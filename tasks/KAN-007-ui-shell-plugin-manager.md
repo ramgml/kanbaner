@@ -1,7 +1,7 @@
 ---
 id: KAN-007
 title: UI shell и plugin manager
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-007
@@ -105,6 +105,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker коммитом `660795b` устранил все 10 findings и заменил beta на стабильный `@playwright/test@1.65.0`; 56 focused-тестов, 339 тестов workspace и 3 реальных Chromium E2E на 360px зелёные. Задача повторно в review.
 - 2026-11-06 — Для замены случайно выбранной beta-версии оркестратор разрешил точное `@playwright/test@1.65.0` и добавление этой стабильной версии в `minimumReleaseAgeExclude` корневого `pnpm-workspace.yaml` из-за публикации внутри minimumReleaseAge cutoff. Другие supply-chain правила не ослабляются.
 - 2026-11-06 — Ревью нашло blocker потери deactivation errors, неатомарную UI-регистрацию, fail-open вклады, неподдерживаемые маршруты, обработку Server Actions и формальные mobile/keyboard checks. Задача возвращена worker-у. Для реального browser-теста разрешено добавить `@playwright/test` 1.65.x в `apps/web/package.json` и lock-файл согласно стеку.
 - 2026-11-06 — Worker завершил UI коммитами `ee5e153` и `9764a94`; 38 focused-тестов и 321 тест workspace, strict install, production build и smoke `/`, `/plugins`, `/settings`, `/view/test-ui` зелёные. Создан отчёт, задача переведена в review.
