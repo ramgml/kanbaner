@@ -1,7 +1,7 @@
 ---
 id: KAN-004
 title: Шина команд и запросов
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-004
@@ -103,6 +103,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker завершил шину операций коммитом `a8fd6a4`; 55 focused-тестов и 143 теста workspace, strict install и полный check зелёные. Создан `tasks/reports/KAN-004.md`, задача переведена в review.
 - 2026-11-06 — KAN-001/KAN-002 завершены. Оркестратор подтвердил готовность, назначил worker-kan-004, ветку `feat/kan-004-command-query-bus` и worktree `.worktrees/kan-004-command-query-bus`; корневой index ядра остаётся за оркестратором.
 - 2026-11-06 — Задача создана.
 
