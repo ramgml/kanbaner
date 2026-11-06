@@ -1,0 +1,13 @@
+{
+  "id": "fixture.path-remote",
+  "name": "fixture.path-remote",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "https://example.com/plugin.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

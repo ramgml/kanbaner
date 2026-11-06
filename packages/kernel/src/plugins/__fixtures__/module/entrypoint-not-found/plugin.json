@@ -1,0 +1,13 @@
+{
+  "id": "fixture.module-entrypoint-not-found",
+  "name": "fixture.module-entrypoint-not-found",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./missing.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

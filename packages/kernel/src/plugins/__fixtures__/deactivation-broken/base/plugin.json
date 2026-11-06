@@ -1,0 +1,13 @@
+{
+  "id": "fixture.db-base",
+  "name": "fixture.db-base",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

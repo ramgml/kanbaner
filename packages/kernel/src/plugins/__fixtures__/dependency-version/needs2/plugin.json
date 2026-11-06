@@ -1,0 +1,15 @@
+{
+  "id": "fixture.needs2",
+  "name": "fixture.needs2",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.provider": "^2.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

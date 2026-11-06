@@ -1,0 +1,13 @@
+{
+  "id": "fixture.module-client-only",
+  "name": "fixture.module-client-only",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "client": "./client.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

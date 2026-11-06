@@ -1,0 +1,15 @@
+{
+  "id": "fixture.needs-prerelease",
+  "name": "fixture.needs-prerelease",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.prerelease-provider": "^1.0.0-0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

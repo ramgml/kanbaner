@@ -1,0 +1,15 @@
+{
+  "id": "fixture.deactivation-top",
+  "name": "fixture.deactivation-top",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.deactivation-middle": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

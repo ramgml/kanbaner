@@ -1,0 +1,13 @@
+{
+  "id": "fixture.host-healthy",
+  "name": "fixture.host-healthy",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

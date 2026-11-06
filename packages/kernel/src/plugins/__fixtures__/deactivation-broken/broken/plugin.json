@@ -1,0 +1,15 @@
+{
+  "id": "fixture.db-broken",
+  "name": "fixture.db-broken",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.db-base": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

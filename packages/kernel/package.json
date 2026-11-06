@@ -21,6 +21,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@kanbaner/plugin-sdk": "workspace:*"
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "semver": "7.8.6"
+  },
+  "devDependencies": {
+    "@types/semver": "7.8.0"
   }
 }
