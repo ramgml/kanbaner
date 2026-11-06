@@ -1,10 +1,19 @@
 /**
- * Версия Plugin Contract, которую реализует SDK.
+ * Публичный SDK плагинов Kanbaner: типы и схемы Plugin Contract v1.
  *
- * Каркас KAN-001 намеренно не содержит команд, запросов, событий и
- * доменных типов. Публичные контракты добавляются в KAN-002.
+ * Пакет не зависит от ядра, приложения, React и Tailwind. Все JSON Schema
+ * строятся TypeBox, runtime-валидация выполняется Ajv Draft 2020-12.
  */
-export const PLUGIN_CONTRACT_VERSION = "1" as const;
-
-/** Идентификатор плагина в формате `<namespace>.<plugin>`. */
-export type PluginId = string;
+export * from "./contract.ts";
+export * from "./context.ts";
+export * from "./errors.ts";
+export * from "./events.ts";
+export * from "./json.ts";
+export * from "./manifest.ts";
+export * from "./operations.ts";
+export * from "./plugin-id.ts";
+export * from "./resources.ts";
+export * from "./results.ts";
+export * from "./time.ts";
+export * from "./ui.ts";
+export * from "./validation.ts";
