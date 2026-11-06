@@ -24,6 +24,8 @@ describe("@kanbaner/plugin-sdk", () => {
     expect(sdk.ResourceLinkSchema).toBeDefined();
     expect(sdk.ResourceDescriptorSchema).toBeDefined();
     expect(sdk.UiContributionSchema).toBeDefined();
+    expect(sdk.JsonValueSchema).toBeDefined();
+    expect(sdk.JsonObjectSchema).toBeDefined();
 
     expect(sdk.validatePluginManifest).toBeTypeOf("function");
     expect(sdk.validateCommandMetadata).toBeTypeOf("function");
@@ -32,5 +34,17 @@ describe("@kanbaner/plugin-sdk", () => {
     expect(sdk.validateEventEnvelope).toBeTypeOf("function");
     expect(sdk.validateResourceRef).toBeTypeOf("function");
     expect(sdk.validateUiContribution).toBeTypeOf("function");
+    expect(sdk.validateJsonValue).toBeTypeOf("function");
+    expect(sdk.isUtcTimestamp).toBeTypeOf("function");
+    expect(sdk.validateUtcTimestamp).toBeTypeOf("function");
+  });
+
+  it("экспортирует фабрики рекурсивных схем и schema-aware валидаторов", () => {
+    expect(sdk.createJsonValueSchema).toBeTypeOf("function");
+    expect(sdk.createJsonObjectSchema).toBeTypeOf("function");
+    expect(sdk.createSchemaValidator).toBeTypeOf("function");
+    expect(sdk.createResultSchema).toBeTypeOf("function");
+    expect(sdk.createResultValidator).toBeTypeOf("function");
+    expect(sdk.JSON_CONTRACT_SCHEMA).toBeTypeOf("symbol");
   });
 });

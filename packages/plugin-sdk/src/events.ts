@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12, PLUGIN_CONTRACT_VERSION_NUMBER } from "./contract.ts";
-import { JsonObjectSchema } from "./json.ts";
+import { createJsonObjectSchema } from "./json.ts";
 import { PluginIdSchema, SEGMENT_SOURCE } from "./plugin-id.ts";
 import { ResourceRefSchema } from "./resources.ts";
 import { UtcTimestampSchema } from "./time.ts";
@@ -45,7 +45,7 @@ export const EventEnvelopeSchema = Type.Object(
     occurredAt: UtcTimestampSchema,
     resource: ResourceRefSchema,
     resourceVersion: Type.Optional(Type.Integer({ minimum: 1 })),
-    payload: JsonObjectSchema,
+    payload: createJsonObjectSchema(),
   },
   DRAFT_2020_12,
 );

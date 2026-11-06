@@ -1,6 +1,10 @@
-import type { TSchema } from "@sinclair/typebox";
-import { Ajv2020 } from "ajv/dist/2020.js";
+import type { Static, TSchema } from "@sinclair/typebox";
 import type { ErrorObject, ValidateFunction } from "ajv";
+import { Ajv2020 } from "ajv/dist/2020.js";
+import * as ajvFormatsModule from "ajv-formats";
+
+// ajv-formats — CJS-пакет с ESM-декларацией; NodeNext типизирует default как namespace.
+const addFormats = ajvFormatsModule.default as unknown as (ajv: Ajv2020) => unknown;
 
 import {
   EventEnvelopeSchema,
@@ -9,7 +13,7 @@ import {
   type EventEnvelope,
 } from "./events.ts";
 import { PluginErrorSchema, type PluginError } from "./errors.ts";
-import { JsonValueSchema, type JsonValue } from "./json.ts";
+import { JsonValueSchema, isJsonContractSchema, type JsonValue } from "./json.ts";
 import { PluginManifestSchema, type PluginManifest } from "./manifest.ts";
 import {
   CommandMetadataSchema,
@@ -27,6 +31,7 @@ import {
   PluginIdSchema,
   RelationSchema,
   SemVerSchema,
+  isHostApiRange,
 } from "./plugin-id.ts";
 import {
   ResourceDescriptorSchema,
@@ -36,7 +41,8 @@ import {
   type ResourceLink,
   type ResourceRef,
 } from "./resources.ts";
-import { OperationResultSchema, type OperationResult } from "./results.ts";
+import { OperationResultSchema, createResultSchema, type OperationResult } from "./results.ts";
+import { UtcTimestampSchema } from "./time.ts";
 import { UiContributionSchema, type UiContribution } from "./ui.ts";
 
 /** Одна ошибка JSON Schema-валидации в безопасной форме. */
@@ -62,6 +68,21 @@ export interface JsonSchemaValidator<T = unknown> {
 
 const validatorCache = new WeakMap<TSchema, ValidateFunction>();
 
+function createAjv(): Ajv2020 {
+  const ajv = new Ajv2020({
+    allErrors: true,
+    strict: true,
+  });
+
+  addFormats(ajv);
+  ajv.addFormat("host-api-range", {
+    type: "string",
+    validate: (value: string) => isHostApiRange(value),
+  });
+
+  return ajv;
+}
+
 function compileSchema(schema: TSchema): ValidateFunction {
   const cached = validatorCache.get(schema);
 
@@ -70,11 +91,7 @@ function compileSchema(schema: TSchema): ValidateFunction {
   }
 
   // Отдельный экземпляр на схему изолирует `$id` разных плагинов друг от друга.
-  const compiled = new Ajv2020({
-    allErrors: true,
-    strict: true,
-  }).compile(schema);
-
+  const compiled = createAjv().compile(schema);
   validatorCache.set(schema, compiled);
 
   return compiled;
@@ -108,28 +125,243 @@ function issuesFrom(validate: ValidateFunction): readonly ValidationIssue[] {
   return errors.map(toIssue);
 }
 
+function prefixedIssue(issue: ValidationIssue, prefix: string): ValidationIssue {
+  return {
+    ...issue,
+    path: issue.path === "/" ? prefix : `${prefix}${issue.path}`,
+  };
+}
+
+function jsonIssue(
+  path: string,
+  message: string,
+  keyword = "json-value",
+  params: Readonly<Record<string, unknown>> = {},
+): ValidationIssue {
+  return {
+    path: path === "" ? "/" : path,
+    schemaPath: "#",
+    keyword,
+    message,
+    params,
+  };
+}
+
+function appendJsonPointer(path: string, segment: string | number): string {
+  const escaped = String(segment).replace(/~/g, "~0").replace(/\//g, "~1");
+
+  return `${path}/${escaped}`;
+}
+
+/**
+ * Boundary-guard для JSON-значений.
+ *
+ * Ajv не различает отсутствие свойства и `undefined`, пропускает `NaN`,
+ * `Infinity` и экземпляры классов как обычные object. Guard дополняет Ajv и
+ * не даёт рекурсивной схеме уйти в stack overflow на циклических ссылках.
+ */
+function findJsonValueIssue(value: unknown, path = ""): ValidationIssue | null {
+  const stack = new WeakSet<object>();
+
+  const walk = (current: unknown, currentPath: string): ValidationIssue | null => {
+    if (current === null) {
+      return null;
+    }
+
+    switch (typeof current) {
+      case "string":
+      case "boolean":
+        return null;
+      case "number":
+        return Number.isFinite(current)
+          ? null
+          : jsonIssue(currentPath, "JSON-число должно быть конечным");
+      case "undefined":
+        return jsonIssue(currentPath, "JSON-значение не может быть undefined");
+      case "bigint":
+        return jsonIssue(currentPath, "bigint не является JSON-значением");
+      case "function":
+        return jsonIssue(currentPath, "function не является JSON-значением");
+      case "symbol":
+        return jsonIssue(currentPath, "symbol не является JSON-значением");
+      case "object":
+        break;
+      default:
+        return jsonIssue(currentPath, "Значение не является JSON-значением");
+    }
+
+    const object = current;
+
+    if (stack.has(object)) {
+      return jsonIssue(currentPath, "Циклическая ссылка не является JSON-значением");
+    }
+
+    if (Array.isArray(object)) {
+      stack.add(object);
+
+      try {
+        for (let index = 0; index < object.length; index += 1) {
+          const issue = walk(object[index], appendJsonPointer(currentPath, index));
+
+          if (issue !== null) {
+            return issue;
+          }
+        }
+      } finally {
+        stack.delete(object);
+      }
+
+      return null;
+    }
+
+    const prototype = Object.getPrototypeOf(object);
+
+    if (prototype !== Object.prototype && prototype !== null) {
+      return jsonIssue(currentPath, "JSON-объект должен быть plain object");
+    }
+
+    stack.add(object);
+
+    try {
+      for (const key of Object.keys(object)) {
+        const issue = walk(
+          (object as Record<string, unknown>)[key],
+          appendJsonPointer(currentPath, key),
+        );
+
+        if (issue !== null) {
+          return issue;
+        }
+      }
+    } finally {
+      stack.delete(object);
+    }
+
+    return null;
+  };
+
+  try {
+    return walk(value, path);
+  } catch {
+    return jsonIssue(path, "Не удалось проверить JSON-значение");
+  }
+}
+
+function jsonPropertyIssue(value: unknown, key: string, path: string): ValidationIssue | null {
+  if (typeof value !== "object" || value === null || !(key in value)) {
+    return null;
+  }
+
+  return findJsonValueIssue((value as Record<string, unknown>)[key], path);
+}
+
+function operationResultJsonIssue(value: unknown): ValidationIssue | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  if (record.ok === true) {
+    return findJsonValueIssue(record.data, "/data");
+  }
+
+  if (record.ok === false) {
+    return jsonPropertyIssue(record.error, "details", "/error/details");
+  }
+
+  return null;
+}
+
+function compileIssue(pointer: string, error: unknown): ValidationIssue {
+  const missingRef =
+    typeof error === "object" &&
+    error !== null &&
+    "missingRef" in error &&
+    typeof error.missingRef === "string"
+      ? error.missingRef
+      : undefined;
+
+  return {
+    path: pointer,
+    schemaPath: `#${pointer}`,
+    keyword: "compile",
+    message: error instanceof Error ? error.message : "JSON Schema не компилируется",
+    params: missingRef === undefined ? {} : { missingRef },
+  };
+}
+
+function schemaCompileIssues(schema: unknown, pointer: string): readonly ValidationIssue[] {
+  const ajv = createAjv();
+
+  try {
+    if (!ajv.validateSchema(schema as TSchema)) {
+      return (ajv.errors ?? []).map((error) => prefixedIssue(toIssue(error), pointer));
+    }
+
+    ajv.compile(schema as TSchema);
+  } catch (error) {
+    return [compileIssue(pointer, error)];
+  }
+
+  return [];
+}
+
+function operationSchemaIssues(metadata: OperationMetadata): readonly ValidationIssue[] {
+  return [
+    ...schemaCompileIssues(metadata.inputSchema, "/inputSchema"),
+    ...schemaCompileIssues(metadata.outputSchema, "/outputSchema"),
+  ];
+}
+
 /** Валидирует значение по произвольной TypeBox/JSON Schema-схеме. */
-export function validateWithSchema<T>(schema: TSchema, value: unknown): ValidationResult<T> {
+export function validateWithSchema<Schema extends TSchema>(
+  schema: Schema,
+  value: unknown,
+): ValidationResult<Static<Schema>> {
+  if (isJsonContractSchema(schema)) {
+    const issue = findJsonValueIssue(value);
+
+    if (issue !== null) {
+      return { ok: false, errors: [issue] };
+    }
+  }
+
   const validate = compileSchema(schema);
 
   if (validate(value)) {
-    return { ok: true, value: value as T };
+    return { ok: true, value: value as Static<Schema> };
   }
 
   return { ok: false, errors: issuesFrom(validate) };
 }
 
 /** Создаёт переиспользуемый публичный валидатор для схемы. */
-export function createSchemaValidator<T = unknown>(schema: TSchema): JsonSchemaValidator<T> {
+export function createSchemaValidator<Schema extends TSchema>(
+  schema: Schema,
+): JsonSchemaValidator<Static<Schema>> {
   const validate = compileSchema(schema);
+  const jsonSchema = isJsonContractSchema(schema);
 
   return {
-    check(value: unknown): value is T {
+    check(value: unknown): value is Static<Schema> {
+      if (jsonSchema && findJsonValueIssue(value) !== null) {
+        return false;
+      }
+
       return validate(value);
     },
-    validate(value: unknown): ValidationResult<T> {
+    validate(value: unknown): ValidationResult<Static<Schema>> {
+      if (jsonSchema) {
+        const issue = findJsonValueIssue(value);
+
+        if (issue !== null) {
+          return { ok: false, errors: [issue] };
+        }
+      }
+
       if (validate(value)) {
-        return { ok: true, value: value as T };
+        return { ok: true, value: value as Static<Schema> };
       }
 
       return { ok: false, errors: issuesFrom(validate) };
@@ -138,85 +370,169 @@ export function createSchemaValidator<T = unknown>(schema: TSchema): JsonSchemaV
 }
 
 export function validatePluginId(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(PluginIdSchema, value);
+  return validateWithSchema(PluginIdSchema, value);
 }
 
 export function validateSemVer(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(SemVerSchema, value);
+  return validateWithSchema(SemVerSchema, value);
 }
 
 export function validateHostApiRange(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(HostApiRangeSchema, value);
+  return validateWithSchema(HostApiRangeSchema, value);
 }
 
 export function validateOperationId(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(OperationIdSchema, value);
+  return validateWithSchema(OperationIdSchema, value);
 }
 
 export function validatePluginManifest(value: unknown): ValidationResult<PluginManifest> {
-  return validateWithSchema<PluginManifest>(PluginManifestSchema, value);
+  return validateWithSchema(PluginManifestSchema, value);
 }
 
 export function validateCommandMetadata(value: unknown): ValidationResult<CommandMetadata> {
-  return validateWithSchema<CommandMetadata>(CommandMetadataSchema, value);
+  const base = validateWithSchema(CommandMetadataSchema, value);
+
+  if (!base.ok) {
+    return base;
+  }
+
+  const issues = operationSchemaIssues(base.value);
+
+  return issues.length === 0 ? base : { ok: false, errors: issues };
 }
 
 export function validateQueryMetadata(value: unknown): ValidationResult<QueryMetadata> {
-  return validateWithSchema<QueryMetadata>(QueryMetadataSchema, value);
+  const base = validateWithSchema(QueryMetadataSchema, value);
+
+  if (!base.ok) {
+    return base;
+  }
+
+  const issues = operationSchemaIssues(base.value);
+
+  return issues.length === 0 ? base : { ok: false, errors: issues };
 }
 
 export function validateOperationMetadata(value: unknown): ValidationResult<OperationMetadata> {
-  return validateWithSchema<OperationMetadata>(OperationMetadataSchema, value);
+  const base = validateWithSchema(OperationMetadataSchema, value);
+
+  if (!base.ok) {
+    return base;
+  }
+
+  return base.value.kind === "mutation"
+    ? validateCommandMetadata(value)
+    : validateQueryMetadata(value);
 }
 
 export function validateOperationEnvelope(value: unknown): ValidationResult<OperationEnvelope> {
-  return validateWithSchema<OperationEnvelope>(OperationEnvelopeSchema, value);
+  const payloadIssue = jsonPropertyIssue(value, "payload", "/payload");
+
+  if (payloadIssue !== null) {
+    return { ok: false, errors: [payloadIssue] };
+  }
+
+  return validateWithSchema(OperationEnvelopeSchema, value);
 }
 
 export function validateEventEnvelope(value: unknown): ValidationResult<EventEnvelope> {
-  return validateWithSchema<EventEnvelope>(EventEnvelopeSchema, value);
+  const payloadIssue = jsonPropertyIssue(value, "payload", "/payload");
+
+  if (payloadIssue !== null) {
+    return { ok: false, errors: [payloadIssue] };
+  }
+
+  return validateWithSchema(EventEnvelopeSchema, value);
 }
 
 export function validateEventType(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(EventTypeSchema, value);
+  return validateWithSchema(EventTypeSchema, value);
 }
 
 export function validateEventSubscription(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(EventSubscriptionSchema, value);
+  return validateWithSchema(EventSubscriptionSchema, value);
 }
 
 export function validateResourceRef(value: unknown): ValidationResult<ResourceRef> {
-  return validateWithSchema<ResourceRef>(ResourceRefSchema, value);
+  return validateWithSchema(ResourceRefSchema, value);
 }
 
 export function validateRelation(value: unknown): ValidationResult<string> {
-  return validateWithSchema<string>(RelationSchema, value);
+  return validateWithSchema(RelationSchema, value);
 }
 
 export function validateResourceLink(value: unknown): ValidationResult<ResourceLink> {
-  return validateWithSchema<ResourceLink>(ResourceLinkSchema, value);
+  return validateWithSchema(ResourceLinkSchema, value);
 }
 
 export function validateResourceDescriptor(value: unknown): ValidationResult<ResourceDescriptor> {
-  return validateWithSchema<ResourceDescriptor>(ResourceDescriptorSchema, value);
+  const metadataIssue = jsonPropertyIssue(value, "metadata", "/metadata");
+
+  if (metadataIssue !== null) {
+    return { ok: false, errors: [metadataIssue] };
+  }
+
+  return validateWithSchema(ResourceDescriptorSchema, value);
 }
 
 export function validateUiContribution(value: unknown): ValidationResult<UiContribution> {
-  return validateWithSchema<UiContribution>(UiContributionSchema, value);
+  return validateWithSchema(UiContributionSchema, value);
 }
 
 export function validateJsonValue(value: unknown): ValidationResult<JsonValue> {
-  return validateWithSchema<JsonValue>(JsonValueSchema, value);
+  return validateWithSchema(JsonValueSchema, value);
+}
+
+export function isUtcTimestamp(value: unknown): value is string {
+  return validateWithSchema(UtcTimestampSchema, value).ok;
+}
+
+export function validateUtcTimestamp(value: unknown): ValidationResult<string> {
+  return validateWithSchema(UtcTimestampSchema, value);
 }
 
 export function validatePluginError(value: unknown): ValidationResult<PluginError> {
-  return validateWithSchema<PluginError>(PluginErrorSchema, value);
+  const detailsIssue = jsonPropertyIssue(value, "details", "/details");
+
+  if (detailsIssue !== null) {
+    return { ok: false, errors: [detailsIssue] };
+  }
+
+  return validateWithSchema(PluginErrorSchema, value);
 }
 
-export function validateOperationResult<T = unknown>(
-  value: unknown,
-): ValidationResult<OperationResult<T>> {
-  return validateWithSchema<OperationResult<T>>(OperationResultSchema, value);
+export function validateOperationResult(value: unknown): ValidationResult<OperationResult> {
+  const jsonIssueResult = operationResultJsonIssue(value);
+
+  if (jsonIssueResult !== null) {
+    return { ok: false, errors: [jsonIssueResult] };
+  }
+
+  return validateWithSchema(OperationResultSchema, value);
+}
+
+/**
+ * Создаёт schema-aware валидатор результата для конкретной схемы данных.
+ */
+export function createResultValidator<Data extends TSchema>(
+  data: Data,
+): JsonSchemaValidator<OperationResult<Static<Data>>> {
+  const validator = createSchemaValidator(createResultSchema(data));
+
+  return {
+    check(value: unknown): value is OperationResult<Static<Data>> {
+      return operationResultJsonIssue(value) === null && validator.check(value);
+    },
+    validate(value: unknown): ValidationResult<OperationResult<Static<Data>>> {
+      const issue = operationResultJsonIssue(value);
+
+      if (issue !== null) {
+        return { ok: false, errors: [issue] };
+      }
+
+      return validator.validate(value) as ValidationResult<OperationResult<Static<Data>>>;
+    },
+  };
 }
 
 function inputSchemaOf(metadata: OperationMetadata): TSchema {

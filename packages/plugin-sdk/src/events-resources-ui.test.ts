@@ -4,12 +4,18 @@ import {
   CORE_UI_SLOTS,
   EventEnvelopeSchema,
   UI_CONTRACT_VERSION,
+  createPluginError,
   formatResourceRef,
+  isErrorResult,
   isEventSubscription,
   isEventType,
+  isRelation,
   isResourceRef,
+  isUtcTimestamp,
   matchesEventSubscription,
   parseResourceRef,
+  toErrorResult,
+  toSuccessResult,
   validateEventEnvelope,
   validateEventSubscription,
   validateRelation,
@@ -17,6 +23,7 @@ import {
   validateResourceLink,
   validateResourceRef,
   validateUiContribution,
+  validateUtcTimestamp,
   type CommandInvoker,
   type ExecutionContext,
   type ResourceService,
@@ -88,6 +95,37 @@ describe("события и подписки", () => {
   });
 });
 
+describe("UTC timestamp", () => {
+  it("принимает реальные UTC-даты с суффиксом Z", () => {
+    for (const timestamp of [
+      "2026-11-06T12:00:00Z",
+      "2026-11-06T12:00:00.123Z",
+      "2024-02-29T23:59:59Z",
+    ]) {
+      expect(isUtcTimestamp(timestamp)).toBe(true);
+      expect(validateUtcTimestamp(timestamp).ok).toBe(true);
+    }
+  });
+
+  it("отклоняет несуществующие даты и смещения от UTC одинаково везде", () => {
+    for (const timestamp of [
+      "2026-02-31T25:61:61Z",
+      "2026-13-01T00:00:00Z",
+      "2026-02-29T12:00:00Z",
+      "2026-11-06T12:00:00+03:00",
+      "2026-11-06T12:00:00",
+      "2026-11-06 12:00:00Z",
+    ]) {
+      expect(isUtcTimestamp(timestamp)).toBe(false);
+      expect(validateUtcTimestamp(timestamp).ok).toBe(false);
+      expect(validateEventEnvelope({ ...validEvent, occurredAt: timestamp }).ok).toBe(false);
+    }
+
+    expect(isUtcTimestamp(42)).toBe(false);
+    expect(validateUtcTimestamp(undefined).ok).toBe(false);
+  });
+});
+
 describe("ResourceRef и связи", () => {
   it("разбирает и собирает ResourceRef, сохраняя opaque-id непрозрачным", () => {
     const ref = formatResourceRef({
@@ -144,6 +182,83 @@ describe("ResourceRef и связи", () => {
     expect(validateRelation("kanbaner.references").ok).toBe(true);
     expect(validateRelation("references").ok).toBe(false);
     expect(validateRelation("kanbaner..references").ok).toBe(false);
+
+    // Короткое валидное значение одинаково принимают Ajv и предикат.
+    expect(validateRelation("a.b").ok).toBe(true);
+    expect(isRelation("a.b")).toBe(true);
+    expect(isRelation("a")).toBe(false);
+    expect(isRelation(42)).toBe(false);
+  });
+
+  it("не пропускает нестроковые части ResourceRef в рантайме", () => {
+    expect(() =>
+      formatResourceRef({
+        pluginId: "kanbaner.tasks",
+        resourceType: "task",
+        opaqueId: undefined as unknown as string,
+      }),
+    ).toThrow("opaque-id");
+    expect(() =>
+      formatResourceRef({
+        pluginId: "kanbaner.tasks",
+        resourceType: "task",
+        opaqueId: 42 as unknown as string,
+      }),
+    ).toThrow("opaque-id");
+    expect(() =>
+      formatResourceRef({
+        pluginId: undefined as unknown as string,
+        resourceType: "task",
+        opaqueId: "01J",
+      }),
+    ).toThrow("plugin-id");
+    expect(() =>
+      formatResourceRef({
+        pluginId: "kanbaner.tasks",
+        resourceType: 42 as unknown as string,
+        opaqueId: "01J",
+      }),
+    ).toThrow("resource-type");
+
+    expect(() => parseResourceRef(42 as unknown as string)).toThrow("строкой");
+    expect(() => parseResourceRef(undefined as unknown as string)).toThrow("строкой");
+  });
+
+  it("возвращает NOT_FOUND из ResourceService.resolve вместо null", async () => {
+    const missingRef = "kanbaner.tasks:task:missing";
+    const service: ResourceService = {
+      async link(sourceRef, targetRef, relation) {
+        return { sourceRef, targetRef, relation };
+      },
+      async unlink() {},
+      async list() {
+        return [];
+      },
+      async resolve(ref) {
+        if (ref === missingRef) {
+          return toErrorResult(createPluginError("NOT_FOUND", "Ресурс не найден"));
+        }
+
+        return toSuccessResult({ ref, resourceType: "task", title: "Задача" });
+      },
+      async canOpen() {
+        return false;
+      },
+      async open() {},
+    };
+
+    const missing = await service.resolve(missingRef);
+    const found = await service.resolve("kanbaner.tasks:task:01J-task");
+
+    expect(missing).not.toBeNull();
+    expect(isErrorResult(missing)).toBe(true);
+    if (isErrorResult(missing)) {
+      expect(missing.error.code).toBe("NOT_FOUND");
+    }
+    expect(found.ok).toBe(true);
+    if (found.ok) {
+      expect(found.data.resourceType).toBe("task");
+    }
   });
 
   it("валидирует связь и метаданные ресурса", () => {

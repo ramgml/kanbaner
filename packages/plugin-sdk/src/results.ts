@@ -1,8 +1,8 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
 import { DRAFT_2020_12 } from "./contract.ts";
-import { ErrorResultSchema, type ErrorResult } from "./errors.ts";
-import { JsonValueSchema } from "./json.ts";
+import { createErrorResultSchema, type ErrorResult } from "./errors.ts";
+import { createJsonValueSchema } from "./json.ts";
 
 export const ResultMetaSchema = Type.Object({
   warnings: Type.Optional(Type.Array(Type.String())),
@@ -34,11 +34,11 @@ export function createSuccessResultSchema<Data extends TSchema>(data: Data) {
 
 /** Схема единого результата операции для конкретной схемы данных. */
 export function createResultSchema<Data extends TSchema>(data: Data) {
-  return Type.Union([createSuccessResultSchema(data), ErrorResultSchema], DRAFT_2020_12);
+  return Type.Union([createSuccessResultSchema(data), createErrorResultSchema()], DRAFT_2020_12);
 }
 
 /** Схема результата с произвольными JSON-данными. */
-export const OperationResultSchema = createResultSchema(JsonValueSchema);
+export const OperationResultSchema = createResultSchema(createJsonValueSchema());
 
 export function toSuccessResult<T>(data: T, meta?: ResultMeta): SuccessResult<T> {
   return meta === undefined ? { ok: true, data } : { ok: true, data, meta };

@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { validRange } from "semver";
 
 import { DRAFT_2020_12 } from "./contract.ts";
 
@@ -50,20 +51,6 @@ export const SEMVER_PATTERN =
   "(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?" +
   "(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$";
 
-const HOST_API_RANGE_TOKEN =
-  "(?:\\^|~|>=|<=|>|<|=)?\\s*" +
-  "(?:0|[1-9]\\d*|[xX*])(?:\\.(?:0|[1-9]\\d*|[xX*])){0,2}" +
-  "(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?";
-
-/**
- * Разумно валидный SemVer-диапазон Host API.
- *
- * Поддерживаются точные версии, `^`, `~`, comparators, `*`, `x` и
- * объединения через `||` или пробел. Полный semver-engine здесь не нужен:
- * контракт требует лишь непустой диапазон, а совместимость проверяет ядро.
- */
-export const HOST_API_RANGE_PATTERN = `^\\s*${HOST_API_RANGE_TOKEN}(?:\\s*(?:\\|\\||\\s)\\s*${HOST_API_RANGE_TOKEN})*\\s*$`;
-
 export const PluginIdSchema = Type.String({
   ...DRAFT_2020_12,
   minLength: 3,
@@ -79,8 +66,9 @@ export const SemVerSchema = Type.String({
 export const PluginVersionSchema = SemVerSchema;
 
 export const HostApiRangeSchema = Type.String({
+  ...DRAFT_2020_12,
   minLength: 1,
-  pattern: HOST_API_RANGE_PATTERN,
+  format: "host-api-range",
 });
 
 export const ContractIdSchema = Type.String({
@@ -95,7 +83,7 @@ export const OperationIdSchema = Type.String({
 
 export const RelationSchema = Type.String({
   ...DRAFT_2020_12,
-  minLength: 5,
+  minLength: 3,
   pattern: RELATION_PATTERN,
 });
 
@@ -103,7 +91,6 @@ const pluginIdRegex = new RegExp(PLUGIN_ID_PATTERN);
 const operationIdRegex = new RegExp(OPERATION_ID_PATTERN);
 const contractIdRegex = new RegExp(CONTRACT_ID_PATTERN);
 const semVerRegex = new RegExp(SEMVER_PATTERN);
-const hostApiRangeRegex = new RegExp(HOST_API_RANGE_PATTERN);
 const relationRegex = new RegExp(RELATION_PATTERN);
 const resourceTypeRegex = new RegExp(RESOURCE_TYPE_PATTERN);
 
@@ -123,8 +110,23 @@ export function isSemVer(value: unknown): value is PluginVersion {
   return typeof value === "string" && semVerRegex.test(value);
 }
 
+/**
+ * Проверяет Host API как SemVer-диапазон через `semver.validRange`.
+ *
+ * Пустая строка для `validRange` означает `*`, поэтому она отклоняется
+ * отдельно. Comparator sets, hyphen ranges, `||`, prerelease и build
+ * поддерживаются самим semver.
+ */
 export function isHostApiRange(value: unknown): value is HostApiRange {
-  return typeof value === "string" && hostApiRangeRegex.test(value);
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return false;
+  }
+
+  try {
+    return validRange(value) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function isRelation(value: unknown): value is Relation {

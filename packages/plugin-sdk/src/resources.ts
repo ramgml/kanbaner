@@ -12,6 +12,7 @@ import {
   isResourceType,
   type Relation,
 } from "./plugin-id.ts";
+import type { OperationResult } from "./results.ts";
 import { UtcTimestampSchema } from "./time.ts";
 
 /** Стабильный тип ресурса внутри плагина, например `task`. */
@@ -73,7 +74,7 @@ export interface ResourceService {
   link(sourceRef: ResourceRef, targetRef: ResourceRef, relation: Relation): Promise<ResourceLink>;
   unlink(sourceRef: ResourceRef, targetRef: ResourceRef, relation: Relation): Promise<void>;
   list(ref: ResourceRef, relation?: Relation): Promise<readonly ResourceLink[]>;
-  resolve(ref: ResourceRef): Promise<ResourceDescriptor | null>;
+  resolve(ref: ResourceRef): Promise<OperationResult<ResourceDescriptor>>;
   canOpen(ref: ResourceRef): Promise<boolean>;
   open(ref: ResourceRef): Promise<void>;
 }
@@ -93,6 +94,10 @@ export function isResourceRef(value: unknown): value is ResourceRef {
  * проверки без исключения используйте `isResourceRef`.
  */
 export function parseResourceRef(value: string): ResourceRefParts {
+  if (typeof value !== "string") {
+    throw new TypeError("ResourceRef должен быть строкой");
+  }
+
   const parts = value.split(":");
 
   if (parts.length !== 3) {
@@ -118,17 +123,19 @@ export function parseResourceRef(value: string): ResourceRefParts {
 
 /** Собирает ResourceRef из частей, проверяя каждую часть. */
 export function formatResourceRef(parts: ResourceRefParts): ResourceRef {
-  const { pluginId, resourceType, opaqueId } = parts;
+  const pluginId: unknown = parts.pluginId;
+  const resourceType: unknown = parts.resourceType;
+  const opaqueId: unknown = parts.opaqueId;
 
-  if (!isPluginId(pluginId)) {
+  if (typeof pluginId !== "string" || !isPluginId(pluginId)) {
     throw new TypeError("ResourceRef содержит неверный plugin-id");
   }
 
-  if (!isResourceType(resourceType)) {
+  if (typeof resourceType !== "string" || !isResourceType(resourceType)) {
     throw new TypeError("ResourceRef содержит неверный resource-type");
   }
 
-  if (!opaqueIdRegex.test(opaqueId)) {
+  if (typeof opaqueId !== "string" || !opaqueIdRegex.test(opaqueId)) {
     throw new TypeError("ResourceRef содержит пустой или неверный opaque-id");
   }
 

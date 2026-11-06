@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12 } from "./contract.ts";
-import { JsonObjectSchema, type JsonObject } from "./json.ts";
+import { JsonObjectSchema, createJsonObjectSchema, type JsonObject } from "./json.ts";
 
 /** Все стабильные коды ошибок Plugin Contract v1. */
 export const PLUGIN_ERROR_CODES = [
@@ -54,6 +54,24 @@ export type PluginErrorDetails = JsonObject;
 
 export const PluginErrorDetailsSchema = JsonObjectSchema;
 
+/**
+ * Фабрика схемы ошибки с уникальными `$id` для вложенной JSON-схемы.
+ *
+ * Нужна там, где ошибка встраивается рядом с другой JSON-схемой: повторное
+ * использование одной и той же константы с `$id` ломает компиляцию Ajv.
+ */
+export function createPluginErrorSchema() {
+  return Type.Object(
+    {
+      code: PluginErrorCodeSchema,
+      message: Type.String({ minLength: 1 }),
+      retryable: Type.Boolean(),
+      details: Type.Optional(createJsonObjectSchema()),
+    },
+    DRAFT_2020_12,
+  );
+}
+
 export const PluginErrorSchema = Type.Object(
   {
     code: PluginErrorCodeSchema,
@@ -65,6 +83,17 @@ export const PluginErrorSchema = Type.Object(
 );
 
 export type PluginError = Static<typeof PluginErrorSchema>;
+
+/** Фабрика схемы ошибочного результата с уникальными `$id`. */
+export function createErrorResultSchema() {
+  return Type.Object(
+    {
+      ok: Type.Literal(false),
+      error: createPluginErrorSchema(),
+    },
+    DRAFT_2020_12,
+  );
+}
 
 export const ErrorResultSchema = Type.Object(
   {

@@ -6,6 +6,7 @@ import {
   isHostApiRange,
   isPluginId,
   isSemVer,
+  validateHostApiRange,
   validatePluginManifest,
   type PluginManifest,
 } from "./index.ts";
@@ -118,15 +119,45 @@ describe("PluginManifest", () => {
   });
 
   it("принимает разумные диапазоны Host API и отклоняет мусор", () => {
-    for (const range of ["^1.0.0", "~1.2.0", ">=1.0.0 <2.0.0", "1.x", "*", "1.0.0 || 2.0.0"]) {
+    const validRanges = [
+      "^1.0.0",
+      "~1.2.0",
+      ">=1.0.0 <2.0.0",
+      "1.x",
+      "*",
+      "1.0.0 || 2.0.0",
+      "1.2.3 - 2.3.4",
+      "^1.0.0-0",
+      "1.0.0+build.7",
+    ] as const;
+
+    for (const range of validRanges) {
       expect(isHostApiRange(range)).toBe(true);
+      expect(validateHostApiRange(range).ok).toBe(true);
+      expect(validatePluginManifest({ ...fullManifest, hostApi: range }).ok).toBe(true);
     }
 
-    for (const range of ["", "banana", "^^1.0.0", "1.0.0.0"]) {
+    const invalidRanges = [
+      "",
+      "   ",
+      "banana",
+      "1.0.0-01",
+      "1.0.0-..",
+      "1.0.0+..",
+      "1.0.0.0",
+      "^^1.0.0",
+    ] as const;
+
+    for (const range of invalidRanges) {
       expect(isHostApiRange(range)).toBe(false);
+
+      const result = validateHostApiRange(range);
+
+      expect(result.ok).toBe(false);
+      expectInvalid(validatePluginManifest({ ...fullManifest, hostApi: range }));
     }
 
-    expectInvalid(validatePluginManifest({ ...fullManifest, hostApi: "banana" }));
+    expect(isHostApiRange(42)).toBe(false);
   });
 
   it("требует хотя бы одну точку входа и не принимает неизвестные entrypoints", () => {

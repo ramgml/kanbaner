@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12, PLUGIN_CONTRACT_VERSION_NUMBER } from "./contract.ts";
 import { OperationSourceSchema } from "./context.ts";
-import { JsonObjectSchema, JsonValueSchema } from "./json.ts";
+import { JsonObjectSchema, createJsonObjectSchema, createJsonValueSchema } from "./json.ts";
 import { ContractIdSchema, OperationIdSchema } from "./plugin-id.ts";
 
 export const EXPOSURE_CHANNELS = ["ui", "http", "mcp"] as const;
@@ -75,8 +75,8 @@ export const CommandMetadataSchema = Type.Object(
     risk: CommandRiskLevelSchema,
     idempotency: IdempotencyModeSchema,
     exposure: Type.Optional(ExposureSchema),
-    inputSchema: OperationJsonSchemaSchema,
-    outputSchema: OperationJsonSchemaSchema,
+    inputSchema: createJsonObjectSchema(),
+    outputSchema: createJsonObjectSchema(),
     description: Type.Optional(Type.String()),
   },
   DRAFT_2020_12,
@@ -98,8 +98,8 @@ export const QueryMetadataSchema = Type.Object(
     kind: Type.Literal("query"),
     risk: Type.Literal("read"),
     exposure: Type.Optional(ExposureSchema),
-    inputSchema: OperationJsonSchemaSchema,
-    outputSchema: OperationJsonSchemaSchema,
+    inputSchema: createJsonObjectSchema(),
+    outputSchema: createJsonObjectSchema(),
     description: Type.Optional(Type.String()),
   },
   DRAFT_2020_12,
@@ -123,7 +123,7 @@ export const OperationEnvelopeSchema = Type.Object(
     operationVersion: Type.Integer({ minimum: 1 }),
     idempotencyKey: Type.Optional(Type.String({ minLength: 1 })),
     source: OperationSourceSchema,
-    payload: JsonValueSchema,
+    payload: createJsonValueSchema(),
   },
   DRAFT_2020_12,
 );
