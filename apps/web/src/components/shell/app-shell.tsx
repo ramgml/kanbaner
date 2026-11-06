@@ -93,11 +93,13 @@ export function AppShell({ children, safeMode = false, problemCount = 0 }: AppSh
       <div className="flex min-h-0 flex-1">
         <DesktopSidebar pathname={pathname} safeMode={safeMode} problemCount={problemCount} />
 
-        <div className="flex min-w-0 flex-1 flex-col">
+        {/* details и main — соседние элементы горизонтального flex; колонкой
+            остаётся только основной контент. */}
+        <div className="flex min-w-0 flex-1">
           <main
             id="main-content"
             tabIndex={-1}
-            className="min-w-0 flex-1 px-3 pt-4 pb-24 focus:outline-none sm:px-6 md:pb-6"
+            className="flex min-w-0 flex-1 flex-col px-3 pt-4 pb-24 focus:outline-none sm:px-6 md:pb-6"
           >
             {safeMode ? <SafeModeNotice problemCount={problemCount} /> : null}
             {children}

@@ -2,23 +2,42 @@
 
 import { revalidatePath } from "next/cache";
 
-import type { PluginManagerActionResult } from "../lib/plugin-manager-types";
+import type { PluginManagerActionResult, PluginManagerState } from "../lib/plugin-manager-types";
 import { getPluginService, PluginServiceError } from "./plugin-service";
 
-function failure(code: string, message: string): PluginManagerActionResult {
+const INTERNAL_ERROR_MESSAGE = "Не удалось изменить состояние плагина";
+
+function failure(
+  code: string,
+  message: string,
+  state: PluginManagerState | null = null,
+): PluginManagerActionResult {
   return {
     ok: false,
-    state: null,
+    state,
     error: { code, message },
   };
 }
 
 function toFailure(error: unknown): PluginManagerActionResult {
   if (error instanceof PluginServiceError) {
-    return failure(error.code, error.message);
+    return failure(error.code, error.message, error.state);
   }
 
-  return failure("INTERNAL_ERROR", "Не удалось изменить состояние плагина");
+  // Произвольный текст исключения не выходит за пределы сервера.
+  return failure("INTERNAL_ERROR", INTERNAL_ERROR_MESSAGE);
+}
+
+function revalidateIfChanged(state: PluginManagerState | null): void {
+  if (state === null) {
+    return;
+  }
+
+  try {
+    revalidatePath("/", "layout");
+  } catch {
+    // Инвалидация RSC не должна скрывать безопасный результат действия.
+  }
 }
 
 export async function setPluginEnabledAction(
@@ -42,7 +61,13 @@ export async function setPluginEnabledAction(
 
     return { ok: true, state, error: null };
   } catch (error) {
-    return toFailure(error);
+    const result = toFailure(error);
+
+    // При неудачной деактивации runtime уже остановлен: layout должен
+    // получить stopped snapshot, а не старое активное состояние.
+    revalidateIfChanged(result.state);
+
+    return result;
   }
 }
 
@@ -54,6 +79,10 @@ export async function refreshPluginsAction(): Promise<PluginManagerActionResult>
 
     return { ok: true, state, error: null };
   } catch (error) {
-    return toFailure(error);
+    const result = toFailure(error);
+
+    revalidateIfChanged(result.state);
+
+    return result;
   }
 }

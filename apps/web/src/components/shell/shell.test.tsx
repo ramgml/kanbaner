@@ -101,6 +101,17 @@ describe("адаптивный app shell", () => {
     expect(screen.getByTestId("test-ui-overlay")).toBeInTheDocument();
   });
 
+  it("держит main и details соседями горизонтального flex, колонка только у main", () => {
+    renderShell();
+
+    const main = screen.getByRole("main");
+    const details = screen.getByTestId("details-slot");
+
+    expect(details.parentElement).toBe(main.parentElement);
+    expect(main.parentElement).toHaveClass("flex");
+    expect(main).toHaveClass("flex", "flex-col");
+  });
+
   it("скрывает вклад отключённого плагина", () => {
     renderShell({
       activePluginIds: [],
@@ -112,6 +123,47 @@ describe("адаптивный app shell", () => {
     expect(screen.queryByText("Тест UI")).not.toBeInTheDocument();
     expect(screen.queryByTestId("test-ui-overlay")).not.toBeInTheDocument();
     expect(screen.queryByText("Детали теста")).not.toBeInTheDocument();
+  });
+
+  it("скрывает вклад плагина, которого нет в allowlist активных", () => {
+    renderShell({
+      activePluginIds: ["other.plugin"],
+      unavailablePluginIds: [],
+      safeMode: false,
+      problemCount: 0,
+    });
+
+    // Плагин не входит ни в active, ни в unavailable: это unknown/removed ID,
+    // поэтому его вклады не должны попасть в shell.
+    expect(screen.queryByText("Тест UI")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("test-ui-overlay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Детали теста")).not.toBeInTheDocument();
+  });
+
+  it("скрывает все вклады при пустом allowlist активных", () => {
+    renderShell({
+      activePluginIds: [],
+      unavailablePluginIds: [],
+      safeMode: false,
+      problemCount: 0,
+    });
+
+    expect(screen.queryByText("Тест UI")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("test-ui-overlay")).not.toBeInTheDocument();
+    expect(screen.queryByText("Детали теста")).not.toBeInTheDocument();
+  });
+
+  it("показывает вклады только из allowlist активных", () => {
+    renderShell({
+      activePluginIds: ["example.test-ui"],
+      unavailablePluginIds: [],
+      safeMode: false,
+      problemCount: 0,
+    });
+
+    expect(screen.getAllByRole("link", { name: "Тест UI" })).toHaveLength(2);
+    expect(screen.getByTestId("test-ui-overlay")).toBeInTheDocument();
+    expect(screen.getByText("Детали теста")).toBeInTheDocument();
   });
 });
 

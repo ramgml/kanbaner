@@ -24,10 +24,17 @@ const CONTRIBUTION_KINDS: readonly UiContributionKind[] = [
 
 const SLOT_PATTERN = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$/;
 const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/;
+const VIEW_ROUTE_PATTERN =
+  /^\/view\/[A-Za-z0-9][A-Za-z0-9._~-]*(?:\/[A-Za-z0-9][A-Za-z0-9._~-]*)*$/;
 
 export interface RegisteredUiContribution {
   readonly pluginId: string;
   readonly contribution: UiContribution;
+  readonly render: UiComponent;
+}
+
+export interface UiContributionRegistration {
+  readonly metadata: UiContribution;
   readonly render: UiComponent;
 }
 
@@ -37,6 +44,7 @@ export type UiComponent = ComponentType<{
 
 export interface UiContributionRegistry {
   register(pluginId: string, contribution: UiContribution, render: UiComponent): () => void;
+  registerBatch(pluginId: string, contributions: readonly UiContributionRegistration[]): () => void;
   unregisterPlugin(pluginId: string): void;
   list(slot: UiSlotId): readonly RegisteredUiContribution[];
   listAll(): readonly RegisteredUiContribution[];
@@ -49,6 +57,7 @@ export interface UiContributionRegistry {
 export type UiRegistryErrorCode =
   | "INVALID_PLUGIN_ID"
   | "INVALID_CONTRIBUTION"
+  | "INVALID_ROUTE"
   | "DUPLICATE_CONTRIBUTION_ID"
   | "DUPLICATE_ROUTE"
   | "INVALID_RENDERER";
@@ -76,13 +85,44 @@ export function normalizeRoute(route: string): string {
     throw new UiRegistryError("INVALID_CONTRIBUTION", "Маршрут вклада должен начинаться с /");
   }
 
-  if (/\s/.test(route)) {
-    throw new UiRegistryError("INVALID_CONTRIBUTION", "Маршрут вклада не должен содержать пробелы");
+  if (/\s/.test(route) || route.includes("\\")) {
+    throw new UiRegistryError("INVALID_ROUTE", "Маршрут вклада содержит недопустимые символы");
   }
 
   const path = route.split("#")[0]?.split("?")[0] ?? route;
 
-  return path.length > 1 ? path.replace(/\/+$/, "") : "/";
+  if (path.includes("//")) {
+    throw new UiRegistryError(
+      "INVALID_ROUTE",
+      "Маршрут вклада не должен содержать пустые сегменты",
+    );
+  }
+
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new UiRegistryError("INVALID_ROUTE", "Маршрут вклада не должен содержать . или ..");
+  }
+
+  return segments.length === 0 ? "/" : `/${segments.join("/")}`;
+}
+
+/**
+ * UI-плагинам разрешены только представления внутри `/view/`.
+ * Core routes (`/plugins`, `/settings`, `/`) и произвольные разделы вроде
+ * `/kanban` отклоняются, чтобы плагин не подменял навигацию shell-а.
+ */
+export function normalizeUiViewRoute(route: string): string {
+  const normalized = normalizeRoute(route);
+
+  if (!VIEW_ROUTE_PATTERN.test(normalized)) {
+    throw new UiRegistryError(
+      "INVALID_ROUTE",
+      "Маршрут UI-вклада должен иметь вид /view/<name> и не пересекаться с core routes",
+    );
+  }
+
+  return normalized;
 }
 
 function assertNonEmptyString(value: unknown, field: string): asserts value is string {
@@ -129,7 +169,7 @@ function assertContribution(value: UiContribution): UiContribution {
 
   if (value.route !== undefined) {
     assertNonEmptyString(value.route, "route");
-    normalizeRoute(value.route);
+    normalizeUiViewRoute(value.route);
   }
 
   if (value.kind === "navigation") {
@@ -182,41 +222,74 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
   private version = 0;
 
   register(pluginId: string, contribution: UiContribution, render: UiComponent): () => void {
+    return this.registerBatch(pluginId, [{ metadata: contribution, render }]);
+  }
+
+  registerBatch(
+    pluginId: string,
+    contributions: readonly UiContributionRegistration[],
+  ): () => void {
     assertPluginId(pluginId);
-    assertRenderer(render);
 
-    const metadata = assertContribution(contribution);
-
-    if (this.entries.has(metadata.id)) {
-      throw new UiRegistryError(
-        "DUPLICATE_CONTRIBUTION_ID",
-        `UI-вклад с ID ${metadata.id} уже зарегистрирован`,
-      );
+    if (!Array.isArray(contributions)) {
+      throw new UiRegistryError("INVALID_CONTRIBUTION", "Набор UI-вкладов должен быть массивом");
     }
 
-    const normalizedRoute = metadata.route === undefined ? null : normalizeRoute(metadata.route);
+    if (contributions.length === 0) {
+      return () => undefined;
+    }
 
-    if (normalizedRoute !== null && isRouteContribution(metadata)) {
-      const existing = this.routes.get(normalizedRoute);
+    const seenIds = new Set<string>();
+    const seenRoutes = new Set<string>();
+    const prepared: RegisteredUiContribution[] = [];
 
-      if (existing !== undefined) {
+    // Сначала валидируем весь batch, ничего не записывая. Внутренние дубликаты
+    // ID и маршрутов тоже проверяются здесь, до единственного state update.
+    for (const registration of contributions) {
+      assertRenderer(registration.render);
+
+      const metadata = assertContribution(registration.metadata);
+
+      if (this.entries.has(metadata.id) || seenIds.has(metadata.id)) {
         throw new UiRegistryError(
-          "DUPLICATE_ROUTE",
-          `Маршрут ${normalizedRoute} уже занят вкладом ${existing.contribution.id}`,
+          "DUPLICATE_CONTRIBUTION_ID",
+          `UI-вклад с ID ${metadata.id} уже зарегистрирован`,
         );
       }
+
+      seenIds.add(metadata.id);
+
+      const normalizedRoute =
+        metadata.route === undefined ? null : normalizeUiViewRoute(metadata.route);
+
+      if (normalizedRoute !== null && isRouteContribution(metadata)) {
+        if (this.routes.has(normalizedRoute) || seenRoutes.has(normalizedRoute)) {
+          throw new UiRegistryError(
+            "DUPLICATE_ROUTE",
+            `Маршрут ${normalizedRoute} уже занят другим UI-вкладом`,
+          );
+        }
+
+        seenRoutes.add(normalizedRoute);
+      }
+
+      prepared.push({
+        pluginId,
+        contribution:
+          normalizedRoute === null ? { ...metadata } : { ...metadata, route: normalizedRoute },
+        render: registration.render,
+      });
     }
 
-    const entry: RegisteredUiContribution = {
-      pluginId,
-      contribution: { ...metadata },
-      render,
-    };
+    const added: RegisteredUiContribution[] = [];
 
-    this.entries.set(metadata.id, entry);
+    for (const entry of prepared) {
+      this.entries.set(entry.contribution.id, entry);
+      added.push(entry);
 
-    if (normalizedRoute !== null && isRouteContribution(metadata)) {
-      this.routes.set(normalizedRoute, entry);
+      if (isRouteContribution(entry.contribution)) {
+        this.routes.set(normalizeUiViewRoute(entry.contribution.route as string), entry);
+      }
     }
 
     this.emit();
@@ -230,24 +303,16 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
 
       active = false;
 
-      if (this.removeEntry(entry)) {
+      if (this.removeEntries(added)) {
         this.emit();
       }
     };
   }
 
   unregisterPlugin(pluginId: string): void {
-    let changed = false;
+    const removed = [...this.entries.values()].filter((entry) => entry.pluginId === pluginId);
 
-    for (const entry of [...this.entries.values()]) {
-      if (entry.pluginId !== pluginId) {
-        continue;
-      }
-
-      changed = this.removeEntry(entry) || changed;
-    }
-
-    if (changed) {
+    if (removed.length > 0 && this.removeEntries(removed)) {
       this.emit();
     }
   }
@@ -264,7 +329,7 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
 
   resolveRoute(pathname: string): RegisteredUiContribution | null {
     try {
-      return this.routes.get(normalizeRoute(pathname)) ?? null;
+      return this.routes.get(normalizeUiViewRoute(pathname)) ?? null;
     } catch {
       return null;
     }
@@ -286,29 +351,48 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
     return this.entries.size;
   }
 
-  private removeEntry(entry: RegisteredUiContribution): boolean {
-    const current = this.entries.get(entry.contribution.id);
+  private removeEntries(entries: readonly RegisteredUiContribution[]): boolean {
+    let changed = false;
 
-    if (current !== entry) {
-      return false;
+    for (const entry of entries) {
+      const current = this.entries.get(entry.contribution.id);
+
+      if (current !== entry) {
+        continue;
+      }
+
+      this.entries.delete(entry.contribution.id);
+
+      const route = entry.contribution.route;
+
+      if (route !== undefined) {
+        const normalized = normalizeUiViewRoute(route);
+
+        if (this.routes.get(normalized) === entry) {
+          this.routes.delete(normalized);
+        }
+      }
+
+      changed = true;
     }
 
-    this.entries.delete(entry.contribution.id);
-
-    const route = entry.contribution.route;
-
-    if (route !== undefined && this.routes.get(normalizeRoute(route)) === entry) {
-      this.routes.delete(normalizeRoute(route));
-    }
-
-    return true;
+    return changed;
   }
 
+  /**
+   * Listener-и не должны ломать регистрацию и друг друга. Ошибка одного
+   * наблюдателя изолируется: состояние уже зафиксировано и остальные
+   * слушатели получают полный snapshot.
+   */
   private emit(): void {
     this.version += 1;
 
     for (const listener of this.listeners) {
-      listener();
+      try {
+        listener();
+      } catch {
+        // Ошибка наблюдателя не откатывает и не дробит state update.
+      }
     }
   }
 }

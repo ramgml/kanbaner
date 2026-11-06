@@ -200,6 +200,115 @@ describe("plugin manager", () => {
     expect(screen.getByText("Активен")).toBeInTheDocument();
   });
 
+  it("показывает stopped snapshot, если действие завершилось ошибкой деактивации", async () => {
+    actions.setPluginEnabled.mockResolvedValue({
+      ok: false,
+      state: state({
+        started: false,
+        safeMode: true,
+        mode: "safe_mode",
+        plugins: [
+          plugin({
+            status: "failed",
+            activated: false,
+            diagnostics: [
+              {
+                code: "deactivation_failed",
+                severity: "error",
+                phase: "deactivation",
+                message: "Серверная деактивация плагина завершилась ошибкой",
+              },
+            ],
+          }),
+        ],
+        problems: [
+          {
+            pluginId: "example.one",
+            source: "root#0/one/plugin.json",
+            status: "failed",
+            code: "deactivation_failed",
+            message: "Серверная деактивация плагина завершилась ошибкой",
+          },
+        ],
+      }),
+      error: {
+        code: "DEACTIVATION_FAILED",
+        message: "Плагин не удалось безопасно деактивировать",
+      },
+    });
+
+    render(<PluginManager initialState={state()} />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "Включить плагин Example One" }));
+
+    expect(await screen.findByTestId("plugin-action-error")).toHaveTextContent(
+      "Плагин не удалось безопасно деактивировать",
+    );
+    expect(screen.getByTestId("safe-mode-panel")).toBeInTheDocument();
+    expect(screen.getByText("deactivation_failed")).toBeInTheDocument();
+    expect(screen.getByText("Runtime остановлен")).toBeInTheDocument();
+  });
+
+  it("перехватывает rejected toggle и снимает pending", async () => {
+    actions.setPluginEnabled.mockRejectedValue(new Error("server action failed"));
+
+    render(<PluginManager initialState={state()} />);
+
+    const control = screen.getByRole("switch", { name: "Включить плагин Example One" });
+
+    fireEvent.click(control);
+
+    expect(await screen.findByTestId("plugin-action-error")).toHaveTextContent(
+      "Не удалось изменить состояние плагина",
+    );
+    await waitFor(() => {
+      expect(control).not.toBeDisabled();
+    });
+    expect(screen.getByText("Активен")).toBeInTheDocument();
+  });
+
+  it("перехватывает rejected refresh и снимает pending", async () => {
+    actions.refresh.mockRejectedValue(new Error("server action failed"));
+
+    render(<PluginManager initialState={state()} />);
+
+    const button = screen.getByRole("button", { name: "Обновить" });
+
+    fireEvent.click(button);
+
+    expect(await screen.findByTestId("plugin-action-error")).toHaveTextContent(
+      "Не удалось изменить состояние плагина",
+    );
+    await waitFor(() => {
+      expect(button).not.toBeDisabled();
+    });
+  });
+
+  it("рендерит обе карточки с одинаковым ID и разными источниками после refresh", async () => {
+    actions.refresh.mockResolvedValue(
+      result(
+        state({
+          plugins: [
+            plugin({ source: "root#0/a/plugin.json" }),
+            plugin({ source: "root#1/b/plugin.json", name: "Example Two" }),
+          ],
+        }),
+      ),
+    );
+
+    render(<PluginManager initialState={state()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("plugin-card")).toHaveLength(2);
+    });
+
+    expect(screen.getByText("root#0/a/plugin.json")).toBeInTheDocument();
+    expect(screen.getByText("root#1/b/plugin.json")).toBeInTheDocument();
+    expect(screen.getAllByText("example.one")).toHaveLength(2);
+  });
+
   it("обновляет снимок состояния кнопкой «Обновить»", async () => {
     actions.refresh.mockResolvedValue(
       result(

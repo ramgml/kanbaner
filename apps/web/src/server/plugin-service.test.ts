@@ -8,7 +8,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PluginRuntimeLogger } from "@kanbaner/kernel";
 
-import { createPluginService, type PluginServiceOptions } from "./plugin-service";
+import type { PluginManagerState } from "../lib/plugin-manager-types";
+import {
+  createPluginService,
+  PluginServiceError,
+  sanitizeDiagnosticDetails,
+  sanitizeOutboundString,
+  type PluginServiceOptions,
+} from "./plugin-service";
 
 interface FixturePlugin {
   readonly directory: string;
@@ -16,6 +23,7 @@ interface FixturePlugin {
   readonly version?: string;
   readonly requires?: Readonly<Record<string, string>>;
   readonly activateSource?: string;
+  readonly serverSource?: string;
 }
 
 const temporaryDirectories: string[] = [];
@@ -47,7 +55,9 @@ async function createPlugin(root: string, plugin: FixturePlugin): Promise<void> 
   await writeFile(path.join(directory, "plugin.json"), JSON.stringify(manifest));
   await writeFile(
     path.join(directory, "server.mjs"),
-    plugin.activateSource ?? "export function activate() {}\nexport function deactivate() {}\n",
+    plugin.serverSource ??
+      plugin.activateSource ??
+      "export function activate() {}\nexport function deactivate() {}\n",
   );
 }
 
@@ -59,6 +69,26 @@ function createService(
   services.push(service);
 
   return service;
+}
+
+async function captureServiceError(promise: Promise<unknown>): Promise<PluginServiceError> {
+  try {
+    await promise;
+  } catch (error) {
+    expect(error).toBeInstanceOf(PluginServiceError);
+
+    return error as PluginServiceError;
+  }
+
+  throw new Error("Ожидалась PluginServiceError");
+}
+
+function requireState(error: PluginServiceError): PluginManagerState {
+  if (error.state === null) {
+    throw new Error("Ожидался безопасный snapshot вместе с ошибкой");
+  }
+
+  return error.state;
 }
 
 afterEach(async () => {
@@ -199,8 +229,9 @@ describe("plugin service", () => {
       const service = createService([root], { logger, disabledPlugins: ["example.one"] });
       const state = await service.getState();
 
-      await Promise.resolve();
-      await Promise.resolve();
+      // Ждём macrotask: rejected Promise логгера должен быть поглощён до
+      // снятия listener-а unhandledRejection.
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
       expect(state.plugins[0]?.status).toBe("disabled");
       expect(unhandled).not.toHaveBeenCalled();
@@ -257,5 +288,163 @@ describe("plugin service", () => {
     expect(refreshed.plugins.map((plugin) => plugin.id)).toEqual(["example.one", "example.two"]);
     expect(refreshed.plugins[1]?.version).toBe("2.0.0");
     expect(refreshed.started).toBe(true);
+  });
+
+  it("не запускает новый runtime при ошибке деактивации и возвращает stopped snapshot", async () => {
+    const root = await createRoot();
+    await createPlugin(root, {
+      directory: "one",
+      id: "example.one",
+      serverSource:
+        "export function activate() {}\nexport function deactivate() { throw new Error('/secret/deactivate'); }\n",
+    });
+
+    const service = createService([root]);
+    await service.getState();
+
+    const error = await captureServiceError(service.setPluginEnabled("example.one", false));
+    const state = requireState(error);
+
+    expect(error.code).toBe("DEACTIVATION_FAILED");
+    expect(state.started).toBe(false);
+    expect(state.plugins[0]).toMatchObject({
+      id: "example.one",
+      status: "failed",
+      activated: false,
+      configuredEnabled: true,
+    });
+    expect(state.plugins[0]?.diagnostics.map((item) => item.code)).toContain("deactivation_failed");
+    expect(state.problems[0]?.message).toBe("Серверная деактивация плагина завершилась ошибкой");
+    expect(JSON.stringify(state)).not.toContain("/secret/deactivate");
+    expect(JSON.stringify(state)).not.toContain(root);
+
+    // getState не перезапускает runtime и сохраняет stopped snapshot.
+    const stopped = await service.getState();
+
+    expect(stopped.started).toBe(false);
+    expect(stopped.plugins[0]?.status).toBe("failed");
+
+    // До явного retry действие снова не запускает плагин.
+    const repeated = await captureServiceError(service.setPluginEnabled("example.one", true));
+    const repeatedState = requireState(repeated);
+
+    expect(repeated.code).toBe("DEACTIVATION_FAILED");
+    expect(repeatedState.started).toBe(false);
+    expect(repeatedState.plugins[0]?.activated).toBe(false);
+  });
+
+  it("явный refresh повторяет запуск после ошибки деактивации", async () => {
+    const root = await createRoot();
+    await createPlugin(root, {
+      directory: "one",
+      id: "example.one",
+      serverSource:
+        "export function activate() {}\nexport function deactivate() { throw new Error('/secret/deactivate'); }\n",
+    });
+
+    const service = createService([root]);
+    await service.getState();
+
+    await expect(service.setPluginEnabled("example.one", false)).rejects.toMatchObject({
+      code: "DEACTIVATION_FAILED",
+    });
+
+    const retried = await service.refresh();
+
+    expect(retried.started).toBe(true);
+    expect(retried.plugins[0]).toMatchObject({ status: "active", activated: true });
+  });
+
+  it("обнаруживает ошибку hook деактивации", async () => {
+    const root = await createRoot();
+    await createPlugin(root, { directory: "one", id: "example.one" });
+
+    const service = createService([root], {
+      hooks: {
+        beforeDeactivate: () => {
+          throw new Error("/secret/hook");
+        },
+      },
+    });
+
+    await service.getState();
+
+    const error = await captureServiceError(service.setPluginEnabled("example.one", false));
+    const state = requireState(error);
+
+    expect(error.code).toBe("DEACTIVATION_FAILED");
+    expect(state.started).toBe(false);
+    expect(state.plugins[0]?.diagnostics.map((item) => item.code)).toContain("hook_failed");
+    expect(JSON.stringify(state)).not.toContain("/secret/hook");
+  });
+
+  it("refresh возвращает stopped snapshot при ошибке деактивации, следующий retry успешен", async () => {
+    const root = await createRoot();
+    await createPlugin(root, { directory: "one", id: "example.one" });
+
+    const beforeDeactivate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("/secret/refresh-hook"))
+      .mockResolvedValue(undefined);
+
+    const service = createService([root], { hooks: { beforeDeactivate } });
+    await service.getState();
+
+    const error = await captureServiceError(service.refresh());
+    const state = requireState(error);
+
+    expect(error.code).toBe("DEACTIVATION_FAILED");
+    expect(state.started).toBe(false);
+    expect(state.plugins[0]?.status).toBe("failed");
+    expect(JSON.stringify(state)).not.toContain("/secret/refresh-hook");
+
+    const retried = await service.refresh();
+
+    expect(retried.started).toBe(true);
+    expect(retried.plugins[0]).toMatchObject({ status: "active", activated: true });
+  });
+
+  it("санитизирует POSIX, Windows, UNC и встроенные пути в исходящих строках", () => {
+    const sanitized = sanitizeOutboundString(
+      "posix /home/aero/secret/plugin.json windows C:\\Users\\aero\\secret\\plugin.json unc \\\\server\\share\\secret embedded /srv/data/plugin.json",
+    );
+
+    expect(sanitized).toContain("[redacted]");
+    expect(sanitized).not.toContain("home");
+    expect(sanitized).not.toContain("Users");
+    expect(sanitized).not.toContain("server");
+    expect(sanitized).not.toContain("share");
+    expect(sanitized).not.toContain("/srv/data");
+  });
+
+  it("оставляет только разрешённые ключи деталей и санитизирует их значения", () => {
+    const sanitized = sanitizeDiagnosticDetails({
+      stage: "deactivate",
+      dependency: "example.base",
+      rootIndex: 0,
+      apiToken: "/home/aero/token",
+      accessToken: "secret-access-token",
+      filePath: "/home/aero/plugin.json",
+      stackTrace: "at C:\\Users\\aero\\plugin.js:1",
+      issues: [
+        {
+          path: "/home/aero/plugin.json",
+          keyword: "type",
+          message: "Путь /home/aero/plugin.json",
+        },
+      ],
+    });
+
+    expect(sanitized).toEqual({
+      stage: "deactivate",
+      dependency: "example.base",
+      rootIndex: 0,
+      issues: [{ keyword: "type", message: "Путь [redacted]" }],
+    });
+    expect(JSON.stringify(sanitized)).not.toContain("apiToken");
+    expect(JSON.stringify(sanitized)).not.toContain("accessToken");
+    expect(JSON.stringify(sanitized)).not.toContain("filePath");
+    expect(JSON.stringify(sanitized)).not.toContain("stackTrace");
+    expect(JSON.stringify(sanitized)).not.toContain("aero");
   });
 });

@@ -1,13 +1,15 @@
 import type { UiContribution } from "@kanbaner/plugin-sdk";
 
-import type { UiComponent, UiContributionRegistry } from "./registry";
+import type { UiComponent, UiContributionRegistration, UiContributionRegistry } from "./registry";
 
 export {
   createUiContributionRegistry,
   normalizeRoute,
+  normalizeUiViewRoute,
   UiRegistryError,
   type RegisteredUiContribution,
   type UiComponent,
+  type UiContributionRegistration,
   type UiContributionRegistry,
   type UiRegistryErrorCode,
 } from "./registry";
@@ -33,30 +35,19 @@ export function defineUiPlugin(definition: UiPluginDefinition): UiPluginDefiniti
 }
 
 /**
- * Регистрирует все вклады плагина атомарно: при ошибке уже добавленные
- * вклады откатываются, чтобы реестр не оставался частично изменённым.
+ * Регистрирует все вклады плагина одним batch-ом.
+ *
+ * Весь набор валидируется до записи, state обновляется один раз, а
+ * подписчики получают только полный snapshot.
  */
 export function registerUiPlugin(
   registry: UiContributionRegistry,
   plugin: UiPluginDefinition,
 ): () => void {
-  const unregisters: Array<() => void> = [];
+  const registrations: UiContributionRegistration[] = plugin.contributions.map((contribution) => ({
+    metadata: contribution.metadata,
+    render: contribution.render,
+  }));
 
-  try {
-    for (const contribution of plugin.contributions) {
-      unregisters.push(registry.register(plugin.id, contribution.metadata, contribution.render));
-    }
-  } catch (error) {
-    for (const unregister of unregisters.reverse()) {
-      unregister();
-    }
-
-    throw error;
-  }
-
-  return () => {
-    for (const unregister of unregisters.reverse()) {
-      unregister();
-    }
-  };
+  return registry.registerBatch(plugin.id, registrations);
 }

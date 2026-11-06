@@ -5,6 +5,7 @@ import type { UiContribution } from "@kanbaner/plugin-sdk";
 import {
   createUiContributionRegistry,
   normalizeRoute,
+  normalizeUiViewRoute,
   UiRegistryError,
   type UiComponent,
 } from "./registry";
@@ -152,6 +153,131 @@ describe("клиентский реестр UI-вкладов", () => {
         ),
       "INVALID_CONTRIBUTION",
     );
+  });
+
+  it("допускает только маршруты /view и отклоняет core routes и /kanban", () => {
+    const registry = createUiContributionRegistry();
+    const rejectedRoutes = [
+      "/kanban",
+      "/plugins",
+      "/settings",
+      "/",
+      "/view",
+      "/view/",
+      "/view//example",
+      "/view/example/../settings",
+      "/view/example/./",
+    ];
+
+    rejectedRoutes.forEach((route, index) => {
+      expect(() => normalizeUiViewRoute(route)).toThrow(UiRegistryError);
+      expectRegistryError(
+        () =>
+          registry.register(
+            "example.test-ui",
+            contribution({ id: `view-${String(index)}`, kind: "view", route }),
+            render,
+          ),
+        "INVALID_ROUTE",
+      );
+    });
+
+    expect(registry.size()).toBe(0);
+  });
+
+  it("валидирует весь batch до записи и не уведомляет о частичном результате", () => {
+    const registry = createUiContributionRegistry();
+    const listener = vi.fn();
+
+    registry.subscribe(listener);
+
+    const plugin = defineUiPlugin({
+      id: "example.test-ui",
+      contributions: [
+        { metadata: contribution({ id: "first" }), render },
+        { metadata: contribution({ id: "first" }), render },
+      ],
+    });
+
+    expect(() => registerUiPlugin(registry, plugin)).toThrow(UiRegistryError);
+    expect(registry.size()).toBe(0);
+    expect(registry.getVersion()).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+
+    const routePlugin = defineUiPlugin({
+      id: "example.test-ui",
+      contributions: [
+        {
+          metadata: contribution({ id: "route-one", kind: "view", route: "/view/same" }),
+          render,
+        },
+        {
+          metadata: contribution({ id: "route-two", kind: "view", route: "/view/same/" }),
+          render,
+        },
+      ],
+    });
+
+    expect(() => registerUiPlugin(registry, routePlugin)).toThrow(UiRegistryError);
+    expect(registry.size()).toBe(0);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("уведомляет подписчиков один раз и только полным snapshot", () => {
+    const registry = createUiContributionRegistry();
+    const snapshots: Array<{ size: number; version: number; entries: number }> = [];
+
+    registry.subscribe(() => {
+      snapshots.push({
+        size: registry.size(),
+        version: registry.getVersion(),
+        entries: registry.listAll().length,
+      });
+    });
+
+    const plugin = defineUiPlugin({
+      id: "example.test-ui",
+      contributions: [
+        { metadata: contribution({ id: "one" }), render },
+        { metadata: contribution({ id: "two" }), render },
+      ],
+    });
+
+    registerUiPlugin(registry, plugin);
+
+    expect(snapshots).toEqual([{ size: 2, version: 1, entries: 2 }]);
+    expect(registry.listAll()).toHaveLength(2);
+  });
+
+  it("изолирует ошибку слушателя и не мешает другим подписчикам", () => {
+    const registry = createUiContributionRegistry();
+    const throwing = vi.fn(() => {
+      throw new Error("listener failure");
+    });
+    const observer = vi.fn();
+
+    registry.subscribe(throwing);
+    registry.subscribe(observer);
+
+    const plugin = defineUiPlugin({
+      id: "example.test-ui",
+      contributions: [
+        { metadata: contribution({ id: "one" }), render },
+        { metadata: contribution({ id: "two" }), render },
+      ],
+    });
+
+    expect(() => registerUiPlugin(registry, plugin)).not.toThrow();
+    expect(registry.size()).toBe(2);
+    expect(throwing).toHaveBeenCalledTimes(1);
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(registry.getVersion()).toBe(1);
+
+    registry.register("other.plugin", contribution({ id: "three" }), render);
+
+    expect(registry.size()).toBe(3);
+    expect(throwing).toHaveBeenCalledTimes(2);
+    expect(observer).toHaveBeenCalledTimes(2);
   });
 
   it("убирает вклады плагина и уведомляет подписчиков", () => {

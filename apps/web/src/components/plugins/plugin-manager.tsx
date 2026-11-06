@@ -13,6 +13,8 @@ import type { PluginManagerActionResult, PluginManagerState } from "../../lib/pl
 import { refreshPluginsAction, setPluginEnabledAction } from "../../server/plugin-actions";
 import { PluginCard } from "./plugin-card";
 
+const INTERNAL_ERROR = "Не удалось изменить состояние плагина";
+
 function formatUtc(value: string): string {
   return value.replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
@@ -76,13 +78,22 @@ export function PluginManager({ initialState }: PluginManagerProps) {
   const configuredCount = state.plugins.filter((plugin) => plugin.configuredEnabled).length;
 
   function applyResult(result: PluginManagerActionResult): void {
-    if (result.ok && result.state !== null) {
+    // Даже при ошибке сервер может вернуть безопасный stopped snapshot:
+    // показываем фактическое состояние runtime, а не устаревший экран.
+    if (result.state !== null) {
       setState(result.state);
+    }
+
+    if (result.ok) {
       setError(null);
       return;
     }
 
-    setError(result.error?.message ?? "Не удалось изменить состояние плагина");
+    setError(result.error?.message ?? INTERNAL_ERROR);
+  }
+
+  function applyRejection(): void {
+    setError(INTERNAL_ERROR);
   }
 
   function toggle(pluginId: string, enabled: boolean): void {
@@ -92,6 +103,8 @@ export function PluginManager({ initialState }: PluginManagerProps) {
     startTransition(async () => {
       try {
         applyResult(await setPluginEnabledAction(pluginId, enabled));
+      } catch {
+        applyRejection();
       } finally {
         setPendingId(null);
       }
@@ -105,6 +118,8 @@ export function PluginManager({ initialState }: PluginManagerProps) {
     startTransition(async () => {
       try {
         applyResult(await refreshPluginsAction());
+      } catch {
+        applyRejection();
       } finally {
         setPendingId(null);
       }
@@ -181,7 +196,7 @@ export function PluginManager({ initialState }: PluginManagerProps) {
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {state.plugins.map((plugin) => (
             <PluginCard
-              key={plugin.id ?? plugin.source}
+              key={`${plugin.id ?? "unknown"}:${plugin.source}`}
               plugin={plugin}
               pending={pendingId === plugin.id}
               disabled={isPending}

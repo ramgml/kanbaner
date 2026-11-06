@@ -4,15 +4,12 @@ import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNod
 
 import type { UiSlotId } from "@kanbaner/plugin-sdk";
 
-import {
-  EMPTY_UI_PLUGIN_AVAILABILITY,
-  type UiPluginAvailability,
-} from "../lib/plugin-manager-types";
+import type { UiPluginAvailability } from "../lib/plugin-manager-types";
 import type { RegisteredUiContribution, UiContributionRegistry } from "./registry";
 import { createUiContributionRegistry } from "./registry";
 
 const RegistryContext = createContext<UiContributionRegistry | null>(null);
-const AvailabilityContext = createContext<UiPluginAvailability | null>(null);
+const AvailabilityContext = createContext<UiPluginAvailability | null | undefined>(undefined);
 
 export interface UiRegistryProviderProps {
   readonly children: ReactNode;
@@ -22,18 +19,24 @@ export interface UiRegistryProviderProps {
 
 function isContributionAvailable(
   contribution: RegisteredUiContribution,
-  availability: UiPluginAvailability,
+  availability: UiPluginAvailability | null | undefined,
 ): boolean {
-  return !availability.unavailablePluginIds.includes(contribution.pluginId);
+  // Test-only режим без availability разрешает все вклады. В приложении
+  // layout всегда передаёт allowlist активных плагинов, поэтому unknown,
+  // removed и пустой список скрывают вклад.
+  if (availability === null || availability === undefined) {
+    return true;
+  }
+
+  return availability.activePluginIds.includes(contribution.pluginId);
 }
 
 export function UiRegistryProvider({ children, registry, availability }: UiRegistryProviderProps) {
   const value = useMemo(() => registry ?? createUiContributionRegistry(), [registry]);
-  const availabilityValue = availability ?? EMPTY_UI_PLUGIN_AVAILABILITY;
 
   return (
     <RegistryContext.Provider value={value}>
-      <AvailabilityContext.Provider value={availabilityValue}>
+      <AvailabilityContext.Provider value={availability ?? null}>
         {children}
       </AvailabilityContext.Provider>
     </RegistryContext.Provider>
@@ -50,8 +53,8 @@ export function useUiRegistry(): UiContributionRegistry {
   return registry;
 }
 
-export function useUiAvailability(): UiPluginAvailability {
-  return useContext(AvailabilityContext) ?? EMPTY_UI_PLUGIN_AVAILABILITY;
+export function useUiAvailability(): UiPluginAvailability | null {
+  return useContext(AvailabilityContext) ?? null;
 }
 
 function useRegistryVersion(registry: UiContributionRegistry): number {

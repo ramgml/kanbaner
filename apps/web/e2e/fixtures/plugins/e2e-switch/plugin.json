@@ -1,0 +1,13 @@
+{
+  "id": "example.e2e-switch",
+  "name": "E2E Switch Plugin",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": ["events"]
+}
