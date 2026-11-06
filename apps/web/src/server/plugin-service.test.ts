@@ -91,6 +91,31 @@ function requireState(error: PluginServiceError): PluginManagerState {
   return error.state;
 }
 
+type GlobalWithActivationLog = typeof globalThis & {
+  __kanbanerTestActivationLog?: string[];
+};
+
+function resetActivationLog(): void {
+  (globalThis as GlobalWithActivationLog).__kanbanerTestActivationLog = [];
+}
+
+function activationLog(): readonly string[] {
+  return (globalThis as GlobalWithActivationLog).__kanbanerTestActivationLog ?? [];
+}
+
+function journalSource(pluginId: string, deactivateThrows: boolean): string {
+  const deactivate = deactivateThrows
+    ? "throw new Error('/secret/deactivate');"
+    : "return undefined;";
+
+  return [
+    "globalThis.__kanbanerTestActivationLog ??= [];",
+    `export function activate() { globalThis.__kanbanerTestActivationLog.push(${JSON.stringify(pluginId)}); }`,
+    `export function deactivate() { ${deactivate} }`,
+    "",
+  ].join("\n");
+}
+
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.dispose()));
 
@@ -324,35 +349,100 @@ describe("plugin service", () => {
     expect(stopped.started).toBe(false);
     expect(stopped.plugins[0]?.status).toBe("failed");
 
-    // До явного retry действие снова не запускает плагин.
+    // Без подтверждённой очистки любая lifecycle-операция требует перезапуска процесса.
     const repeated = await captureServiceError(service.setPluginEnabled("example.one", true));
     const repeatedState = requireState(repeated);
 
-    expect(repeated.code).toBe("DEACTIVATION_FAILED");
+    expect(repeated.code).toBe("PROCESS_RESTART_REQUIRED");
     expect(repeatedState.started).toBe(false);
     expect(repeatedState.plugins[0]?.activated).toBe(false);
   });
 
-  it("явный refresh повторяет запуск после ошибки деактивации", async () => {
+  it("повторный refresh не реактивирует плагин без подтверждённой деактивации", async () => {
+    resetActivationLog();
+
     const root = await createRoot();
     await createPlugin(root, {
       directory: "one",
       id: "example.one",
-      serverSource:
-        "export function activate() {}\nexport function deactivate() { throw new Error('/secret/deactivate'); }\n",
+      serverSource: journalSource("example.one", true),
     });
 
     const service = createService([root]);
-    await service.getState();
+    const initial = await service.getState();
 
-    await expect(service.setPluginEnabled("example.one", false)).rejects.toMatchObject({
-      code: "DEACTIVATION_FAILED",
+    expect(initial.plugins[0]).toMatchObject({ status: "active", activated: true });
+    expect(activationLog()).toEqual(["example.one"]);
+
+    const failure = await captureServiceError(service.setPluginEnabled("example.one", false));
+
+    expect(failure.code).toBe("DEACTIVATION_FAILED");
+    expect(activationLog()).toEqual(["example.one"]);
+
+    const firstRefresh = await captureServiceError(service.refresh());
+    const firstState = requireState(firstRefresh);
+
+    expect(firstRefresh.code).toBe("PROCESS_RESTART_REQUIRED");
+    expect(firstState.started).toBe(false);
+    expect(firstState.plugins[0]).toMatchObject({ status: "failed", activated: false });
+    expect(firstState.plugins[0]?.diagnostics.map((item) => item.code)).toContain(
+      "deactivation_failed",
+    );
+    expect(activationLog()).toEqual(["example.one"]);
+
+    const secondRefresh = await captureServiceError(service.refresh());
+    const secondState = requireState(secondRefresh);
+
+    expect(secondRefresh.code).toBe("PROCESS_RESTART_REQUIRED");
+    expect(secondState.started).toBe(false);
+    expect(secondState.plugins[0]?.activated).toBe(false);
+    expect(activationLog()).toEqual(["example.one"]);
+
+    // Даже чтение состояния не запускает старый Plugin ID повторно.
+    const stopped = await service.getState();
+
+    expect(stopped.started).toBe(false);
+    expect(activationLog()).toEqual(["example.one"]);
+  });
+
+  it("не запускает healthy plugins, пока деактивация не подтверждена", async () => {
+    resetActivationLog();
+
+    const root = await createRoot();
+    await createPlugin(root, {
+      directory: "bad",
+      id: "example.bad",
+      serverSource: journalSource("example.bad", true),
+    });
+    await createPlugin(root, {
+      directory: "healthy",
+      id: "example.healthy",
+      serverSource: journalSource("example.healthy", false),
     });
 
-    const retried = await service.refresh();
+    const service = createService([root]);
+    const initial = await service.getState();
 
-    expect(retried.started).toBe(true);
-    expect(retried.plugins[0]).toMatchObject({ status: "active", activated: true });
+    expect(initial.plugins.map((plugin) => plugin.status)).toEqual(["active", "active"]);
+    expect([...activationLog()].sort()).toEqual(["example.bad", "example.healthy"]);
+
+    // Деактивация идёт в обратном порядке: healthy отключается первым,
+    // затем bad падает. После этого новый runtime не должен запускаться.
+    const failure = await captureServiceError(service.setPluginEnabled("example.bad", false));
+
+    expect(failure.code).toBe("DEACTIVATION_FAILED");
+
+    const refresh = await captureServiceError(service.refresh());
+    const state = requireState(refresh);
+
+    expect(refresh.code).toBe("PROCESS_RESTART_REQUIRED");
+    expect(state.started).toBe(false);
+    expect(state.plugins.find((plugin) => plugin.id === "example.bad")).toMatchObject({
+      status: "failed",
+      activated: false,
+    });
+    expect(activationLog().filter((id) => id === "example.bad")).toHaveLength(1);
+    expect(activationLog().filter((id) => id === "example.healthy")).toHaveLength(1);
   });
 
   it("обнаруживает ошибку hook деактивации", async () => {
@@ -378,7 +468,7 @@ describe("plugin service", () => {
     expect(JSON.stringify(state)).not.toContain("/secret/hook");
   });
 
-  it("refresh возвращает stopped snapshot при ошибке деактивации, следующий retry успешен", async () => {
+  it("refresh возвращает stopped snapshot и не выдаёт себя за восстановление", async () => {
     const root = await createRoot();
     await createPlugin(root, { directory: "one", id: "example.one" });
 
@@ -398,10 +488,13 @@ describe("plugin service", () => {
     expect(state.plugins[0]?.status).toBe("failed");
     expect(JSON.stringify(state)).not.toContain("/secret/refresh-hook");
 
-    const retried = await service.refresh();
+    const retried = await captureServiceError(service.refresh());
+    const retriedState = requireState(retried);
 
-    expect(retried.started).toBe(true);
-    expect(retried.plugins[0]).toMatchObject({ status: "active", activated: true });
+    expect(retried.code).toBe("PROCESS_RESTART_REQUIRED");
+    expect(retriedState.started).toBe(false);
+    expect(retriedState.plugins[0]?.status).toBe("failed");
+    expect(JSON.stringify(retriedState)).not.toContain("/secret/refresh-hook");
   });
 
   it("санитизирует POSIX, Windows, UNC и встроенные пути в исходящих строках", () => {

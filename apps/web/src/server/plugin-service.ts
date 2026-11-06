@@ -27,6 +27,8 @@ const SERVICE_KEY = "__kanbanerWebPluginServiceV1";
 const SERVICE_ERROR_MESSAGES = {
   NOT_FOUND: "Плагин не найден",
   DEACTIVATION_FAILED: "Плагин не удалось безопасно деактивировать",
+  PROCESS_RESTART_REQUIRED:
+    "Требуется перезапуск процесса: плагин не удалось безопасно деактивировать",
   INTERNAL_ERROR: "Не удалось изменить состояние плагина",
 } as const;
 
@@ -408,10 +410,11 @@ class PluginService {
     return this.enqueue(async () => {
       const snapshot = await this.ensureStarted();
 
-      // Пока не выполнен явный retry, новые lifecycle-операции не должны
-      // реактивировать плагин после неудачной деактивации.
+      // Пока деактивация не подтверждена, новые lifecycle-операции не должны
+      // реактивировать ни сбойный, ни остальные плагины: старый экземпляр мог
+      // остаться активным. Восстановление — только перезапуск процесса.
       if (this.blockedPluginIds.size > 0) {
-        throw this.deactivationError(this.snapshot);
+        throw this.processRestartRequired(this.snapshot);
       }
 
       if (!snapshot.plugins.some((plugin) => plugin.pluginId === pluginId)) {
@@ -441,13 +444,19 @@ class PluginService {
   }
 
   /**
-   * Явный retry: снимает блокировку деактивации и заново запускает runtime.
-   * Если остановка текущего runtime снова завершится ошибкой деактивации,
-   * новый runtime не создаётся и клиент получает stopped snapshot.
+   * Повторное обнаружение плагинов.
+   *
+   * Если предыдущая деактивация не подтверждена, refresh не является retry:
+   * blockedPluginIds не очищаются, новый runtime не создаётся, а клиент
+   * получает stopped snapshot и требование перезапустить процесс. KAN-003 не
+   * предоставляет API подтверждённой очистки старого экземпляра, поэтому
+   * выдавать refresh за восстановление нельзя.
    */
   refresh(): Promise<PluginManagerState> {
     return this.enqueue(async () => {
-      this.blockedPluginIds.clear();
+      if (this.blockedPluginIds.size > 0) {
+        throw this.processRestartRequired(this.snapshot);
+      }
 
       if (this.runtime !== null && this.snapshot !== null) {
         const stopResult = await this.stopCurrentRuntime();
@@ -542,6 +551,18 @@ class PluginService {
   private deactivationError(snapshot: PluginRuntimeSnapshot | null): PluginServiceError {
     return new PluginServiceError(
       "DEACTIVATION_FAILED",
+      snapshot === null ? null : toManagerState(snapshot, this.disabledPlugins),
+    );
+  }
+
+  /**
+   * Без подтверждённой очистки старого экземпляра никакой in-process retry
+   * невозможен. Возвращаем stopped snapshot и стабильное требование
+   * перезапуска процесса.
+   */
+  private processRestartRequired(snapshot: PluginRuntimeSnapshot | null): PluginServiceError {
+    return new PluginServiceError(
+      "PROCESS_RESTART_REQUIRED",
       snapshot === null ? null : toManagerState(snapshot, this.disabledPlugins),
     );
   }
