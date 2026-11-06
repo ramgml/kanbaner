@@ -1,7 +1,7 @@
 ---
 id: KAN-002
 title: Контракты Plugin SDK
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-002
@@ -100,6 +100,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker коммитом `a209cf0` перенёс JSON boundary-guard на общую границу `validateWithSchema` и `createSchemaValidator`; добавлены регрессии для generic API и циклических/non-plain metadata. 85 focused-тестов и 89 тестов workspace, полный check и runtime import зелёные. Задача переведена в review.
 - 2026-11-06 — Повторное ревью подтвердило исправления 2 и 4–9, но нашло обход JSON boundary-guard через generic API и циклические/non-plain `inputSchema`/`outputSchema`. Требуется единая проверка на границе всех публичных JSON Schema-валидаторов; задача возвращена worker-у.
 - 2026-11-06 — Worker коммитом `9acbbba` устранил все 9 замечаний ревью и дополнительный конфликт `$id` в схеме результата; 82 focused-теста и 86 тестов workspace, полный `pnpm check`, runtime import и strict install зелёные. Задача повторно переведена в review.
 - 2026-11-06 — Независимое ревью нашло проблемы глубокой JSON-валидации, обработки `format`, проверки плагинных схем, типизации generic-валидаторов, SemVer range, `ResourceService.resolve` и мелкие несогласованности. Задача возвращена worker-у. Оркестратор согласовал `ajv-formats@3.0.1`, `semver@7.8.6` и `@types/semver@7.8.0`; стек обновлён коммитом `e8233c5`, изменение lock-файла разрешено.
