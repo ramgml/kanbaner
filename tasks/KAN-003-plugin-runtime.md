@@ -1,7 +1,7 @@
 ---
 id: KAN-003
 title: Runtime и жизненный цикл плагинов
-status: review
+status: in_progress
 stage: 1
 priority: high
 owner: worker-kan-003
@@ -102,6 +102,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Независимое ревью нашло blocker обрыва runtime при разборе exports, rejected Promise logger/observer, symlink escape, пробелы discovery/UTF-8/snapshot/concurrency и недостающие error-path тесты. Задача возвращена worker-у для исправления всех 9 findings.
 - 2026-11-06 — Worker завершил runtime коммитами `d33942d` и `328115e`; 43 focused-теста и 131 тест workspace, strict install и полный check зелёные. Создан отчёт, задача переведена в review.
 - 2026-11-06 — Оркестратор согласовал добавление `semver@7.8.6` и `@types/semver@7.8.0` в `packages/kernel/package.json` для фактической проверки Host API/dependency ranges; соответствующее обновление lock-файла разрешено, корневой `package.json` менять запрещено.
 - 2026-11-06 — KAN-001/KAN-002 завершены. Оркестратор подтвердил готовность, назначил worker-kan-003, ветку `feat/kan-003-plugin-runtime` и worktree `.worktrees/kan-003-plugin-runtime`; корневой index ядра остаётся за оркестратором.
