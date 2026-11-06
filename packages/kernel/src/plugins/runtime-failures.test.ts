@@ -50,7 +50,12 @@ describe("PluginRuntime failure isolation", () => {
 
     expect(statusOf(snapshot, "fixture.partial")).toBe("failed");
     expect(snapshot.activationOrder).toEqual([]);
-    expect(fixtureEvents()).toEqual(["activate:fixture.partial", "deactivate:fixture.partial"]);
+    expect(fixtureEvents()).toEqual([
+      "activate:fixture.broken-rollback",
+      "deactivate:fixture.broken-rollback",
+      "activate:fixture.partial",
+      "deactivate:fixture.partial",
+    ]);
     expect(
       snapshot.diagnostics.some(
         (diagnostic) =>

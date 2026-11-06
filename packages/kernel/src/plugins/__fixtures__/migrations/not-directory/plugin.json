@@ -1,0 +1,14 @@
+{
+  "id": "fixture.migrations-not-directory",
+  "name": "fixture.migrations-not-directory",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": [],
+  "migrations": "./migrations-file.txt"
+}

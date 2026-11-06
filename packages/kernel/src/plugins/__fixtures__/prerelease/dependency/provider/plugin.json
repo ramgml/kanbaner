@@ -1,0 +1,13 @@
+{
+  "id": "fixture.prerelease-provider",
+  "name": "fixture.prerelease-provider",
+  "version": "1.0.0-beta.1",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

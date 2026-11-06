@@ -18,6 +18,7 @@ export type {
   PluginLifecyclePhase,
   PluginProblem,
   PluginProblemStatus,
+  PluginManifestSummary,
   PluginRuntimeLogger,
   PluginRuntimeMode,
   PluginRuntimeSnapshot,

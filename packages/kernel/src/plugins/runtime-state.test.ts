@@ -1,6 +1,8 @@
+import type { PluginManifest } from "@kanbaner/plugin-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { PluginRuntimeLogger } from "../lifecycle/index.ts";
+import { summarizePluginManifest } from "../lifecycle/index.ts";
 import { createPluginRuntime } from "./plugin-runtime.ts";
 import { fixtureEvents, fixturePath, resetFixtures } from "./test-support.ts";
 
@@ -51,7 +53,20 @@ describe("PluginRuntime public state", () => {
 
     expect(state?.pluginId).toBe("fixture.alpha");
     expect(state?.status).toBe("active");
-    expect(state?.manifest?.requires).toEqual({ "fixture.zeta": "^1.0.0" });
+    expect(state?.manifest).toEqual({
+      id: "fixture.alpha",
+      name: "fixture.alpha",
+      version: "1.0.0",
+      hostApi: "^1.0.0",
+      requires: { "fixture.zeta": "^1.0.0" },
+      consumes: [],
+      provides: [],
+      permissions: [],
+    });
+    expect(Object.isFrozen(state?.manifest)).toBe(true);
+    expect(Object.isFrozen(state?.manifest?.requires)).toBe(true);
+    expect(state?.manifest).not.toHaveProperty("entrypoints");
+    expect(state?.manifest).not.toHaveProperty("migrations");
     expect(runtime.getState("fixture.absent")).toBeUndefined();
     expect(runtime.getActivationOrder()).toEqual(["fixture.zeta", "fixture.alpha", "fixture.mid"]);
     expect(runtime.isSafeMode()).toBe(false);
@@ -66,6 +81,54 @@ describe("PluginRuntime public state", () => {
 
     expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
     expect(JSON.stringify(snapshot)).not.toContain("function");
+    expect(JSON.stringify(snapshot)).not.toContain("entrypoints");
+    expect(JSON.stringify(snapshot)).not.toContain("server.mjs");
+  });
+
+  it("не публикует entrypoints, migrations и неизвестные поля в manifest summary", () => {
+    const manifest = {
+      id: "fixture.summary",
+      name: "Summary",
+      version: "1.0.0",
+      hostApi: "^1.0.0",
+      entrypoints: { server: "/abs/plugin/server.mjs" },
+      requires: { "fixture.dep": "^1.0.0" },
+      consumes: ["tasks.task"],
+      provides: ["notes.note"],
+      permissions: ["storage.read"],
+      migrations: "/abs/plugin/migrations",
+      secret: "token=super-secret",
+      absolutePath: "/abs/plugin",
+    } as unknown as PluginManifest;
+
+    const summary = summarizePluginManifest(manifest);
+
+    expect(summary).toEqual({
+      id: "fixture.summary",
+      name: "Summary",
+      version: "1.0.0",
+      hostApi: "^1.0.0",
+      requires: { "fixture.dep": "^1.0.0" },
+      consumes: ["tasks.task"],
+      provides: ["notes.note"],
+      permissions: ["storage.read"],
+    });
+    expect(Object.keys(summary).sort()).toEqual([
+      "consumes",
+      "hostApi",
+      "id",
+      "name",
+      "permissions",
+      "provides",
+      "requires",
+      "version",
+    ]);
+    const serialized = JSON.stringify(summary);
+
+    expect(serialized).not.toContain("/abs");
+    expect(serialized).not.toContain("server.mjs");
+    expect(serialized).not.toContain("migrations");
+    expect(serialized).not.toContain("super-secret");
   });
 });
 

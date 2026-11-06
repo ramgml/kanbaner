@@ -216,11 +216,22 @@ describe("PluginRuntime dependency failures", () => {
 
     expect(duplicates).toHaveLength(2);
     expect(duplicates.every((plugin) => plugin.status === "failed")).toBe(true);
+    expect(duplicates.map((plugin) => plugin.source)).toEqual([
+      "root#0/dup/plugin.json",
+      "root#1/dup/plugin.json",
+    ]);
     expect(statusOf(snapshot, "fixture.dup-dependent")).toBe("missing_dependency");
     expect(statusOf(snapshot, "fixture.dup-healthy")).toBe("active");
-    expect(
-      snapshot.diagnostics.filter((diagnostic) => diagnostic.code === "duplicate_plugin_id"),
-    ).toHaveLength(2);
+    const duplicateDiagnostics = snapshot.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "duplicate_plugin_id",
+    );
+
+    expect(duplicateDiagnostics).toHaveLength(2);
+    expect(duplicateDiagnostics[0]?.details?.sources).toEqual([
+      "root#0/dup/plugin.json",
+      "root#1/dup/plugin.json",
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain(fixturePath("duplicate"));
   });
 
   it("не активирует плагин, отключённый конфигурацией", async () => {

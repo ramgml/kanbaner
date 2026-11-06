@@ -1,0 +1,14 @@
+{
+  "id": "fixture.migrations-path-invalid",
+  "name": "fixture.migrations-path-invalid",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": [],
+  "migrations": "../outside"
+}

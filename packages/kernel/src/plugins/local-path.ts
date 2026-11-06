@@ -1,6 +1,15 @@
+import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep, win32 } from "node:path";
 
-export type LocalPathFailure = "empty" | "remote" | "absolute" | "escape" | "invalid";
+export type LocalPathFailure =
+  | "empty"
+  | "remote"
+  | "absolute"
+  | "escape"
+  | "invalid"
+  | "not_found"
+  | "realpath_failed"
+  | "symlink_escape";
 
 export type LocalPathResolution =
   | { readonly ok: true; readonly path: string }
@@ -8,14 +17,27 @@ export type LocalPathResolution =
 
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR")
+  );
+}
+
 /**
  * Разрешает локальный путь внутри каталога плагина.
  *
- * Абсолютные пути, URL-схемы, `..`-выходы и обратные слэши отклоняются,
- * чтобы манифест нельзя было использовать для загрузки удалённого кода и
- * чтобы путь одинаково трактовался на Linux и Windows.
+ * Проверка выполняется в два этапа: лексическая (абсолютные пути, URL-схемы,
+ * `..`-выходы, обратные слэши) и каноническая через `realpath`. Второй этап
+ * запрещает symlink/junction-выход за пределы каталога плагина. Возвращается
+ * канонический путь, который runtime использует для `stat` и dynamic import.
  */
-export function resolveLocalPluginPath(directory: string, value: string): LocalPathResolution {
+export async function resolveLocalPluginPath(
+  directory: string,
+  value: string,
+): Promise<LocalPathResolution> {
   if (value.trim().length === 0) {
     return { ok: false, reason: "empty" };
   }
@@ -32,17 +54,47 @@ export function resolveLocalPluginPath(directory: string, value: string): LocalP
     return { ok: false, reason: "absolute" };
   }
 
-  const resolved = resolve(directory, value);
-  const relativePath = relative(directory, resolved);
+  const lexicalCandidate = resolve(directory, value);
+  const lexicalRelative = relative(directory, lexicalCandidate);
 
   if (
-    relativePath === "" ||
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
+    lexicalRelative === "" ||
+    lexicalRelative === ".." ||
+    lexicalRelative.startsWith(`..${sep}`) ||
+    isAbsolute(lexicalRelative)
   ) {
     return { ok: false, reason: "escape" };
   }
 
-  return { ok: true, path: resolved };
+  let canonicalDirectory: string;
+
+  try {
+    canonicalDirectory = await realpath(directory);
+  } catch {
+    return { ok: false, reason: "realpath_failed" };
+  }
+
+  let canonicalCandidate: string;
+
+  try {
+    canonicalCandidate = await realpath(lexicalCandidate);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: isNotFound(error) ? "not_found" : "realpath_failed",
+    };
+  }
+
+  const canonicalRelative = relative(canonicalDirectory, canonicalCandidate);
+
+  if (
+    canonicalRelative === "" ||
+    canonicalRelative === ".." ||
+    canonicalRelative.startsWith(`..${sep}`) ||
+    isAbsolute(canonicalRelative)
+  ) {
+    return { ok: false, reason: "symlink_escape" };
+  }
+
+  return { ok: true, path: canonicalCandidate };
 }

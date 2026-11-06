@@ -18,9 +18,14 @@ import type {
   PluginStateSnapshot,
   PluginStatus,
 } from "../lifecycle/index.ts";
+import { summarizePluginManifest } from "../lifecycle/index.ts";
 import { buildPluginGraph, type DependencyNode } from "./dependency-graph.ts";
 import { compareStrings, createDiagnostic, deepFreeze, cloneJson } from "./diagnostics.ts";
-import { discoverPluginManifests, type DiscoveredPluginManifest } from "./discovery.ts";
+import {
+  discoverPluginManifests,
+  type DiscoveredPluginFailure,
+  type DiscoveredPluginManifest,
+} from "./discovery.ts";
 import { loadPluginServerModule } from "./loader.ts";
 import { resolveLocalPluginPath } from "./local-path.ts";
 import { parsePluginManifest } from "./manifest.ts";
@@ -107,6 +112,13 @@ function isNeutralStatus(status: PluginStatus): boolean {
   return status === "manifest_validated";
 }
 
+/** Поглощает rejected Promise от логгера/наблюдателя, не создавая unhandled rejection. */
+function consumeAsyncResult(result: void | Promise<void>): void {
+  void Promise.resolve(result).catch(() => {
+    // Ошибка наблюдателя не влияет на lifecycle плагинов.
+  });
+}
+
 function baseDiagnostic(
   record: PluginRecord,
   code: PluginDiagnosticCode,
@@ -141,40 +153,43 @@ class PluginRuntimeImpl implements PluginRuntime {
   private diagnostics: PluginDiagnostic[] = [];
   private activationOrder: string[] = [];
   private deactivationOrder: string[] = [];
+  private runtimeProblems: PluginProblem[] = [];
   private started = false;
   private runtimeFailed = false;
-  private operation: Promise<PluginRuntimeSnapshot> | null = null;
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(options: PluginRuntimeOptions) {
     this.options = resolveOptions(options);
   }
 
   start(): Promise<PluginRuntimeSnapshot> {
-    if (this.started) {
-      return Promise.resolve(this.getSnapshot());
-    }
+    return this.enqueue(async () => {
+      if (this.started) {
+        return this.getSnapshot();
+      }
 
-    if (this.operation !== null) {
-      return this.operation;
-    }
-
-    this.operation = this.runStart().finally(() => {
-      this.operation = null;
+      return this.runStart();
     });
-
-    return this.operation;
   }
 
   stop(): Promise<PluginRuntimeSnapshot> {
-    if (this.operation !== null) {
-      return this.operation;
-    }
+    return this.enqueue(() => this.runStop());
+  }
 
-    this.operation = this.runStop().finally(() => {
-      this.operation = null;
-    });
+  /**
+   * Сериализует lifecycle-операции.
+   *
+   * `await stop()` всегда ждёт завершения деактивации, даже если `start()` ещё
+   * выполняется. `start()` во время `stop()` запускается после деактивации.
+   */
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(operation, operation);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
 
-    return this.operation;
+    return result;
   }
 
   getSnapshot(): PluginRuntimeSnapshot {
@@ -199,7 +214,13 @@ class PluginRuntimeImpl implements PluginRuntime {
       });
     }
 
-    const safeMode = this.options.safeMode || this.runtimeFailed || problems.length > 0;
+    problems.push(...this.runtimeProblems.map((problem) => ({ ...problem })));
+
+    const safeMode =
+      this.options.safeMode ||
+      this.runtimeFailed ||
+      this.runtimeProblems.length > 0 ||
+      problems.length > 0;
 
     return deepFreeze({
       mode: safeMode ? "safe_mode" : "normal",
@@ -239,11 +260,27 @@ class PluginRuntimeImpl implements PluginRuntime {
     try {
       const discovery = await discoverPluginManifests(this.options.pluginDirectories);
 
+      const failureDiagnostics = new Set(discovery.failures.map((failure) => failure.diagnostic));
+
       for (const diagnostic of discovery.diagnostics) {
+        if (failureDiagnostics.has(diagnostic)) {
+          continue;
+        }
+
         this.addDiagnostic(null, diagnostic);
+        this.runtimeProblems.push({
+          pluginId: null,
+          source: diagnostic.source ?? "runtime",
+          status: "failed",
+          code: diagnostic.code,
+          message: diagnostic.message,
+        });
       }
 
-      this.records = discovery.manifests.map((manifest) => this.createRecord(manifest));
+      this.records = [
+        ...discovery.manifests.map((manifest) => this.createRecord(manifest)),
+        ...discovery.failures.map((failure) => this.createFailureRecord(failure)),
+      ];
 
       const duplicateIds = this.markDuplicateIds();
 
@@ -396,6 +433,7 @@ class PluginRuntimeImpl implements PluginRuntime {
     this.diagnostics = [];
     this.activationOrder = [];
     this.deactivationOrder = [];
+    this.runtimeProblems = [];
     this.started = false;
     this.runtimeFailed = false;
   }
@@ -421,6 +459,28 @@ class PluginRuntimeImpl implements PluginRuntime {
     if (parsed.diagnostic !== null) {
       this.addDiagnostic(record, parsed.diagnostic);
     }
+
+    return record;
+  }
+
+  private createFailureRecord(failure: DiscoveredPluginFailure): PluginRecord {
+    const record: PluginRecord = {
+      key: `failure\u0000${failure.rootIndex}\u0000${failure.source}`,
+      directory: failure.directory,
+      source: failure.source,
+      pluginId: null,
+      manifest: null,
+      status: "failed",
+      diagnostics: [],
+      serverEntrypointPath: null,
+      migrationsPath: null,
+      module: null,
+      activated: false,
+      deactivated: false,
+      activationIndex: null,
+    };
+
+    this.addDiagnostic(record, failure.diagnostic);
 
     return record;
   }
@@ -505,13 +565,15 @@ class PluginRuntimeImpl implements PluginRuntime {
     const serverEntrypoint = manifest.entrypoints.server;
 
     if (serverEntrypoint !== undefined) {
-      const resolved = resolveLocalPluginPath(record.directory, serverEntrypoint);
+      const resolved = await resolveLocalPluginPath(record.directory, serverEntrypoint);
 
       if (!resolved.ok) {
         this.failRecord(
           record,
-          "entrypoint_invalid",
-          "Серверная точка входа должна быть локальным файлом плагина",
+          resolved.reason === "not_found" ? "entrypoint_not_found" : "entrypoint_invalid",
+          resolved.reason === "not_found"
+            ? "Серверная точка входа не найдена"
+            : "Серверная точка входа должна быть локальным файлом плагина",
           "manifest_validation",
           { reason: resolved.reason },
         );
@@ -544,7 +606,7 @@ class PluginRuntimeImpl implements PluginRuntime {
     }
 
     if (manifest.migrations !== undefined) {
-      const resolved = resolveLocalPluginPath(record.directory, manifest.migrations);
+      const resolved = await resolveLocalPluginPath(record.directory, manifest.migrations);
 
       if (!resolved.ok) {
         this.failRecord(
@@ -553,6 +615,30 @@ class PluginRuntimeImpl implements PluginRuntime {
           "Каталог миграций должен находиться внутри каталога плагина",
           "manifest_validation",
           { reason: resolved.reason },
+        );
+        return;
+      }
+
+      try {
+        const info = await stat(resolved.path);
+
+        if (!info.isDirectory()) {
+          this.failRecord(
+            record,
+            "migrations_path_invalid",
+            "Каталог миграций должен быть каталогом",
+            "manifest_validation",
+            { reason: "not_directory" },
+          );
+          return;
+        }
+      } catch {
+        this.failRecord(
+          record,
+          "migrations_path_invalid",
+          "Каталог миграций не найден",
+          "manifest_validation",
+          { reason: "not_found" },
         );
         return;
       }
@@ -777,7 +863,19 @@ class PluginRuntimeImpl implements PluginRuntime {
     }
 
     if (record.serverEntrypointPath !== null) {
-      const loaded = await loadPluginServerModule(record.serverEntrypointPath);
+      let loaded;
+
+      try {
+        loaded = await loadPluginServerModule(record.serverEntrypointPath);
+      } catch {
+        this.failRecord(
+          record,
+          "entrypoint_invalid_module",
+          "Серверный модуль плагина не загрузился",
+          "server_activation",
+        );
+        return;
+      }
 
       if (!loaded.ok) {
         this.failRecord(
@@ -970,20 +1068,22 @@ class PluginRuntimeImpl implements PluginRuntime {
     }
 
     try {
-      this.options.hooks.onDiagnostic?.(safeDiagnostic);
+      consumeAsyncResult(this.options.hooks.onDiagnostic?.(safeDiagnostic));
     } catch {
       // Ошибка наблюдателя не влияет на lifecycle плагинов.
     }
 
     try {
-      this.options.logger.log(
-        safeDiagnostic.severity === "error"
-          ? "error"
-          : safeDiagnostic.severity === "warning"
-            ? "warn"
-            : "info",
-        safeDiagnostic.message,
-        safeDiagnostic.details,
+      consumeAsyncResult(
+        this.options.logger.log(
+          safeDiagnostic.severity === "error"
+            ? "error"
+            : safeDiagnostic.severity === "warning"
+              ? "warn"
+              : "info",
+          safeDiagnostic.message,
+          safeDiagnostic.details,
+        ),
       );
     } catch {
       // Ошибка логгера не влияет на lifecycle плагинов.
@@ -995,7 +1095,7 @@ class PluginRuntimeImpl implements PluginRuntime {
       pluginId: record.pluginId,
       source: record.source,
       status: record.status,
-      manifest: record.manifest === null ? null : cloneJson(record.manifest),
+      manifest: record.manifest === null ? null : summarizePluginManifest(record.manifest),
       diagnostics: record.diagnostics.map((diagnostic) => cloneJson(diagnostic)),
       activated: record.activated,
       deactivated: record.deactivated,

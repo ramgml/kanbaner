@@ -36,5 +36,5 @@ export interface PluginLifecycleHooks {
   afterActivate?(context: PluginActivationContext): MaybePromise<void>;
   beforeDeactivate?(context: PluginDeactivationContext): MaybePromise<void>;
   afterDeactivate?(context: PluginDeactivationContext): MaybePromise<void>;
-  onDiagnostic?(diagnostic: PluginDiagnostic): void;
+  onDiagnostic?(diagnostic: PluginDiagnostic): MaybePromise<void>;
 }

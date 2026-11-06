@@ -73,6 +73,16 @@ function mergeModules(
  * функция по умолчанию как `activate`.
  */
 export function resolvePluginServerModule(namespace: unknown): PluginServerModule | null {
+  try {
+    return resolvePluginServerModuleUnsafe(namespace);
+  } catch {
+    // Proxy, throwing getter или иной враждебный namespace не должны
+    // выбрасывать исключение за пределы загрузчика.
+    return null;
+  }
+}
+
+function resolvePluginServerModuleUnsafe(namespace: unknown): PluginServerModule | null {
   if (typeof namespace === "function") {
     return { activate: namespace as Activate };
   }
@@ -112,7 +122,13 @@ export async function loadPluginServerModule(
     return { ok: false, reason: "import_failed" };
   }
 
-  const serverModule = resolvePluginServerModule(namespace);
+  let serverModule: PluginServerModule | null;
+
+  try {
+    serverModule = resolvePluginServerModule(namespace);
+  } catch {
+    return { ok: false, reason: "invalid_module" };
+  }
 
   return serverModule === null
     ? { ok: false, reason: "invalid_module" }

@@ -9,7 +9,11 @@ export type PluginLogLevel = "debug" | "info" | "warn" | "error";
  * не содержат секретов и содержимого пользовательских данных.
  */
 export interface PluginRuntimeLogger {
-  log(level: PluginLogLevel, message: string, details?: Readonly<Record<string, JsonValue>>): void;
+  log(
+    level: PluginLogLevel,
+    message: string,
+    details?: Readonly<Record<string, JsonValue>>,
+  ): void | Promise<void>;
 }
 
 /** Контекст, который runtime передаёт серверному коду плагина. */
