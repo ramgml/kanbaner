@@ -146,9 +146,16 @@ export function cancelledError(): ErrorResult {
   return errorResult("CANCELLED", "Операция отменена");
 }
 
-/** Истёк deadline операции. */
+/**
+ * Истёк deadline операции.
+ *
+ * Шина не знает, успела ли mutation зафиксировать запись, поэтому
+ * bus-generated TIMEOUT всегда консервативно помечается `retryable: false`.
+ */
 export function timeoutError(): ErrorResult {
-  return errorResult("TIMEOUT", "Истёк срок выполнения операции");
+  return toErrorResult(
+    createPluginError("TIMEOUT", "Истёк срок выполнения операции", { retryable: false }),
+  );
 }
 
 /** Внутренняя ошибка плагина без деталей исключения. */

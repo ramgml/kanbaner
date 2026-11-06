@@ -122,8 +122,24 @@ class OperationRuntime {
     parent?: ExecutionFrame,
   ): Promise<OperationResult<unknown>> {
     const startedAt = Date.now();
-    const requestId = createRequestId();
     const traceId = parent === undefined ? createTraceId() : parent.traceId;
+    let requestId: string;
+
+    if (parent === undefined) {
+      const suppliedRequestId: unknown = options.requestId;
+
+      if (
+        suppliedRequestId !== undefined &&
+        (typeof suppliedRequestId !== "string" || suppliedRequestId.length === 0)
+      ) {
+        return invalidOptionError("requestId");
+      }
+
+      requestId = suppliedRequestId ?? createRequestId();
+    } else {
+      // Вложенный вызов не может подменить внешний requestId или traceId.
+      requestId = createRequestId();
+    }
 
     const sourceValidation =
       parent === undefined
@@ -334,7 +350,15 @@ class OperationRuntime {
       ? interruption.then(() => (interrupted === "timeout" ? timeoutError() : cancelledError()))
       : undefined;
 
-    const handlerPromise = Promise.resolve().then(() => operation.handler(input, context));
+    const handlerPromise = Promise.resolve().then(() => {
+      // Проверка непосредственно перед запуском закрывает окно между
+      // предварительной проверкой и микротаском обработчика.
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+
+      return operation.handler(input, context);
+    });
     const outcome = handlerPromise.then(
       (data) => this.successResult(operation, data),
       (error: unknown) => {

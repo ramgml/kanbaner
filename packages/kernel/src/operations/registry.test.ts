@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createOperationBus } from "./bus.ts";
 import { OperationRegistrationError } from "./errors.ts";
 import { OperationRegistry } from "./registry.ts";
 import { commandMetadata, queryMetadata } from "./test-fixtures.ts";
@@ -182,5 +183,55 @@ describe("OperationRegistry", () => {
     registry.registerCommand({ metadata: commandMetadata(), handler: spy });
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("делает глубокий снимок метаданных и не зависит от их последующих мутаций", async () => {
+    const bus = createOperationBus();
+    const metadata = commandMetadata();
+    const descriptor = bus.registerCommand({
+      metadata,
+      handler: () => ({}),
+    });
+
+    const mutableMetadata = metadata as unknown as {
+      version: number;
+      exposure: { ui: boolean };
+      inputSchema: {
+        required: string[];
+        properties: { title: { minLength: number } };
+      };
+    };
+
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(descriptor.metadata)).toBe(true);
+    expect(Object.isFrozen(descriptor.metadata.inputSchema)).toBe(true);
+    expect(Object.isFrozen(descriptor.exposure)).toBe(true);
+
+    mutableMetadata.version = 99;
+    mutableMetadata.exposure.ui = false;
+    mutableMetadata.inputSchema.required.push("extra");
+    mutableMetadata.inputSchema.properties.title.minLength = 100;
+
+    expect(descriptor.metadata.version).toBe(1);
+    expect(descriptor.exposure).toEqual({ ui: true, http: false, mcp: false });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(true);
+
+    expect(() => {
+      (descriptor.metadata as unknown as { version: number }).version = 2;
+    }).toThrow(TypeError);
+
+    expect(() => {
+      (descriptor.exposure as unknown as { ui: boolean }).ui = false;
+    }).toThrow(TypeError);
+
+    const listed = bus.registry.list();
+    expect(listed).toHaveLength(1);
+    expect(Object.isFrozen(listed[0])).toBe(true);
+    expect(Object.isFrozen(listed[0]?.metadata)).toBe(true);
+    expect(listed[0]?.metadata.version).toBe(1);
+    expect(listed[0]?.exposure).toEqual({ ui: true, http: false, mcp: false });
   });
 });

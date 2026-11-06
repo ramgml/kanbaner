@@ -10,7 +10,7 @@ import {
   queryMetadata,
   titleInputSchema,
 } from "./test-fixtures.ts";
-import type { OperationHandler } from "./types.ts";
+import type { ExecutionOptions, OperationHandler } from "./types.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -172,6 +172,47 @@ describe("OperationBus: контекст и идемпотентность", () 
     expect(captured.requestId).not.toBe(captured.traceId);
     expect(captured.source).toEqual({ type: "ui", id: "web" });
     expect(captured.idempotencyKey).toBe("operation-key-1");
+  });
+
+  it("использует внешний requestId верхнего вызова", async () => {
+    const bus = createOperationBus();
+    let captured: ExecutionContext | undefined;
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: (_input, context) => {
+        captured = context;
+
+        return {};
+      },
+    });
+
+    const result = await bus.executeCommand(
+      "test.tasks.create",
+      { title: "x" },
+      { requestId: "X-Request-Id-42", source: { type: "http", id: "api" } },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(captured?.requestId).toBe("X-Request-Id-42");
+    expect(captured?.traceId).toMatch(UUID_PATTERN);
+  });
+
+  it("отклоняет пустой внешний requestId", async () => {
+    const bus = createOperationBus();
+    const handler = vi.fn(() => ({}));
+
+    bus.registerCommand({ metadata: commandMetadata(), handler });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" }, { requestId: "" });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("VALIDATION_ERROR");
+      expect(result.error.details).toMatchObject({ field: "requestId" });
+    }
   });
 
   it("использует source.type = system по умолчанию", async () => {
@@ -422,6 +463,67 @@ describe("OperationBus: вложенные вызовы", () => {
     expect(data.command.data.source.type).toBe("mcp");
   });
 
+  it("не позволяет вложенному вызову подменить requestId и source", async () => {
+    const bus = createOperationBus();
+    const overrideOptions: ExecutionOptions = {
+      requestId: "spoofed-request-id",
+      source: { type: "http", id: "evil" },
+    };
+    let nestedSnapshot: ContextSnapshot | undefined;
+
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.outer" }),
+      handler: async (_input, context) => {
+        const nested = await context.commands.execute(
+          "test.tasks.nested",
+          { title: "nested" },
+          overrideOptions,
+        );
+
+        return { ...contextSnapshot(context), nested };
+      },
+    });
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.nested" }),
+      handler: (_input, context) => {
+        nestedSnapshot = contextSnapshot(context);
+
+        return nestedSnapshot;
+      },
+    });
+
+    const result = await bus.executeCommand(
+      "test.tasks.outer",
+      { title: "outer" },
+      { requestId: "external-request-id", source: { type: "ui", id: "web" } },
+    );
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) {
+      return;
+    }
+
+    const data = result.data as {
+      requestId: string;
+      traceId: string;
+      source: { type: string };
+      nested: { ok: true; data: ContextSnapshot } | { ok: false };
+    };
+
+    expect(data.requestId).toBe("external-request-id");
+    expect(nestedSnapshot).toBeDefined();
+
+    if (nestedSnapshot === undefined || !data.nested.ok) {
+      return;
+    }
+
+    expect(nestedSnapshot.requestId).not.toBe("spoofed-request-id");
+    expect(nestedSnapshot.requestId).toMatch(UUID_PATTERN);
+    expect(nestedSnapshot.traceId).toBe(data.traceId);
+    expect(nestedSnapshot.source).toEqual({ type: "ui", id: "web" });
+  });
+
   it("не позволяет вложенной команде вызывать запрос через ctx.commands", async () => {
     const bus = createOperationBus();
 
@@ -526,6 +628,90 @@ describe("OperationBus: вложенные вызовы", () => {
 });
 
 describe("OperationBus: отмена и таймаут", () => {
+  it("не запускает обработчик, если AbortSignal сработал сразу после executeCommand", async () => {
+    const bus = createOperationBus();
+    const handler = vi.fn(() => ({}));
+
+    bus.registerCommand({ metadata: commandMetadata(), handler });
+
+    const controller = new AbortController();
+    const pending = bus.executeCommand(
+      "test.tasks.create",
+      { title: "x" },
+      { signal: controller.signal },
+    );
+
+    controller.abort();
+
+    const result = await pending;
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("CANCELLED");
+    }
+  });
+
+  it("не запускает обработчик для уже отменённого signal", async () => {
+    const bus = createOperationBus();
+    const handler = vi.fn(() => ({}));
+
+    bus.registerCommand({ metadata: commandMetadata(), handler });
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await bus.executeCommand(
+      "test.tasks.create",
+      { title: "x" },
+      { signal: controller.signal },
+    );
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("CANCELLED");
+    }
+  });
+
+  it("не запускает вложенный обработчик при отмене сразу после вложенного вызова", async () => {
+    const bus = createOperationBus();
+    const nestedHandler = vi.fn(() => ({}));
+
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.outer" }),
+      handler: async (_input, context) => {
+        const nestedController = new AbortController();
+        const nestedPending = context.commands.execute(
+          "test.tasks.nested",
+          { title: "nested" },
+          { signal: nestedController.signal },
+        );
+
+        nestedController.abort();
+
+        return { nested: await nestedPending };
+      },
+    });
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.nested" }),
+      handler: nestedHandler,
+    });
+
+    const result = await bus.executeCommand("test.tasks.outer", { title: "outer" });
+
+    expect(nestedHandler).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+
+    if (result.ok) {
+      const data = result.data as { nested: { ok: boolean; error?: { code: string } } };
+      expect(data.nested.ok).toBe(false);
+      expect(data.nested.error?.code).toBe("CANCELLED");
+    }
+  });
+
   it("возвращает CANCELLED по AbortSignal", async () => {
     const bus = createOperationBus();
     let startedResolve: (() => void) | undefined;
@@ -611,9 +797,62 @@ describe("OperationBus: отмена и таймаут", () => {
       rejectLater?.(new Error("secret after cancellation"));
       await delay(20);
 
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.error.code).toBe("CANCELLED");
+      }
+
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("не меняет результат при позднем resolve отменённого обработчика", async () => {
+    const bus = createOperationBus();
+    let resolveLater: ((value: unknown) => void) | undefined;
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        startedResolve?.();
+
+        return new Promise((resolve) => {
+          resolveLater = resolve;
+        });
+      },
+    });
+
+    const controller = new AbortController();
+    const pending = bus.executeCommand(
+      "test.tasks.create",
+      { title: "x" },
+      { signal: controller.signal },
+    );
+
+    await started;
+    controller.abort();
+
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("CANCELLED");
+    }
+
+    resolveLater?.({ late: true });
+    await delay(20);
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("CANCELLED");
     }
   });
 
@@ -645,13 +884,58 @@ describe("OperationBus: отмена и таймаут", () => {
 
       if (!result.ok) {
         expect(result.error.code).toBe("TIMEOUT");
+        expect(result.error.retryable).toBe(false);
       }
 
       await delay(60);
 
       expect(unhandled).toEqual([]);
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.error.code).toBe("TIMEOUT");
+      }
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("не помечает bus TIMEOUT неидемпотентной mutation как retryable и не ждёт её завершения", async () => {
+    const bus = createOperationBus();
+    let finished = false;
+
+    bus.registerCommand({
+      metadata: commandMetadata({ idempotency: "none" }),
+      handler: async () => {
+        await delay(40);
+        finished = true;
+
+        return { late: true };
+      },
+    });
+
+    const result = await bus.executeCommand(
+      "test.tasks.create",
+      { title: "x" },
+      { deadline: new Date(Date.now() + 10) },
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("TIMEOUT");
+      expect(result.error.retryable).toBe(false);
+    }
+
+    expect(finished).toBe(false);
+
+    await delay(60);
+
+    expect(finished).toBe(true);
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("TIMEOUT");
     }
   });
 
@@ -761,6 +1045,60 @@ describe("OperationBus: отмена и таймаут", () => {
       expect(data.nested.ok).toBe(false);
       expect(data.nested.error?.code).toBe("TIMEOUT");
     }
+  });
+
+  it("распространяет timeout родителя на вложенный вызов", async () => {
+    const bus = createOperationBus();
+    let nestedPromise: Promise<unknown> | undefined;
+    let nestedSignal: AbortSignal | undefined;
+
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.outer" }),
+      handler: async (_input, context) => {
+        nestedPromise = context.commands.execute("test.tasks.slow", { title: "slow" });
+        await new Promise(() => undefined);
+
+        return {};
+      },
+    });
+    bus.registerCommand({
+      metadata: commandMetadata({ id: "test.tasks.slow" }),
+      handler: (_input, context) => {
+        nestedSignal = context.signal;
+
+        return new Promise(() => undefined);
+      },
+    });
+
+    const result = await bus.executeCommand(
+      "test.tasks.outer",
+      { title: "outer" },
+      { deadline: new Date(Date.now() + 20) },
+    );
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("TIMEOUT");
+      expect(result.error.retryable).toBe(false);
+    }
+
+    expect(nestedPromise).toBeDefined();
+    expect(nestedSignal).toBeDefined();
+    expect(nestedSignal?.aborted).toBe(true);
+
+    if (nestedPromise === undefined) {
+      return;
+    }
+
+    const nestedResult = (await nestedPromise) as {
+      ok: boolean;
+      error?: { code: string; retryable: boolean };
+    };
+
+    expect(nestedResult.ok).toBe(false);
+    expect(nestedResult.error?.code).toBe("TIMEOUT");
+    expect(nestedResult.error?.retryable).toBe(false);
   });
 });
 

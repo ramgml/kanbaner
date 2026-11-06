@@ -71,6 +71,19 @@ function descriptorOf(operation: RegisteredOperation): OperationDescriptor {
   });
 }
 
+/** Глубоко замораживает уже проверенное JSON-значение метаданных. */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(nested);
+  }
+
+  return Object.freeze(value);
+}
+
 /** Публичная часть реестра одного вида операций. */
 export interface OperationStore {
   get(operationId: string): OperationDescriptor | undefined;
@@ -235,19 +248,23 @@ export class OperationRegistry {
       );
     }
 
+    // Метаданные уже прошли JSON Schema-валидацию SDK, поэтому допускается
+    // structuredClone без риска потерять функции/классы. Снимок изолирует
+    // регистрацию от последующих мутаций объекта плагином.
+    const metadataSnapshot = deepFreeze(structuredClone(metadata));
     const operation: RegisteredOperation = Object.freeze({
-      id: metadata.id,
-      kind: metadata.kind,
-      pluginId: pluginIdOf(metadata.id),
-      metadata,
-      exposure: resolveExposure(metadata.exposure),
+      id: metadataSnapshot.id,
+      kind: metadataSnapshot.kind,
+      pluginId: pluginIdOf(metadataSnapshot.id),
+      metadata: metadataSnapshot,
+      exposure: Object.freeze(resolveExposure(metadataSnapshot.exposure)),
       handler,
-      inputValidator: createOperationInputValidator(metadata),
-      outputValidator: createOperationOutputValidator(metadata),
+      inputValidator: createOperationInputValidator(metadataSnapshot),
+      outputValidator: createOperationOutputValidator(metadataSnapshot),
     });
 
     target.add(operation);
-    this.operationIds.add(metadata.id);
+    this.operationIds.add(metadataSnapshot.id);
 
     return descriptorOf(operation);
   }

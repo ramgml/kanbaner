@@ -10,4 +10,5 @@ export * from "./context.ts";
 export * from "./errors.ts";
 export * from "./ids.ts";
 export * from "./registry.ts";
+export * from "./resource-adapter.ts";
 export * from "./types.ts";

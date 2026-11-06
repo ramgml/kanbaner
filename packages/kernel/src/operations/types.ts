@@ -73,4 +73,11 @@ export interface ExecutionOptions extends InvocationOptions {
    * подменить источник, полученный от ядра.
    */
   readonly source?: OperationSource;
+  /**
+   * Внешний идентификатор запроса, например из `X-Request-Id`.
+   *
+   * Учитывается только на верхнем вызове. Вложенный вызов всегда получает
+   * новый requestId и не может подменить идентификатор родителя.
+   */
+  readonly requestId?: string;
 }
