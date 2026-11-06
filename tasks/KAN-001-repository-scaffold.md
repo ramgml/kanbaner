@@ -1,13 +1,13 @@
 ---
 id: KAN-001
 title: Каркас репозитория, workspace и SQLite
-status: ready
+status: review
 stage: 1
 priority: high
-owner: unassigned
+owner: worker-kan-001
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-001-repository-scaffold
+worktree: .worktrees/kan-001-repository-scaffold
 created: 2026-11-06
 updated: 2026-11-06
 specs:
@@ -83,8 +83,8 @@ specs:
 - Использует технологии и версии из `specs/technology-stack.md`.
 - Работает в ветке `feat/kan-001-repository-scaffold` от `dev` согласно `specs/development-workflow.md`.
 - Корневая версия приложения — `0.1.0-dev.0`; пакеты workspace остаются private.
-- Package manager — pnpm 12; TypeScript — 6.0.x; test runner — Vitest 5; линтер — ESLint 10; форматтер — Prettier 3.
-- Установка не содержит deprecated-пакетов и unmet peer dependencies.
+- Package manager — pnpm 12; TypeScript — 6.0.x; test runner — Vitest 5; линтер — ESLint 9; форматтер — Prettier 3.
+- Установка не содержит unmet peer dependencies; единственный deprecated-пакет — явно разрешённый спецификацией `eslint@9.39.x`.
 - SQLite WAL является единственным backend MVP.
 - `better-sqlite3` используется как драйвер SQLite.
 - Пакет `pg` и `DATABASE_URL` не добавляются.
@@ -100,7 +100,7 @@ specs:
 
 - [ ] Чистая установка зависимостей завершается успешно на Linux и Windows.
 - [ ] Установка проходит с `--strict-peer-dependencies` без предупреждений.
-- [ ] В дереве зависимостей нет deprecated-пакетов.
+- [ ] В дереве зависимостей нет deprecated-пакетов, кроме явно разрешённого спецификацией `eslint@9.39.x`.
 - [ ] Базовое приложение запускается и открывает страницу-заглушку.
 - [ ] Server composition root запускается и не содержит доменной логики или Storage Provider.
 - [ ] `build`, `typecheck`, `lint` и `test` доступны документированными командами.
@@ -146,6 +146,12 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker завершил реализацию коммитами `abc6524` и `c297024`, создал `tasks/reports/KAN-001.md`; Linux-проверки зелёные, задача переведена в review для независимого ревью и интеграции.
+- 2026-11-06 — Пользователь явно разрешил временный deprecated `eslint@9.39.x` как единственное исключение; спецификация обновлена, строгие peer-проверки сохранены, задача возвращена в работу.
+- 2026-11-06 — После коммита worker-а проверка npm registry показала, что все стабильные версии ESLint 9 deprecated. Для завершения требуется явное исключение либо из запрета deprecated (ESLint 9), либо из peer-совместимости (ESLint 10); интеграция приостановлена до решения пользователя.
+- 2026-11-06 — Пользователь выбрал переход на ESLint 9.x для сохранения строгой peer-совместимости; `specs/technology-stack.md` обновлён, задача возвращена в работу.
+- 2026-11-06 — Реализация приостановлена перед коммитом: `eslint-config-next@16.4.5` и актуальные версии его транзитивных плагинов не объявляют peer-поддержку ESLint 10. Требуется решение пользователя: изменить версию ESLint в спецификации либо официально разрешить локальное расширение peer-диапазонов.
+- 2026-11-06 — Оркестратор назначил worker-kan-001, создана ветка `feat/kan-001-repository-scaffold` и worktree `.worktrees/kan-001-repository-scaffold`.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — Хранилище изменено с внешнего PostgreSQL на PGlite; добавлены требования Linux/Windows.
 - 2026-11-06 — PGlite заменён на SQLite WAL и `better-sqlite3`.
