@@ -9,15 +9,16 @@ export interface KernelDescriptor {
   readonly pluginContractVersion: typeof PLUGIN_CONTRACT_VERSION;
 }
 
-/**
- * Возвращает описание ядра.
- *
- * Каркас KAN-001 не содержит реестров, Storage Provider, миграций
- * и доменной логики. Они добавляются последующими задачами.
- */
+/** Возвращает описание ядра без раскрытия внутреннего состояния. */
 export function describeKernel(): KernelDescriptor {
   return {
     apiVersion: KERNEL_API_VERSION,
     pluginContractVersion: PLUGIN_CONTRACT_VERSION,
   };
 }
+
+export * from "./lifecycle/index.ts";
+export * from "./plugins/index.ts";
+export * from "./operations/index.ts";
+export * from "./events/index.ts";
+export * from "./resources/index.ts";
