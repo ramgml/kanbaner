@@ -1,7 +1,7 @@
 ---
 id: KAN-005
 title: Шина событий и реестр ресурсов
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-005
@@ -101,6 +101,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker завершил реализацию коммитом `f6c5e64`; 51 focused-тест и 140 тестов workspace, strict install и полный `pnpm check` зелёные. Создан `tasks/reports/KAN-005.md`, задача переведена в review.
 - 2026-11-06 — KAN-001/KAN-002 завершены. Оркестратор подтвердил готовность, назначил worker-kan-005, ветку `feat/kan-005-events-resources` и worktree `.worktrees/kan-005-events-resources`; корневой index ядра остаётся за оркестратором.
 - 2026-11-06 — Задача создана.
 
