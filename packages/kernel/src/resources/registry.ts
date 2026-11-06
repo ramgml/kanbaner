@@ -17,7 +17,7 @@ import {
   type ResourceType,
 } from "@kanbaner/plugin-sdk";
 
-import { ResourceRegistryError, ResourceServiceError } from "./errors.ts";
+import { ResourceRegistryError, ResourceServiceError, safeErrorName } from "./errors.ts";
 
 /**
  * Адаптер плагина-владельца типа ресурса.
@@ -48,14 +48,17 @@ export interface ResourceRegistryOptions {
 /**
  * Реестр типов ресурсов по plugin ID владельца.
  *
+ * Тип ресурса локален внутри plugin ID: разные плагины могут независимо
+ * объявить `widget` и разрешаются каждый своим адаптером. Глобальной
+ * уникальности типов нет.
+ *
  * Один плагин регистрируется один раз и сразу объявляет все свои типы.
- * Дубликат plugin ID или типа ресурса отклоняется до изменения состояния,
- * поэтому неудачная регистрация не оставляет частичных записей.
+ * Дубликат plugin ID и некорректная регистрация отклоняются до изменения
+ * состояния, поэтому неудачная регистрация не оставляет частичных записей.
  */
 export class ResourceRegistry {
   readonly #logger: PluginLogger | undefined;
   readonly #owners = new Map<PluginId, RegisteredOwner>();
-  readonly #typeOwners = new Map<ResourceType, PluginId>();
 
   constructor(options: ResourceRegistryOptions = {}) {
     this.#logger = options.logger;
@@ -80,17 +83,22 @@ export class ResourceRegistry {
       );
     }
 
-    if (this.#owners.has(registration.pluginId)) {
-      throw new ResourceRegistryError("DUPLICATE_OWNER", "Владелец ресурсов уже зарегистрирован");
+    if (adapter.canOpen !== undefined && typeof adapter.canOpen !== "function") {
+      throw new ResourceRegistryError(
+        "INVALID_REGISTRATION",
+        "Адаптер ресурса содержит некорректный canOpen",
+      );
     }
 
-    for (const resourceType of resourceTypes) {
-      if (this.#typeOwners.has(resourceType)) {
-        throw new ResourceRegistryError(
-          "DUPLICATE_RESOURCE_TYPE",
-          "Тип ресурса уже зарегистрирован другим владельцем",
-        );
-      }
+    if (adapter.open !== undefined && typeof adapter.open !== "function") {
+      throw new ResourceRegistryError(
+        "INVALID_REGISTRATION",
+        "Адаптер ресурса содержит некорректный open",
+      );
+    }
+
+    if (this.#owners.has(registration.pluginId)) {
+      throw new ResourceRegistryError("DUPLICATE_OWNER", "Владелец ресурсов уже зарегистрирован");
     }
 
     this.#owners.set(registration.pluginId, {
@@ -98,23 +106,15 @@ export class ResourceRegistry {
       resourceTypes: new Set(resourceTypes),
       adapter,
     });
-
-    for (const resourceType of resourceTypes) {
-      this.#typeOwners.set(resourceType, registration.pluginId);
-    }
   }
 
   hasOwner(pluginId: PluginId): boolean {
     return this.#owners.has(pluginId);
   }
 
+  /** Проверяет, объявил ли конкретный плагин этот тип ресурса. */
   owns(pluginId: PluginId, resourceType: ResourceType): boolean {
     return this.#owners.get(pluginId)?.resourceTypes.has(resourceType) === true;
-  }
-
-  /** Возвращает владельца типа ресурса или `undefined`. */
-  ownerOf(resourceType: ResourceType): PluginId | undefined {
-    return this.#typeOwners.get(resourceType);
   }
 
   /** Возвращает объявленные типы владельца в порядке регистрации. */
@@ -132,66 +132,27 @@ export class ResourceRegistry {
    * `NOT_FOUND`; некорректная строка ссылки — `VALIDATION_ERROR`.
    */
   async resolve(ref: ResourceRef): Promise<OperationResult<ResourceDescriptor>> {
-    const lookup = this.#lookup(ref);
+    const resolved = await this.#resolveOwned(ref);
 
-    if (!lookup.ok) {
-      return lookup.error;
-    }
-
-    const { parts, owner } = lookup.value;
-    let descriptor: ResourceDescriptor | null | undefined;
-
-    try {
-      descriptor = await owner.adapter.resolve(ref);
-    } catch (error) {
-      this.#logFailure("resolve", parts.pluginId, parts.resourceType, error);
-
-      return toErrorResult(
-        createPluginError("INTERNAL_ERROR", "Адаптер ресурса не смог разрешить ресурс"),
-      );
-    }
-
-    if (descriptor === null || descriptor === undefined) {
-      return toErrorResult(createPluginError("NOT_FOUND", "Ресурс не найден"));
-    }
-
-    const validation = validateResourceDescriptor(descriptor);
-
-    if (!validation.ok) {
-      this.#logFailureReason("resolve", parts.pluginId, parts.resourceType, "invalid_descriptor");
-
-      return toErrorResult(
-        createPluginError("INTERNAL_ERROR", "Адаптер ресурса вернул некорректные метаданные"),
-      );
-    }
-
-    const value = validation.value;
-
-    if (value.ref !== ref || value.resourceType !== parts.resourceType) {
-      this.#logFailureReason("resolve", parts.pluginId, parts.resourceType, "descriptor_mismatch");
-
-      return toErrorResult(
-        createPluginError("INTERNAL_ERROR", "Адаптер ресурса вернул метаданные другого ресурса"),
-      );
-    }
-
-    return toSuccessResult(value);
+    return resolved.ok ? toSuccessResult(resolved.value.descriptor) : resolved.error;
   }
 
   /**
    * Проверяет, доступно ли открытие ресурса.
    *
-   * Любая ошибка или неизвестный ресурс означают `false`: метод не бросает
-   * исключений и не должен ломать страницу из-за недоступного адаптера.
+   * Сначала выполняет чистый `resolve`: отсутствующий ресурс или ошибка
+   * адаптера дают `false` без вызова `canOpen`. Любая ошибка или неизвестный
+   * ресурс означают `false`: метод не бросает исключений и не должен ломать
+   * страницу из-за недоступного адаптера.
    */
   async canOpen(ref: ResourceRef): Promise<boolean> {
-    const lookup = this.#lookup(ref);
+    const resolved = await this.#resolveOwned(ref);
 
-    if (!lookup.ok) {
+    if (!resolved.ok) {
       return false;
     }
 
-    const { parts, owner } = lookup.value;
+    const { parts, owner } = resolved.value;
 
     if (owner.adapter.canOpen === undefined) {
       return typeof owner.adapter.open === "function";
@@ -209,17 +170,18 @@ export class ResourceRegistry {
   /**
    * Открывает ресурс через адаптер владельца.
    *
-   * При ошибке бросает `ResourceServiceError` со стабильным кодом SDK:
-   * `VALIDATION_ERROR`, `NOT_FOUND`, `PLUGIN_UNAVAILABLE` или `INTERNAL_ERROR`.
+   * Сначала выполняет чистый `resolve`; стабильный код его ошибки
+   * пробрасывается, а `open` адаптера не вызывается. При ошибке самого
+   * `open` бросается `ResourceServiceError` с `INTERNAL_ERROR`.
    */
   async open(ref: ResourceRef): Promise<void> {
-    const lookup = this.#lookup(ref);
+    const resolved = await this.#resolveOwned(ref);
 
-    if (!lookup.ok) {
-      throw new ResourceServiceError(lookup.error.error.code, lookup.error.error.message);
+    if (!resolved.ok) {
+      throw new ResourceServiceError(resolved.error.error.code, resolved.error.error.message);
     }
 
-    const { parts, owner } = lookup.value;
+    const { parts, owner } = resolved.value;
     const { open } = owner.adapter;
 
     if (open === undefined) {
@@ -269,12 +231,7 @@ export class ResourceRegistry {
     return resourceTypes;
   }
 
-  #lookup(ref: ResourceRef):
-    | {
-        readonly ok: true;
-        readonly value: { readonly parts: ParsedRef; readonly owner: RegisteredOwner };
-      }
-    | { readonly ok: false; readonly error: ErrorResult } {
+  #lookup(ref: ResourceRef): LookupOutcome {
     const validation = validateResourceRef(ref);
 
     if (!validation.ok) {
@@ -311,6 +268,65 @@ export class ResourceRegistry {
     return { ok: true, value: { parts, owner } };
   }
 
+  async #resolveOwned(ref: ResourceRef): Promise<ResolveOutcome> {
+    const lookup = this.#lookup(ref);
+
+    if (!lookup.ok) {
+      return lookup;
+    }
+
+    const { parts, owner } = lookup.value;
+    let descriptor: ResourceDescriptor | null | undefined;
+
+    try {
+      descriptor = await owner.adapter.resolve(ref);
+    } catch (error) {
+      this.#logFailure("resolve", parts.pluginId, parts.resourceType, error);
+
+      return {
+        ok: false,
+        error: toErrorResult(
+          createPluginError("INTERNAL_ERROR", "Адаптер ресурса не смог разрешить ресурс"),
+        ),
+      };
+    }
+
+    if (descriptor === null || descriptor === undefined) {
+      return {
+        ok: false,
+        error: toErrorResult(createPluginError("NOT_FOUND", "Ресурс не найден")),
+      };
+    }
+
+    const validation = validateResourceDescriptor(descriptor);
+
+    if (!validation.ok) {
+      this.#logFailureReason("resolve", parts.pluginId, parts.resourceType, "invalid_descriptor");
+
+      return {
+        ok: false,
+        error: toErrorResult(
+          createPluginError("INTERNAL_ERROR", "Адаптер ресурса вернул некорректные метаданные"),
+        ),
+      };
+    }
+
+    const value = validation.value;
+
+    if (value.ref !== ref || value.resourceType !== parts.resourceType) {
+      this.#logFailureReason("resolve", parts.pluginId, parts.resourceType, "descriptor_mismatch");
+
+      return {
+        ok: false,
+        error: toErrorResult(
+          createPluginError("INTERNAL_ERROR", "Адаптер ресурса вернул метаданные другого ресурса"),
+        ),
+      };
+    }
+
+    return { ok: true, value: { parts, owner, descriptor: value } };
+  }
+
   #logFailure(
     operation: "resolve" | "canOpen" | "open",
     pluginId: PluginId,
@@ -325,7 +341,7 @@ export class ResourceRegistry {
       operation,
       pluginId,
       resourceType,
-      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorName: safeErrorName(error),
     });
   }
 
@@ -344,6 +360,24 @@ export class ResourceRegistry {
     this.#logger.warn("resource.adapter_failed", fields);
   }
 }
+
+type LookupOutcome =
+  | {
+      readonly ok: true;
+      readonly value: { readonly parts: ParsedRef; readonly owner: RegisteredOwner };
+    }
+  | { readonly ok: false; readonly error: ErrorResult };
+
+type ResolveOutcome =
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly parts: ParsedRef;
+        readonly owner: RegisteredOwner;
+        readonly descriptor: ResourceDescriptor;
+      };
+    }
+  | { readonly ok: false; readonly error: ErrorResult };
 
 interface ParsedRef {
   readonly pluginId: PluginId;

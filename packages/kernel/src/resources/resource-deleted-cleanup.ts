@@ -54,9 +54,19 @@ export function subscribeResourceDeletedCleanup(
   options: EventSubscriptionOptions,
 ): EventUnsubscribe {
   const handler = createResourceDeletedHandler(links);
-  const unsubscribers = subscriptions.map((subscription) =>
-    events.subscribe(subscription, handler, options),
-  );
+  const unsubscribers: EventUnsubscribe[] = [];
+
+  try {
+    for (const subscription of subscriptions) {
+      unsubscribers.push(events.subscribe(subscription, handler, options));
+    }
+  } catch (error) {
+    for (let index = unsubscribers.length - 1; index >= 0; index -= 1) {
+      unsubscribers[index]?.();
+    }
+
+    throw error;
+  }
 
   return () => {
     let removed = false;

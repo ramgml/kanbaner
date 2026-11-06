@@ -6,8 +6,33 @@ import {
 } from "@kanbaner/plugin-sdk";
 
 /** Стабильные коды ошибок регистрации типов ресурсов. */
-export type ResourceRegistryErrorCode =
-  "INVALID_REGISTRATION" | "DUPLICATE_OWNER" | "DUPLICATE_RESOURCE_TYPE";
+export type ResourceRegistryErrorCode = "INVALID_REGISTRATION" | "DUPLICATE_OWNER";
+
+const SAFE_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+]);
+
+/**
+ * Возвращает безопасное имя ошибки для структурного журнала.
+ *
+ * Произвольный `error.name` может содержать данные плагина, поэтому в журнал
+ * попадают только стандартные имена JavaScript-ошибок. Неизвестное имя
+ * заменяется на `Error`, не-`Error` значение — на `UnknownError`.
+ */
+export function safeErrorName(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "UnknownError";
+  }
+
+  return SAFE_ERROR_NAMES.has(error.name) ? error.name : "Error";
+}
 
 /**
  * Ошибка регистрации владельца или типа ресурса.

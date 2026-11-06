@@ -75,7 +75,6 @@ describe("ResourceRegistry registration", () => {
     expect(registry.hasOwner("acme.widgets")).toBe(true);
     expect(registry.owns("acme.widgets", "widget")).toBe(true);
     expect(registry.owns("acme.widgets", "other")).toBe(false);
-    expect(registry.ownerOf("widget")).toBe("acme.widgets");
     expect(registry.resourceTypesOf("acme.widgets")).toEqual(["widget", "widget-template"]);
   });
 
@@ -91,16 +90,30 @@ describe("ResourceRegistry registration", () => {
     expect(registry.owns("acme.widgets", "gadget")).toBe(false);
   });
 
-  it("защищает от дубликата типа ресурса у разных владельцев", () => {
+  it("допускает одинаковый тип ресурса у разных владельцев", async () => {
     const registry = new ResourceRegistry();
 
-    register(registry, "acme.widgets", ["widget"]);
+    register(registry, "acme.widgets", ["widget"], {
+      resolve: (ref) => ({ ref, resourceType: "widget", title: "Widget" }),
+    });
+    register(registry, "acme.gadgets", ["widget"], {
+      resolve: (ref) => ({ ref, resourceType: "widget", title: "Gadget" }),
+    });
 
-    expect(() => register(registry, "acme.gadgets", ["widget"])).toThrowError(
-      expect.objectContaining({ code: "DUPLICATE_RESOURCE_TYPE" }),
-    );
-    expect(registry.hasOwner("acme.gadgets")).toBe(false);
-    expect(registry.ownerOf("widget")).toBe("acme.widgets");
+    expect(registry.hasOwner("acme.gadgets")).toBe(true);
+    expect(registry.owns("acme.widgets", "widget")).toBe(true);
+    expect(registry.owns("acme.gadgets", "widget")).toBe(true);
+
+    await expect(registry.resolve(WIDGET_REF)).resolves.toMatchObject({
+      ok: true,
+      data: { title: "Widget", resourceType: "widget" },
+    });
+    await expect(
+      registry.resolve("acme.gadgets:widget:01JGADGET0000000000000001"),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { title: "Gadget", resourceType: "widget" },
+    });
   });
 
   it("отклоняет некорректную регистрацию без частичных записей", () => {
@@ -117,7 +130,26 @@ describe("ResourceRegistry registration", () => {
     ).toThrow(ResourceRegistryError);
 
     expect(registry.hasOwner("acme.widgets")).toBe(false);
-    expect(registry.ownerOf("widget")).toBeUndefined();
+    expect(registry.owns("acme.widgets", "widget")).toBe(false);
+  });
+
+  it.each([
+    { label: "canOpen не функция", invalid: { canOpen: "yes" } },
+    { label: "open не функция", invalid: { open: "yes" } },
+    { label: "canOpen равен null", invalid: { canOpen: null } },
+    { label: "open равен null", invalid: { open: null } },
+  ])("отклоняет адаптер: $label, без частичной регистрации", ({ invalid }) => {
+    const registry = new ResourceRegistry();
+    const adapter = {
+      resolve: (ref: ResourceRef) => createDescriptor(ref),
+      ...invalid,
+    } as unknown as ResourceAdapter;
+
+    expect(() => register(registry, "acme.widgets", ["widget"], adapter)).toThrowError(
+      expect.objectContaining({ code: "INVALID_REGISTRATION" }),
+    );
+    expect(registry.hasOwner("acme.widgets")).toBe(false);
+    expect(registry.owns("acme.widgets", "widget")).toBe(false);
   });
 });
 
@@ -207,6 +239,25 @@ describe("ResourceRegistry.resolve", () => {
     expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
   });
 
+  it("не журналирует произвольный error.name", async () => {
+    const logger = new RecordingLogger();
+    const registry = new ResourceRegistry({ logger });
+    const error = new Error("adapter failed");
+
+    error.name = SECRET;
+
+    register(registry, "acme.widgets", ["widget"], {
+      resolve: () => {
+        throw error;
+      },
+    });
+
+    await registry.resolve(WIDGET_REF);
+
+    expect(logger.entries[0]?.fields?.errorName).toBe("Error");
+    expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
+  });
+
   it("отклоняет некорректные или чужие метаданные адаптера", async () => {
     const logger = new RecordingLogger();
     const registry = new ResourceRegistry({ logger });
@@ -259,7 +310,7 @@ describe("ResourceRegistry.resolve", () => {
     expect(first).toEqual(second);
     expect(calls).toEqual({ resolve: 2, canOpen: 0, open: 0 });
     expect(registry.resourceTypesOf("acme.widgets")).toEqual(before);
-    expect(registry.ownerOf("widget")).toBe("acme.widgets");
+    expect(registry.owns("acme.widgets", "widget")).toBe(true);
   });
 });
 
@@ -285,6 +336,27 @@ describe("ResourceRegistry.canOpen и open", () => {
     await expect(registry.canOpen("acme.unknown:widget:x")).resolves.toBe(false);
     await expect(registry.canOpen("broken")).resolves.toBe(false);
     expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
+  });
+
+  it("не вызывает canOpen/open для отсутствующего ресурса", async () => {
+    const registry = new ResourceRegistry();
+    const calls = { canOpen: 0, open: 0 };
+
+    register(registry, "acme.widgets", ["widget"], {
+      resolve: () => null,
+      canOpen: () => {
+        calls.canOpen += 1;
+
+        return true;
+      },
+      open: () => {
+        calls.open += 1;
+      },
+    });
+
+    await expect(registry.canOpen(WIDGET_REF)).resolves.toBe(false);
+    await expect(registry.open(WIDGET_REF)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(calls).toEqual({ canOpen: 0, open: 0 });
   });
 
   it("по умолчанию разрешает открытие, если адаптер реализует open", async () => {

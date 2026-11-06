@@ -62,20 +62,34 @@ function createService(
 }
 
 class FailingLinkStore implements LinkStore {
+  readonly #errorName: string;
+
+  constructor(errorName = "Error") {
+    this.#errorName = errorName;
+  }
+
   async add(): Promise<LinkStoreAddResult> {
-    throw new Error(SECRET);
+    throw this.#error();
   }
 
   async remove(): Promise<boolean> {
-    throw new Error(SECRET);
+    throw this.#error();
   }
 
   async listByRef(): Promise<readonly ResourceLink[]> {
-    throw new Error(SECRET);
+    throw this.#error();
   }
 
   async deleteByRef(): Promise<number> {
-    throw new Error(SECRET);
+    throw this.#error();
+  }
+
+  #error(): Error {
+    const error = new Error(SECRET);
+
+    error.name = this.#errorName;
+
+    return error;
   }
 }
 
@@ -108,6 +122,24 @@ describe("LinkService", () => {
 
     expect(second).toEqual(first);
     expect(store.size()).toBe(1);
+  });
+
+  it("создаёт одну запись при одновременных одинаковых link", async () => {
+    const store = new InMemoryLinkStore();
+    const times = [new Date(CREATED_AT), new Date("2026-11-06T13:00:00Z")];
+    const service = createService({
+      store,
+      now: () => times.shift() ?? new Date("2026-11-06T14:00:00Z"),
+    });
+
+    const [first, second] = await Promise.all([
+      service.link(SOURCE, TARGET, RELATION),
+      service.link(SOURCE, TARGET, RELATION),
+    ]);
+
+    expect(store.size()).toBe(1);
+    expect(first.createdAt).toBe(CREATED_AT);
+    expect(second).toEqual(first);
   });
 
   it("различает связи по relation и не считает дубликатом обратное направление", async () => {
@@ -191,6 +223,17 @@ describe("LinkService", () => {
       operation: "link",
       errorName: "Error",
     });
+    expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
+  });
+
+  it("не журналирует произвольный error.name store", async () => {
+    const logger = new RecordingLogger();
+    const service = createService({ store: new FailingLinkStore(SECRET), logger });
+
+    await expect(service.link(SOURCE, TARGET, RELATION)).rejects.toMatchObject({
+      code: "INTERNAL_ERROR",
+    });
+    expect(logger.entries[0]?.fields?.errorName).toBe("Error");
     expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
   });
 

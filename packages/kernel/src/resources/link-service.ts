@@ -8,7 +8,7 @@ import {
   type ResourceRef,
 } from "@kanbaner/plugin-sdk";
 
-import { ResourceServiceError } from "./errors.ts";
+import { ResourceServiceError, safeErrorName } from "./errors.ts";
 import type { LinkStore } from "./link-store.ts";
 
 export interface LinkServiceOptions {
@@ -137,7 +137,7 @@ export class LinkService {
     if (this.#logger !== undefined) {
       const fields: LogFields = {
         operation,
-        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorName: safeErrorName(error),
       };
 
       this.#logger.error("resource.link_store_failed", fields);

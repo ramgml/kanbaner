@@ -138,6 +138,36 @@ describe("resource deleted cleanup", () => {
     expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
   });
 
+  it("откатывает уже созданные подписки при ошибке шаблона", async () => {
+    const logger = new RecordingLogger();
+    const bus = new EventBus({ logger });
+    const store = new InMemoryLinkStore();
+    const links = new LinkService({ store });
+
+    await links.link(SOURCE, TARGET, RELATION);
+
+    expect(() =>
+      subscribeResourceDeletedCleanup(bus, links, ["acme.*", "bad*"], {
+        pluginId: "kanbaner.kernel",
+      }),
+    ).toThrow(TypeError);
+
+    await bus.publishAfterCommit(createEnvelope(), { traceId: "trace-rollback" });
+
+    expect(store.size()).toBe(1);
+
+    const unsubscribe = subscribeResourceDeletedCleanup(bus, links, ["acme.*"], {
+      pluginId: "kanbaner.kernel",
+    });
+
+    await bus.publishAfterCommit(createEnvelope({ eventId: "01KEVENT000000000000000002" }), {
+      traceId: "trace-reinstall",
+    });
+
+    expect(store.size()).toBe(0);
+    unsubscribe();
+  });
+
   it("идемпотентно снимает wildcard-подписки", () => {
     const logger = new RecordingLogger();
     const bus = new EventBus({ logger });

@@ -59,6 +59,20 @@ function createBus(maxTrackedEventIds?: number): { bus: EventBus; logger: Record
   return { bus, logger };
 }
 
+interface Deferred {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+}
+
+function createDeferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+
+  return { promise, resolve };
+}
+
 describe("EventBus.publishAfterCommit", () => {
   it("передаёт конверт и traceId подписчику только после явного вызова", async () => {
     const { bus } = createBus();
@@ -231,6 +245,74 @@ describe("EventBus.publishAfterCommit", () => {
 
     expect(result).toMatchObject({ status: "accepted", failedSubscribers: 1 });
     expect(logger.entries[0]?.fields?.errorName).toBe("UnknownError");
+  });
+
+  it("не журналирует произвольный error.name", async () => {
+    const { bus, logger } = createBus();
+    const error = new Error("boom");
+
+    error.name = SECRET;
+
+    bus.subscribe(
+      "acme.widgets.widget.updated",
+      () => {
+        throw error;
+      },
+      { pluginId: "acme.consumer" },
+    );
+
+    await bus.publishAfterCommit(createEnvelope(), { traceId: "trace-name" });
+
+    expect(logger.entries[0]?.fields?.errorName).toBe("Error");
+    expect(JSON.stringify(logger.entries)).not.toContain(SECRET);
+  });
+
+  it("дедуплицирует два одновременных publishAfterCommit", async () => {
+    const { bus } = createBus();
+    const gate = createDeferred();
+    const event = createEnvelope();
+    let calls = 0;
+
+    bus.subscribe(
+      "acme.widgets.widget.updated",
+      async () => {
+        calls += 1;
+        await gate.promise;
+      },
+      { pluginId: "acme.consumer" },
+    );
+
+    const first = bus.publishAfterCommit(event, { traceId: "trace-race" });
+    const second = bus.publishAfterCommit(event, { traceId: "trace-race" });
+    const secondResult = await second;
+
+    expect(secondResult).toEqual({ status: "duplicate", eventId: event.eventId });
+    expect(calls).toBe(1);
+
+    gate.resolve();
+
+    await expect(first).resolves.toMatchObject({ status: "accepted", matchedSubscribers: 1 });
+    expect(calls).toBe(1);
+  });
+
+  it("не удаляет новую подписку старым unsubscribe", async () => {
+    const { bus } = createBus();
+    let calls = 0;
+    const handler = (): void => {
+      calls += 1;
+    };
+
+    const oldUnsubscribe = bus.subscribe("acme.widgets.widget.updated", handler, {
+      pluginId: "acme.consumer",
+    });
+
+    bus.subscribe("acme.widgets.widget.updated", handler, { pluginId: "acme.consumer" });
+
+    expect(oldUnsubscribe()).toBe(true);
+
+    await bus.publishAfterCommit(createEnvelope(), { traceId: "trace-resubscribe" });
+
+    expect(calls).toBe(1);
   });
 
   it("требует непустой traceId", async () => {

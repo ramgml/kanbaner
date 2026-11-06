@@ -185,7 +185,7 @@ export class EventBus {
             eventType: event.type,
             pluginId: subscription.pluginId,
             traceId: options.traceId,
-            errorName: error instanceof Error ? error.name : "UnknownError",
+            errorName: safeErrorName(error),
           });
         }
       }),
@@ -248,4 +248,24 @@ interface SubscriptionRecord {
   readonly type: EventSubscription;
   readonly pluginId: PluginId;
   readonly handler: EventHandler;
+}
+
+const SAFE_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+]);
+
+/** Не пропускает произвольный `error.name` в журнал. */
+function safeErrorName(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "UnknownError";
+  }
+
+  return SAFE_ERROR_NAMES.has(error.name) ? error.name : "Error";
 }
