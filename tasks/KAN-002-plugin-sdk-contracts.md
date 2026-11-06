@@ -1,14 +1,13 @@
 ---
 id: KAN-002
 title: Контракты Plugin SDK
-status: backlog
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-branch: null
-worktree: null
+owner: worker-kan-002
+blocked_by: []
+branch: feat/kan-002-plugin-sdk-contracts
+worktree: .worktrees/kan-002-plugin-sdk-contracts
 created: 2026-11-06
 updated: 2026-11-06
 specs:
@@ -101,6 +100,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — KAN-001 завершена, зависимость закрыта. Оркестратор подтвердил готовность задачи, назначил worker-kan-002, ветку `feat/kan-002-plugin-sdk-contracts` и worktree `.worktrees/kan-002-plugin-sdk-contracts`; обновление lock-файла для TypeBox/Ajv согласовано без изменения корневого `package.json`.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — Зафиксированы TypeBox и Ajv согласно `specs/technology-stack.md`.
 
