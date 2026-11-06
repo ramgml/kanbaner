@@ -1,7 +1,7 @@
 ---
 id: KAN-007
 title: UI shell и plugin manager
-status: review
+status: in_progress
 stage: 1
 priority: high
 owner: worker-kan-007
@@ -105,6 +105,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Ревью нашло blocker потери deactivation errors, неатомарную UI-регистрацию, fail-open вклады, неподдерживаемые маршруты, обработку Server Actions и формальные mobile/keyboard checks. Задача возвращена worker-у. Для реального browser-теста разрешено добавить `@playwright/test` 1.65.x в `apps/web/package.json` и lock-файл согласно стеку.
 - 2026-11-06 — Worker завершил UI коммитами `ee5e153` и `9764a94`; 38 focused-тестов и 321 тест workspace, strict install, production build и smoke `/`, `/plugins`, `/settings`, `/view/test-ui` зелёные. Создан отчёт, задача переведена в review.
 - 2026-11-06 — Зависимости KAN-001/KAN-002/KAN-003 завершены, публичный kernel API подключён. Оркестратор назначил worker-kan-007, ветку `feat/kan-007-ui-shell-plugin-manager` и worktree `.worktrees/kan-007-ui-shell-plugin-manager`; разрешено обновление `apps/web/package.json` и lock-файла только для shadcn/Radix через CLI, корневой package.json запрещён.
 - 2026-11-06 — Задача создана.
