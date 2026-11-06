@@ -1,0 +1,11 @@
+.next/
+coverage/
+dist/
+node_modules/
+pnpm-lock.yaml
+next-env.d.ts
+specs/
+tasks/KAN-*.md
+tasks/README.md
+tasks/TEMPLATE.md
+tasks/reports/README.md
