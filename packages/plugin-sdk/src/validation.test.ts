@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   JsonObjectSchema,
+  OperationEnvelopeSchema,
   createJsonObjectSchema,
   createResultSchema,
   createResultValidator,
@@ -10,6 +11,7 @@ import {
   isSuccessResult,
   validateCommandMetadata,
   validateOperationInput,
+  validateOperationMetadata,
   validateQueryMetadata,
   validateWithSchema,
   type CommandMetadata,
@@ -190,5 +192,136 @@ describe("schema-aware generics", () => {
         false,
       );
     }
+  });
+});
+
+describe("boundary-guard на всех публичных входах", () => {
+  const queryMetadata: QueryMetadata = {
+    id: "kanbaner.tasks.list",
+    contract: "kanbaner.tasks.queries.v1",
+    version: 1,
+    kind: "query",
+    risk: "read",
+    inputSchema: Type.Object({}),
+    outputSchema,
+  };
+
+  function commandWithSchema(
+    field: "inputSchema" | "outputSchema",
+    schema: unknown,
+  ): CommandMetadata {
+    return { ...command, [field]: schema } as unknown as CommandMetadata;
+  }
+
+  function queryWithSchema(field: "inputSchema" | "outputSchema", schema: unknown): QueryMetadata {
+    return { ...queryMetadata, [field]: schema } as unknown as QueryMetadata;
+  }
+
+  it("ловит Date, Map и циклы в inputSchema/outputSchema всех metadata-валидаторов", () => {
+    const cyclicSchema: Record<string, unknown> = { type: "object", properties: {} };
+    cyclicSchema.self = cyclicSchema;
+    const badSchemas = [
+      { name: "Date", schema: { type: "object", properties: { when: new Date() } } },
+      { name: "Map", schema: { type: "object", properties: { map: new Map() } } },
+      { name: "cycle", schema: cyclicSchema },
+    ];
+
+    for (const { name, schema } of badSchemas) {
+      for (const field of ["inputSchema", "outputSchema"] as const) {
+        const commandValue = commandWithSchema(field, schema);
+        const queryValue = queryWithSchema(field, schema);
+        const run = () => [
+          validateCommandMetadata(commandValue),
+          validateQueryMetadata(queryValue),
+          validateOperationMetadata(commandValue),
+          validateOperationMetadata(queryValue),
+        ];
+
+        expect(run).not.toThrow();
+
+        for (const result of run()) {
+          expect(result.ok, `${name}:${field}`).toBe(false);
+          if (!result.ok) {
+            expect(
+              result.errors.some(
+                (issue) => issue.path.startsWith(`/${field}`) && issue.keyword === "json-value",
+              ),
+              `${name}:${field}: ${JSON.stringify(result.errors)}`,
+            ).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  it("generic и schema-validator не обходят guard", () => {
+    const cyclicPayload: Record<string, unknown> = { a: 1 };
+    cyclicPayload.self = cyclicPayload;
+    const cyclicResult = { ok: true, data: cyclicPayload };
+    const result = validateWithSchema(createResultSchema(JsonObjectSchema), cyclicResult);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]?.path).toBe("/data/self");
+    }
+
+    const validator = createSchemaValidator(OperationEnvelopeSchema);
+    const envelope = (payload: unknown) => ({
+      contractVersion: 1,
+      requestId: "01K-request",
+      operationId: "kanbaner.tasks.create",
+      operationVersion: 1,
+      source: { type: "http" },
+      payload,
+    });
+
+    for (const value of [envelope(cyclicPayload), envelope(new Map()), envelope(new Date())]) {
+      expect(validator.check(value)).toBe(false);
+
+      const validated = validator.validate(value);
+
+      expect(validated.ok).toBe(false);
+      if (!validated.ok) {
+        expect(validated.errors[0]?.keyword).toBe("json-value");
+      }
+    }
+  });
+
+  it("принимает повторно используемые, но не циклические объекты и валидные envelopes", () => {
+    const shared = { a: 1 };
+    const sharedSchema = { type: "string", minLength: 1 };
+    const commandValue = commandWithSchema("inputSchema", {
+      type: "object",
+      properties: { a: sharedSchema, b: sharedSchema },
+      required: ["a", "b"],
+      additionalProperties: false,
+    });
+
+    expect(
+      validateWithSchema(createResultSchema(JsonObjectSchema), {
+        ok: true,
+        data: { left: shared, right: shared },
+      }).ok,
+    ).toBe(true);
+
+    const metadata = validateCommandMetadata(commandValue);
+
+    expect(metadata.ok).toBe(true);
+    if (metadata.ok) {
+      expect(validateOperationMetadata(metadata.value).ok).toBe(true);
+    }
+
+    const envelope = {
+      contractVersion: 1,
+      requestId: "01K-request",
+      operationId: "kanbaner.tasks.create",
+      operationVersion: 1,
+      source: { type: "http" },
+      payload: { left: shared, right: shared },
+    };
+    const validator = createSchemaValidator(OperationEnvelopeSchema);
+
+    expect(validator.check(envelope)).toBe(true);
+    expect(validator.validate(envelope).ok).toBe(true);
   });
 });

@@ -45,6 +45,5 @@ describe("@kanbaner/plugin-sdk", () => {
     expect(sdk.createSchemaValidator).toBeTypeOf("function");
     expect(sdk.createResultSchema).toBeTypeOf("function");
     expect(sdk.createResultValidator).toBeTypeOf("function");
-    expect(sdk.JSON_CONTRACT_SCHEMA).toBeTypeOf("symbol");
   });
 });
