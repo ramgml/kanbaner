@@ -1,15 +1,13 @@
 ---
 id: KAN-003
 title: Runtime и жизненный цикл плагинов
-status: backlog
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-  - KAN-002
-branch: null
-worktree: null
+owner: worker-kan-003
+blocked_by: []
+branch: feat/kan-003-plugin-runtime
+worktree: .worktrees/kan-003-plugin-runtime
 created: 2026-11-06
 updated: 2026-11-06
 specs:
@@ -104,6 +102,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — KAN-001/KAN-002 завершены. Оркестратор подтвердил готовность, назначил worker-kan-003, ветку `feat/kan-003-plugin-runtime` и worktree `.worktrees/kan-003-plugin-runtime`; корневой index ядра остаётся за оркестратором.
 - 2026-11-06 — Задача создана.
 
 ## Итог
