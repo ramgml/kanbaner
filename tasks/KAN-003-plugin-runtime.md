@@ -102,6 +102,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Оркестратор согласовал добавление `semver@7.8.6` и `@types/semver@7.8.0` в `packages/kernel/package.json` для фактической проверки Host API/dependency ranges; соответствующее обновление lock-файла разрешено, корневой `package.json` менять запрещено.
 - 2026-11-06 — KAN-001/KAN-002 завершены. Оркестратор подтвердил готовность, назначил worker-kan-003, ветку `feat/kan-003-plugin-runtime` и worktree `.worktrees/kan-003-plugin-runtime`; корневой index ядра остаётся за оркестратором.
 - 2026-11-06 — Задача создана.
 
