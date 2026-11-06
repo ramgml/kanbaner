@@ -344,49 +344,20 @@ Kanbaner — локальная однопользовательская сис�
 
 ## 14. Команды проекта
 
-Требования: Node.js `24.22.2`, pnpm `12.18.0` через Corepack. Версии зафиксированы в
-`package.json`, а `.npmrc` включает `engine-strict` и `strict-peer-dependencies`.
+Каркас приложения ещё не создан, поэтому команды разработки пока не определены.
 
-Подготовка окружения:
+После создания каркаса добавь сюда точные команды:
 
-```bash
-corepack enable
-corepack prepare pnpm@12.18.0 --activate
-```
+- установка зависимостей;
+- запуск разработки;
+- сборка;
+- typecheck;
+- линтер;
+- unit- и integration-тесты;
+- end-to-end-тесты;
+- миграции.
 
-Установка зависимостей:
-
-```bash
-pnpm install --frozen-lockfile --strict-peer-dependencies
-```
-
-Разработка и сборка:
-
-```bash
-pnpm dev
-pnpm build
-pnpm start
-pnpm check:composition
-```
-
-Проверки:
-
-```bash
-pnpm typecheck
-pnpm lint
-pnpm lint:fix
-pnpm format
-pnpm format:check
-pnpm test
-pnpm test:watch
-pnpm test:sqlite
-pnpm check
-```
-
-`pnpm check` последовательно выполняет `format:check`, `lint`, `typecheck`, `test` и `build`.
-E2E-тесты и миграции появятся в следующих этапах; команд для них пока нет.
-
-Все команды кроссплатформенные и не требуют bash, Docker или установленного сервера БД.
+Не выдумывай команды и не добавляй package manager до соответствующего этапа.
 
 ## 15. Критерии завершённой задачи
 
