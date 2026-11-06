@@ -187,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Для устранения структурного дублирования оркестратор разрешил worker-у добавить `export *` для storage в корневые `packages/plugin-sdk/src/index.ts` и `packages/kernel/src/index.ts` и заменить локальную копию контрактов на публичные типы SDK. Другие корневые файлы по-прежнему запрещены.
 - 2026-11-06 — Зависимости KAN-001/KAN-002/KAN-003/KAN-005 завершены. Оркестратор назначил worker-kan-006, ветку `feat/kan-006-storage-migrations` и worktree `.worktrees/kan-006-storage-migrations`; корневые exports SDK/kernel остаются за оркестратором, новые зависимости и общие configs требуют отдельной координации.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — PostgreSQL заменён на PGlite; добавлены Linux/Windows, single gateway и `pgDump`.
