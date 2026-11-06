@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+minimumReleaseAgeExclude:
+  - jsdom@31.0.0
+  - lucide-react@1.70.0
+
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
