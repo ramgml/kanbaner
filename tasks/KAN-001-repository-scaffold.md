@@ -1,7 +1,7 @@
 ---
 id: KAN-001
 title: Каркас репозитория, workspace и SQLite
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-001
@@ -146,6 +146,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker коммитом `403ad00` исключил `.worktrees` из Git, Prettier и ESLint; focused-проверка ignore-правил и полный `pnpm check` зелёные, задача готова к повторной интеграции.
 - 2026-11-06 — Первая интеграция остановлена на проверке `dev`: Prettier просканировал вложенный `.worktrees`. Merge откачен инструментом через revert; требуется исключить служебные worktree из конфигурации проверок и повторить интеграцию.
 - 2026-11-06 — Worker исправил замечание ревью коммитом `d728a66`: добавлен `.gitattributes` с LF, полный `pnpm check` зелёный; задача повторно переведена в review.
 - 2026-11-06 — Независимое ревью нашло риск CRLF при Windows checkout: для воспроизводимого Prettier check требуется `.gitattributes` с LF. Задача возвращена worker-у для исправления.
