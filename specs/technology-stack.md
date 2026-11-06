@@ -104,9 +104,11 @@ TypeScript закреплён на `6.0.x`, а не на актуальном 7.
 |---|---|---|---|
 | Сборка пакетов | tsup | 9.0.x | ESM, declaration files, без отдельного bundler-фреймворка |
 | Сборка приложения | `next build` | 16.4.x | Production build на Node.js runtime |
-| Линтер | ESLint | 10.14.x | Flat config |
+| Линтер | ESLint | 9.39.x | Flat config |
 | Конфигурация Next.js | `eslint-config-next` | 16.4.5 | Синхронизируется с minor-версией Next.js |
 | TypeScript lint | `typescript-eslint` | 8.72.x | Поддерживает TypeScript `<6.1.0` |
+
+ESLint закреплён на `9.39.x`, а не на `10.x`: `eslint-config-next@16.4.5` подключает `eslint-plugin-react`, `eslint-plugin-import` и `eslint-plugin-jsx-a11y`, чьи актуальные peer-диапазоны поддерживают ESLint максимум 9. Переход на ESLint 10 допускается только после появления совместимых версий всего lint-стека. Нельзя обходить это ограничение через `peerDependencyRules.allowedVersions`, `legacy-peer-deps` или force-установку.
 | Форматирование | Prettier | 3.9.x | Единая конфигурация |
 | Логирование | Pino | 10.4.x | Структурированные логи, без содержимого заметок и секретов |
 | Git hooks | не фиксируются | — | Добавляются только по отдельному решению |
