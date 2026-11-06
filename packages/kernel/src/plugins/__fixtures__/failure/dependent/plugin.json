@@ -1,0 +1,15 @@
+{
+  "id": "fixture.dependent",
+  "name": "fixture.dependent",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.boom": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

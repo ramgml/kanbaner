@@ -1,0 +1,13 @@
+{
+  "id": "fixture.future",
+  "name": "fixture.future",
+  "version": "1.0.0",
+  "hostApi": "^2.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

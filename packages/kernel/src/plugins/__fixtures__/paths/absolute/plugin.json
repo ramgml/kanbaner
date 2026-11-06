@@ -1,0 +1,13 @@
+{
+  "id": "fixture.path-absolute",
+  "name": "fixture.path-absolute",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "/tmp/kanbaner-plugin-fixture.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

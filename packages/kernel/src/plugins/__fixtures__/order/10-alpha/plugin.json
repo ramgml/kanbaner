@@ -1,0 +1,15 @@
+{
+  "id": "fixture.alpha",
+  "name": "fixture.alpha",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.zeta": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

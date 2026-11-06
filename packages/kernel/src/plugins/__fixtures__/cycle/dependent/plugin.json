@@ -1,0 +1,15 @@
+{
+  "id": "fixture.cycle-dependent",
+  "name": "fixture.cycle-dependent",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.cycle-alpha": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

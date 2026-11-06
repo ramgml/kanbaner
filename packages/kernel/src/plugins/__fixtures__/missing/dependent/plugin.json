@@ -1,0 +1,15 @@
+{
+  "id": "fixture.missing-dependent",
+  "name": "fixture.missing-dependent",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.absent": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

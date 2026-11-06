@@ -1,0 +1,15 @@
+{
+  "id": "fixture.safe-b",
+  "name": "fixture.safe-b",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {
+    "fixture.safe-a": "^1.0.0"
+  },
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}
