@@ -1,7 +1,7 @@
 ---
 id: KAN-002
 title: Контракты Plugin SDK
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-002
@@ -100,6 +100,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker коммитом `9acbbba` устранил все 9 замечаний ревью и дополнительный конфликт `$id` в схеме результата; 82 focused-теста и 86 тестов workspace, полный `pnpm check`, runtime import и strict install зелёные. Задача повторно переведена в review.
 - 2026-11-06 — Независимое ревью нашло проблемы глубокой JSON-валидации, обработки `format`, проверки плагинных схем, типизации generic-валидаторов, SemVer range, `ResourceService.resolve` и мелкие несогласованности. Задача возвращена worker-у. Оркестратор согласовал `ajv-formats@3.0.1`, `semver@7.8.6` и `@types/semver@7.8.0`; стек обновлён коммитом `e8233c5`, изменение lock-файла разрешено.
 - 2026-11-06 — Worker завершил Plugin Contract v1 коммитами `66f5480` и `ab25d03`; 55 focused-тестов и 59 тестов workspace, strict install, lint, typecheck, build и runtime import зелёные. Создан `tasks/reports/KAN-002.md`, задача переведена в review.
 - 2026-11-06 — KAN-001 завершена, зависимость закрыта. Оркестратор подтвердил готовность задачи, назначил worker-kan-002, ветку `feat/kan-002-plugin-sdk-contracts` и worktree `.worktrees/kan-002-plugin-sdk-contracts`; обновление lock-файла для TypeBox/Ajv согласовано без изменения корневого `package.json`.
