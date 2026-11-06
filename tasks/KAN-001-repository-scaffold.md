@@ -1,7 +1,7 @@
 ---
 id: KAN-001
 title: Каркас репозитория, workspace и SQLite
-status: review
+status: done
 stage: 1
 priority: high
 owner: worker-kan-001
@@ -30,23 +30,23 @@ specs:
 
 ## Объём работ
 
-- [ ] Создать private pnpm workspace с версией приложения `0.1.0-dev.0` и корневыми скриптами.
-- [ ] Зафиксировать Node.js 24.22.2 и pnpm 12.18 через `engines` и `packageManager`.
-- [ ] Создать пакеты `kernel` и `plugin-sdk` без доменной логики.
-- [ ] Создать базовое приложение `apps/web` на Next.js 16 с Node.js runtime.
-- [ ] Создать server composition root приложения без Storage Provider и доменных плагинов.
-- [ ] Включить строгую проверку TypeScript 6.0.x.
-- [ ] Настроить ESLint 10 с `eslint-config-next` и `typescript-eslint`, Prettier 3.
-- [ ] Настроить Vitest 5 с обязательным Vite 8 и smoke-тест.
-- [ ] Добавить обязательные peer-пакеты Testing Library, Tailwind и shadcn/ui по `specs/technology-stack.md`.
-- [ ] Добавить зависимости `better-sqlite3` и `@types/better-sqlite3`.
-- [ ] Добавить smoke-тест in-memory SQLite с `SELECT 1`.
-- [ ] Добавить `.gitignore` и `.env.example` без секретов.
-- [ ] Добавить `CHANGELOG.md` с пустым разделом `Unreleased`.
-- [ ] Описать `KANBANER_DATA_DIR` и кроссплатформенные каталоги данных.
-- [ ] Убедиться, что скрипты не зависят от bash и Unix-утилит.
-- [ ] Добавить инструкции запуска для Linux и Windows в `README.md`.
-- [ ] Заполнить раздел `## 14. Команды проекта` в `AGENTS.md`.
+- [x] Создать private pnpm workspace с версией приложения `0.1.0-dev.0` и корневыми скриптами.
+- [x] Зафиксировать Node.js 24.22.2 и pnpm 12.18 через `engines` и `packageManager`.
+- [x] Создать пакеты `kernel` и `plugin-sdk` без доменной логики.
+- [x] Создать базовое приложение `apps/web` на Next.js 16 с Node.js runtime.
+- [x] Создать server composition root приложения без Storage Provider и доменных плагинов.
+- [x] Включить строгую проверку TypeScript 6.0.x.
+- [x] Настроить ESLint 10 с `eslint-config-next` и `typescript-eslint`, Prettier 3.
+- [x] Настроить Vitest 5 с обязательным Vite 8 и smoke-тест.
+- [x] Добавить обязательные peer-пакеты Testing Library, Tailwind и shadcn/ui по `specs/technology-stack.md`.
+- [x] Добавить зависимости `better-sqlite3` и `@types/better-sqlite3`.
+- [x] Добавить smoke-тест in-memory SQLite с `SELECT 1`.
+- [x] Добавить `.gitignore` и `.env.example` без секретов.
+- [x] Добавить `CHANGELOG.md` с пустым разделом `Unreleased`.
+- [x] Описать `KANBANER_DATA_DIR` и кроссплатформенные каталоги данных.
+- [x] Убедиться, что скрипты не зависят от bash и Unix-утилит.
+- [x] Добавить инструкции запуска для Linux и Windows в `README.md`.
+- [x] Заполнить раздел `## 14. Команды проекта` в `AGENTS.md`.
 
 ## Владение файлами
 
@@ -98,41 +98,41 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Чистая установка зависимостей завершается успешно на Linux и Windows.
-- [ ] Установка проходит с `--strict-peer-dependencies` без предупреждений.
-- [ ] В дереве зависимостей нет deprecated-пакетов, кроме явно разрешённого спецификацией `eslint@9.39.x`.
-- [ ] Базовое приложение запускается и открывает страницу-заглушку.
-- [ ] Server composition root запускается и не содержит доменной логики или Storage Provider.
-- [ ] `build`, `typecheck`, `lint` и `test` доступны документированными командами.
-- [ ] TypeScript работает в строгом режиме.
-- [ ] Пакеты `kernel` и `plugin-sdk` собираются и импортируются.
-- [ ] In-memory SQLite выполняет `SELECT 1` в smoke-тесте.
-- [ ] `better-sqlite3` устанавливается из prebuilt binary или собирается из исходников на обеих ОС.
-- [ ] Production build не использует Edge runtime для серверной части.
-- [ ] Команды запуска не требуют bash, Docker или установленного сервера БД.
-- [ ] В репозитории нет секретов.
-- [ ] `README.md` описывает запуск на Linux и Windows.
-- [ ] `AGENTS.md` содержит фактические кроссплатформенные команды проекта.
-- [ ] Версии и инструменты соответствуют `specs/technology-stack.md`.
-- [ ] Корневая версия — `0.1.0-dev.0`, все пакеты workspace private.
-- [ ] `CHANGELOG.md` существует и содержит раздел `Unreleased`.
-- [ ] Доменной логики и плагинных функций нет.
+- [ ] Чистая установка зависимостей завершается успешно на Linux и Windows. Linux проверен; Windows недоступен в текущем окружении.
+- [x] Установка проходит с `--strict-peer-dependencies` без предупреждений.
+- [x] В дереве зависимостей нет deprecated-пакетов, кроме явно разрешённого спецификацией `eslint@9.39.x`.
+- [x] Базовое приложение запускается и открывает страницу-заглушку.
+- [x] Server composition root запускается и не содержит доменной логики или Storage Provider.
+- [x] `build`, `typecheck`, `lint` и `test` доступны документированными командами.
+- [x] TypeScript работает в строгом режиме.
+- [x] Пакеты `kernel` и `plugin-sdk` собираются и импортируются.
+- [x] In-memory SQLite выполняет `SELECT 1` в smoke-тесте.
+- [ ] `better-sqlite3` устанавливается из prebuilt binary или собирается из исходников на обеих ОС. Linux проверен; Windows не проверен.
+- [x] Production build не использует Edge runtime для серверной части.
+- [x] Команды запуска не требуют bash, Docker или установленного сервера БД.
+- [x] В репозитории нет секретов.
+- [x] `README.md` описывает запуск на Linux и Windows.
+- [x] `AGENTS.md` содержит фактические кроссплатформенные команды проекта.
+- [x] Версии и инструменты соответствуют `specs/technology-stack.md`.
+- [x] Корневая версия — `0.1.0-dev.0`, все пакеты workspace private.
+- [x] `CHANGELOG.md` существует и содержит раздел `Unreleased`.
+- [x] Доменной логики и плагинных функций нет.
 
 ## Проверки
 
-- [ ] Установка зависимостей на Linux.
-- [ ] Установка зависимостей на Windows.
-- [ ] Установка с `--strict-peer-dependencies` и разбор предупреждений.
-- [ ] Проверка отсутствия deprecated-зависимостей.
-- [ ] Typecheck.
-- [ ] Линтер.
-- [ ] Unit-тест и SQLite smoke-тест.
-- [ ] Production build приложения без проверки реального провайдера.
-- [ ] Запуск приложения.
-- [ ] Проверка запуска server composition root.
-- [ ] Проверка отсутствия Docker-конфигурации.
-- [ ] Проверка отсутствия секретов в отслеживаемых файлах.
-- [ ] Проверка версии `0.1.0-dev.0` и private-статуса пакетов.
+- [x] Установка зависимостей на Linux.
+- [ ] Установка зависимостей на Windows — окружение недоступно, проверка не выполнялась.
+- [x] Установка с `--strict-peer-dependencies` и разбор предупреждений.
+- [x] Проверка отсутствия deprecated-зависимостей.
+- [x] Typecheck.
+- [x] Линтер.
+- [x] Unit-тест и SQLite smoke-тест.
+- [x] Production build приложения без проверки реального провайдера.
+- [x] Запуск приложения.
+- [x] Проверка запуска server composition root.
+- [x] Проверка отсутствия Docker-конфигурации.
+- [x] Проверка отсутствия секретов в отслеживаемых файлах.
+- [x] Проверка версии `0.1.0-dev.0` и private-статуса пакетов.
 
 ## Риски
 
@@ -146,6 +146,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Повторная интеграция завершена merge-коммитом `1352f96ce4374ea0229eaad875e2d3e112520be0`; строгая установка и полный `pnpm check` прошли на ветке и `dev`, composition root и SQLite smoke дополнительно проверены на `dev`. Worktree и feature-ветка удалены, задача переведена в done.
 - 2026-11-06 — Worker коммитом `403ad00` исключил `.worktrees` из Git, Prettier и ESLint; focused-проверка ignore-правил и полный `pnpm check` зелёные, задача готова к повторной интеграции.
 - 2026-11-06 — Первая интеграция остановлена на проверке `dev`: Prettier просканировал вложенный `.worktrees`. Merge откачен инструментом через revert; требуется исключить служебные worktree из конфигурации проверок и повторить интеграцию.
 - 2026-11-06 — Worker исправил замечание ревью коммитом `d728a66`: добавлен `.gitattributes` с LF, полный `pnpm check` зелёный; задача повторно переведена в review.
@@ -167,9 +168,7 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `1352f96ce4374ea0229eaad875e2d3e112520be0`; итоговые feature-коммиты `2722d64`, `cdd5365`, `5562f60`, `c3ee4e1`.
+- Ветка: `feat/kan-001-repository-scaffold` влита в `dev` через `merge --no-ff`; ветка и worktree удалены после успеха.
+- Проверки: на Node.js 24.22.2 / pnpm 12.18.0 в Linux прошли strict frozen install без unmet peers, Prettier, ESLint, TypeScript, 5 test files / 6 tests, SQLite smoke, production build, запуск HTTP 200 и composition root. Независимое ревью завершено без блокирующих замечаний. Проверки merge queue на ветке и `dev` зелёные. Единственный deprecated-пакет — разрешённый спецификацией `eslint@9.39.5`.
+- Остаточные риски: установка, нативный модуль, пути и build не проверены на Windows из-за недоступности ОС; `eslint@9.39.x` остаётся временным deprecated-исключением до совместимого обновления lint-стека; production-проверка реального SQLite Storage Provider относится к KAN-009.
