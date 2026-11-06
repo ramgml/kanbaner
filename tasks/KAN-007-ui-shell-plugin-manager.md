@@ -1,7 +1,7 @@
 ---
 id: KAN-007
 title: UI shell и plugin manager
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-007
@@ -105,6 +105,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Worker коммитом `5c075be` запретил повторную активацию после неуспешной деактивации: refresh не очищает blocked IDs и возвращает `PROCESS_RESTART_REQUIRED`. 57 focused-тестов, 340 workspace-тестов и 3 Playwright-теста зелёные. Задача оставлена в review до повторного независимого ревью и интеграции при возобновлении.
 - 2026-11-06 — Повторное ревью закрыло 9 из 10 замечаний, но нашло повторную активацию через refresh после неуспешной деактивации. Worker должен сохранять blocked IDs в disabled-наборе и запрещать reactivation до подтверждённой очистки/перезапуска процесса.
 - 2026-11-06 — Worker коммитом `660795b` устранил все 10 findings и заменил beta на стабильный `@playwright/test@1.65.0`; 56 focused-тестов, 339 тестов workspace и 3 реальных Chromium E2E на 360px зелёные. Задача повторно в review.
 - 2026-11-06 — Для замены случайно выбранной beta-версии оркестратор разрешил точное `@playwright/test@1.65.0` и добавление этой стабильной версии в `minimumReleaseAgeExclude` корневого `pnpm-workspace.yaml` из-за публикации внутри minimumReleaseAge cutoff. Другие supply-chain правила не ослабляются.

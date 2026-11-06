@@ -1,7 +1,7 @@
 ---
 id: KAN-006
 title: Storage Provider Registry, Store-контракты и миграции
-status: in_progress
+status: blocked
 stage: 1
 priority: high
 owner: worker-kan-006
@@ -187,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Пользователь приостановил работу до следующего дня и выбрал решение конфликта поискового контракта: **удалить типизированное `SearchIndexDocument.projectRef`**. При возобновлении доменная ссылка на проект должна передаваться через generic `metadata`, ядро не интерпретирует её; одновременно уточнить `specs/architecture.md` (раздел поиска), не меняя инвариант отсутствия проекта в публичных типах ядра. Код и спецификация в этой паузе не изменялись.
 - 2026-11-06 — Независимое ревью нашло blocker поздней записи после rollback, гонки registry.open, неполный bootstrap cleanup, пробелы conformance/checksum, дублирование LinkStore/validation, спорный projectRef и мелкие JSON/delayed-дефекты. Задача возвращена worker-у; изменение KAN-005 LinkStore на alias SDK согласовано оркестратором.
 - 2026-11-06 — Worker завершил Storage коммитом `b1f1452`; структурная копия контрактов устранена, SDK/kernel exports и StorageError унифицированы. 110 focused-тестов и 396 тестов workspace, strict install и полный check зелёные. Создан отчёт, задача переведена в review.
 - 2026-11-06 — Для устранения структурного дублирования оркестратор разрешил worker-у добавить `export *` для storage в корневые `packages/plugin-sdk/src/index.ts` и `packages/kernel/src/index.ts` и заменить локальную копию контрактов на публичные типы SDK. Другие корневые файлы по-прежнему запрещены.
