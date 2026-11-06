@@ -1,17 +1,13 @@
 ---
 id: KAN-006
 title: Storage Provider Registry, Store-контракты и миграции
-status: backlog
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-  - KAN-002
-  - KAN-003
-  - KAN-005
-branch: null
-worktree: null
+owner: worker-kan-006
+blocked_by: []
+branch: feat/kan-006-storage-migrations
+worktree: .worktrees/kan-006-storage-migrations
 created: 2026-11-06
 updated: 2026-11-06
 specs:
@@ -191,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Зависимости KAN-001/KAN-002/KAN-003/KAN-005 завершены. Оркестратор назначил worker-kan-006, ветку `feat/kan-006-storage-migrations` и worktree `.worktrees/kan-006-storage-migrations`; корневые exports SDK/kernel остаются за оркестратором, новые зависимости и общие configs требуют отдельной координации.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — PostgreSQL заменён на PGlite; добавлены Linux/Windows, single gateway и `pgDump`.
 - 2026-11-06 — Задача перепрофилирована под Storage Provider Registry, Store-контракты и conformance suite; SQLite-провайдер вынесен в KAN-009.

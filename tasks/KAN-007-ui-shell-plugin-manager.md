@@ -1,16 +1,13 @@
 ---
 id: KAN-007
 title: UI shell и plugin manager
-status: backlog
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-  - KAN-002
-  - KAN-003
-branch: null
-worktree: null
+owner: worker-kan-007
+blocked_by: []
+branch: feat/kan-007-ui-shell-plugin-manager
+worktree: .worktrees/kan-007-ui-shell-plugin-manager
 created: 2026-11-06
 updated: 2026-11-06
 specs:
@@ -108,6 +105,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-06 — Зависимости KAN-001/KAN-002/KAN-003 завершены, публичный kernel API подключён. Оркестратор назначил worker-kan-007, ветку `feat/kan-007-ui-shell-plugin-manager` и worktree `.worktrees/kan-007-ui-shell-plugin-manager`; разрешено обновление `apps/web/package.json` и lock-файла только для shadcn/Radix через CLI, корневой package.json запрещён.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — UI-стек привязан к `specs/technology-stack.md`.
 
