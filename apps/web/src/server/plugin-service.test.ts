@@ -541,3 +541,80 @@ describe("plugin service", () => {
     expect(JSON.stringify(sanitized)).not.toContain("aero");
   });
 });
+
+type GlobalWithBootstrapOrder = typeof globalThis & {
+  __kanbanerTestBootstrapOrder?: string[];
+};
+
+function resetBootstrapOrder(): void {
+  (globalThis as GlobalWithBootstrapOrder).__kanbanerTestBootstrapOrder = [];
+}
+
+function bootstrapOrder(): readonly string[] {
+  return (globalThis as GlobalWithBootstrapOrder).__kanbanerTestBootstrapOrder ?? [];
+}
+
+function orderedActivationSource(): string {
+  return [
+    "globalThis.__kanbanerTestBootstrapOrder ??= [];",
+    "export function activate() { globalThis.__kanbanerTestBootstrapOrder.push('activate'); }",
+    "export function deactivate() { return undefined; }",
+    "",
+  ].join("\n");
+}
+
+describe("plugin service: Storage bootstrap hook", () => {
+  it("выполняет bootstrap ровно один раз до старта runtime", async () => {
+    resetBootstrapOrder();
+
+    const root = await createRoot();
+    await createPlugin(root, {
+      directory: "one",
+      id: "example.one",
+      serverSource: orderedActivationSource(),
+    });
+
+    const bootstrap = vi.fn(async () => {
+      (globalThis as GlobalWithBootstrapOrder).__kanbanerTestBootstrapOrder?.push("bootstrap");
+    });
+    const service = createService([root], { bootstrap });
+
+    const state = await service.getState();
+
+    expect(state.started).toBe(true);
+    expect(bootstrapOrder()).toEqual(["bootstrap", "activate"]);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+
+    await service.getState();
+    await service.refresh();
+
+    expect(bootstrapOrder()).toEqual(["bootstrap", "activate", "activate"]);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("не стартует runtime при ошибке bootstrap и повторяет попытку", async () => {
+    resetBootstrapOrder();
+
+    const root = await createRoot();
+    await createPlugin(root, {
+      directory: "one",
+      id: "example.one",
+      serverSource: orderedActivationSource(),
+    });
+
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("storage is not ready"))
+      .mockResolvedValue(undefined);
+    const service = createService([root], { bootstrap });
+
+    await expect(service.getState()).rejects.toThrow("storage is not ready");
+    expect(bootstrapOrder()).toEqual([]);
+
+    const state = await service.getState();
+
+    expect(state.started).toBe(true);
+    expect(bootstrapOrder()).toEqual(["activate"]);
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+  });
+});
