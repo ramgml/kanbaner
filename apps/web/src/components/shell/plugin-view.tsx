@@ -19,8 +19,9 @@ export interface PluginViewProps {
  * `app.main` как `view`/`route` и его владелец не отключён.
  */
 export function PluginView({ pathname }: PluginViewProps) {
-  const currentPathname = usePathname() ?? "/";
-  const contribution = useUiRoute(pathname ?? currentPathname);
+  const routerPathname = usePathname() ?? "/";
+  const currentPathname = pathname ?? routerPathname;
+  const contribution = useUiRoute(currentPathname);
 
   if (contribution === null) {
     return (
@@ -38,7 +39,7 @@ export function PluginView({ pathname }: PluginViewProps) {
 
   return (
     <ContributionBoundary contribution={contribution}>
-      <ContributionRenderer contribution={contribution} />
+      <ContributionRenderer contribution={contribution} pathname={currentPathname} />
     </ContributionBoundary>
   );
 }

@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "pnpm build:packages && pnpm --filter @kanbaner/web dev",
     "build": "pnpm build:packages && pnpm --filter @kanbaner/web build",
-    "build:packages": "pnpm --filter @kanbaner/plugin-sdk build && pnpm --filter @kanbaner/kernel build && pnpm --filter @kanbaner/storage-sqlite build && pnpm --filter @kanbaner/plugin-fixture build && pnpm --filter @kanbaner/plugin-tasks build",
+    "build:packages": "pnpm --filter @kanbaner/plugin-sdk build && pnpm --filter @kanbaner/kernel build && pnpm --filter @kanbaner/storage-sqlite build && pnpm --filter @kanbaner/plugin-fixture build && pnpm --filter @kanbaner/plugin-tasks build && pnpm --filter @kanbaner/task-ui build && pnpm --filter @kanbaner/plugin-task-list build",
     "start": "pnpm --filter @kanbaner/web start",
     "typecheck": "pnpm build:packages && tsc -p tsconfig.tools.json --noEmit && pnpm -r typecheck",
     "lint": "eslint .",

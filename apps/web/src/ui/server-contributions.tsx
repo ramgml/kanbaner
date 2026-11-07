@@ -4,17 +4,23 @@ import { useEffect, useMemo, useState, useTransition } from "react";
 
 import type { UiContribution } from "@kanbaner/plugin-sdk";
 
-import { executePluginOperation, type UiOperationResult } from "../server/plugin-operations";
 import { Button } from "../components/ui/button";
 import { useUiRegistry } from "./provider";
 import { type UiComponent } from "./plugin-api";
+import type { UiOperationInvoker, UiOperationResult } from "./operation-types";
 
 export interface SerializedUiContribution {
   readonly pluginId: string;
   readonly contribution: UiContribution;
 }
 
-function OperationPanel({ contribution }: { readonly contribution: RegisteredLike }) {
+function OperationPanel({
+  contribution,
+  invoke,
+}: {
+  readonly contribution: RegisteredLike;
+  readonly invoke: UiOperationInvoker;
+}) {
   const [result, setResult] = useState<UiOperationResult | null>(null);
   const [pending, startTransition] = useTransition();
   const operationId = contribution.contribution.commandId;
@@ -25,7 +31,7 @@ function OperationPanel({ contribution }: { readonly contribution: RegisteredLik
     }
 
     startTransition(async () => {
-      setResult(await executePluginOperation(operationId, {}));
+      setResult(await invoke(operationId, {}));
     });
   };
 
@@ -72,16 +78,17 @@ interface RegisteredLike {
   readonly contribution: UiContribution;
 }
 
-const GenericRenderer: UiComponent = ({ contribution }) => (
-  <OperationPanel contribution={contribution} />
+const GenericRenderer: UiComponent = ({ contribution, invoke }) => (
+  <OperationPanel contribution={contribution} invoke={invoke} />
 );
 
 /**
  * Регистрирует серверные UI-метаданные через публичный реестр UI-контракта.
  *
- * Этот компонент не знает о fixture-плагине: он принимает только
- * сериализуемые декларации SDK и общий безопасный рендерер. Ошибка одного
- * вклада изолируется, shell продолжает работать.
+ * Метаданные группируются по плагину и синхронизируются идемпотентно:
+ * повторный набор не создаёт дубликатов, исчезнувшие вклады удаляются.
+ * Реальные рендереры встроенных UI-плагинов привязывает composition-модуль
+ * `builtin-ui-plugins.ts`; этот компонент не импортирует доменные плагины.
  */
 export function ServerUiContributions({
   contributions,
@@ -92,13 +99,30 @@ export function ServerUiContributions({
   const stable = useMemo(() => contributions, [contributions]);
 
   useEffect(() => {
-    const cleanups: Array<() => void> = [];
+    const grouped = new Map<string, SerializedUiContribution[]>();
 
     for (const record of stable) {
+      const list = grouped.get(record.pluginId) ?? [];
+      list.push(record);
+      grouped.set(record.pluginId, list);
+    }
+
+    const cleanups: Array<() => void> = [];
+
+    for (const [pluginId, records] of grouped) {
       try {
-        cleanups.push(registry.register(record.pluginId, record.contribution, GenericRenderer));
+        cleanups.push(
+          registry.syncPlugin(
+            pluginId,
+            records.map((record) => ({
+              metadata: record.contribution,
+              render: GenericRenderer,
+            })),
+            GenericRenderer,
+          ),
+        );
       } catch {
-        // Невалидный вклад не должен ронять shell и другие плагины.
+        // Невалидный набор не должен ронять shell и другие плагины.
       }
     }
 

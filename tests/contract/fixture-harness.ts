@@ -59,6 +59,8 @@ export interface FixtureHarnessOptions {
   readonly migrate?: boolean;
   readonly removeOnClose?: boolean;
   readonly pluginDirectories?: readonly string[];
+  /** Plugin ID, которые runtime должен оставить отключёнными. */
+  readonly disabledPlugins?: readonly string[];
 }
 
 export function temporaryDirectory(prefix = "kanbaner-kan008-"): string {
@@ -115,6 +117,7 @@ export async function startFixtureHarness(
 
   const runtime = createPluginRuntime({
     pluginDirectories: options.pluginDirectories ?? [FIXTURE_DISCOVERY_ROOT],
+    ...(options.disabledPlugins === undefined ? {} : { disabledPlugins: options.disabledPlugins }),
     hooks: {
       migrate: async (context) => {
         if (!migrate) {

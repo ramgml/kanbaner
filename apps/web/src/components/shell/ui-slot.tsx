@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import type { UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
 
-import { useUiContributions } from "../../ui/provider";
+import { useUiContributions, useUiOperationInvoker } from "../../ui/provider";
 import type { RegisteredUiContribution } from "../../ui/registry";
 import { ContributionBoundary } from "./contribution-boundary";
 
@@ -15,6 +15,8 @@ export interface UiSlotProps {
   readonly onlyWithoutRoute?: boolean;
   readonly className?: string;
   readonly empty?: ReactNode;
+  /** Текущий pathname shell-а; передаётся каждому рендереру. */
+  readonly pathname?: string | undefined;
 }
 
 function matchesFilters(
@@ -42,12 +44,15 @@ function matchesFilters(
 
 export function ContributionRenderer({
   contribution,
+  pathname,
 }: {
   readonly contribution: RegisteredUiContribution;
+  readonly pathname?: string | undefined;
 }) {
   const Component = contribution.render;
+  const invoke = useUiOperationInvoker();
 
-  return <Component contribution={contribution} />;
+  return <Component contribution={contribution} invoke={invoke} pathname={pathname} />;
 }
 
 /**
@@ -61,6 +66,7 @@ export function UiSlot({
   onlyWithoutRoute,
   className,
   empty = null,
+  pathname,
 }: UiSlotProps) {
   const contributions = useUiContributions(slot);
   const visible = contributions.filter((contribution) =>
@@ -75,7 +81,7 @@ export function UiSlot({
     <div className={className} data-ui-slot={slot}>
       {visible.map((contribution) => (
         <ContributionBoundary key={contribution.contribution.id} contribution={contribution}>
-          <ContributionRenderer contribution={contribution} />
+          <ContributionRenderer contribution={contribution} pathname={pathname} />
         </ContributionBoundary>
       ))}
     </div>

@@ -1,0 +1,16 @@
+{
+  "id": "kanbaner.task-list",
+  "name": "Kanbaner Task List",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./dist/index.js",
+    "client": "./dist/ui.js"
+  },
+  "requires": {
+    "kanbaner.tasks": "^1.0.0"
+  },
+  "consumes": ["kanbaner.tasks.commands.v1", "kanbaner.tasks.queries.v1"],
+  "provides": ["kanbaner.task-list.ui.v1"],
+  "permissions": ["commands", "events", "ui"]
+}

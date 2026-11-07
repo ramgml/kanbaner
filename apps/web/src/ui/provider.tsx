@@ -5,16 +5,29 @@ import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNod
 import type { UiSlotId } from "@kanbaner/plugin-sdk";
 
 import type { UiPluginAvailability } from "../lib/plugin-manager-types";
+import type { UiOperationInvoker } from "./operation-types";
 import type { RegisteredUiContribution, UiContributionRegistry } from "./registry";
 import { createUiContributionRegistry } from "./registry";
 
 const RegistryContext = createContext<UiContributionRegistry | null>(null);
 const AvailabilityContext = createContext<UiPluginAvailability | null | undefined>(undefined);
+const InvokeContext = createContext<UiOperationInvoker | null>(null);
+
+const UNAVAILABLE_INVOKER: UiOperationInvoker = async () => ({
+  ok: false,
+  error: {
+    code: "PLUGIN_UNAVAILABLE",
+    message: "Вызов операций не подключён к UI-рантайму",
+    retryable: false,
+  },
+});
 
 export interface UiRegistryProviderProps {
   readonly children: ReactNode;
   readonly registry?: UiContributionRegistry;
   readonly availability?: UiPluginAvailability;
+  /** Реализация из layout/server action; в тестах можно передать заглушку. */
+  readonly invoke?: UiOperationInvoker;
 }
 
 function isContributionAvailable(
@@ -31,13 +44,20 @@ function isContributionAvailable(
   return availability.activePluginIds.includes(contribution.pluginId);
 }
 
-export function UiRegistryProvider({ children, registry, availability }: UiRegistryProviderProps) {
+export function UiRegistryProvider({
+  children,
+  registry,
+  availability,
+  invoke,
+}: UiRegistryProviderProps) {
   const value = useMemo(() => registry ?? createUiContributionRegistry(), [registry]);
 
   return (
     <RegistryContext.Provider value={value}>
       <AvailabilityContext.Provider value={availability ?? null}>
-        {children}
+        <InvokeContext.Provider value={invoke ?? UNAVAILABLE_INVOKER}>
+          {children}
+        </InvokeContext.Provider>
       </AvailabilityContext.Provider>
     </RegistryContext.Provider>
   );
@@ -55,6 +75,10 @@ export function useUiRegistry(): UiContributionRegistry {
 
 export function useUiAvailability(): UiPluginAvailability | null {
   return useContext(AvailabilityContext) ?? null;
+}
+
+export function useUiOperationInvoker(): UiOperationInvoker {
+  return useContext(InvokeContext) ?? UNAVAILABLE_INVOKER;
 }
 
 function useRegistryVersion(registry: UiContributionRegistry): number {

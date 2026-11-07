@@ -29,7 +29,7 @@ function SafeModeNotice({ problemCount }: { readonly problemCount: number }) {
   );
 }
 
-function DetailsSlot() {
+function DetailsSlot({ pathname }: { readonly pathname: string }) {
   const contributions = useUiContributions("app.details");
 
   if (contributions.length === 0) {
@@ -42,12 +42,12 @@ function DetailsSlot() {
       data-testid="details-slot"
       className="hidden w-80 shrink-0 overflow-y-auto border-l bg-muted/20 p-4 xl:block"
     >
-      <UiSlot slot="app.details" className="flex flex-col gap-3" />
+      <UiSlot slot="app.details" className="flex flex-col gap-3" pathname={pathname} />
     </aside>
   );
 }
 
-function OverlaysSlot() {
+function OverlaysSlot({ pathname }: { readonly pathname: string }) {
   const contributions = useUiContributions("app.overlays");
 
   if (contributions.length === 0) {
@@ -61,7 +61,7 @@ function OverlaysSlot() {
       className="pointer-events-none fixed inset-0 z-50 flex flex-col items-end justify-end gap-2 p-4"
     >
       <div className="pointer-events-auto flex w-full max-w-sm flex-col gap-2">
-        <UiSlot slot="app.overlays" className="flex flex-col gap-2" />
+        <UiSlot slot="app.overlays" className="flex flex-col gap-2" pathname={pathname} />
       </div>
     </div>
   );
@@ -105,12 +105,12 @@ export function AppShell({ children, safeMode = false, problemCount = 0 }: AppSh
             {children}
           </main>
 
-          <DetailsSlot />
+          <DetailsSlot pathname={pathname} />
         </div>
       </div>
 
       <MobileNavigation pathname={pathname} safeMode={safeMode} />
-      <OverlaysSlot />
+      <OverlaysSlot pathname={pathname} />
     </div>
   );
 }

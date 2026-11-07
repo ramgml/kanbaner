@@ -285,8 +285,13 @@ describe("fixture plugin: публичный lifecycle и общие шины", 
     }
 
     expect(harness.composition.registry.owns(FIXTURE_PLUGIN_ID, FIXTURE_ITEM_TYPE)).toBe(true);
+    // Discovery root — весь packages/, поэтому в composition попадают и
+    // встроенные плагины. Проверка относится только к fixture.
     expect(
-      harness.composition.listUiContributions().map((record) => record.contribution.slot),
+      harness.composition
+        .listUiContributions()
+        .filter((record) => record.pluginId === FIXTURE_PLUGIN_ID)
+        .map((record) => record.contribution.slot),
     ).toEqual(["app.main", "app.main"]);
   });
 

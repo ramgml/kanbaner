@@ -143,6 +143,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 @kanbaner/kernel
 @kanbaner/plugin-sdk
 @kanbaner/storage-sqlite
+@kanbaner/task-ui
 @kanbaner/plugin-tasks
 @kanbaner/plugin-task-list
 @kanbaner/plugin-kanban
@@ -156,6 +157,8 @@ Kanbaner строится как **модульный монолит с plugin-�
 - `kernel` может зависеть от `plugin-sdk`, но не от плагинов;
 - плагины зависят от `plugin-sdk`, но не от `kernel` и не от внутренностей других плагинов;
 - связь между плагинами идёт через публичные контракты;
+- `task-ui` — общая клиентская библиотека компонентов, а не плагин: она может зависеть от `plugin-sdk` и `@kanbaner/plugin-tasks/contract`, но не от корневого `@kanbaner/plugin-tasks`, `kernel`, storage, серверных модулей или `apps/web`;
+- UI-entrypoint плагина импортируется только composition-модулем `apps/web/src/ui/builtin-ui-plugins.ts`; shell и слоты работают с metadata из реестра;
 - нарушение правил импорта проверяется автоматическим тестом.
 
 ## 7. Жизненный цикл плагина

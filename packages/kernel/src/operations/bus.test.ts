@@ -1,6 +1,8 @@
 import {
+  createPluginError,
   PluginOperationError,
   type ExecutionContext,
+  type PluginError,
   type PluginLogger,
 } from "@kanbaner/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
@@ -1210,6 +1212,175 @@ describe("OperationBus: ошибки", () => {
     if (!result.ok) {
       expect(result.error.message).not.toContain("Секретная деталь");
     }
+  });
+
+  it("распознаёт PluginOperationError из другого экземпляра SDK", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        // Плагин загружен динамическим import() и получил собственную копию
+        // SDK, поэтому instanceof на границе ядра не срабатывает.
+        throw {
+          name: "PluginOperationError",
+          message: "Сущность была изменена другой операцией",
+          error: createPluginError("VERSION_CONFLICT", "Сущность была изменена другой операцией"),
+        };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("VERSION_CONFLICT");
+      expect(result.error.message).toBe("Сущность была изменена другой операцией");
+    }
+  });
+
+  it("не принимает подделку с невалидным конвертом ошибки", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw { name: "PluginOperationError", error: { code: "VERSION_CONFLICT" } };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("INTERNAL_ERROR");
+      expect(result.error.message).toBe("Внутренняя ошибка операции");
+    }
+  });
+
+  it("вычищает лишние поля структурного конверта PluginOperationError", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw {
+          name: "PluginOperationError",
+          message: "Служебное сообщение",
+          stack: "at /home/aero/private.ts",
+          path: "/etc/passwd",
+          error: {
+            code: "NOT_FOUND",
+            message: "Задача не найдена",
+            retryable: false,
+            details: { entity: "task" },
+            stack: "hunter2",
+            path: "/etc/passwd",
+            secret: "hunter2",
+          },
+        };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Задача не найдена",
+        retryable: false,
+        details: { entity: "task" },
+      },
+    });
+
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toContain("hunter2");
+    expect(serialized).not.toContain("/etc/passwd");
+    expect(serialized).not.toContain("/home/aero");
+  });
+
+  it("возвращает INTERNAL_ERROR, если accessor конверта бросает исключение", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw {
+          name: "PluginOperationError",
+          get error(): never {
+            throw new Error("секрет в геттере");
+          },
+        };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Внутренняя ошибка операции",
+        retryable: false,
+      },
+    });
+  });
+
+  it("возвращает INTERNAL_ERROR, если геттер name бросает исключение", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw Object.defineProperty({}, "name", {
+          get(): never {
+            throw new Error("секрет в name");
+          },
+        });
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("INTERNAL_ERROR");
+      expect(result.error.message).toBe("Внутренняя ошибка операции");
+    }
+  });
+
+  it("вычищает лишние поля у настоящего PluginOperationError", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        const thrown = new PluginOperationError("NOT_FOUND", "Задача не найдена");
+        const raw = thrown.error as PluginError & { readonly secret?: string };
+
+        Object.assign(raw, { secret: "hunter2", path: "/etc/passwd" });
+
+        throw thrown;
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Задача не найдена",
+        retryable: false,
+      },
+    });
+
+    expect(JSON.stringify(result)).not.toContain("hunter2");
   });
 });
 
