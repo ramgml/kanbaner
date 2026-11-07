@@ -17,6 +17,7 @@ import type {
   PluginManagerProblem,
   PluginManagerState,
 } from "../lib/plugin-manager-types";
+import { getApplicationStorage } from "./application-storage";
 
 const SERVICE_KEY = "__kanbanerWebPluginServiceV1";
 
@@ -271,6 +272,13 @@ export interface PluginServiceOptions {
   readonly hostApiVersion?: string;
   readonly logger?: PluginRuntimeLogger;
   readonly hooks?: PluginLifecycleHooks;
+  /**
+   * Bootstrap Storage-слоя до старта runtime.
+   *
+   * Composition root приложения передаёт инициализацию SQLite provider-а;
+   * тесты и независимые экземпляры могут не подключать Storage.
+   */
+  readonly bootstrap?: () => Promise<void>;
 }
 
 interface StopResult {
@@ -386,8 +394,10 @@ class PluginService {
   private readonly hooks: PluginLifecycleHooks;
   private readonly disabledPlugins: Set<string>;
   private readonly blockedPluginIds = new Set<string>();
+  private readonly bootstrap: (() => Promise<void>) | undefined;
   private runtime: PluginRuntime | null = null;
   private snapshot: PluginRuntimeSnapshot | null = null;
+  private bootstrapDone = false;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: PluginServiceOptions = {}) {
@@ -396,6 +406,7 @@ class PluginService {
     this.logger = options.logger ?? createDefaultLogger();
     this.hooks = options.hooks ?? {};
     this.disabledPlugins = new Set(options.disabledPlugins ?? configuredDisabledPlugins());
+    this.bootstrap = options.bootstrap;
   }
 
   getState(): Promise<PluginManagerState> {
@@ -498,6 +509,14 @@ class PluginService {
   private async ensureStarted(): Promise<PluginRuntimeSnapshot> {
     if (this.snapshot !== null) {
       return this.snapshot;
+    }
+
+    // Storage bootstrap выполняется до старта runtime плагинов и только один
+    // раз. Ошибка оставляет флаг сброшенным: следующий запрос повторит
+    // инициализацию, а runtime не будет запущен на неготовом хранилище.
+    if (!this.bootstrapDone && this.bootstrap !== undefined) {
+      await this.bootstrap();
+      this.bootstrapDone = true;
     }
 
     this.runtime ??= this.createRuntime();
@@ -608,7 +627,11 @@ export function createPluginService(options: PluginServiceOptions = {}): PluginS
 
 /** Singleton сервиса для Next.js с учётом hot reload. */
 export function getPluginService(): PluginService {
-  globalHolder[SERVICE_KEY] ??= createPluginService();
+  globalHolder[SERVICE_KEY] ??= createPluginService({
+    bootstrap: async () => {
+      await getApplicationStorage();
+    },
+  });
 
   return globalHolder[SERVICE_KEY];
 }

@@ -238,6 +238,9 @@ importers:
       '@kanbaner/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@kanbaner/storage-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/storage-sqlite
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -319,6 +322,22 @@ importers:
       '@types/semver':
         specifier: 7.8.0
         version: 7.8.0
+
+  packages/storage-sqlite:
+    dependencies:
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      better-sqlite3:
+        specifier: 13.0.3
+        version: 13.0.3
+    devDependencies:
+      '@kanbaner/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
 
 packages:
 
