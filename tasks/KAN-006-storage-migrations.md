@@ -1,7 +1,7 @@
 ---
 id: KAN-006
 title: Storage Provider Registry, Store-контракты и миграции
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-006
@@ -187,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker коммитом `a65d8c8` устранил все 9 findings, включая late-write sealing, registry/bootstrap races, conformance concurrency и удаление `projectRef`; 176 focused-тестов и 419 тестов workspace, strict install и полный check зелёные. Задача повторно переведена в review.
 - 2026-11-07 — Пользователь возобновил работу. Решение по `projectRef` применено к `specs/architecture.md`; worker должен устранить все 9 findings, включая удаление поля из SDK в пользу `metadata`, повторное ревью и полные проверки.
 - 2026-11-06 — Пользователь приостановил работу до следующего дня и выбрал решение конфликта поискового контракта: **удалить типизированное `SearchIndexDocument.projectRef`**. При возобновлении доменная ссылка на проект должна передаваться через generic `metadata`, ядро не интерпретирует её; одновременно уточнить `specs/architecture.md` (раздел поиска), не меняя инвариант отсутствия проекта в публичных типах ядра. Код и спецификация в этой паузе не изменялись.
 - 2026-11-06 — Независимое ревью нашло blocker поздней записи после rollback, гонки registry.open, неполный bootstrap cleanup, пробелы conformance/checksum, дублирование LinkStore/validation, спорный projectRef и мелкие JSON/delayed-дефекты. Задача возвращена worker-у; изменение KAN-005 LinkStore на alias SDK согласовано оркестратором.
