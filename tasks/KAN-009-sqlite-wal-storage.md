@@ -1,7 +1,7 @@
 ---
 id: KAN-009
 title: SQLite WAL Storage Provider
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-009
@@ -202,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker коммитом `ae7da96` реализовал stack-aware AsyncLocalStorage scheduler, SQL transaction-control scanner и custom await-able production server; 160 focused-тестов, 660 workspace-тестов, 70 Conformance и отдельный deferred-write SIGTERM test зелёные. Задача повторно в review.
 - 2026-11-07 — Повторное ревью подтвердило backup/schema/checkpoint/paths, но нашло пересечение savepoint с parent/sibling-операциями, возможность COMMIT/ROLLBACK внутри SQL-файла миграции и отсутствие ожидания deferred операций при завершении Next.js. Требуется stack-aware scheduler, SQL transaction-control guard и await-able production server lifecycle.
 - 2026-11-07 — Worker коммитом `67c0153` устранил все 9 направлений ревью; 150 focused-тестов, 650 workspace-тестов и 70 Conformance-тестов зелёные. Production `/plugins` 200, `kanbaner.core` v1 и integrity_check подтверждены, SIGTERM очищает WAL/SHM, CLI restore с non-ASCII путями работает. Задача повторно в review.
 - 2026-11-07 — Независимое ревью нашло blocker удаления существующего backup/чужих sidecar, DDL в open до checksum и вне миграции, нарушение LIFO savepoint, непроверенный checkpoint, shutdown race, неподключённые plugin migrations, обходы path validation, непустой restore dir и Windows import в CLI. Задача возвращена worker-у для исправления всех findings.
