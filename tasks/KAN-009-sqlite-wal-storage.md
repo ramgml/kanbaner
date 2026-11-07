@@ -1,7 +1,7 @@
 ---
 id: KAN-009
 title: SQLite WAL Storage Provider
-status: review
+status: done
 stage: 1
 priority: high
 owner: worker-kan-009
@@ -29,43 +29,43 @@ specs:
 
 ## Объём работ
 
-- [ ] Создать пакет `packages/storage-sqlite` со сборкой через tsup 9.
-- [ ] Реализовать `StorageProvider` для SQLite.
-- [ ] Открывать базу через `better-sqlite3` 13.0.x.
-- [ ] Обернуть синхронные вызовы драйвера в асинхронный публичный API.
-- [ ] Реализовать `withTransaction` вручную, не передавая async callback в sync transaction helper.
-- [ ] Сериализовать операции на соединении; транзакция монополизирует соединение.
-- [ ] Откатывать транзакцию при rejected Promise.
-- [ ] Зарегистрировать провайдер в application composition root `apps/web` при bootstrap.
-- [ ] Проходить health check до применения миграций остальных плагинов.
-- [ ] Сохранять app-generated ID и UTC-время без участия SQLite autoincrement.
-- [ ] Устанавливать `journal_mode = WAL`.
-- [ ] Устанавливать `foreign_keys = ON`.
-- [ ] Устанавливать `busy_timeout = 5000`.
-- [ ] Устанавливать `synchronous = NORMAL`.
-- [ ] Разрешать `KANBANER_DATA_DIR` и каталоги ОС по умолчанию.
-- [ ] Формировать пути только через Node.js path API.
-- [ ] Реализовать singleton для Next.js hot reload.
-- [ ] Закрывать соединение и выполнять WAL checkpoint при завершении.
-- [ ] Реализовать транзакции и savepoints.
-- [ ] Реализовать bounded retry для `SQLITE_BUSY`.
-- [ ] Реализовать namespace-префиксы таблиц.
-- [ ] Реализовать `PluginDocumentStore`.
-- [ ] Реализовать `LinkStore`, `PluginStateStore` и `MigrationStore`.
-- [ ] Реализовать `SearchIndexStore` на FTS5.
-- [ ] Использовать токенизатор `unicode61`.
-- [ ] Реализовать `SearchNormalizer`.
-- [ ] Реализовать online backup через `.backup()` внутри процесса приложения.
-- [ ] Проверять backup через `integrity_check`.
-- [ ] Реализовать offline restore в новый каталог.
-- [ ] Запретить restore в каталог с существующей базой.
-- [ ] Не открывать второе соединение со стороны backup/restore при работающем приложении.
-- [ ] Запретить ручное копирование файлов базы, WAL и SHM.
-- [ ] Не реализовывать перенос данных между backend в этой задаче.
-- [ ] Запустить Storage Provider Conformance Suite.
-- [ ] Проверить установку и работу на Linux и Windows.
-- [ ] Проверить загрузку нативного модуля в production build.
-- [ ] Проверить production smoke собранного приложения с открытием SQLite через провайдер.
+- [x] Создать пакет `packages/storage-sqlite` со сборкой через tsup 9.
+- [x] Реализовать `StorageProvider` для SQLite.
+- [x] Открывать базу через `better-sqlite3` 13.0.x.
+- [x] Обернуть синхронные вызовы драйвера в асинхронный публичный API.
+- [x] Реализовать `withTransaction` вручную, не передавая async callback в sync transaction helper.
+- [x] Сериализовать операции на соединении; транзакция монополизирует соединение.
+- [x] Откатывать транзакцию при rejected Promise.
+- [x] Зарегистрировать провайдер в application composition root `apps/web` при bootstrap.
+- [x] Проходить health check до применения миграций остальных плагинов.
+- [x] Сохранять app-generated ID и UTC-время без участия SQLite autoincrement.
+- [x] Устанавливать `journal_mode = WAL`.
+- [x] Устанавливать `foreign_keys = ON`.
+- [x] Устанавливать `busy_timeout = 5000`.
+- [x] Устанавливать `synchronous = NORMAL`.
+- [x] Разрешать `KANBANER_DATA_DIR` и каталоги ОС по умолчанию.
+- [x] Формировать пути только через Node.js path API.
+- [x] Реализовать singleton для Next.js hot reload.
+- [x] Закрывать соединение и выполнять WAL checkpoint при завершении.
+- [x] Реализовать транзакции и savepoints.
+- [x] Реализовать bounded retry для `SQLITE_BUSY`.
+- [x] Реализовать namespace-префиксы таблиц.
+- [x] Реализовать `PluginDocumentStore`.
+- [x] Реализовать `LinkStore`, `PluginStateStore` и `MigrationStore`.
+- [x] Реализовать `SearchIndexStore` на FTS5.
+- [x] Использовать токенизатор `unicode61`.
+- [x] Реализовать `SearchNormalizer`.
+- [x] Реализовать online backup через `.backup()` внутри процесса приложения.
+- [x] Проверять backup через `integrity_check`.
+- [x] Реализовать offline restore в новый каталог.
+- [x] Запретить restore в каталог с существующей базой.
+- [x] Не открывать второе соединение со стороны backup/restore при работающем приложении.
+- [x] Запретить ручное копирование файлов базы, WAL и SHM.
+- [x] Не реализовывать перенос данных между backend в этой задаче.
+- [x] Запустить Storage Provider Conformance Suite.
+- [ ] Проверить установку и работу на Linux и Windows. Linux проверен; Windows недоступен в текущем окружении.
+- [x] Проверить загрузку нативного модуля в production build.
+- [x] Проверить production smoke собранного приложения с открытием SQLite через провайдер.
 
 ## Владение файлами
 
@@ -118,72 +118,72 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] SQLite открывается без внешней СУБД и Docker.
-- [ ] Используется `better-sqlite3` 13.0.x и FTS5.
-- [ ] Все публичные методы провайдера возвращают `Promise`.
-- [ ] Commit происходит после завершения async callback.
-- [ ] Rejected Promise приводит к rollback.
-- [ ] Параллельные write-транзакции сериализуются и не перемешиваются.
-- [ ] Операция другого вызова не выполняется внутри открытой транзакции.
-- [ ] Провайдер зарегистрирован в `apps/web` и открыт до первой миграции.
-- [ ] Ошибка открытия провайдера не приводит к частично применённым миграциям.
-- [ ] Публичные ID генерируются до записи и не являются SQLite rowid.
-- [ ] UTC-время сохраняется без изменения часового пояса.
-- [ ] `PRAGMA journal_mode` возвращает `wal`.
-- [ ] `PRAGMA foreign_keys` включён.
-- [ ] `busy_timeout` равен 5000 мс.
-- [ ] `synchronous` соответствует `NORMAL`.
-- [ ] `KANBANER_DATA_DIR` переопределяет каталог данных.
-- [ ] Каталоги по умолчанию корректны для Linux и Windows.
-- [ ] Пути с пробелами и не-ASCII символами работают.
-- [ ] Данные сохраняются после закрытия и повторного открытия.
-- [ ] При hot reload не создаётся лишнее соединение.
-- [ ] При завершении выполняется WAL checkpoint.
-- [ ] Транзакция откатывается при ошибке.
-- [ ] `SQLITE_BUSY` не приводит к бесконечному retry.
-- [ ] Namespace-префиксы не позволяют плагину писать в чужие таблицы через публичный API.
-- [ ] `PluginDocumentStore` и инфраструктурные Store-контракты проходят conformance suite.
-- [ ] FTS5 находит кириллицу без учёта регистра.
-- [ ] FTS5 поддерживает фразы и prefix-запросы.
-- [ ] Online `.backup()` создаёт консистентную копию при параллельной записи.
-- [ ] Online backup выполняется внутри процесса приложения.
-- [ ] `.backup()` не копирует live-файлы базы, WAL и SHM вручную.
-- [ ] `integrity_check` проходит на созданном backup.
-- [ ] Повреждённый backup обнаруживается.
-- [ ] Restore в новый каталог работает при остановленном приложении.
-- [ ] Restore отказывается работать с каталогом, где уже есть база.
-- [ ] Backup/restore не открывают второе соединение с работающей базой.
-- [ ] Storage Provider Conformance Suite проходит полностью.
-- [ ] Тесты проходят на Linux и Windows.
-- [ ] Production build загружает `better-sqlite3`.
-- [ ] Production smoke запускает собранное приложение и открывает SQLite через провайдер.
-- [ ] В репозитории нет секретов.
+- [x] SQLite открывается без внешней СУБД и Docker.
+- [x] Используется `better-sqlite3` 13.0.x и FTS5.
+- [x] Все публичные методы провайдера возвращают `Promise`.
+- [x] Commit происходит после завершения async callback.
+- [x] Rejected Promise приводит к rollback.
+- [x] Параллельные write-транзакции сериализуются и не перемешиваются.
+- [x] Операция другого вызова не выполняется внутри открытой транзакции.
+- [x] Провайдер зарегистрирован в `apps/web` и открыт до первой миграции.
+- [x] Ошибка открытия провайдера не приводит к частично применённым миграциям.
+- [x] Публичные ID генерируются до записи и не являются SQLite rowid.
+- [x] UTC-время сохраняется без изменения часового пояса.
+- [x] `PRAGMA journal_mode` возвращает `wal`.
+- [x] `PRAGMA foreign_keys` включён.
+- [x] `busy_timeout` равен 5000 мс.
+- [x] `synchronous` соответствует `NORMAL`.
+- [x] `KANBANER_DATA_DIR` переопределяет каталог данных.
+- [x] Каталоги по умолчанию корректны для Linux и Windows.
+- [x] Пути с пробелами и не-ASCII символами работают.
+- [x] Данные сохраняются после закрытия и повторного открытия.
+- [x] При hot reload не создаётся лишнее соединение.
+- [x] При завершении выполняется WAL checkpoint.
+- [x] Транзакция откатывается при ошибке.
+- [x] `SQLITE_BUSY` не приводит к бесконечному retry.
+- [x] Namespace-префиксы не позволяют плагину писать в чужие таблицы через публичный API.
+- [x] `PluginDocumentStore` и инфраструктурные Store-контракты проходят conformance suite.
+- [x] FTS5 находит кириллицу без учёта регистра.
+- [x] FTS5 поддерживает фразы и prefix-запросы.
+- [x] Online `.backup()` создаёт консистентную копию при параллельной записи.
+- [x] Online backup выполняется внутри процесса приложения.
+- [x] `.backup()` не копирует live-файлы базы, WAL и SHM вручную.
+- [x] `integrity_check` проходит на созданном backup.
+- [x] Повреждённый backup обнаруживается.
+- [x] Restore в новый каталог работает при остановленном приложении.
+- [x] Restore отказывается работать с каталогом, где уже есть база.
+- [x] Backup/restore не открывают второе соединение с работающей базой.
+- [x] Storage Provider Conformance Suite проходит полностью.
+- [ ] Тесты проходят на Linux и Windows. Linux проверен; Windows не проверен.
+- [x] Production build загружает `better-sqlite3`.
+- [x] Production smoke запускает собранное приложение и открывает SQLite через провайдер.
+- [x] В репозитории нет секретов.
 
 ## Проверки
 
-- [ ] Typecheck.
-- [ ] Линтер.
-- [ ] Unit-тесты провайдера.
-- [ ] Проверка асинхронности публичного API.
-- [ ] Тест async callback с задержкой и commit после `await`.
-- [ ] Тест rollback при rejected Promise.
-- [ ] Тест параллельных транзакций и сериализации.
-- [ ] Тест операции другого вызова во время открытой транзакции.
-- [ ] Тест app-generated ID и UTC-времени.
-- [ ] Проверка bootstrap-порядка и health check.
-- [ ] Тесты WAL, транзакций и `SQLITE_BUSY`.
-- [ ] Тесты миграций и checksum.
-- [ ] Тесты Store-контрактов.
-- [ ] Тесты FTS5 и `SearchNormalizer`.
-- [ ] Тест online backup при параллельной записи.
-- [ ] Тест `integrity_check` и повреждённого backup.
-- [ ] Тест offline restore.
-- [ ] Storage Provider Conformance Suite.
-- [ ] Установка и тесты на Linux.
-- [ ] Установка и тесты на Windows.
-- [ ] Production build и загрузка нативного модуля.
-- [ ] Production smoke собранного приложения.
-- [ ] Проверка отсутствия Docker и внешней СУБД.
+- [x] Typecheck.
+- [x] Линтер.
+- [x] Unit-тесты провайдера.
+- [x] Проверка асинхронности публичного API.
+- [x] Тест async callback с задержкой и commit после `await`.
+- [x] Тест rollback при rejected Promise.
+- [x] Тест параллельных транзакций и сериализации.
+- [x] Тест операции другого вызова во время открытой транзакции.
+- [x] Тест app-generated ID и UTC-времени.
+- [x] Проверка bootstrap-порядка и health check.
+- [x] Тесты WAL, транзакций и `SQLITE_BUSY`.
+- [x] Тесты миграций и checksum.
+- [x] Тесты Store-контрактов.
+- [x] Тесты FTS5 и `SearchNormalizer`.
+- [x] Тест online backup при параллельной записи.
+- [x] Тест `integrity_check` и повреждённого backup.
+- [x] Тест offline restore.
+- [x] Storage Provider Conformance Suite.
+- [x] Установка и тесты на Linux.
+- [ ] Установка и тесты на Windows — окружение недоступно, проверка не выполнялась.
+- [x] Production build и загрузка нативного модуля.
+- [x] Production smoke собранного приложения.
+- [x] Проверка отсутствия Docker и внешней СУБД.
 
 ## Риски
 
@@ -202,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — KAN-009 влита в `dev` merge-коммитом `064b0d55764fd7a7cf671b8c1f238d6c794514af`; strict install, полный check, Playwright и deferred-write SIGTERM test зелёные на ветке и `dev`, финальное ревью разрешило интеграцию. Feature-ветка и worktree удалены, задача переведена в done; Windows-проверки явно оставлены невыполненными.
 - 2026-11-07 — После разрешённого повтора worker коммитом `36cfe6d` устранил scheduling deadlock и изолировал Playwright на custom server; 164 focused-теста, 664 workspace-теста, 70 Conformance, 3 E2E и deferred SIGTERM test зелёные. Пользовательский data dir не изменился, задача повторно в review.
 - 2026-11-07 — При запуске исправления scheduler deadlock и E2E worker завершился инфраструктурной ошибкой `Internal Server Error` (`request_id: ce86f91b-1564-410f-97aa-03522badfc9f`). Worktree чистый на `ae7da96`, новых изменений и результатов исправления нет; требуется решение о повторном запуске.
 - 2026-11-07 — Ревью подтвердило SQL scanner, backup и custom shutdown, но нашло deadlock при await parent/sibling из активного savepoint и запуск Playwright через старый `next start` без изолированной БД. Требуется обнаружение scheduling conflict вместо ожидания и единый custom server для E2E.
@@ -218,9 +219,7 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `064b0d55764fd7a7cf671b8c1f238d6c794514af`; feature-коммиты `fcc6351`, `2e2b9c4`, `310325b`, `68910b7`.
+- Ветка: `feat/kan-009-sqlite-wal-storage` влита в `dev`; ветка и worktree удалены после успеха.
+- Проверки: strict frozen install, полный `pnpm check`, 7 focused test files / 164 tests и 48 workspace test files / 664 tests, 70 Conformance-тестов normal/delayed, 3 Playwright E2E и deferred-write SIGTERM test зелёные на ветке и `dev`. Production подтвердил WAL, `kanbaner.core`, integrity_check и checkpoint; CLI restore с non-ASCII путями работает.
+- Остаточные риски: установка, нативный модуль, custom shutdown, CLI и E2E не проверены на Windows из-за недоступности ОС; `synchronous=NORMAL` остаётся осознанным компромиссом; предупреждения Turbopack и отдельные E2E/SIGTERM-проверки вне `pnpm check` задокументированы.
