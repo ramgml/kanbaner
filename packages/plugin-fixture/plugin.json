@@ -1,0 +1,18 @@
+{
+  "id": "kanbaner.fixture",
+  "name": "Kanbaner Contract Fixture",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./dist/index.js"
+  },
+  "requires": {},
+  "consumes": [
+    "kanbaner.fixture.commands.v1",
+    "kanbaner.fixture.queries.v1",
+    "kanbaner.fixture.events.v1"
+  ],
+  "provides": ["kanbaner.fixture.ui.v1"],
+  "permissions": ["commands", "events", "storage", "ui"],
+  "migrations": "./migrations"
+}

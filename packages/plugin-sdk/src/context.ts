@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12 } from "./contract.ts";
+import type { PluginEventService } from "./activation.ts";
 import type { OperationId } from "./plugin-id.ts";
 import type { ResourceService } from "./resources.ts";
 import type { OperationResult } from "./results.ts";
@@ -79,5 +80,6 @@ export interface ExecutionContext<TStorage = unknown> {
   readonly commands: CommandInvoker;
   readonly queries: QueryInvoker;
   readonly resources: ResourceService;
+  readonly events: PluginEventService;
   readonly storage: TStorage;
 }

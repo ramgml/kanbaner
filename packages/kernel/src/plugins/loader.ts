@@ -117,7 +117,11 @@ export async function loadPluginServerModule(
   let namespace: unknown;
 
   try {
-    namespace = await import(/* @vite-ignore */ url);
+    // Плагины загружаются из локального каталога уже во время работы
+    // приложения. Bundler не должен превращать этот динамический import в
+    // статический require-граф: иначе Next/Turbopack пытается разрешить
+    // выражение на этапе сборки и падает с MODULE_NOT_FOUND.
+    namespace = await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ url);
   } catch {
     return { ok: false, reason: "import_failed" };
   }

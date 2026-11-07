@@ -23,7 +23,19 @@ export const E2E_DATA_DIR = path.join(
   `${process.pid}-${Date.now()}`,
 );
 
-export const E2E_PLUGIN_DIRS = path.join(appDirectory, "e2e", "fixtures", "plugins");
+/**
+ * Discovery roots плагинов для E2E.
+ *
+ * Ядро ищет `<root>/<plugin-dir>/plugin.json`, поэтому fixture-пакет
+ * подключается через родительский `packages/`, а не через путь самого
+ * пакета. `path.delimiter` делает значение кроссплатформенным.
+ */
+const E2E_FIXTURE_PLUGIN_DIR = path.join(appDirectory, "e2e", "fixtures", "plugins");
+const E2E_WORKSPACE_PACKAGES_DIR = path.resolve(appDirectory, "../../packages");
+
+export const E2E_PLUGIN_DIRS = [E2E_FIXTURE_PLUGIN_DIR, E2E_WORKSPACE_PACKAGES_DIR].join(
+  path.delimiter,
+);
 
 if (!E2E_DATA_DIR.startsWith(`${nodeModulesDirectory}${path.sep}`)) {
   throw new Error(`E2E data directory must stay inside apps/web/node_modules: ${E2E_DATA_DIR}`);

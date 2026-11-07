@@ -1,4 +1,4 @@
-import type { JsonValue, PluginManifest } from "@kanbaner/plugin-sdk";
+import type { JsonValue, PluginActivationServices, PluginManifest } from "@kanbaner/plugin-sdk";
 
 export type PluginLogLevel = "debug" | "info" | "warn" | "error";
 
@@ -16,8 +16,15 @@ export interface PluginRuntimeLogger {
   ): void | Promise<void>;
 }
 
-/** Контекст, который runtime передаёт серверному коду плагина. */
-export interface PluginActivationContext {
+/**
+ * Контекст, который runtime передаёт серверному коду плагина.
+ *
+ * `PluginActivationServices` — публичный SDK-контракт. Регистраторы уже
+ * привязаны к `pluginId`; storage — активный Storage Provider, события —
+ * шина с публикацией после коммита. Composition root передаёт общие сервисы
+ * в runtime, runtime безопасно связывает их с конкретным плагином.
+ */
+export interface PluginActivationContext extends PluginActivationServices {
   readonly pluginId: string;
   readonly manifest: PluginManifest;
   readonly directory: string;

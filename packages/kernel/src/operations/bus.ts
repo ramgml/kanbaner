@@ -3,6 +3,7 @@ import {
   toSuccessResult,
   validateWithSchema,
   type CommandInvoker,
+  type EventService,
   type ExecutionContext,
   type OperationId,
   type OperationResult,
@@ -12,7 +13,12 @@ import {
   type ResourceService,
 } from "@kanbaner/plugin-sdk";
 
-import { createUnavailableResourceService, NOOP_LOGGER } from "./context.ts";
+import {
+  bindEventService,
+  createUnavailableEventService,
+  createUnavailableResourceService,
+  NOOP_LOGGER,
+} from "./context.ts";
 import {
   cancelledError,
   inputValidationError,
@@ -94,6 +100,7 @@ class OperationRuntime {
   private readonly validateOutput: boolean;
   private readonly logger: PluginLogger;
   private readonly resources: ResourceService;
+  private readonly events: EventService;
   private readonly storage: unknown;
 
   constructor(options: OperationBusOptions) {
@@ -111,6 +118,7 @@ class OperationRuntime {
     this.validateOutput = options.validateOutput === true;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.resources = options.resources ?? createUnavailableResourceService();
+    this.events = options.events ?? createUnavailableEventService();
     this.storage = options.storage;
   }
 
@@ -341,6 +349,7 @@ class OperationRuntime {
       commands,
       queries,
       resources: this.resources,
+      events: bindEventService(this.events, operation.pluginId),
       storage: this.storage,
       ...(deadline === undefined ? {} : { deadline }),
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),

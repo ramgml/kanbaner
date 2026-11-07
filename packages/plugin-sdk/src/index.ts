@@ -4,6 +4,7 @@
  * Пакет не зависит от ядра, приложения, React и Tailwind. Все JSON Schema
  * строятся TypeBox, runtime-валидация выполняется Ajv Draft 2020-12.
  */
+export * from "./activation.ts";
 export * from "./contract.ts";
 export * from "./context.ts";
 export * from "./errors.ts";

@@ -68,7 +68,11 @@ test.describe("адаптивный shell в реальном Chromium", () => {
   test("Space переключает плагин через Radix Switch", async ({ page }) => {
     await page.goto("/plugins");
 
-    const control = page.getByRole("switch", { name: /Включить плагин/ });
+    // В registry есть и контрактный fixture-плагин, поэтому переключатель
+    // выбирается по карточке конкретного плагина, а не по общему имени роли.
+    const control = page
+      .locator('[data-plugin-id="example.e2e-switch"]')
+      .getByRole("switch", { name: /Включить плагин/ });
 
     await expect(control).toBeVisible();
     await expect(control).toHaveAttribute("aria-checked", "true");

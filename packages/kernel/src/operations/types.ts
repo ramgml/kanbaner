@@ -1,5 +1,6 @@
 import type {
   CommandMetadata,
+  EventService,
   ExecutionContext,
   InvocationOptions,
   JsonSchemaValidator,
@@ -63,6 +64,13 @@ export interface OperationBusOptions {
   readonly validateOutput?: boolean;
   readonly logger?: PluginLogger;
   readonly resources?: ResourceService;
+  /**
+   * Хост-шина событий.
+   *
+   * Шина операций привязывает её к namespace-у выполняемой операции и
+   * передаёт обработчику как `ctx.events`.
+   */
+  readonly events?: EventService;
   readonly storage?: unknown;
 }
 
