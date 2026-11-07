@@ -1,7 +1,7 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-008
@@ -139,6 +139,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker завершил fixture и контрактные проверки коммитом `9424ad9`; 53 focused-теста, 37 Conformance integration, 718 workspace-тестов, 7 Playwright E2E и deferred SIGTERM test зелёные. `check:imports` и self-test работают, production fixture загружается через public lifecycle. Создан отчёт, задача переведена в review.
 - 2026-11-07 — Пользователь выбрал расширение lifecycle. Оркестратор назначил worker-kan-008, ветку `feat/kan-008-contract-tests` и worktree `.worktrees/kan-008-contract-tests`; разрешены точечные изменения SDK/KAN-003/KAN-004/KAN-005 и composition services для commands/queries/resources/storage/events, обновление Plugin Contract и согласованных test configs.
 - 2026-11-07 — Все зависимости завершены, но запуск заблокирован конфликтом: фактический `PluginActivationContext` из KAN-003 содержит только `pluginId`, `manifest`, `directory`, `hostApiVersion`, `logger`, тогда как fixture должен зарегистрировать commands/queries/events/resources через lifecycle без изменения ядра. Требуется явное решение пользователя о расширении composition-контракта и границ KAN-008.
 - 2026-11-06 — Задача создана.
