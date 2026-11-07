@@ -32,7 +32,8 @@ export interface KanbanCardProps {
   readonly task: Task;
   readonly index: number;
   readonly columnSize: number;
-  readonly subtaskCount: number;
+  /** `null` — счётчик неизвестен из-за ошибки запроса, а не реальный ноль. */
+  readonly subtaskCount: number | null;
   readonly selected: boolean;
   readonly pending: boolean;
   readonly conflict: boolean;
@@ -187,7 +188,7 @@ export function KanbanCard({
         data-testid={`kanban-subtasks-${task.id}`}
         style={{ margin: 0, fontSize: "11px", color: "var(--muted-foreground)" }}
       >
-        Подзадачи: {subtaskCount}
+        Подзадачи: {subtaskCount ?? "—"}
       </p>
 
       {pending ? (

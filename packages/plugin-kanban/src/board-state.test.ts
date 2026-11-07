@@ -4,10 +4,10 @@ import type { Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 
 import {
   applyPlacements,
-  computeMovePosition,
   createEmptyColumns,
   getColumn,
   placementForIndex,
+  resolveMovePosition,
 } from "./ui/board-state.ts";
 
 function task(id: string, status: TaskStatus, position: number, projectId = "project-1"): Task {
@@ -79,16 +79,27 @@ describe("board-state", () => {
     expect(getColumn(moved, "done").total).toBe(2);
   });
 
-  it("считает позицию в области проекта, игнорируя чужие проекты", () => {
-    const items = [
-      task("a0", "todo", 0, "project-a"),
-      task("b0", "todo", 0, "project-b"),
-      task("a1", "todo", 1, "project-a"),
-      task("b1", "todo", 1, "project-b"),
-    ];
+  it("считает append и before по полному списку, исключая перемещаемую карточку", () => {
+    const items = [task("a", "todo", 0), task("b", "todo", 1), task("c", "todo", 2)];
 
-    expect(computeMovePosition(items, "a1")).toBe(1);
-    expect(computeMovePosition(items, "b1")).toBe(1);
+    expect(resolveMovePosition(items, "a", { kind: "append" })).toBe(2);
+    expect(resolveMovePosition(items, "a", { kind: "start" })).toBe(0);
+    expect(resolveMovePosition(items, "a", { kind: "before", beforeId: "c" })).toBe(1);
+    expect(resolveMovePosition(items, "a", { kind: "before", beforeId: "missing" })).toBe(2);
+  });
+
+  it("считает up/down по полному scope, включая скрытого фильтром соседа", () => {
+    const visibleNeighbour = task("visible", "todo", 0);
+    const moved = task("moved", "todo", 1);
+    const hiddenNeighbour = task("hidden", "todo", 2);
+    const fullScope = [visibleNeighbour, moved, hiddenNeighbour];
+
+    // В отфильтрованном виде «ниже» выглядит как конец списка, но в полном
+    // scope после moved есть скрытый сосед, поэтому позиция = 2.
+    expect(resolveMovePosition(fullScope, "moved", { kind: "relative", direction: "up" })).toBe(0);
+    expect(resolveMovePosition(fullScope, "moved", { kind: "relative", direction: "down" })).toBe(
+      2,
+    );
   });
 
   it("строит вставку перед следующей карточкой для целевого индекса", () => {

@@ -46,6 +46,10 @@ export type UiComponent = ComponentType<{
   readonly invoke: UiOperationInvoker;
   /** Текущий pathname App Router; shell передаёт его в слоты. */
   readonly pathname?: string | undefined;
+  /** Текущая query string App Router; нужна для синхронизации состояния. */
+  readonly search?: string | undefined;
+  /** Поддерживаемое обновление query string через App Router. */
+  readonly replaceSearch?: ((search: string) => void) | undefined;
 }>;
 
 export interface UiContributionRegistry {

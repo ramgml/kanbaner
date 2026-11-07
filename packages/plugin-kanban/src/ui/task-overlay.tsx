@@ -38,7 +38,12 @@ import {
   invokeJson,
   isVersionConflict,
 } from "./operations.ts";
-import { bumpKanbanRevision, updateKanbanQuery, useKanbanQuery } from "./query-state.ts";
+import {
+  bumpKanbanRevision,
+  registerKanbanSearchWriter,
+  updateKanbanQuery,
+  useKanbanQuery,
+} from "./query-state.ts";
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
 
@@ -48,6 +53,8 @@ const MOBILE_DIALOG_CLASS =
 export interface TaskOverlayProps {
   readonly invoke: UiOperationInvoker;
   readonly pathname?: string | undefined;
+  readonly search?: string | undefined;
+  readonly replaceSearch?: ((search: string) => void) | undefined;
 }
 
 /**
@@ -57,8 +64,16 @@ export interface TaskOverlayProps {
  * только пока локальное состояние открыто. Детали и форма берутся из
  * `@kanbaner/task-ui`, поэтому плагин не зависит от `kanbaner.task-list`.
  */
-export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
-  const query = useKanbanQuery();
+export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOverlayProps) {
+  const query = useKanbanQuery(search);
+
+  useEffect(() => {
+    if (replaceSearch === undefined) {
+      return;
+    }
+
+    return registerKanbanSearchWriter(replaceSearch);
+  }, [replaceSearch]);
   const taskId = query.taskId;
   const onKanbanRoute = pathname === KANBAN_ROUTE;
   const isDesktopViewport = useMediaQuery(DESKTOP_MEDIA_QUERY);
@@ -69,7 +84,10 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const editing = editingTaskId !== null && editingTaskId === taskId;
+  // Данные от предыдущей задачи (A) не должны показываться или выполнять
+  // команды, пока не загрузилась выбранная задача (B).
+  const currentTask = task !== null && task.id === taskId ? task : null;
+  const editing = editingTaskId !== null && editingTaskId === taskId && currentTask !== null;
   const [conflictState, setConflictState] = useState<{
     readonly taskId: string;
     readonly message: string;
@@ -131,7 +149,7 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   }, [invoke, taskId, query.revision, onKanbanRoute]);
 
   useEffect(() => {
-    if (!editing || task === null || !onKanbanRoute) {
+    if (!editing || currentTask === null || !onKanbanRoute) {
       return;
     }
 
@@ -140,7 +158,7 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
     void (async () => {
       try {
         const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
-          projectId: task.projectId,
+          projectId: currentTask.projectId,
           parentTaskId: null,
           limit: 200,
           offset: 0,
@@ -158,7 +176,7 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
     return () => {
       cancelled = true;
     };
-  }, [invoke, editing, task, query.revision, onKanbanRoute]);
+  }, [invoke, editing, currentTask, query.revision, onKanbanRoute]);
 
   useEffect(() => {
     if (!onKanbanRoute || taskId === null || editing || !isDesktopViewport) {
@@ -211,13 +229,13 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   };
 
   const save = async (values: TaskFormValues): Promise<void> => {
-    if (task === null) {
+    if (currentTask === null) {
       return;
     }
 
     const input: TaskUpdateInput = {
-      id: task.id,
-      expectedVersion: task.version,
+      id: currentTask.id,
+      expectedVersion: currentTask.version,
       title: values.title,
       descriptionMarkdown: values.descriptionMarkdown,
       priority: values.priority,
@@ -232,11 +250,14 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   };
 
   const complete = (): void => {
-    if (task === null) {
+    if (currentTask === null) {
       return;
     }
 
-    const input: TaskCompleteInput = { id: task.id, expectedVersion: task.version };
+    const input: TaskCompleteInput = {
+      id: currentTask.id,
+      expectedVersion: currentTask.version,
+    };
 
     void runCommand(async () => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskComplete, input as unknown as JsonValue);
@@ -244,13 +265,13 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   };
 
   const move = (status: TaskStatus): void => {
-    if (task === null) {
+    if (currentTask === null) {
       return;
     }
 
     const input: TaskMoveInput = {
-      id: task.id,
-      expectedVersion: task.version,
+      id: currentTask.id,
+      expectedVersion: currentTask.version,
       status,
       position: 0,
     };
@@ -261,13 +282,13 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   };
 
   const remove = (): void => {
-    if (task === null) {
+    if (currentTask === null) {
       return;
     }
 
     const input: TaskDeleteInput = {
-      id: task.id,
-      expectedVersion: task.version,
+      id: currentTask.id,
+      expectedVersion: currentTask.version,
       confirm: true,
     };
 
@@ -278,9 +299,9 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
   };
 
   const content =
-    loading && task === null ? (
+    loading && currentTask === null ? (
       <LoadingState label="Загрузка деталей…" />
-    ) : task === null ? (
+    ) : currentTask === null ? (
       <ErrorState message={error ?? "Задача не найдена"} onRetry={bumpKanbanRevision} />
     ) : editing ? (
       <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -290,14 +311,14 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
           </p>
         )}
         <TaskForm
-          key={`edit-${task.id}-${String(task.version)}`}
+          key={`edit-${currentTask.id}-${String(currentTask.version)}`}
           mode="edit"
           projects={project === null ? [] : [project]}
           rootTasks={rootTasks}
-          initial={taskToFormValues(task)}
-          excludeTaskId={task.id}
+          initial={taskToFormValues(currentTask)}
+          excludeTaskId={currentTask.id}
           lockParent
-          submitting={busy}
+          submitting={busy || loading}
           error={error}
           onSubmit={(values) => {
             void save(values);
@@ -310,10 +331,10 @@ export function TaskOverlay({ invoke, pathname }: TaskOverlayProps) {
       </div>
     ) : (
       <TaskDetails
-        task={task}
+        task={currentTask}
         project={project}
         parentTask={parentTask}
-        busy={busy}
+        busy={busy || loading}
         error={error ?? conflict}
         onClose={close}
         onEdit={() => {

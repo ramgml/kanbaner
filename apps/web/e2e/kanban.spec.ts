@@ -175,6 +175,10 @@ async function openCardActions(page: Page, taskId: string): Promise<void> {
   await expect(details).toHaveAttribute("open", /.*/u);
 }
 
+async function waitForCardSettled(page: Page, taskId: string): Promise<void> {
+  await expect(card(page, taskId)).not.toHaveAttribute("aria-busy", "true");
+}
+
 async function moveWithMenu(
   page: Page,
   taskId: string,
@@ -189,6 +193,7 @@ async function moveWithMenu(
   await expect(button).toBeVisible();
   await button.focus();
   await page.keyboard.press("Enter");
+  await waitForCardSettled(page, taskId);
 }
 
 async function reorderWithMenu(
@@ -203,6 +208,7 @@ async function reorderWithMenu(
   await expect(button).toBeVisible();
   await button.focus();
   await page.keyboard.press("Enter");
+  await waitForCardSettled(page, taskId);
 }
 
 async function cardTitles(page: Page, status: keyof typeof STATUS_LABELS): Promise<string[]> {
@@ -558,6 +564,174 @@ test.describe("канбан в production shell", () => {
       await page.getByTestId("kanban-load-more-backlog").click();
       await expect.poll(async () => cardTitles(page, "backlog")).toEqual(ids);
       expect(new Set(await cardTitles(page, "backlog")).size).toBe(total);
+
+      // «В конец» после догрузки считается по полному scope и не теряет
+      // карточку за границей первой страницы.
+      const rotated = [...ids.slice(1), ids[0] as string];
+
+      await reorderWithMenu(page, ids[0] as string, "В конец");
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(rotated);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await filterByProject(page, projectTitle);
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(rotated);
+      expect(new Set(await cardTitles(page, "backlog")).size).toBe(total);
+    });
+
+    test("переставляет filtered-карточку по полному scope, не теряя скрытого соседа", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект скрытого соседа");
+      const visibleTitle = uniqueTitle("Видимая A");
+      const hiddenTitle = uniqueTitle("Скрытая соседняя");
+      const secondTitle = uniqueTitle("Видимая C");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const visibleId = await createTask(page, {
+        projectTitle,
+        title: visibleTitle,
+        status: "todo",
+        tags: "release",
+      });
+      const hiddenId = await createTask(page, {
+        projectTitle,
+        title: hiddenTitle,
+        status: "todo",
+        tags: "backend",
+      });
+      const secondId = await createTask(page, {
+        projectTitle,
+        title: secondTitle,
+        status: "todo",
+        tags: "release",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect
+        .poll(async () => cardTitles(page, "todo"))
+        .toEqual([visibleId, hiddenId, secondId]);
+
+      const filters = page.getByTestId("kanban-filters");
+
+      await filters.getByLabel("Тег", { exact: true }).fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleId, secondId]);
+
+      // В видимом списке «В конец» дал бы позицию 1; полный scope требует 2,
+      // поэтому скрытая карточка остаётся перед видимой C.
+      await reorderWithMenu(page, visibleId, "В конец");
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([secondId, visibleId]);
+
+      await filters.getByLabel("Тег", { exact: true }).fill("");
+      await expect
+        .poll(async () => cardTitles(page, "todo"))
+        .toEqual([hiddenId, secondId, visibleId]);
+    });
+
+    test("после перемещения догружает target колонку на 10 и 12 задач", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект границы страницы");
+      const progressTotal = 10;
+      const doneTotal = 12;
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      for (let index = 0; index < progressTotal; index += 1) {
+        await createTask(page, {
+          projectTitle,
+          title: `Прогресс ${String(index + 1).padStart(2, "0")} ${projectTitle}`,
+          status: "in_progress",
+        });
+      }
+
+      for (let index = 0; index < doneTotal; index += 1) {
+        await createTask(page, {
+          projectTitle,
+          title: `Готово ${String(index + 1).padStart(2, "0")} ${projectTitle}`,
+          status: "done",
+        });
+      }
+
+      const progressMoverId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("В прогресс после 10"),
+        status: "todo",
+      });
+      const doneMoverId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("В готово после 12"),
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText(String(progressTotal));
+      await expect(page.getByTestId("kanban-count-done")).toHaveText(String(doneTotal));
+
+      await moveWithMenu(page, progressMoverId, "in_progress");
+      await expectCardInColumn(page, progressMoverId, "in_progress");
+      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText(
+        String(progressTotal + 1),
+      );
+
+      await moveWithMenu(page, doneMoverId, "done");
+      await expectCardInColumn(page, doneMoverId, "done");
+      await expect(page.getByTestId("kanban-count-done")).toHaveText(String(doneTotal + 1));
+
+      // После свежей загрузки страницы колонки снова начинаются с первой
+      // страницы; карточки за границей появляются после «Показать ещё».
+      // Auto-include относится к reloadBoard сразу после move (выше).
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await filterByProject(page, projectTitle);
+      await expect(page.getByTestId("kanban-load-more-in_progress")).toBeVisible();
+      await page.getByTestId("kanban-load-more-in_progress").click();
+      await expectCardInColumn(page, progressMoverId, "in_progress");
+      await expect(page.getByTestId("kanban-load-more-done")).toBeVisible();
+      await page.getByTestId("kanban-load-more-done").click();
+      await expectCardInColumn(page, doneMoverId, "done");
+    });
+
+    test("настоящий Link меняет query на том же маршруте и закрывает overlay", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект Link навигации");
+      const taskTitle = uniqueTitle("Задача Link навигации");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId(`kanban-open-${taskId}`).click();
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(page).toHaveURL(/[?&]task=/u);
+
+      // Клик по настоящей Next Link-навигации на тот же /view/kanban убирает
+      // только query string: overlay закрывается без полной перезагрузки.
+      await page
+        .getByTestId("desktop-sidebar")
+        .getByRole("link", { name: "Канбан", exact: true })
+        .click();
+
+      await expect(page).toHaveURL(/\/view\/kanban$/u);
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+
+      // Уход на другой маршрут тоже скрывает overlay.
+      await page.getByTestId(`kanban-open-${taskId}`).click();
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await page
+        .getByTestId("desktop-sidebar")
+        .getByRole("link", { name: "Плагины", exact: true })
+        .click();
+
+      await expect(page).toHaveURL(/\/plugins$/u);
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
   });
 

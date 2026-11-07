@@ -11,18 +11,20 @@ export { TaskOverlay, type TaskOverlayProps } from "./ui/task-overlay.tsx";
 export {
   KANBAN_PAGE_SIZE,
   applyPlacements,
-  computeMovePosition,
   createEmptyColumns,
   getColumn,
   placementForIndex,
+  resolveMovePosition,
   type KanbanColumnData,
   type KanbanColumns,
+  type MoveIntent,
   type Placement,
 } from "./ui/board-state.ts";
 export {
   DEFAULT_KANBAN_QUERY,
   getKanbanQuerySnapshot,
   parseKanbanQuery,
+  registerKanbanSearchWriter,
   resetKanbanFilters,
   resetKanbanQueryForTests,
   updateKanbanQuery,
@@ -50,7 +52,13 @@ export const kanbanUiPlugin = defineUiPlugin({
         description: "Доска задач с четырьмя колонками, фильтрами и перемещением",
         route: KANBAN_ROUTE,
       },
-      render: (props) => <KanbanView invoke={props.invoke} />,
+      render: (props) => (
+        <KanbanView
+          invoke={props.invoke}
+          search={props.search}
+          replaceSearch={props.replaceSearch}
+        />
+      ),
     },
     {
       metadata: {
@@ -72,7 +80,14 @@ export const kanbanUiPlugin = defineUiPlugin({
         title: "Детали задачи",
         description: "Детали и редактор выбранной карточки на маршруте канбана",
       },
-      render: (props) => <TaskOverlay invoke={props.invoke} pathname={props.pathname} />,
+      render: (props) => (
+        <TaskOverlay
+          invoke={props.invoke}
+          pathname={props.pathname}
+          search={props.search}
+          replaceSearch={props.replaceSearch}
+        />
+      ),
     },
   ],
 });

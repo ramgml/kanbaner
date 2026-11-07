@@ -10,10 +10,12 @@ import { createUiContributionRegistry } from "../../ui/registry";
 import { brokenUiPlugin, testUiPlugin } from "../../ui/__fixtures__/test-ui-plugin";
 import { UiRegistryProvider } from "../../ui/provider";
 
-const navigation = vi.hoisted(() => ({ pathname: "/" }));
+const navigation = vi.hoisted(() => ({ pathname: "/", search: "", replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => navigation.pathname,
+  useSearchParams: () => new URLSearchParams(navigation.search),
+  useRouter: () => ({ replace: navigation.replace }),
 }));
 
 function renderShell(
@@ -40,6 +42,7 @@ function renderShell(
 
 beforeEach(() => {
   navigation.pathname = "/";
+  navigation.search = "";
 });
 
 afterEach(() => {

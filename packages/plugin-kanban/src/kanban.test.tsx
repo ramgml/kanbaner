@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
@@ -9,7 +9,11 @@ import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
 import { TaskOverlay } from "./ui/task-overlay.tsx";
-import { resetKanbanQueryForTests } from "./ui/query-state.ts";
+import {
+  bumpKanbanRevision,
+  resetKanbanQueryForTests,
+  updateKanbanQuery,
+} from "./ui/query-state.ts";
 
 const project: Project = {
   id: "project-1",
@@ -71,6 +75,37 @@ function fail(code: string, message = code): UiOperationResult {
 
 function inputOf(input: JsonValue): Record<string, unknown> {
   return (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve: ((value: T) => void) | null = null;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+
+  return {
+    promise,
+    resolve: (value) => {
+      resolve?.(value);
+    },
+  };
+}
+
+function statusOf(input: JsonValue): string | null {
+  const value = inputOf(input).status;
+
+  return typeof value === "string" ? value : null;
+}
+
+function offsetOf(input: JsonValue): number {
+  const value = inputOf(input).offset;
+
+  return typeof value === "number" ? value : 0;
 }
 
 function compareTasks(left: Task, right: Task): number {
@@ -198,6 +233,18 @@ function createOperations(
 
       return result.ok ? ok({ task: result.task }) : fail(result.code);
     },
+    "kanbaner.tasks.task.delete": (input) => {
+      const id = String(inputOf(input).id);
+
+      board.tasks = board.tasks.filter((task) => task.id !== id);
+
+      return ok(null);
+    },
+    "kanbaner.tasks.task.complete": (input) => {
+      const task = getTask(board, String(inputOf(input).id));
+
+      return task === undefined ? fail("NOT_FOUND") : ok({ task });
+    },
   };
 
   const invoke: UiOperationInvoker = async (operationId, input) => {
@@ -279,7 +326,9 @@ describe("KanbanView", () => {
     await waitFor(() => {
       expect(screen.getByTestId("kanban-subtasks-parent")).toHaveTextContent("Подзадачи: 1");
     });
-    expect(screen.getByTestId("kanban-subtasks-child")).toHaveTextContent("Подзадачи: 0");
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-subtasks-child")).toHaveTextContent("Подзадачи: 0");
+    });
     expect(cardTitles("todo")).toEqual(["Задача todo-task"]);
   });
 
@@ -471,6 +520,525 @@ describe("KanbanView", () => {
 
     expect(pageCalls.some((call) => inputOf(call.input).offset === 10)).toBe(true);
   });
+
+  it("переупорядочивает по полному scope, не теряя скрытого фильтром соседа", async () => {
+    window.history.replaceState(null, "", "/view/kanban?project=project-1&tag=show");
+    resetKanbanQueryForTests("?project=project-1&tag=show");
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("visible-a", { title: "A", status: "todo", position: 0, tags: ["show"] }),
+        makeTask("hidden", { title: "Скрытая", status: "todo", position: 1, tags: ["other"] }),
+        makeTask("visible-c", { title: "C", status: "todo", position: 2, tags: ["show"] }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-visible-a");
+    expect(cardTitles("todo")).toEqual(["A", "C"]);
+
+    // Видимый список [A, C] дал бы position 1, полный [A, скрытая, C] — 2.
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-visible-a")).getByRole("button", {
+        name: "В конец",
+      }),
+    );
+
+    await waitFor(() => {
+      const lastMove = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+        .at(-1);
+
+      expect(inputOf(lastMove?.input ?? {})).toMatchObject({
+        id: "visible-a",
+        status: "todo",
+        position: 2,
+      });
+    });
+
+    await waitFor(() => {
+      expect(cardTitles("todo")).toEqual(["C", "A"]);
+    });
+    expect(board.tasks.find((task) => task.id === "hidden")?.position).toBe(0);
+  });
+
+  it.each([10, 12])(
+    "догружает target колонку после перемещения при %i существующих задачах",
+    async (existingCount) => {
+      const board: FakeBoard = {
+        projects: [project],
+        tasks: [
+          ...Array.from({ length: existingCount }, (_, index) =>
+            makeTask(`done-${String(index)}`, {
+              title: `Готовая ${String(index)}`,
+              status: "done",
+              position: index,
+            }),
+          ),
+          makeTask("mover", { title: "Mover", status: "todo" }),
+        ],
+      };
+      const operations = createOperations(board);
+
+      render(<KanbanView invoke={operations.invoke} />);
+
+      await screen.findByTestId("kanban-card-mover");
+      fireEvent.click(
+        within(screen.getByTestId("kanban-card-mover")).getByRole("button", {
+          name: "Переместить в Готово",
+        }),
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("kanban-count-done")).toHaveTextContent(
+          String(existingCount + 1),
+        );
+      });
+      await waitFor(() => {
+        expect(
+          within(screen.getByTestId("kanban-column-done")).getByTestId("kanban-card-mover"),
+        ).toBeTruthy();
+      });
+      await waitFor(() => {
+        const lastMove = operations.calls
+          .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+          .at(-1);
+
+        expect(inputOf(lastMove?.input ?? {})).toMatchObject({
+          id: "mover",
+          status: "done",
+          position: existingCount,
+        });
+      });
+
+      const moveIndex = operations.calls.findIndex(
+        (call) => call.operationId === "kanbaner.tasks.task.move",
+      );
+      const pagesAfterMove = operations.calls
+        .slice(moveIndex + 1)
+        .filter(
+          (call) =>
+            call.operationId === "kanbaner.tasks.task.list" &&
+            statusOf(call.input) === "done" &&
+            offsetOf(call.input) > 0,
+        );
+
+      expect(pagesAfterMove.length).toBeGreaterThan(0);
+    },
+  );
+
+  it("ставит карточку в конец после догрузки и не теряет её за границей страницы", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`p${String(index).padStart(2, "0")}`, {
+          title: `P${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toHaveLength(12);
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-p00")).getByRole("button", { name: "В конец" }),
+    );
+
+    await waitFor(() => {
+      expect(cardTitles("backlog").at(-1)).toBe("P00");
+    });
+    expect(
+      within(screen.getByTestId("kanban-column-backlog")).getByTestId("kanban-card-p00"),
+    ).toBeTruthy();
+
+    const lastMove = operations.calls
+      .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+      .at(-1);
+
+    expect(inputOf(lastMove?.input ?? {})).toMatchObject({ id: "p00", position: 11 });
+  });
+
+  it("не применяет запоздавший loadMore после смены фильтра", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`t${String(index).padStart(2, "0")}`, {
+          title: `T${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+          tags: [index < 2 ? "keep" : "other"],
+        }),
+      ),
+    };
+    const stale = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        const values = inputOf(input);
+
+        if (
+          statusOf(input) === "backlog" &&
+          offsetOf(input) === 10 &&
+          values.tag === undefined &&
+          values.parentTaskId === undefined
+        ) {
+          return stale.promise;
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    act(() => {
+      updateKanbanQuery({ tag: "keep" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("2");
+    });
+
+    await act(async () => {
+      stale.resolve(
+        ok({
+          items: [makeTask("stale-page", { title: "Stale", status: "backlog", position: 10 })],
+          total: 12,
+          nextOffset: null,
+        }),
+      );
+      await stale.promise;
+    });
+
+    expect(screen.queryByTestId("kanban-card-stale-page")).toBeNull();
+    expect(cardTitles("backlog")).toEqual(["T00", "T01"]);
+  });
+
+  it("после смены фильтра во время move перечитывает колонку актуальным фильтром", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("visible-a", { title: "A", status: "todo", position: 0, tags: ["show"] }),
+        makeTask("hidden", { title: "Скрытая", status: "todo", position: 1, tags: ["other"] }),
+        makeTask("visible-c", { title: "C", status: "todo", position: 2, tags: ["show"] }),
+      ],
+    };
+    const moveDeferred = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.move": (input) => {
+        applyMove(board, input);
+
+        return moveDeferred.promise;
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-visible-a");
+    expect(screen.getByTestId("kanban-card-hidden")).toBeInTheDocument();
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-visible-a")).getByRole("button", {
+        name: "Переместить в Готово",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.move")).toBe(
+        true,
+      );
+    });
+
+    // Фильтр меняется, пока команда ещё не завершилась. Запоздавший reload
+    // после move обязан использовать новый фильтр, а не замыкание клика.
+    act(() => {
+      updateKanbanQuery({ tag: "show" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-card-hidden")).toBeNull();
+    });
+
+    await act(async () => {
+      moveDeferred.resolve(ok({ task: getTask(board, "visible-a") as Task }));
+      await moveDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-visible-a")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("kanban-card-visible-c")).toBeInTheDocument();
+    expect(screen.queryByTestId("kanban-card-hidden")).toBeNull();
+    expect(screen.getByTestId("kanban-count-done")).toHaveTextContent("1");
+    expect(
+      within(screen.getByTestId("kanban-column-todo")).getByTestId("kanban-card-visible-c"),
+    ).toBeTruthy();
+  });
+
+  it("не применяет запоздавший loadMore после перемещения карточки", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`m${String(index).padStart(2, "0")}`, {
+          title: `M${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    const stale = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        const values = inputOf(input);
+
+        if (
+          statusOf(input) === "backlog" &&
+          offsetOf(input) === 10 &&
+          values.parentTaskId === undefined
+        ) {
+          return stale.promise;
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-m00")).getByRole("button", {
+        name: "Переместить в Готово",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("kanban-column-done")).getByTestId("kanban-card-m00"),
+      ).toBeTruthy();
+    });
+
+    await act(async () => {
+      stale.resolve(
+        ok({
+          items: [
+            makeTask("stale-after-move", { title: "Stale", status: "backlog", position: 10 }),
+          ],
+          total: 12,
+          nextOffset: null,
+        }),
+      );
+      await stale.promise;
+    });
+
+    expect(screen.queryByTestId("kanban-card-stale-after-move")).toBeNull();
+  });
+
+  it("перечитывает колонку с начала при полностью дублированной странице и не закрывает пагинацию", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`d${String(index).padStart(2, "0")}`, {
+          title: `D${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    let serveDuplicate = true;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        if (statusOf(input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
+          return ok({ items: board.tasks.slice(0, 10), total: 12, nextOffset: 10 });
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-load-more-backlog")).not.toBeDisabled();
+    });
+    expect(cardTitles("backlog")).toHaveLength(10);
+    expect(new Set(cardTitles("backlog")).size).toBe(10);
+    expect(screen.getByTestId("kanban-load-more-backlog")).toBeInTheDocument();
+
+    serveDuplicate = false;
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toHaveLength(12);
+    });
+    expect(new Set(cardTitles("backlog")).size).toBe(12);
+    expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+  });
+
+  it("добавляет только новые карточки из частично дублированной страницы", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`q${String(index).padStart(2, "0")}`, {
+          title: `Q${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        if (statusOf(input) === "backlog" && offsetOf(input) === 10) {
+          return ok({
+            items: [board.tasks[0] as Task, board.tasks[10] as Task, board.tasks[11] as Task],
+            total: 12,
+            nextOffset: null,
+          });
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toHaveLength(12);
+    });
+    expect(new Set(cardTitles("backlog")).size).toBe(12);
+    expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+  });
+
+  it("пишет query через router-writer shell вместо history.replaceState", () => {
+    const writer = vi.fn();
+    const board: FakeBoard = { projects: [project], tasks: [] };
+    const operations = createOperations(board);
+    const view = render(<KanbanView invoke={operations.invoke} replaceSearch={writer} search="" />);
+
+    act(() => {
+      updateKanbanQuery({ taskId: "a" });
+    });
+
+    expect(writer).toHaveBeenCalledWith("?task=a");
+
+    view.unmount();
+
+    act(() => {
+      updateKanbanQuery({ taskId: null });
+    });
+
+    expect(writer).not.toHaveBeenCalledWith("");
+  });
+
+  it("не кэширует ошибку счётчика подзадач как ноль и перезапрашивает по ревизии", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("parent", { title: "Родитель", status: "todo" }),
+        makeTask("child", { title: "Ребёнок", status: "todo", parentTaskId: "parent" }),
+      ],
+    };
+    let failCounts = true;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        if (inputOf(input).parentTaskId === "parent") {
+          return failCounts
+            ? fail("INTERNAL_ERROR", "счётчик недоступен")
+            : ok({ items: [board.tasks[1] as Task], total: 1, nextOffset: null });
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-subtasks-parent")).toHaveTextContent("Подзадачи: —");
+    });
+    expect(screen.getByTestId("kanban-subtasks-parent")).not.toHaveTextContent("Подзадачи: 0");
+
+    failCounts = false;
+
+    act(() => {
+      bumpKanbanRevision();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-subtasks-parent")).toHaveTextContent("Подзадачи: 1");
+    });
+  });
+
+  it("обновляет счётчик родителя после удаления подзадачи без remount доски", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("parent", { title: "Родитель", status: "todo" }),
+        makeTask("child", { title: "Ребёнок", status: "todo", parentTaskId: "parent" }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    render(
+      <>
+        <KanbanView invoke={operations.invoke} />
+        <TaskOverlay invoke={operations.invoke} pathname="/view/kanban" />
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-subtasks-parent")).toHaveTextContent("Подзадачи: 1");
+    });
+
+    const parentCard = screen.getByTestId("kanban-card-parent");
+
+    fireEvent.click(screen.getByTestId("kanban-open-child"));
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-details")).toHaveTextContent("Ребёнок");
+    });
+
+    fireEvent.click(screen.getByTestId("task-delete"));
+    fireEvent.click(screen.getByTestId("task-delete-confirm"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-subtasks-parent")).toHaveTextContent("Подзадачи: 0");
+    });
+    expect(screen.getByTestId("kanban-card-parent")).toBe(parentCard);
+    expect(board.tasks.some((task) => task.id === "child")).toBe(false);
+  });
 });
 
 describe("TaskOverlay", () => {
@@ -522,5 +1090,122 @@ describe("TaskOverlay", () => {
     );
 
     expect(screen.queryByTestId("kanban-details")).toBeNull();
+  });
+
+  it("при переключении A→B не показывает и не меняет устаревшую задачу A", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    const bLoad = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.get": (input) => {
+        const id = String(inputOf(input).id);
+
+        if (id === "b") {
+          return bLoad.promise;
+        }
+
+        const found = getTask(board, id);
+
+        return found === undefined ? fail("NOT_FOUND") : ok({ task: found });
+      },
+    });
+
+    render(
+      <>
+        <KanbanView invoke={operations.invoke} />
+        <TaskOverlay invoke={operations.invoke} pathname="/view/kanban" />
+      </>,
+    );
+
+    await screen.findByTestId("kanban-card-a");
+    fireEvent.click(screen.getByTestId("kanban-open-a"));
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-details")).toHaveTextContent("Задача A");
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("task-ui-loading")).toBeInTheDocument();
+    });
+
+    const loadingDialog = screen.getByTestId("kanban-details");
+
+    expect(within(loadingDialog).queryByText("Задача A")).toBeNull();
+    expect(within(loadingDialog).queryByRole("button", { name: "Завершить" })).toBeNull();
+    expect(
+      operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.complete"),
+    ).toBe(false);
+
+    await act(async () => {
+      bLoad.resolve(ok({ task: getTask(board, "b") as Task }));
+      await bLoad.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-details")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Завершить" }));
+
+    await waitFor(() => {
+      const lastComplete = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.complete")
+        .at(-1);
+
+      expect(inputOf(lastComplete?.input ?? {})).toMatchObject({ id: "b" });
+    });
+  });
+
+  it("синхронизирует overlay с search из router-aware shell", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "todo", position: 1 }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    const view = render(
+      <>
+        <KanbanView invoke={operations.invoke} search="?task=a" />
+        <TaskOverlay invoke={operations.invoke} pathname="/view/kanban" search="?task=a" />
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-details")).toHaveTextContent("Задача A");
+    });
+
+    // Настоящий Link на том же маршруте меняет только query string.
+    view.rerender(
+      <>
+        <KanbanView invoke={operations.invoke} search="?task=b" />
+        <TaskOverlay invoke={operations.invoke} pathname="/view/kanban" search="?task=b" />
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-details")).toHaveTextContent("Задача B");
+    });
+
+    view.rerender(
+      <>
+        <KanbanView invoke={operations.invoke} search="" />
+        <TaskOverlay invoke={operations.invoke} pathname="/view/kanban" search="" />
+      </>,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
   });
 });

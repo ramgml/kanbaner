@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, type ReactNode } from "react";
 
 import { ShieldAlert } from "lucide-react";
 
@@ -29,7 +29,15 @@ function SafeModeNotice({ problemCount }: { readonly problemCount: number }) {
   );
 }
 
-function DetailsSlot({ pathname }: { readonly pathname: string }) {
+function DetailsSlot({
+  pathname,
+  search,
+  replaceSearch,
+}: {
+  readonly pathname: string;
+  readonly search: string;
+  readonly replaceSearch: (search: string) => void;
+}) {
   const contributions = useUiContributions("app.details");
 
   if (contributions.length === 0) {
@@ -42,12 +50,26 @@ function DetailsSlot({ pathname }: { readonly pathname: string }) {
       data-testid="details-slot"
       className="hidden w-80 shrink-0 overflow-y-auto border-l bg-muted/20 p-4 xl:block"
     >
-      <UiSlot slot="app.details" className="flex flex-col gap-3" pathname={pathname} />
+      <UiSlot
+        slot="app.details"
+        className="flex flex-col gap-3"
+        pathname={pathname}
+        search={search}
+        replaceSearch={replaceSearch}
+      />
     </aside>
   );
 }
 
-function OverlaysSlot({ pathname }: { readonly pathname: string }) {
+function OverlaysSlot({
+  pathname,
+  search,
+  replaceSearch,
+}: {
+  readonly pathname: string;
+  readonly search: string;
+  readonly replaceSearch: (search: string) => void;
+}) {
   const contributions = useUiContributions("app.overlays");
 
   if (contributions.length === 0) {
@@ -61,7 +83,13 @@ function OverlaysSlot({ pathname }: { readonly pathname: string }) {
       className="pointer-events-none fixed inset-0 z-50 flex flex-col items-end justify-end gap-2 p-4"
     >
       <div className="pointer-events-auto flex w-full max-w-sm flex-col gap-2">
-        <UiSlot slot="app.overlays" className="flex flex-col gap-2" pathname={pathname} />
+        <UiSlot
+          slot="app.overlays"
+          className="flex flex-col gap-2"
+          pathname={pathname}
+          search={search}
+          replaceSearch={replaceSearch}
+        />
       </div>
     </div>
   );
@@ -80,6 +108,14 @@ export interface AppShellProps {
  */
 export function AppShell({ children, safeMode = false, problemCount = 0 }: AppShellProps) {
   const pathname = usePathname() ?? "/";
+  const search = useSearchParams()?.toString() ?? "";
+  const router = useRouter();
+  const replaceSearch = useCallback(
+    (nextSearch: string) => {
+      router.replace(`${pathname}${nextSearch}`, { scroll: false });
+    },
+    [pathname, router],
+  );
 
   return (
     <div className="flex min-h-dvh w-full flex-col bg-background">
@@ -105,12 +141,12 @@ export function AppShell({ children, safeMode = false, problemCount = 0 }: AppSh
             {children}
           </main>
 
-          <DetailsSlot pathname={pathname} />
+          <DetailsSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
         </div>
       </div>
 
       <MobileNavigation pathname={pathname} safeMode={safeMode} />
-      <OverlaysSlot pathname={pathname} />
+      <OverlaysSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
     </div>
   );
 }

@@ -134,28 +134,54 @@ export function applyPlacements(
 }
 
 /**
- * Позиция для `task.move`: количество задач того же проекта перед карточкой.
+ * Намерение перемещения, независимое от видимого (отфильтрованного или
+ * постраничного) списка карточек.
  *
- * Store считает `position` в области `(projectId, status)`, поэтому карточки
- * других проектов на общей доске не влияют на индекс.
+ * Позиция команды вычисляется по полному scope `(projectId, status)`, поэтому
+ * скрытый фильтром сосед не сдвигает индекс.
  */
-export function computeMovePosition(items: readonly Task[], taskId: string): number {
-  const index = items.findIndex((task) => task.id === taskId);
-  const task = index === -1 ? undefined : items[index];
+export type MoveIntent =
+  | { readonly kind: "append" }
+  | { readonly kind: "start" }
+  | { readonly kind: "relative"; readonly direction: "up" | "down" }
+  | { readonly kind: "before"; readonly beforeId: string };
 
-  if (task === undefined) {
-    return 0;
-  }
+/**
+ * Позиция для `task.move` по полному упорядоченному списку scope.
+ *
+ * `tasks` — все задачи целевого `(projectId, status)` без UI-фильтров и
+ * пагинации. Перемещаемая карточка исключается: `append` равен реальной длине
+ * остальных, `beforeId` — индексу в этом же полном списке.
+ */
+export function resolveMovePosition(
+  tasks: readonly Task[],
+  taskId: string,
+  intent: MoveIntent,
+): number {
+  const others = tasks.filter((task) => task.id !== taskId);
 
-  let position = 0;
+  switch (intent.kind) {
+    case "append":
+      return others.length;
+    case "start":
+      return 0;
+    case "before": {
+      const index = others.findIndex((task) => task.id === intent.beforeId);
 
-  for (let itemIndex = 0; itemIndex < index; itemIndex += 1) {
-    if (items[itemIndex]?.projectId === task.projectId) {
-      position += 1;
+      return index === -1 ? others.length : index;
+    }
+    case "relative": {
+      const currentIndex = tasks.findIndex((task) => task.id === taskId);
+
+      if (currentIndex === -1) {
+        return others.length;
+      }
+
+      return intent.direction === "up"
+        ? Math.max(0, currentIndex - 1)
+        : Math.min(others.length, currentIndex + 1);
     }
   }
-
-  return position;
 }
 
 /** Строит placement для целевого индекса внутри колонки. */

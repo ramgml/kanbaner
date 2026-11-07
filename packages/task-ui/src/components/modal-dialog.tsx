@@ -116,16 +116,34 @@ export function ModalDialog({
       }
     }
 
+    // Настоящее действие пользователя (клик, Tab) имеет приоритет: после него
+    // асинхронное содержимое не должно перехватывать фокус.
+    let userInteracted = false;
+
+    const markInteracted = (): void => {
+      userInteracted = true;
+    };
+
     const focusFirst = (): void => {
-      if (dialog.contains(document.activeElement)) {
+      if (userInteracted) {
+        return;
+      }
+
+      const active = document.activeElement;
+
+      // Сам <dialog> (tabIndex=-1) не является пользовательским фокусом:
+      // после появления первого focusable его нужно перевести внутрь.
+      if (active instanceof HTMLElement && active !== dialog && dialog.contains(active)) {
         return;
       }
 
       const first = focusableElements(dialog)[0];
 
       if (first !== undefined) {
-        first.focus();
-      } else {
+        if (active !== first) {
+          first.focus();
+        }
+      } else if (active !== dialog) {
         dialog.focus();
       }
     };
@@ -139,7 +157,12 @@ export function ModalDialog({
 
     observer?.observe(dialog, { childList: true, subtree: true });
 
+    dialog.addEventListener("pointerdown", markInteracted);
+    dialog.addEventListener("click", markInteracted);
+
     const onKeyDown = (event: KeyboardEvent): void => {
+      markInteracted();
+
       if (event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
@@ -178,6 +201,8 @@ export function ModalDialog({
     return () => {
       observer?.disconnect();
       dialog.removeEventListener("keydown", onKeyDown);
+      dialog.removeEventListener("pointerdown", markInteracted);
+      dialog.removeEventListener("click", markInteracted);
 
       if (dialog.open) {
         if (typeof dialog.close === "function") {

@@ -22,11 +22,12 @@ import {
   KANBAN_PAGE_SIZE,
   KANBAN_STATUSES,
   applyPlacements,
-  computeMovePosition,
   createEmptyColumns,
   getColumn,
   placementForIndex,
+  resolveMovePosition,
   type KanbanColumns,
+  type MoveIntent,
   type Placement,
 } from "./board-state.ts";
 import {
@@ -35,12 +36,25 @@ import {
   invokeJson,
   isVersionConflict,
 } from "./operations.ts";
-import { resetKanbanFilters, updateKanbanQuery, useKanbanQuery } from "./query-state.ts";
+import {
+  registerKanbanSearchWriter,
+  resetKanbanFilters,
+  updateKanbanQuery,
+  useKanbanQuery,
+} from "./query-state.ts";
+
+/** Контракт задачи ограничивает `limit` значением 200. */
+const MAX_LIST_LIMIT = 200;
 
 interface ColumnPage {
   readonly items: readonly Task[];
   readonly total: number;
   readonly nextOffset: number | null;
+}
+
+interface VisibilityRequirement {
+  readonly status: TaskStatus;
+  readonly taskId: string;
 }
 
 interface DropTarget {
@@ -71,13 +85,20 @@ function listInput(
   return input as unknown as JsonValue;
 }
 
-/** Читает страницу колонки, последовательно добирая до нужного количества. */
+/**
+ * Читает страницу колонки, последовательно добирая до нужного количества.
+ *
+ * `mustIncludeId` нужен после перемещения: карточка не должна исчезнуть за
+ * границей страницы, поэтому чтение продолжается, пока она не появится или
+ * сервер не сообщит об окончании списка.
+ */
 async function fetchColumnPage(
   invoke: UiOperationInvoker,
   status: TaskStatus,
   projectId: string,
   tag: string,
   targetCount: number,
+  mustIncludeId: string | null = null,
 ): Promise<ColumnPage> {
   const items: Task[] = [];
   let total = 0;
@@ -85,7 +106,7 @@ async function fetchColumnPage(
   let remaining = Math.max(1, targetCount);
 
   for (;;) {
-    const limit = Math.min(KANBAN_PAGE_SIZE, remaining);
+    const limit = remaining > 0 ? Math.min(KANBAN_PAGE_SIZE, remaining) : KANBAN_PAGE_SIZE;
     const data = await invokeJson<TaskListOutput>(
       invoke,
       TASKS_QUERY_IDS.taskList,
@@ -97,12 +118,52 @@ async function fetchColumnPage(
     nextOffset = data.nextOffset;
     remaining -= data.items.length;
 
-    if (data.nextOffset === null || data.items.length === 0 || remaining <= 0) {
+    const found = mustIncludeId !== null && items.some((task) => task.id === mustIncludeId);
+
+    if (
+      data.nextOffset === null ||
+      data.items.length === 0 ||
+      (remaining <= 0 && (mustIncludeId === null || found))
+    ) {
       break;
     }
   }
 
   return { items, total, nextOffset };
+}
+
+/**
+ * Полный нефильтрованный упорядоченный список задач одного статуса в проекте.
+ *
+ * `task.move` считает `position` в области `(projectId, status)`, поэтому для
+ * корректного индекса нужен весь scope, а не видимый subset с фильтром тега
+ * или текущей страницей.
+ */
+async function fetchAllScopeTasks(
+  invoke: UiOperationInvoker,
+  projectId: string,
+  status: TaskStatus,
+): Promise<readonly Task[]> {
+  const items: Task[] = [];
+  let offset = 0;
+
+  for (;;) {
+    const data = await invokeJson<TaskListOutput>(
+      invoke,
+      TASKS_QUERY_IDS.taskList,
+      listInput(status, projectId, "", MAX_LIST_LIMIT, offset),
+    );
+
+    items.push(...data.items);
+
+    if (data.nextOffset === null || data.items.length === 0 || data.nextOffset <= offset) {
+      break;
+    }
+
+    offset = data.nextOffset;
+  }
+
+  return items;
 }
 
 function statusOf(element: Element | null): TaskStatus | null {
@@ -125,22 +186,41 @@ function columnContaining(columns: KanbanColumns, taskId: string): TaskStatus | 
 }
 
 /** Основное представление `/view/kanban`. */
-export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) {
-  const query = useKanbanQuery();
+export function KanbanView({
+  invoke,
+  search,
+  replaceSearch,
+}: {
+  readonly invoke: UiOperationInvoker;
+  readonly search?: string | undefined;
+  readonly replaceSearch?: ((search: string) => void) | undefined;
+}) {
+  const query = useKanbanQuery(search);
+
+  useEffect(() => {
+    if (replaceSearch === undefined) {
+      return;
+    }
+
+    return registerKanbanSearchWriter(replaceSearch);
+  }, [replaceSearch]);
   const [projects, setProjects] = useState<readonly Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [columns, setColumns] = useState<KanbanColumns>(createEmptyColumns);
   const [placements, setPlacements] = useState<ReadonlyMap<string, Placement>>(() => new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const [conflicts, setConflicts] = useState<ReadonlySet<string>>(() => new Set());
-  const [subtaskCounts, setSubtaskCounts] = useState<Readonly<Record<string, number>>>({});
+  const [subtaskCounts, setSubtaskCounts] = useState<Readonly<Record<string, number | null>>>({});
   const [error, setError] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
 
   const loadedCountsRef = useRef<Record<TaskStatus, number>>(emptyCounts(KANBAN_PAGE_SIZE));
   const filterKeyRef = useRef<string>("\u0000");
+  const filtersRef = useRef({ projectId: query.projectId, tag: query.tag });
   const reloadSequenceRef = useRef(0);
+  const loadMoreSequenceRef = useRef<Record<TaskStatus, number>>(emptyCounts(0));
+  const visibilityRef = useRef<VisibilityRequirement | null>(null);
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
 
@@ -172,8 +252,23 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
 
   const reloadBoard = useCallback(async (): Promise<void> => {
     const sequence = reloadSequenceRef.current + 1;
+    const visibility = visibilityRef.current;
+    // Читаем актуальные фильтры из ref, а не из замыкания: запоздавший
+    // reload после move не должен перезаписать колонку старым фильтром.
+    const filters = filtersRef.current;
+    const filterKey = filterKeyRef.current;
 
     reloadSequenceRef.current = sequence;
+
+    // Любой полный reload отменяет запоздавшие loadMore: их ответ уже не
+    // относится к текущему фильтру и поколению данных.
+    for (const status of KANBAN_STATUSES) {
+      loadMoreSequenceRef.current = {
+        ...loadMoreSequenceRef.current,
+        [status]: loadMoreSequenceRef.current[status] + 1,
+      };
+    }
+
     setColumns((current) => {
       const next: Record<TaskStatus, KanbanColumns[TaskStatus]> = {
         backlog: { ...getColumn(current, "backlog"), loading: true },
@@ -191,9 +286,10 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
           const page = await fetchColumnPage(
             invoke,
             status,
-            query.projectId,
-            query.tag,
+            filters.projectId,
+            filters.tag,
             loadedCountsRef.current[status] ?? KANBAN_PAGE_SIZE,
+            visibility?.status === status ? visibility.taskId : null,
           );
 
           return { status, page, error: null } as const;
@@ -203,11 +299,19 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
       }),
     );
 
-    if (reloadSequenceRef.current !== sequence) {
+    if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
       return;
     }
 
+    if (visibilityRef.current === visibility) {
+      visibilityRef.current = null;
+    }
+
     setColumns((current) => {
+      if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+        return current;
+      }
+
       const next: Record<TaskStatus, KanbanColumns[TaskStatus]> = {
         backlog: getColumn(current, "backlog"),
         todo: getColumn(current, "todo"),
@@ -226,6 +330,10 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
           continue;
         }
 
+        loadedCountsRef.current[result.status] = Math.max(
+          KANBAN_PAGE_SIZE,
+          result.page.items.length,
+        );
         next[result.status] = {
           items: result.page.items,
           total: result.page.total,
@@ -237,10 +345,12 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
 
       return next;
     });
-  }, [invoke, query.projectId, query.tag]);
+  }, [invoke]);
 
   useEffect(() => {
     const filterKey = `${query.projectId}\u0000${query.tag}`;
+
+    filtersRef.current = { projectId: query.projectId, tag: query.tag };
 
     if (filterKeyRef.current !== filterKey) {
       filterKeyRef.current = filterKey;
@@ -271,17 +381,18 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
   const rootTaskKey = rootTaskIds.join("|");
 
   useEffect(() => {
-    const missing = rootTaskIds.filter((taskId) => subtaskCounts[taskId] === undefined);
-
-    if (missing.length === 0) {
+    if (rootTaskIds.length === 0) {
       return;
     }
 
     let cancelled = false;
 
+    // Ревизия инвалидирует ранее полученные значения: после create/delete
+    // подзадачи в overlay счётчики перезапрашиваются для всех видимых
+    // корневых карточек, без remount доски.
     void (async () => {
       const entries = await Promise.all(
-        missing.map(async (taskId) => {
+        rootTaskIds.map(async (taskId) => {
           try {
             const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
               parentTaskId: taskId,
@@ -291,7 +402,8 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
 
             return [taskId, data.total] as const;
           } catch {
-            return [taskId, 0] as const;
+            // Ошибка не должна выглядеть как реальный ноль подзадач.
+            return [taskId, null] as const;
           }
         }),
       );
@@ -306,7 +418,7 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
     };
     // rootTaskKey стабилен между рендерами при том же наборе карточек.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [invoke, rootTaskKey]);
+  }, [invoke, rootTaskKey, query.revision]);
 
   const setPendingCard = (taskId: string, value: boolean): void => {
     const next = new Set(pendingRef.current);
@@ -348,20 +460,15 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
     });
   };
 
-  const moveTask = async (task: Task, placement: Placement): Promise<void> => {
+  const moveTask = async (
+    task: Task,
+    status: TaskStatus,
+    intent: MoveIntent,
+    placement: Placement,
+  ): Promise<void> => {
     if (pendingRef.current.has(task.id)) {
       return;
     }
-
-    const optimisticPlacements = new Map(placementsRef.current);
-
-    optimisticPlacements.set(task.id, placement);
-
-    const optimisticColumns = applyPlacements(columns, optimisticPlacements);
-    const position = computeMovePosition(
-      getColumn(optimisticColumns, placement.status).items,
-      task.id,
-    );
 
     setPlacement(task.id, placement);
     setPendingCard(task.id, true);
@@ -371,18 +478,31 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
     setDragOver(null);
 
     try {
+      // Позиция считается по полному scope `(projectId, status)`, а не по
+      // видимому subset с фильтром или текущей страницей.
+      const scopeTasks = await fetchAllScopeTasks(invoke, task.projectId, status);
+      const position = resolveMovePosition(scopeTasks, task.id, intent);
+
+      loadedCountsRef.current[status] = Math.max(
+        loadedCountsRef.current[status] ?? KANBAN_PAGE_SIZE,
+        position + 1,
+      );
+      visibilityRef.current = { status, taskId: task.id };
+
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskMove, {
         id: task.id,
         expectedVersion: task.version,
-        status: placement.status,
+        status,
         position,
       } as unknown as JsonValue);
 
       // Store сдвигает соседей и повышает их версии. После команды доска
-      // перечитывается, а не пересчитывает версии вручную.
+      // перечитывается, а не пересчитывает версии вручную. reloadBoard
+      // догружает target колонку минимум до позиции перемещённой карточки.
       await reloadBoard();
     } catch (commandError) {
       if (isVersionConflict(commandError)) {
+        visibilityRef.current = null;
         setConflict(task.id, true);
         setError(VERSION_CONFLICT_MESSAGE);
         await reloadBoard();
@@ -396,7 +516,7 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
   };
 
   const moveToStatus = (task: Task, status: TaskStatus): void => {
-    void moveTask(task, { status, beforeId: null });
+    void moveTask(task, status, { kind: "append" }, { status, beforeId: null });
   };
 
   const reorder = (task: Task, kind: KanbanReorderKind): void => {
@@ -413,15 +533,38 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
       return;
     }
 
+    // Оптимистичное отображение строится по видимым карточкам, а команда —
+    // по полному scope. Скрытый сосед не ломает ни порядок, ни индекс.
     const targetIndex =
       kind === "start" ? 0 : kind === "end" ? items.length : kind === "up" ? index - 1 : index + 1;
+    const placement = placementForIndex(status, items, task.id, targetIndex);
+    const intent: MoveIntent =
+      kind === "start"
+        ? { kind: "start" }
+        : kind === "end"
+          ? { kind: "append" }
+          : { kind: "relative", direction: kind };
 
-    void moveTask(task, placementForIndex(status, items, task.id, targetIndex));
+    void moveTask(task, status, intent, placement);
   };
 
   const loadMore = (status: TaskStatus): void => {
     const current = getColumn(columns, status);
-    const offset = current.items.length;
+    const cursor = current.nextOffset;
+
+    if (cursor === null) {
+      return;
+    }
+
+    const generation = reloadSequenceRef.current;
+    const filterKey = filterKeyRef.current;
+    const filters = filtersRef.current;
+    const request = loadMoreSequenceRef.current[status] + 1;
+
+    loadMoreSequenceRef.current = {
+      ...loadMoreSequenceRef.current,
+      [status]: request,
+    };
 
     setColumns((previous) => ({
       ...previous,
@@ -433,14 +576,59 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
         const data = await invokeJson<TaskListOutput>(
           invoke,
           TASKS_QUERY_IDS.taskList,
-          listInput(status, query.projectId, query.tag, KANBAN_PAGE_SIZE, offset),
+          listInput(status, filters.projectId, filters.tag, KANBAN_PAGE_SIZE, cursor),
         );
 
+        const isCurrent = (): boolean =>
+          reloadSequenceRef.current === generation &&
+          loadMoreSequenceRef.current[status] === request &&
+          filterKeyRef.current === filterKey;
+
+        if (!isCurrent()) {
+          return;
+        }
+
+        const known = new Set(current.items.map((task) => task.id));
+        const appended = data.items.filter((task) => !known.has(task.id));
+
+        if (appended.length === 0) {
+          // Дубликаты или пустая страница не означают конец пагинации:
+          // перечитываем колонку с начала, чтобы восстановить курсор.
+          if (data.nextOffset === null) {
+            setColumns((previous) => {
+              if (!isCurrent()) {
+                return previous;
+              }
+
+              return {
+                ...previous,
+                [status]: {
+                  ...getColumn(previous, status),
+                  total: data.total,
+                  nextOffset: null,
+                  loading: false,
+                  error: null,
+                },
+              };
+            });
+
+            return;
+          }
+
+          await reloadBoard();
+
+          return;
+        }
+
         setColumns((previous) => {
+          if (!isCurrent()) {
+            return previous;
+          }
+
           const existing = getColumn(previous, status);
-          const known = new Set(existing.items.map((task) => task.id));
-          const appended = data.items.filter((task) => !known.has(task.id));
-          const items = [...existing.items, ...appended];
+          const knownIds = new Set(existing.items.map((task) => task.id));
+          const fresh = data.items.filter((task) => !knownIds.has(task.id));
+          const items = [...existing.items, ...fresh];
 
           loadedCountsRef.current[status] = items.length;
 
@@ -449,13 +637,21 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
             [status]: {
               items,
               total: data.total,
-              nextOffset: appended.length === 0 ? null : data.nextOffset,
+              nextOffset: data.nextOffset,
               loading: false,
               error: null,
             },
           };
         });
       } catch (loadError) {
+        if (
+          reloadSequenceRef.current !== generation ||
+          loadMoreSequenceRef.current[status] !== request ||
+          filterKeyRef.current !== filterKey
+        ) {
+          return;
+        }
+
         setColumns((previous) => ({
           ...previous,
           [status]: {
@@ -551,7 +747,10 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
       cleanup();
 
       if (active && drop !== null) {
-        void moveTask(task, { status: drop.status, beforeId: drop.beforeId });
+        const intent: MoveIntent =
+          drop.beforeId === null ? { kind: "append" } : { kind: "before", beforeId: drop.beforeId };
+
+        void moveTask(task, drop.status, intent, drop);
       }
     };
 
@@ -751,7 +950,7 @@ export function KanbanView({ invoke }: { readonly invoke: UiOperationInvoker }) 
                     task={task}
                     index={index}
                     columnSize={column.items.length}
-                    subtaskCount={subtaskCounts[task.id] ?? 0}
+                    subtaskCount={task.parentTaskId === null ? (subtaskCounts[task.id] ?? null) : 0}
                     selected={query.taskId === task.id}
                     pending={pending.has(task.id)}
                     conflict={conflicts.has(task.id)}

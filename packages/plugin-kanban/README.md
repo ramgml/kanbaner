@@ -34,10 +34,18 @@ React-рендереры находятся в клиентском entrypoint (
 - Загрузка через `kanbaner.tasks.task.list` с фильтрами `projectId`/`tag` и
   сортировкой `position asc`.
 - Пагинация внутри каждой колонки: страницы по 10 карточек, кнопка
-  «Показать ещё» использует `limit`/`offset`/`nextOffset`. После команды доска
-  перечитывается с сохранением уже догруженного количества.
+  «Показать ещё» использует серверный `nextOffset` как курсор. Дубликаты или
+  пустая страница не закрывают пагинацию: колонка перечитывается с начала.
+- Запоздавшие ответы `loadMore` отменяются по поколению/фильтру/ревизии и не
+  применяются после смены фильтра, move или reload.
+- После move доска перечитывается с сохранением уже догруженного количества;
+  target-колонка гарантированно догружается минимум до позиции перемещённой
+  карточки (`mustIncludeId`), поэтому карточка не исчезает за page boundary.
 - Фильтры проекта и тега хранятся в query string (`project`, `tag`) и
   переживают reload. Выбранная карточка хранится в `task`.
+- Query string обновляется через `replaceSearch` из router-aware shell
+  (`router.replace` теми же параметрами, что и `search`). Это держит
+  `useSearchParams` синхронным; fallback — `history.replaceState`.
 - Горизонтальная прокрутка включена только у контейнера колонок; страница на
   360 px не получает горизонтальный overflow.
 
@@ -45,8 +53,13 @@ React-рендереры находятся в клиентском entrypoint (
 
 - Команда: `kanbaner.tasks.task.move` с `expectedVersion`, `status`,
   `position`. `completedAt` при переходе в `done` выставляет домен.
-- Позиция считается в области `(projectId, status)`: карточки других проектов
-  на общей доске не искажают индекс.
+- Позиция считается по полному нефильтрованному ordered-списку
+  `(projectId, status)` (все страницы `task.list`, `limit ≤ 200`), а не по
+  видимому subset с фильтром тега или текущей страницей. `append` — реальная
+  длина scope, `beforeId` — индекс в этом же списке, `up`/`down`/`start`/`end`
+  учитывают скрытых соседей.
+- `reloadBoard` читает актуальные фильтры и поколение из ref: запоздавший
+  reload после move не перезаписывает колонку старым фильтром.
 - Drag-and-drop реализован нативными pointer events на drag handle. Новых
   DnD-библиотек нет.
 - DnD не единственный путь: у каждой карточки есть меню «Переместить в…»,
@@ -65,16 +78,25 @@ React-рендереры находятся в клиентском entrypoint (
   `invoke` UI-рантайма; собственной копии деталей и доменных запросов вне
   компонентов нет.
 - Рендерится только при `pathname === "/view/kanban"`, непустом `task` в query
-  string и открытом состоянии; при client-side переходе на другой маршрут
-  исчезает.
+  string и открытом состоянии; при client-side переходе на другой маршрут или
+  Link-переходе с изменением query исчезает.
+- Переключение A → B не показывает данные A: рендер и все команды используют
+  только `currentTask`, у которого `task.id === taskId`; до загрузки B действия
+  заблокированы, project/parent относятся к B.
 - На мобильном используется нативный modal `<dialog>` из
   `@kanbaner/task-ui` (`ModalDialog`): focus trap, Escape, возврат фокуса,
-  закрытие при переходе breakpoint mobile → desktop.
+  закрытие при переходе breakpoint mobile → desktop. Первый focusable после
+  загрузки получает фокус один раз; после реального действия пользователя
+  (click/pointerdown/keydown) фокус не перехватывается.
+- Число подзадач видимых корневых карточек перезапрашивается по ревизии;
+  ошибка запроса показывается как `—` и не кэшируется как `0`.
 
 ## Границы импорта
 
 - UI-код импортирует только `@kanbaner/plugin-sdk`,
   `@kanbaner/plugin-tasks/contract`, `@kanbaner/task-ui` и React.
+- CSS-классы плагина попадают в Tailwind через
+  `@source "../../../../packages/plugin-kanban/src"` в `apps/web/src/app/globals.css`.
 - Запрещены корневой `@kanbaner/plugin-tasks`, `@kanbaner/kernel`,
   `@kanbaner/storage-sqlite`, внутренности `apps/web` и
   `@kanbaner/plugin-task-list`.
@@ -87,7 +109,7 @@ React-рендереры находятся в клиентском entrypoint (
 
 ```bash
 pnpm install --frozen-lockfile --strict-peer-dependencies
-pnpm exec vitest run packages/task-ui packages/plugin-kanban apps/web/src/ui
+pnpm exec vitest run packages/plugin-kanban packages/task-ui apps/web/src/ui apps/web/src/components/shell
 node scripts/check-import-boundaries.mjs --self-test
 pnpm check
 cd apps/web && pnpm exec playwright test

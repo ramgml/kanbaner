@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface KanbanQueryState {
   readonly projectId: string;
@@ -18,6 +18,14 @@ export const DEFAULT_KANBAN_QUERY: KanbanQueryState = Object.freeze({
 });
 
 const listeners = new Set<() => void>();
+/**
+ * Поддерживаемые writer-ы query string из router-aware shell.
+ *
+ * `history.replaceState` меняет URL, но Next 16 App Router не обновляет
+ * `useSearchParams` для внешнего replaceState (renderedSearch остаётся
+ * прежним). `router.replace` держит router и URL синхронными.
+ */
+const searchWriters = new Set<(search: string) => void>();
 let current: KanbanQueryState = DEFAULT_KANBAN_QUERY;
 
 function first(params: URLSearchParams, key: string): string {
@@ -71,9 +79,30 @@ function writeUrl(state: KanbanQueryState): void {
   }
 
   const search = toSearchParams(state).toString();
-  const url = `${window.location.pathname}${search.length === 0 ? "" : `?${search}`}`;
+  const nextSearch = search.length === 0 ? "" : `?${search}`;
+  const writer = searchWriters.values().next().value;
+
+  if (writer !== undefined) {
+    writer(nextSearch);
+
+    return;
+  }
+
+  const url = `${window.location.pathname}${nextSearch}`;
 
   window.history.replaceState(null, "", url);
+}
+
+/**
+ * Регистрирует writer из shell. Возвращает cleanup; несколько смонтированных
+ * вкладов доски используют один и тот же writer, поэтому хранится набор.
+ */
+export function registerKanbanSearchWriter(writer: (search: string) => void): () => void {
+  searchWriters.add(writer);
+
+  return () => {
+    searchWriters.delete(writer);
+  };
 }
 
 function readLocation(): KanbanQueryState {
@@ -125,9 +154,15 @@ export function subscribeKanbanQuery(listener: () => void): () => void {
  *
  * Начальное значение безопасно для SSR; фактический URL читается в effect
  * после монтирования, поэтому серверный и клиентский первый рендер совпадают.
+ *
+ * `search` — актуальная query string из router-aware shell (`useSearchParams`).
+ * Она синхронизирует состояние при настоящих Link-переходах, а не только по
+ * `popstate`; локальные обновления (`updateKanbanQuery`) по-прежнему уведомляют
+ * подписчиков напрямую.
  */
-export function useKanbanQuery(): KanbanQueryState {
+export function useKanbanQuery(search?: string): KanbanQueryState {
   const [state, setState] = useState<KanbanQueryState>(current);
+  const lastSearchRef = useRef<string | null>(null);
 
   useEffect(() => {
     const sync = (): void => {
@@ -148,6 +183,16 @@ export function useKanbanQuery(): KanbanQueryState {
       window.removeEventListener("popstate", updateFromUrl);
     };
   }, []);
+
+  useEffect(() => {
+    if (search === undefined || lastSearchRef.current === search) {
+      return;
+    }
+
+    lastSearchRef.current = search;
+    current = { ...parseKanbanQuery(search), revision: current.revision };
+    setState(current);
+  }, [search]);
 
   return state;
 }
