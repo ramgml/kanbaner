@@ -202,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — При запуске исправления scheduler deadlock и E2E worker завершился инфраструктурной ошибкой `Internal Server Error` (`request_id: ce86f91b-1564-410f-97aa-03522badfc9f`). Worktree чистый на `ae7da96`, новых изменений и результатов исправления нет; требуется решение о повторном запуске.
 - 2026-11-07 — Ревью подтвердило SQL scanner, backup и custom shutdown, но нашло deadlock при await parent/sibling из активного savepoint и запуск Playwright через старый `next start` без изолированной БД. Требуется обнаружение scheduling conflict вместо ожидания и единый custom server для E2E.
 - 2026-11-07 — Worker коммитом `ae7da96` реализовал stack-aware AsyncLocalStorage scheduler, SQL transaction-control scanner и custom await-able production server; 160 focused-тестов, 660 workspace-тестов, 70 Conformance и отдельный deferred-write SIGTERM test зелёные. Задача повторно в review.
 - 2026-11-07 — Повторное ревью подтвердило backup/schema/checkpoint/paths, но нашло пересечение savepoint с parent/sibling-операциями, возможность COMMIT/ROLLBACK внутри SQL-файла миграции и отсутствие ожидания deferred операций при завершении Next.js. Требуется stack-aware scheduler, SQL transaction-control guard и await-able production server lifecycle.
