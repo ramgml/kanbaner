@@ -1,13 +1,13 @@
 ---
 id: KAN-010
 title: Доменные контракты задач
-status: ready
+status: in_progress
 stage: 2
 priority: high
-owner: unassigned
+owner: worker-kan-010
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-010-tasks-domain-contracts
+worktree: .worktrees/kan-010-tasks-domain-contracts
 created: 2026-11-07
 updated: 2026-11-07
 specs:
