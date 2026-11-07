@@ -1,0 +1,172 @@
+"use client";
+
+import Link from "next/link";
+
+import { Blocks, Flag, ShieldAlert } from "lucide-react";
+
+import { Badge } from "../ui/badge";
+import { Separator } from "../ui/separator";
+import { useUiContributions } from "../../ui/provider";
+import { CORE_NAV_ITEMS, isActivePath, type ShellNavItem } from "./nav-items";
+import { UiSlot } from "./ui-slot";
+
+interface ShellNavProps {
+  readonly pathname: string;
+  readonly safeMode?: boolean;
+  readonly problemCount?: number;
+}
+
+function pluginNavItems(
+  contributions: ReturnType<typeof useUiContributions>,
+): readonly ShellNavItem[] {
+  return contributions
+    .filter(
+      (contribution) =>
+        contribution.contribution.kind === "navigation" &&
+        contribution.contribution.route !== undefined,
+    )
+    .map((contribution) => ({
+      href: contribution.contribution.route as string,
+      label: contribution.contribution.title ?? contribution.contribution.id,
+      icon: Flag,
+    }));
+}
+
+function mergeNavItems(pluginItems: readonly ShellNavItem[]): readonly ShellNavItem[] {
+  const seen = new Set<string>();
+
+  return [...CORE_NAV_ITEMS, ...pluginItems].filter((item) => {
+    if (seen.has(item.href)) {
+      return false;
+    }
+
+    seen.add(item.href);
+
+    return true;
+  });
+}
+
+function navLinkClass(active: boolean, mobile: boolean): string {
+  const base = mobile
+    ? "flex min-h-12 min-w-16 flex-1 flex-col items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    : "flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+
+  return `${base} ${
+    active
+      ? "bg-secondary text-secondary-foreground"
+      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+  }`;
+}
+
+export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }: ShellNavProps) {
+  const sidebarContributions = useUiContributions("app.sidebar");
+  const items = mergeNavItems(pluginNavItems(sidebarContributions));
+
+  return (
+    <aside
+      aria-label="Боковая панель"
+      data-testid="desktop-sidebar"
+      className="hidden w-64 shrink-0 flex-col border-r bg-muted/20 md:flex"
+    >
+      <div className="flex h-14 items-center border-b px-4">
+        <Link
+          href="/"
+          className="flex items-center gap-2 rounded-md font-semibold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Blocks aria-hidden="true" className="size-5" />
+          Kanbaner
+        </Link>
+      </div>
+
+      <nav aria-label="Основная навигация" className="flex flex-1 flex-col gap-4 p-3">
+        <ul className="flex flex-col gap-1">
+          {items.map((item) => {
+            const Icon = item.icon;
+            const active = isActivePath(pathname, item.href);
+
+            return (
+              <li key={item.href}>
+                <Link
+                  href={item.href}
+                  aria-current={active ? "page" : undefined}
+                  className={navLinkClass(active, false)}
+                >
+                  <Icon aria-hidden="true" className="size-4 shrink-0" />
+                  <span className="truncate">{item.label}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+
+        <UiSlot slot="app.sidebar" excludeKinds={["navigation"]} className="flex flex-col gap-2" />
+
+        <div className="mt-auto flex flex-col gap-3">
+          <Separator />
+          {safeMode ? (
+            <Link
+              href="/plugins"
+              className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ShieldAlert aria-hidden="true" className="size-4 shrink-0" />
+              <span className="min-w-0">
+                Safe mode
+                {problemCount > 0 ? `: ${String(problemCount)} проблем` : ""}
+              </span>
+            </Link>
+          ) : (
+            <p className="px-3 text-xs text-muted-foreground">Локальный режим</p>
+          )}
+          <Badge variant="outline" className="mx-3 w-fit">
+            Plugin Contract v1
+          </Badge>
+        </div>
+      </nav>
+    </aside>
+  );
+}
+
+export function MobileNavigation({ pathname, safeMode = false }: ShellNavProps) {
+  const sidebarContributions = useUiContributions("app.sidebar");
+  const items = mergeNavItems(pluginNavItems(sidebarContributions));
+
+  return (
+    <nav
+      aria-label="Мобильная навигация"
+      data-testid="mobile-navigation"
+      className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden"
+    >
+      <ul className="flex items-stretch gap-1 overflow-x-auto px-1 py-1">
+        {items.map((item) => {
+          const Icon = item.icon;
+          const active = isActivePath(pathname, item.href);
+
+          return (
+            <li key={item.href} className="flex min-w-16 flex-1">
+              <Link
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={navLinkClass(active, true)}
+              >
+                <Icon aria-hidden="true" className="size-5 shrink-0" />
+                <span className="max-w-full truncate">{item.label}</span>
+              </Link>
+            </li>
+          );
+        })}
+        {safeMode ? (
+          <li className="flex min-w-16 flex-1">
+            <Link
+              href="/plugins"
+              className={navLinkClass(false, true)}
+              aria-label="Открыть plugin manager: safe mode"
+            >
+              <ShieldAlert aria-hidden="true" className="size-5 shrink-0 text-destructive" />
+              <span className="max-w-full truncate">Safe mode</span>
+            </Link>
+          </li>
+        ) : null}
+      </ul>
+    </nav>
+  );
+}
