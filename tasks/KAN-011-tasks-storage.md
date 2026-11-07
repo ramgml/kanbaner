@@ -117,7 +117,9 @@ specs:
   provider-вариантов;
 - `packages/plugin-tasks/package.json` — только devDependencies для тестов,
   если драйверы остаются внутри пакета;
-- `packages/plugin-tasks/vitest.config.ts`, если он нужен локально.
+- `packages/plugin-tasks/vitest.config.ts`, если он нужен локально;
+- `packages/plugin-tasks/tsup.config.ts` — только entrypoint `./testing`;
+- `packages/plugin-tasks/README.md` — документация Store и инвариантов.
 
 Запрещено:
 
@@ -177,6 +179,11 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Независимое ревью нашло high-дефекты: scoped-методы одной
+  транзакции не сериализованы и допускают дубли позиций, а сдвиг соседей не
+  увеличивает их публичные версии. Требуется per-transaction FIFO и увеличение
+  `version`/`updatedAt` при каждом фактическом сдвиге с синхронным CAS.
+  Оркестратор согласовал необходимые изменения `tsup.config.ts` и README.
 - 2026-11-07 — По итогам проверки задач область позиции приведена к
   спецификации `(projectId, status)`, непрерывность сделана необязательной,
   conformance-драйверы разрешены в `tests/integration`, suite вынесен в
