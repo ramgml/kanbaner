@@ -338,6 +338,15 @@ importers:
         specifier: 7.8.0
         version: 7.8.0
 
+  packages/plugin-tasks:
+    dependencies:
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
   packages/storage-sqlite:
     dependencies:
       '@kanbaner/plugin-sdk':
