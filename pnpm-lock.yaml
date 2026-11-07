@@ -166,6 +166,15 @@ importers:
 
   .:
     devDependencies:
+      '@kanbaner/kernel':
+        specifier: workspace:*
+        version: link:packages/kernel
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:packages/plugin-sdk
+      '@kanbaner/storage-sqlite':
+        specifier: workspace:*
+        version: link:packages/storage-sqlite
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(supports-color@7.2.0)(zod@4.6.7)
@@ -303,6 +312,12 @@ importers:
       '@types/semver':
         specifier: 7.8.0
         version: 7.8.0
+
+  packages/plugin-fixture:
+    dependencies:
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
 
   packages/plugin-sdk:
     dependencies:

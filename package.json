@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "pnpm build:packages && pnpm --filter @kanbaner/web dev",
     "build": "pnpm build:packages && pnpm --filter @kanbaner/web build",
-    "build:packages": "pnpm --filter @kanbaner/plugin-sdk build && pnpm --filter @kanbaner/kernel build && pnpm --filter @kanbaner/storage-sqlite build",
+    "build:packages": "pnpm --filter @kanbaner/plugin-sdk build && pnpm --filter @kanbaner/kernel build && pnpm --filter @kanbaner/storage-sqlite build && pnpm --filter @kanbaner/plugin-fixture build",
     "start": "pnpm --filter @kanbaner/web start",
     "typecheck": "pnpm build:packages && tsc -p tsconfig.tools.json --noEmit && pnpm -r typecheck",
     "lint": "eslint .",
@@ -23,9 +23,13 @@
     "test:sqlite": "vitest run apps/web/src/server/sqlite-smoke.test.ts",
     "storage:restore": "pnpm build:packages && node scripts/restore.mjs",
     "check:composition": "pnpm build:packages && pnpm --filter @kanbaner/web check:composition",
+    "check:imports": "node scripts/check-import-boundaries.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
+    "@kanbaner/kernel": "workspace:*",
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/storage-sqlite": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@testing-library/dom": "10.4.2",
     "@testing-library/jest-dom": "7.0.1",

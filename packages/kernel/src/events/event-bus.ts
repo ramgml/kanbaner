@@ -4,53 +4,27 @@ import {
   isPluginId,
   matchesEventSubscription,
   validateEventEnvelope,
+  type EventDeliveryContext,
   type EventEnvelope,
+  type EventHandler,
+  type EventPublishOptions,
+  type EventPublishResult,
+  type EventService,
   type EventSubscription,
-  type PluginId,
+  type EventSubscriptionOptions,
+  type EventUnsubscribe,
   type PluginLogger,
-  type ValidationIssue,
+  type PluginId,
 } from "@kanbaner/plugin-sdk";
 
-/** Обработчик доменного события. */
-export type EventHandler = (
-  envelope: EventEnvelope,
-  context: EventDeliveryContext,
-) => void | Promise<void>;
-
-/** Безопасный контекст доставки, не содержащий payload события. */
-export interface EventDeliveryContext {
-  readonly traceId: string;
-}
-
-/** Параметры подписки. `pluginId` используется только для диагностики. */
-export interface EventSubscriptionOptions {
-  readonly pluginId: PluginId;
-}
-
-/** Идемпотентная отмена подписки; возвращает `true`, если подписка была удалена. */
-export type EventUnsubscribe = () => boolean;
-
-/** Параметры явной публикации после успешного коммита. */
-export interface EventPublishOptions {
-  readonly traceId: string;
-}
-
-/**
- * Результат публикации.
- *
- * `accepted` означает, что событие принято шиной и передано подписчикам
- * best-effort. Это не подтверждение успешной обработки: часть подписчиков
- * могла завершиться ошибкой (`failedSubscribers`).
- */
-export type EventPublishResult =
-  | {
-      readonly status: "accepted";
-      readonly eventId: string;
-      readonly matchedSubscribers: number;
-      readonly failedSubscribers: number;
-    }
-  | { readonly status: "duplicate"; readonly eventId: string }
-  | { readonly status: "invalid"; readonly errors: readonly ValidationIssue[] };
+export type {
+  EventDeliveryContext,
+  EventHandler,
+  EventPublishOptions,
+  EventPublishResult,
+  EventSubscriptionOptions,
+  EventUnsubscribe,
+} from "@kanbaner/plugin-sdk";
 
 /** Настройки шины событий. */
 export interface EventBusOptions {
@@ -79,7 +53,7 @@ export interface EventBusOptions {
  * размеру и теряется при перезапуске. Подписчики обязаны оставаться
  * идемпотентными.
  */
-export class EventBus {
+export class EventBus implements EventService {
   readonly #logger: PluginLogger;
   readonly #maxTrackedEventIds: number;
   readonly #subscriptions = new Set<SubscriptionRecord>();

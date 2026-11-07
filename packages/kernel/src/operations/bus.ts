@@ -3,6 +3,7 @@ import {
   toSuccessResult,
   validateWithSchema,
   type CommandInvoker,
+  type EventService,
   type ExecutionContext,
   type OperationId,
   type OperationResult,
@@ -10,10 +11,23 @@ import {
   type PluginLogger,
   type QueryInvoker,
   type ResourceService,
+  type SearchRegistrar,
+  type StorageProvider,
 } from "@kanbaner/plugin-sdk";
 
-import { createUnavailableResourceService, NOOP_LOGGER } from "./context.ts";
+import type { PluginStorage } from "@kanbaner/plugin-sdk";
+
+import { bindPluginStorage } from "../storage/plugin-storage-binding.ts";
 import {
+  bindEventPublisher,
+  bindSearchService,
+  createUnavailableEventPublisher,
+  createUnavailableResourceService,
+  createUnavailableSearchRegistrar,
+  NOOP_LOGGER,
+} from "./context.ts";
+import {
+  OperationFailure,
   cancelledError,
   inputValidationError,
   internalError,
@@ -42,6 +56,28 @@ import type {
 export const DEFAULT_MAX_DEPTH = 16;
 
 const DEFAULT_SOURCE: OperationSource = Object.freeze({ type: "system" });
+
+function unavailableStorageOperation(): Promise<never> {
+  return Promise.reject(
+    new OperationFailure("PLUGIN_UNAVAILABLE", "Storage Provider не подключён к шине операций"),
+  );
+}
+
+function createUnavailableStorageProxy(): PluginStorage {
+  const documents = {
+    get: unavailableStorageOperation,
+    put: unavailableStorageOperation,
+    delete: unavailableStorageOperation,
+    query: unavailableStorageOperation,
+    list: unavailableStorageOperation,
+  };
+
+  return {
+    backendId: "unavailable",
+    documents,
+    withTransaction: unavailableStorageOperation,
+  };
+}
 
 const TIMEOUT_ABORT_REASON = Symbol("kanbaner.operations.timeout");
 const CANCELLED_ABORT_REASON = Symbol("kanbaner.operations.cancelled");
@@ -94,7 +130,9 @@ class OperationRuntime {
   private readonly validateOutput: boolean;
   private readonly logger: PluginLogger;
   private readonly resources: ResourceService;
-  private readonly storage: unknown;
+  private readonly events: Pick<EventService, "publishAfterCommit">;
+  private readonly search: SearchRegistrar;
+  private readonly storage: StorageProvider | undefined;
 
   constructor(options: OperationBusOptions) {
     const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
@@ -111,6 +149,8 @@ class OperationRuntime {
     this.validateOutput = options.validateOutput === true;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.resources = options.resources ?? createUnavailableResourceService();
+    this.events = options.events ?? createUnavailableEventPublisher();
+    this.search = options.search ?? createUnavailableSearchRegistrar();
     this.storage = options.storage;
   }
 
@@ -341,7 +381,12 @@ class OperationRuntime {
       commands,
       queries,
       resources: this.resources,
-      storage: this.storage,
+      events: bindEventPublisher(this.events, operation.pluginId),
+      search: bindSearchService(this.search, operation.pluginId),
+      storage:
+        this.storage === undefined
+          ? createUnavailableStorageProxy()
+          : bindPluginStorage(this.storage, operation.pluginId),
       ...(deadline === undefined ? {} : { deadline }),
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     };

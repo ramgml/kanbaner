@@ -26,6 +26,7 @@ import {
   validateUtcTimestamp,
   type CommandInvoker,
   type ExecutionContext,
+  type PluginStorage,
   type ResourceService,
   type UiContribution,
 } from "./index.ts";
@@ -338,8 +339,11 @@ describe("UI-вклады", () => {
 });
 
 describe("типы контекста выполнения", () => {
-  it("оставляет storage generic/unknown и не требует kernel-типов", () => {
-    expectTypeOf<ExecutionContext["storage"]>().toEqualTypeOf<unknown>();
+  it("типизирует storage как bound PluginStorage и сохраняет generic", () => {
+    expectTypeOf<ExecutionContext["storage"]>().toEqualTypeOf<PluginStorage>();
+    expectTypeOf<keyof PluginStorage>().toEqualTypeOf<
+      "backendId" | "documents" | "withTransaction"
+    >();
     expectTypeOf<ExecutionContext<{ readonly backend: "memory" }>["storage"]>().toEqualTypeOf<{
       readonly backend: "memory";
     }>();

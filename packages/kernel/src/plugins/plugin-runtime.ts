@@ -1,6 +1,11 @@
 import { stat } from "node:fs/promises";
 
-import { isPluginId, type JsonValue, type PluginManifest } from "@kanbaner/plugin-sdk";
+import {
+  isPluginId,
+  type JsonValue,
+  type PluginHostServices,
+  type PluginManifest,
+} from "@kanbaner/plugin-sdk";
 
 import type {
   PluginActivationContext,
@@ -19,6 +24,11 @@ import type {
   PluginStatus,
 } from "../lifecycle/index.ts";
 import { summarizePluginManifest } from "../lifecycle/index.ts";
+import {
+  bindPluginServices,
+  createUnavailableHostServices,
+  type BoundPluginServices,
+} from "./activation-services.ts";
 import { buildPluginGraph, type DependencyNode } from "./dependency-graph.ts";
 import { compareStrings, createDiagnostic, deepFreeze, cloneJson } from "./diagnostics.ts";
 import {
@@ -42,6 +52,13 @@ export interface PluginRuntimeOptions {
   readonly safeMode?: boolean;
   readonly hooks?: PluginLifecycleHooks;
   readonly logger?: PluginRuntimeLogger;
+  /**
+   * Общие сервисы composition root: commands/queries/resources/events/storage/ui.
+   *
+   * Если не переданы, runtime использует безопасные unavailable defaults:
+   * регистрация завершается ошибкой активации, а не молчаливым успехом.
+   */
+  readonly services?: PluginHostServices;
 }
 
 /** Публичный интерфейс runtime для composition root и plugin manager. */
@@ -73,6 +90,8 @@ interface PluginRecord {
   activated: boolean;
   deactivated: boolean;
   activationIndex: number | null;
+  /** Привязанные сервисы активации; создаются один раз и освобождаются. */
+  boundServices: BoundPluginServices | null;
 }
 
 interface ResolvedPluginRuntimeOptions {
@@ -82,6 +101,7 @@ interface ResolvedPluginRuntimeOptions {
   readonly safeMode: boolean;
   readonly hooks: PluginLifecycleHooks;
   readonly logger: PluginRuntimeLogger;
+  readonly services: PluginHostServices;
 }
 
 interface DependencyBlock {
@@ -454,6 +474,7 @@ class PluginRuntimeImpl implements PluginRuntime {
       activated: false,
       deactivated: false,
       activationIndex: null,
+      boundServices: null,
     };
 
     if (parsed.diagnostic !== null) {
@@ -478,6 +499,7 @@ class PluginRuntimeImpl implements PluginRuntime {
       activated: false,
       deactivated: false,
       activationIndex: null,
+      boundServices: null,
     };
 
     this.addDiagnostic(record, failure.diagnostic);
@@ -859,6 +881,7 @@ class PluginRuntimeImpl implements PluginRuntime {
         "server_activation",
         { hook: "beforeActivate" },
       );
+      this.releaseServices(record);
       return;
     }
 
@@ -874,6 +897,7 @@ class PluginRuntimeImpl implements PluginRuntime {
           "Серверный модуль плагина не загрузился",
           "server_activation",
         );
+        this.releaseServices(record);
         return;
       }
 
@@ -886,6 +910,7 @@ class PluginRuntimeImpl implements PluginRuntime {
             : "Серверный модуль не экспортирует activate/deactivate",
           "server_activation",
         );
+        this.releaseServices(record);
         return;
       }
 
@@ -931,21 +956,52 @@ class PluginRuntimeImpl implements PluginRuntime {
   }
 
   private async rollbackRecord(record: PluginRecord): Promise<void> {
-    if (record.module?.deactivate === undefined) {
+    if (record.module?.deactivate !== undefined) {
+      try {
+        await record.module.deactivate(this.deactivationContext(record));
+      } catch {
+        this.addDiagnostic(
+          record,
+          baseDiagnostic(
+            record,
+            "rollback_failed",
+            "server_activation",
+            "Откат серверной активации завершился ошибкой",
+            { stage: "rollback" },
+          ),
+        );
+      }
+    }
+
+    // Регистрации могли произойти до падения activate/afterActivate, поэтому
+    // очистка не зависит от наличия deactivate.
+    this.releaseServices(record);
+  }
+
+  /**
+   * Снимает все регистрации плагина в общих сервисах.
+   *
+   * Данные и связи не удаляются: деактивация не является удалением.
+   */
+  private releaseServices(record: PluginRecord): void {
+    const services = record.boundServices;
+
+    record.boundServices = null;
+
+    if (services === undefined || services === null) {
       return;
     }
 
     try {
-      await record.module.deactivate(this.deactivationContext(record));
+      services.dispose();
     } catch {
       this.addDiagnostic(
         record,
         baseDiagnostic(
           record,
           "rollback_failed",
-          "server_activation",
-          "Откат серверной активации завершился ошибкой",
-          { stage: "rollback" },
+          "deactivation",
+          "Освобождение сервисов плагина завершилось ошибкой",
         ),
       );
     }
@@ -1007,6 +1063,7 @@ class PluginRuntimeImpl implements PluginRuntime {
 
     record.activated = false;
     record.deactivated = true;
+    this.releaseServices(record);
 
     if (failed) {
       record.status = "failed";
@@ -1034,12 +1091,15 @@ class PluginRuntimeImpl implements PluginRuntime {
       throw new TypeError("Контекст активации недоступен без манифеста");
     }
 
+    record.boundServices ??= bindPluginServices(this.options.services, record.pluginId);
+
     return {
       pluginId: record.pluginId,
       manifest: cloneJson(manifest),
       directory: record.directory,
       hostApiVersion: this.options.hostApiVersion,
       logger: this.options.logger,
+      ...record.boundServices,
     };
   }
 
@@ -1142,6 +1202,7 @@ function resolveOptions(options: PluginRuntimeOptions): ResolvedPluginRuntimeOpt
     safeMode: options.safeMode ?? false,
     hooks: options.hooks ?? {},
     logger: options.logger ?? NOOP_LOGGER,
+    services: options.services ?? createUnavailableHostServices(),
   };
 }
 

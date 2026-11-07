@@ -9,7 +9,18 @@ import {
   type PluginRuntimeLogger,
   type PluginRuntimeSnapshot,
 } from "@kanbaner/kernel";
-import type { JsonValue } from "@kanbaner/plugin-sdk";
+import type {
+  JsonValue,
+  OperationResult,
+  PluginHostServices,
+  PluginLogger,
+} from "@kanbaner/plugin-sdk";
+
+import {
+  createApplicationPluginComposition,
+  type ApplicationPluginComposition,
+  type PluginUiContributionRecord,
+} from "./application-composition";
 
 import type {
   PluginManagerDiagnostic,
@@ -280,6 +291,17 @@ export interface PluginServiceOptions {
    * тесты и независимые экземпляры могут не подключать Storage.
    */
   readonly bootstrap?: () => Promise<void>;
+  /** Общие сервисы composition root; вызывается после bootstrap. */
+  readonly getServices?: () => PluginHostServices | undefined;
+  /** Уведомление после каждого успешного `start()`. */
+  readonly onSnapshot?: (snapshot: PluginRuntimeSnapshot) => void;
+  /** UI-метаданные активных плагинов для серверного рендера. */
+  readonly getUiContributions?: () => readonly PluginUiContributionRecord[];
+  /** Выполнение UI-операции через общий OperationBus. */
+  readonly executeOperation?: (
+    operationId: string,
+    input: JsonValue,
+  ) => Promise<OperationResult<unknown>>;
 }
 
 interface StopResult {
@@ -396,6 +418,12 @@ class PluginService {
   private readonly disabledPlugins: Set<string>;
   private readonly blockedPluginIds = new Set<string>();
   private readonly bootstrap: (() => Promise<void>) | undefined;
+  private readonly getServices: (() => PluginHostServices | undefined) | undefined;
+  private readonly onSnapshot: ((snapshot: PluginRuntimeSnapshot) => void) | undefined;
+  private readonly uiContributionsProvider:
+    (() => readonly PluginUiContributionRecord[]) | undefined;
+  private readonly operationExecutor:
+    ((operationId: string, input: JsonValue) => Promise<OperationResult<unknown>>) | undefined;
   private runtime: PluginRuntime | null = null;
   private snapshot: PluginRuntimeSnapshot | null = null;
   private bootstrapDone = false;
@@ -408,6 +436,10 @@ class PluginService {
     this.hooks = options.hooks ?? {};
     this.disabledPlugins = new Set(options.disabledPlugins ?? configuredDisabledPlugins());
     this.bootstrap = options.bootstrap;
+    this.getServices = options.getServices;
+    this.onSnapshot = options.onSnapshot;
+    this.uiContributionsProvider = options.getUiContributions;
+    this.operationExecutor = options.executeOperation;
 
     const providedHooks = options.hooks ?? {};
 
@@ -479,6 +511,40 @@ class PluginService {
    * предоставляет API подтверждённой очистки старого экземпляра, поэтому
    * выдавать refresh за восстановление нельзя.
    */
+  /** UI-метаданные активных плагинов для серверного layout. */
+  getUiContributions(): Promise<readonly PluginUiContributionRecord[]> {
+    return this.enqueue(async () => {
+      await this.ensureStarted();
+
+      return this.uiContributionsProvider?.() ?? [];
+    });
+  }
+
+  /**
+   * Выполняет UI-операцию через общий OperationBus.
+   *
+   * Composition root проверяет `exposure.ui`; сервис только сериализует
+   * lifecycle и не создаёт отдельную реализацию для UI.
+   */
+  executeUiOperation(operationId: string, input: JsonValue): Promise<OperationResult<unknown>> {
+    return this.enqueue(async () => {
+      await this.ensureStarted();
+
+      if (this.operationExecutor === undefined) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "OperationBus не подключён к composition root",
+            retryable: true,
+          },
+        };
+      }
+
+      return this.operationExecutor(operationId, input);
+    });
+  }
+
   refresh(): Promise<PluginManagerState> {
     return this.enqueue(async () => {
       if (this.blockedPluginIds.size > 0) {
@@ -537,6 +603,7 @@ class PluginService {
 
     this.runtime ??= this.createRuntime();
     this.snapshot = await this.runtime.start();
+    this.onSnapshot?.(this.snapshot);
 
     return this.snapshot;
   }
@@ -617,17 +684,21 @@ class PluginService {
   private async restartInternal(): Promise<PluginManagerState> {
     this.runtime = this.createRuntime();
     this.snapshot = await this.runtime.start();
+    this.onSnapshot?.(this.snapshot);
 
     return toManagerState(this.snapshot, this.disabledPlugins);
   }
 
   private createRuntime(): PluginRuntime {
+    const services = this.getServices?.();
+
     return createPluginRuntime({
       pluginDirectories: this.pluginDirectories,
       hostApiVersion: this.hostApiVersion,
       disabledPlugins: [...this.disabledPlugins],
       hooks: this.hooks,
       logger: this.logger,
+      ...(services === undefined ? {} : { services }),
     });
   }
 }
@@ -648,12 +719,63 @@ export function getPluginService(): PluginService {
   return globalHolder[SERVICE_KEY];
 }
 
+function createCompositionLogger(): PluginLogger {
+  return {
+    debug(): void {
+      // Debug-шум не нужен production composition.
+    },
+    info(): void {
+      // Намеренно пусто.
+    },
+    warn(message, fields): void {
+      if (process.env.NODE_ENV === "development") {
+        console.warn(`[kanbaner] ${message}`, fields ?? {});
+      }
+    },
+    error(message, fields): void {
+      if (process.env.NODE_ENV === "development") {
+        console.error(`[kanbaner] ${message}`, fields ?? {});
+      }
+    },
+  };
+}
+
 function createDefaultPluginService(): PluginService {
   let storage: ApplicationStorageRuntime | null = null;
+  let composition: ApplicationPluginComposition | null = null;
 
   return createPluginService({
     bootstrap: async () => {
-      storage = await getApplicationStorage();
+      const runtime = await getApplicationStorage();
+
+      storage = runtime;
+      composition = createApplicationPluginComposition({
+        storage: runtime.provider,
+        logger: createCompositionLogger(),
+      });
+    },
+    getServices: () => composition?.services,
+    onSnapshot: (snapshot) => {
+      composition?.bindPlugins(
+        snapshot.plugins
+          .filter((plugin) => plugin.activated && plugin.pluginId !== null)
+          .map((plugin) => plugin.pluginId as string),
+      );
+    },
+    getUiContributions: () => composition?.listUiContributions() ?? [],
+    executeOperation: async (operationId, input) => {
+      if (composition === null) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "Composition root не инициализирован",
+            retryable: true,
+          },
+        };
+      }
+
+      return composition.executeUiOperation(operationId, input);
     },
     hooks: {
       migrate: async (context) => {
@@ -676,5 +798,33 @@ export async function getPluginManagerState(): Promise<PluginManagerState> {
     return await getPluginService().getState();
   } catch {
     return createFallbackState();
+  }
+}
+
+/** UI-метаданные активных плагинов; ошибка не роняет layout. */
+export async function getPluginUiContributions(): Promise<readonly PluginUiContributionRecord[]> {
+  try {
+    return await getPluginService().getUiContributions();
+  } catch {
+    return [];
+  }
+}
+
+/** UI-вызов операции через общий bus; возвращает единый конверт. */
+export async function executeUiPluginOperation(
+  operationId: string,
+  input: JsonValue,
+): Promise<OperationResult<unknown>> {
+  try {
+    return await getPluginService().executeUiOperation(operationId, input);
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Не удалось выполнить операцию",
+        retryable: false,
+      },
+    };
   }
 }

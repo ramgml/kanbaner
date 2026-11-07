@@ -5,7 +5,12 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
-    include: ["apps/**/*.test.{ts,tsx}", "packages/**/*.test.{ts,tsx}"],
+    include: [
+      "apps/**/*.test.{ts,tsx}",
+      "packages/**/*.test.{ts,tsx}",
+      "tests/**/*.test.{ts,tsx}",
+      "scripts/**/*.test.mjs",
+    ],
     setupFiles: ["./vitest.setup.ts"],
     restoreMocks: true,
     clearMocks: true,

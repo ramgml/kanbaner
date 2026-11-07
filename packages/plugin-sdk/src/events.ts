@@ -2,9 +2,10 @@ import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12, PLUGIN_CONTRACT_VERSION_NUMBER } from "./contract.ts";
 import { createJsonObjectSchema } from "./json.ts";
-import { PluginIdSchema, SEGMENT_SOURCE } from "./plugin-id.ts";
+import { PluginIdSchema, SEGMENT_SOURCE, type PluginId } from "./plugin-id.ts";
 import { ResourceRefSchema } from "./resources.ts";
 import { UtcTimestampSchema } from "./time.ts";
+import type { ValidationIssue } from "./validation.ts";
 
 /**
  * Тип события `<plugin-id>.<resource>.<past-tense-action>`.
@@ -92,3 +93,44 @@ export function matchesEventSubscription(
 export interface EventSubscriptionMetadata {
   readonly type: EventSubscription;
 }
+
+/** Безопасный контекст доставки, не содержащий payload события. */
+export interface EventDeliveryContext {
+  readonly traceId: string;
+}
+
+/** Обработчик доменного события. */
+export type EventHandler = (
+  envelope: EventEnvelope,
+  context: EventDeliveryContext,
+) => void | Promise<void>;
+
+/** Параметры подписки. `pluginId` используется только для диагностики. */
+export interface EventSubscriptionOptions {
+  readonly pluginId: PluginId;
+}
+
+/** Идемпотентная отмена подписки; `true`, если подписка была удалена. */
+export type EventUnsubscribe = () => boolean;
+
+/** Параметры явной публикации после успешного коммита. */
+export interface EventPublishOptions {
+  readonly traceId: string;
+}
+
+/**
+ * Результат публикации.
+ *
+ * `accepted` означает, что событие принято шиной и передано подписчикам
+ * best-effort. Это не подтверждение успешной обработки: часть подписчиков
+ * могла завершиться ошибкой (`failedSubscribers`).
+ */
+export type EventPublishResult =
+  | {
+      readonly status: "accepted";
+      readonly eventId: string;
+      readonly matchedSubscribers: number;
+      readonly failedSubscribers: number;
+    }
+  | { readonly status: "duplicate"; readonly eventId: string }
+  | { readonly status: "invalid"; readonly errors: readonly ValidationIssue[] };

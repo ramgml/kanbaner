@@ -68,6 +68,53 @@ export interface StorageProvider extends StorageStoreScope {
   createStore<TStore>(registration: StorageStoreRegistration<TStore>): Promise<TStore>;
 }
 
+/**
+ * Структурная проверка Storage Provider на границе плагина.
+ *
+ * Не требует импорта реализации ядра: достаточно публичных методов и
+ * обязательной capability `transactions`.
+ */
+export function isStorageProvider(value: unknown): value is StorageProvider {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as {
+    readonly backendId?: unknown;
+    readonly capabilities?: { readonly transactions?: unknown };
+    readonly open?: unknown;
+    readonly close?: unknown;
+    readonly healthCheck?: unknown;
+    readonly withTransaction?: unknown;
+    readonly createStore?: unknown;
+    readonly documents?: unknown;
+    readonly links?: unknown;
+    readonly pluginStates?: unknown;
+    readonly migrations?: unknown;
+    readonly searchIndex?: unknown;
+  };
+
+  return (
+    typeof candidate.backendId === "string" &&
+    candidate.capabilities?.transactions === true &&
+    typeof candidate.open === "function" &&
+    typeof candidate.close === "function" &&
+    typeof candidate.healthCheck === "function" &&
+    typeof candidate.withTransaction === "function" &&
+    typeof candidate.createStore === "function" &&
+    typeof candidate.documents === "object" &&
+    candidate.documents !== null &&
+    typeof candidate.links === "object" &&
+    candidate.links !== null &&
+    typeof candidate.pluginStates === "object" &&
+    candidate.pluginStates !== null &&
+    typeof candidate.migrations === "object" &&
+    candidate.migrations !== null &&
+    typeof candidate.searchIndex === "object" &&
+    candidate.searchIndex !== null
+  );
+}
+
 /** Проверяет, что контракт относится к ожидаемому Store. */
 export function isSameStoreContract<TStore>(
   left: StorageStoreContract<TStore>,

@@ -1,4 +1,9 @@
-import type { EventSubscription, EventType } from "@kanbaner/plugin-sdk";
+import {
+  parseResourceRef,
+  type EventSubscription,
+  type EventType,
+  type SearchRegistrar,
+} from "@kanbaner/plugin-sdk";
 
 import {
   type EventBus,
@@ -28,13 +33,28 @@ export function isResourceDeletedEvent(type: EventType): boolean {
  * от плагина, домена и payload. Ошибка очистки пробрасывается в шину, где
  * изолируется и журналируется без payload.
  */
-export function createResourceDeletedHandler(links: CleanupTarget): EventHandler {
+export function createResourceDeletedHandler(
+  links: CleanupTarget,
+  search?: Pick<SearchRegistrar, "delete">,
+): EventHandler {
   return async (envelope) => {
     if (!isResourceDeletedEvent(envelope.type)) {
       return;
     }
 
+    const parts = parseResourceRef(envelope.resource);
+
+    // Событие обязано быть опубликовано владельцем ресурса. Иначе чужой
+    // плагин мог бы очистить связи и поисковый индекс другого namespace-а.
+    if (parts.pluginId !== envelope.source) {
+      return;
+    }
+
     await links.cleanup(envelope.resource);
+
+    if (search !== undefined) {
+      await search.delete(parts.pluginId, envelope.resource);
+    }
   };
 }
 
@@ -52,8 +72,9 @@ export function subscribeResourceDeletedCleanup(
   links: CleanupTarget,
   subscriptions: readonly EventSubscription[],
   options: EventSubscriptionOptions,
+  search?: Pick<SearchRegistrar, "delete">,
 ): EventUnsubscribe {
-  const handler = createResourceDeletedHandler(links);
+  const handler = createResourceDeletedHandler(links, search);
   const unsubscribers: EventUnsubscribe[] = [];
 
   try {

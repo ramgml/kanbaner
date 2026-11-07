@@ -9,6 +9,7 @@ import {
   validateResourceRef,
   type ErrorResult,
   type LogFields,
+  type ActivationResourceAdapter,
   type OperationResult,
   type PluginId,
   type PluginLogger,
@@ -22,16 +23,10 @@ import { ResourceRegistryError, ResourceServiceError, safeErrorName } from "./er
 /**
  * Адаптер плагина-владельца типа ресурса.
  *
- * `resolve` обязан быть чистым чтением. `null` или `undefined` означают, что
- * ресурс отсутствует; для удалённого ресурса сервис возвращает `NOT_FOUND`.
+ * Структурный контракт объявлен в SDK. `resolve` обязан быть чистым чтением;
+ * `null`/`undefined` означают отсутствующий ресурс.
  */
-export interface ResourceAdapter {
-  resolve(
-    ref: ResourceRef,
-  ): Promise<ResourceDescriptor | null | undefined> | ResourceDescriptor | null | undefined;
-  canOpen?(ref: ResourceRef): Promise<boolean> | boolean;
-  open?(ref: ResourceRef): Promise<void> | void;
-}
+export type ResourceAdapter = ActivationResourceAdapter;
 
 /** Регистрация владельца и его типов ресурсов. */
 export interface ResourceRegistration {
@@ -106,6 +101,16 @@ export class ResourceRegistry {
       resourceTypes: new Set(resourceTypes),
       adapter,
     });
+  }
+
+  /**
+   * Удаляет владельца и все его типы ресурсов.
+   *
+   * Вызывается при деактивации плагина; данные и универсальные связи не
+   * затрагиваются. Повторный вызов идемпотентен.
+   */
+  unregister(pluginId: PluginId): boolean {
+    return this.#owners.delete(pluginId);
   }
 
   hasOwner(pluginId: PluginId): boolean {

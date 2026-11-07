@@ -1,5 +1,6 @@
 import type {
   CommandMetadata,
+  EventService,
   ExecutionContext,
   InvocationOptions,
   JsonSchemaValidator,
@@ -10,6 +11,8 @@ import type {
   QueryMetadata,
   ResolvedExposure,
   ResourceService,
+  SearchRegistrar,
+  StorageProvider,
 } from "@kanbaner/plugin-sdk";
 
 /** Два вида операций Plugin Contract: изменяющая и читающая. */
@@ -63,7 +66,16 @@ export interface OperationBusOptions {
   readonly validateOutput?: boolean;
   readonly logger?: PluginLogger;
   readonly resources?: ResourceService;
-  readonly storage?: unknown;
+  /**
+   * Хост-шина событий.
+   *
+   * Шина операций привязывает её к namespace-у выполняемой операции и
+   * передаёт обработчику как `ctx.events`.
+   */
+  readonly events?: EventService;
+  readonly search?: SearchRegistrar;
+  /** Хост provider; OperationBus выдаёт обработчику bound PluginStorage. */
+  readonly storage?: StorageProvider;
 }
 
 /** Параметры верхнего вызова операции. */
