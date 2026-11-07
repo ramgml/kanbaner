@@ -648,34 +648,11 @@ export function KanbanView({
         const appended = data.items.filter((task) => !known.has(task.id));
 
         if (appended.length === 0) {
-          // Полностью дублированная или пустая страница не доказывает конец
-          // пагинации: `nextOffset === null` мог прийти при сдвинувшихся
-          // позициях, а `total` всё ещё больше загруженного. Закрываем
-          // пагинацию только когда все уникальные ID уже загружены;
-          // иначе перечитываем колонку с начала независимо от nextOffset.
-          const loadedUnique = new Set(current.items.map((task) => task.id)).size;
-
-          if (data.nextOffset === null && loadedUnique >= data.total) {
-            setColumns((previous) => {
-              if (!isCurrent()) {
-                return previous;
-              }
-
-              return {
-                ...previous,
-                [status]: {
-                  ...getColumn(previous, status),
-                  total: data.total,
-                  nextOffset: null,
-                  loading: false,
-                  error: null,
-                },
-              };
-            });
-
-            return;
-          }
-
+          // Пустая или полностью дублированная страница всегда означает, что
+          // локальные ID могли устареть (уменьшился total, сдвинулись
+          // позиции). Перечитываем колонку с начала: reload не вызывает
+          // loadMore, поэтому цикла нет. Пагинацию закрывает уже актуальный
+          // nextOffset из reload, а не счётчик этой страницы.
           await reloadBoard();
 
           return;

@@ -1184,6 +1184,54 @@ describe("KanbanView", () => {
     expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
   });
 
+  it("убирает stale ID после пустой догрузки при уменьшении total", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`r${String(index).padStart(2, "0")}`, {
+          title: `R${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        // Другая вкладка удалила задачи, и страница за новым концом пуста.
+        if (statusOf(input) === "backlog" && offsetOf(input) === 10) {
+          return ok({ items: [], total: 10, nextOffset: null });
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    expect(cardTitles("backlog")).toHaveLength(10);
+    expect(cardTitles("backlog")).toContain("R00");
+    expect(cardTitles("backlog")).toContain("R01");
+
+    // Из первых десяти удалены две задачи; хвостовые R10/R11 ещё не были
+    // загружены. Пустая страница loadMore не должна оставлять stale ID.
+    board.tasks = board.tasks.filter((task) => task.id !== "r00" && task.id !== "r01");
+
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toHaveLength(10);
+    });
+    expect(cardTitles("backlog")).not.toContain("R00");
+    expect(cardTitles("backlog")).not.toContain("R01");
+    expect(cardTitles("backlog")).toContain("R10");
+    expect(cardTitles("backlog")).toContain("R11");
+    expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("10");
+    expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+  });
+
   it("добавляет только новые карточки из частично дублированной страницы", async () => {
     const board: FakeBoard = {
       projects: [project],
