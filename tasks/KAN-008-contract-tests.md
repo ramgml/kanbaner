@@ -1,7 +1,7 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-008
@@ -139,6 +139,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker коммитом `2a3a35b` подключил search cleanup и сделал reindex атомарным через provider transaction и per-plugin queues; 63 focused-теста, 37 Conformance integration, 733 workspace-теста, 7 E2E и deferred SIGTERM зелёные. Задача повторно в review.
 - 2026-11-07 — Повторное ревью подтвердило закрытие 10 findings, но нашло неподключённый search cleanup в composition root и lost update при concurrent reindex. Требуется передать search service, выполнять замену индекса внутри provider transaction и сериализовать fixture-мутации с regression-тестами.
 - 2026-11-07 — Worker коммитом `a52720a` реализовал bound PluginStorage, поисковый lifecycle, AST import boundaries и остальные исправления; 61 focused-тест, 37 Conformance integration, 729 workspace-тестов, 7 E2E и deferred SIGTERM зелёные. Задача повторно в review.
 - 2026-11-07 — Независимое ревью нашло blocker raw StorageProvider в plugin context и отсутствие обязательного search provider, а также transaction/event lifecycle/ownership/import-boundary/pagination дефекты. Задача возвращена worker-у для bound Storage facade, поискового lifecycle и остальных исправлений без изменения storage providers.
