@@ -241,6 +241,20 @@ describe("task schemas", () => {
     ).toBe(false);
   });
 
+  it("отклоняет дубликаты и внешние пробелы в нормализованных тегах", () => {
+    const output = (tags: string[]) =>
+      validateWithSchema(TaskMutationOutputSchema, {
+        task: { ...task, tags },
+        resource: "kanbaner.tasks:task:task-1",
+        eventId: "event-1",
+      });
+
+    expect(output(["work"]).ok).toBe(true);
+    expect(output(["work", "work"]).ok).toBe(false);
+    expect(output([" work"]).ok).toBe(false);
+    expect(output(["work "]).ok).toBe(false);
+  });
+
   it("требует done ⇔ completedAt !== null", () => {
     const output = (candidate: unknown) => ({
       task: candidate,
@@ -283,15 +297,23 @@ describe("task schemas", () => {
       projectId: "project-1",
       resourceRef: "kanbaner.tasks:task:task-1",
       version: 4,
+      eventVersion: 5,
     };
     const success = {
       deleted: true,
       resource: "kanbaner.tasks:task:task-1",
       version: 4,
+      eventVersion: 5,
       deletedResourceRefs: ["kanbaner.tasks:task:task-1", "kanbaner.tasks:task:task-2"],
       deletedTasks: [
         deletedTask,
-        { ...deletedTask, id: "task-2", resourceRef: "kanbaner.tasks:task:task-2" },
+        {
+          ...deletedTask,
+          id: "task-2",
+          resourceRef: "kanbaner.tasks:task:task-2",
+          version: 7,
+          eventVersion: 8,
+        },
       ],
       eventId: "event-2",
     };
@@ -305,5 +327,14 @@ describe("task schemas", () => {
       validateWithSchema(TaskDeleteOutputSchema, { deleted: false, eventId: "event-3" }).ok,
     ).toBe(false);
     expect(validateWithSchema(TaskDeleteOutputSchema, { ...success, version: 0 }).ok).toBe(false);
+    expect(validateWithSchema(TaskDeleteOutputSchema, { ...success, eventVersion: 1 }).ok).toBe(
+      false,
+    );
+    expect(
+      validateWithSchema(TaskDeleteOutputSchema, {
+        ...success,
+        deletedTasks: [{ ...deletedTask, eventVersion: 1 }],
+      }).ok,
+    ).toBe(false);
   });
 });

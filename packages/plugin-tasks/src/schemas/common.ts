@@ -51,16 +51,25 @@ export const RawTagsSchema = Type.Array(RawTagSchema, { maxItems: MAX_RAW_TAGS }
 /**
  * Один нормализованный тег в сохранённой задаче.
  *
- * Trim, нижний регистр и дедупликация уже выполнены доменом.
+ * Внешние пробелы запрещены. Нижний регистр и дедупликация проверяются
+ * `validateNormalizedTags` на границе сохранённой модели.
  */
 export const TagSchema = Type.String({
   minLength: 1,
   maxLength: MAX_TAG_LENGTH,
-  pattern: "\\S",
+  pattern: "^\\S(?:[\\s\\S]*\\S)?$",
 });
 
-/** Нормализованные теги задачи: не более `MAX_TAGS` штук. */
-export const TagsSchema = Type.Array(TagSchema, { maxItems: MAX_TAGS });
+/**
+ * Нормализованные теги задачи: не более `MAX_TAGS` штук, без дубликатов.
+ *
+ * Уникальность проверяется JSON Schema; trim/нижний регистр — чистой
+ * функцией `validateNormalizedTags`.
+ */
+export const TagsSchema = Type.Array(TagSchema, {
+  maxItems: MAX_TAGS,
+  uniqueItems: true,
+});
 
 /** UTC timestamp или null. */
 export const NullableUtcTimestampSchema = Type.Union([UtcTimestampSchema, Type.Null()]);
@@ -97,6 +106,7 @@ export const DeletedTaskDescriptorSchema = Type.Object(
     projectId: EntityIdSchema,
     resourceRef: ResourceRefSchema,
     version: Type.Integer({ minimum: 1 }),
+    eventVersion: Type.Integer({ minimum: 2 }),
   },
   { ...DRAFT_2020_12, additionalProperties: false },
 );
@@ -107,6 +117,7 @@ export const DeleteSuccessOutputSchema = Type.Object(
     deleted: Type.Literal(true),
     resource: ResourceRefSchema,
     version: Type.Integer({ minimum: 1 }),
+    eventVersion: Type.Integer({ minimum: 2 }),
     deletedResourceRefs: Type.Array(ResourceRefSchema),
     deletedTasks: Type.Array(DeletedTaskDescriptorSchema),
     eventId: Type.String({ minLength: 1 }),

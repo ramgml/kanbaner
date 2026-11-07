@@ -9,6 +9,8 @@ import {
   taskPositionScopeKey,
   validateCompletionInvariant,
   validateExpectedVersion,
+  validateNormalizedTags,
+  validateStoredTask,
   validateOffset,
   validatePagination,
   validatePosition,
@@ -62,6 +64,48 @@ describe("normalizeTags", () => {
     expect(normalizeTag("  Work  ")).toBe("work");
     expect(() => normalizeTag("   ")).toThrowError(TasksValidationError);
     expect(() => normalizeTag("a".repeat(33))).toThrowError(TasksValidationError);
+  });
+});
+
+describe("validateNormalizedTags", () => {
+  it("принимает уже нормализованные теги", () => {
+    expect(validateNormalizedTags(["work", "ä"])).toEqual({
+      ok: true,
+      value: ["work", "ä"],
+    });
+  });
+
+  it("отклоняет верхний регистр, внешние пробелы и дубликаты", () => {
+    for (const tags of [
+      ["Work"],
+      [" work"],
+      ["work "],
+      ["work", "work"],
+      ["work", "WORK"],
+      ["Ä"],
+    ]) {
+      expect(validateNormalizedTags(tags)).toMatchObject({
+        ok: false,
+        code: "INVALID_NORMALIZED_TAGS",
+      });
+    }
+  });
+});
+
+describe("validateStoredTask", () => {
+  const completedAt = "2026-01-01T00:00:00.000Z";
+
+  it("проверяет инвариант completedAt и нормализованные теги", () => {
+    expect(validateStoredTask({ status: "done", completedAt, tags: ["work"] })).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(validateStoredTask({ status: "done", completedAt: null, tags: ["work"] })).toMatchObject(
+      { ok: false, code: "INVALID_COMPLETION" },
+    );
+    expect(validateStoredTask({ status: "todo", completedAt: null, tags: ["Work"] })).toMatchObject(
+      { ok: false, code: "INVALID_NORMALIZED_TAGS" },
+    );
   });
 });
 

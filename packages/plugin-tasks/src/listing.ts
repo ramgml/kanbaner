@@ -55,13 +55,59 @@ export function compareCodePoints(left: string, right: string): number {
   return leftPoints.length - rightPoints.length;
 }
 
-/** Сравнивает два UTC timestamp лексикографически; формат фиксирован. */
-export function compareUtcTimestamps(left: UtcTimestamp, right: UtcTimestamp): number {
-  if (left < right) {
-    return -1;
+const UTC_TIMESTAMP_PARTS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/u;
+
+interface SplitUtcTimestamp {
+  readonly seconds: string;
+  readonly fraction: string;
+}
+
+/**
+ * Разбирает канонический UTC timestamp из SDK без `Date.parse`.
+ *
+ * Секундная часть фиксированной ширины, дробная часть сохраняется целиком:
+ * количество цифр не ограничивается тремя.
+ */
+function splitUtcTimestamp(value: UtcTimestamp): SplitUtcTimestamp {
+  const match = UTC_TIMESTAMP_PARTS.exec(value);
+
+  if (match === null) {
+    throw new TypeError("UTC timestamp должен иметь формат YYYY-MM-DDTHH:mm:ss[.fraction]Z");
   }
 
-  return left > right ? 1 : 0;
+  const [, year = "", month = "", day = "", hour = "", minute = "", second = "", fraction = ""] =
+    match;
+
+  return {
+    seconds: `${year}-${month}-${day}T${hour}:${minute}:${second}`,
+    fraction,
+  };
+}
+
+/**
+ * Сравнивает два UTC timestamp детерминированно.
+ *
+ * Сначала сравниваются секунды, затем дробные части с выравниванием справа
+ * нулями. Поэтому `.1Z` равно `.100Z`, `Z` меньше `.100Z`, а точность больше
+ * трёх знаков не теряется. `Date.parse` не используется.
+ */
+export function compareUtcTimestamps(left: UtcTimestamp, right: UtcTimestamp): number {
+  const leftParts = splitUtcTimestamp(left);
+  const rightParts = splitUtcTimestamp(right);
+
+  if (leftParts.seconds !== rightParts.seconds) {
+    return leftParts.seconds < rightParts.seconds ? -1 : 1;
+  }
+
+  const fractionLength = Math.max(leftParts.fraction.length, rightParts.fraction.length);
+  const leftFraction = leftParts.fraction.padEnd(fractionLength, "0");
+  const rightFraction = rightParts.fraction.padEnd(fractionLength, "0");
+
+  if (leftFraction === rightFraction) {
+    return 0;
+  }
+
+  return leftFraction < rightFraction ? -1 : 1;
 }
 
 /**
@@ -88,6 +134,10 @@ export function compareNullableDueAt(
   }
 
   const order = compareUtcTimestamps(left, right);
+
+  if (order === 0) {
+    return 0;
+  }
 
   return direction === "asc" ? order : -order;
 }
@@ -153,11 +203,11 @@ export function matchesDueRange(
     return false;
   }
 
-  if (dueBefore !== undefined && dueAt > dueBefore) {
+  if (dueBefore !== undefined && compareUtcTimestamps(dueAt, dueBefore) > 0) {
     return false;
   }
 
-  if (dueAfter !== undefined && dueAt < dueAfter) {
+  if (dueAfter !== undefined && compareUtcTimestamps(dueAt, dueAfter) < 0) {
     return false;
   }
 

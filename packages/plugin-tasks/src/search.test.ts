@@ -4,6 +4,7 @@ import { StorageError, type SearchDocumentInput } from "@kanbaner/plugin-sdk";
 
 import type { Task } from "./model.ts";
 import { toTaskSearchDocument } from "./search.ts";
+import { TasksValidationError } from "./validation.ts";
 
 const createdAt = "2026-01-01T00:00:00.000Z";
 
@@ -17,7 +18,7 @@ const task: Task = {
   priority: "high",
   dueAt: null,
   position: 0,
-  tags: ["Release", "backend"],
+  tags: ["release", "backend"],
   version: 3,
   createdAt,
   updatedAt: createdAt,
@@ -50,7 +51,7 @@ describe("toTaskSearchDocument", () => {
       projectId: "project-1",
       status: "in_progress",
       priority: "high",
-      tags: ["Release", "backend"],
+      tags: ["release", "backend"],
       parentTaskId: "parent-1",
     });
   });
@@ -64,6 +65,18 @@ describe("toTaskSearchDocument", () => {
 
     expect(document.text).toBe(task.title);
     expect(document.metadata).not.toHaveProperty("parentTaskId");
+  });
+
+  it("отклоняет ненормализованные теги сохранённой модели", () => {
+    expect(() => toTaskSearchDocument({ ...task, tags: ["Release"] })).toThrowError(
+      TasksValidationError,
+    );
+    expect(() => toTaskSearchDocument({ ...task, tags: [" release"] })).toThrowError(
+      TasksValidationError,
+    );
+    expect(() => toTaskSearchDocument({ ...task, tags: ["work", "work"] })).toThrowError(
+      TasksValidationError,
+    );
   });
 
   it("отказывает для ResourceRef чужого плагина", () => {

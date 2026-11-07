@@ -6,6 +6,7 @@ import {
   compareNullableDueAt,
   compareProjects,
   compareTaskList,
+  compareUtcTimestamps,
   matchesDueRange,
   matchesTaskText,
   normalizeSearchText,
@@ -64,6 +65,27 @@ describe("compareCodePoints", () => {
   });
 });
 
+describe("compareUtcTimestamps", () => {
+  it("выравнивает дробную часть справа и не теряет точность >3 знаков", () => {
+    expect(compareUtcTimestamps("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.100Z")).toBe(0);
+    expect(compareUtcTimestamps("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.100Z")).toBe(-1);
+    expect(compareUtcTimestamps("2026-01-01T00:00:00.100Z", "2026-01-01T00:00:00Z")).toBe(1);
+    expect(
+      compareUtcTimestamps("2026-01-01T00:00:00.1234Z", "2026-01-01T00:00:00.123Z"),
+    ).toBeGreaterThan(0);
+    expect(compareUtcTimestamps("2026-01-01T00:00:00.12340Z", "2026-01-01T00:00:00.1234Z")).toBe(0);
+    expect(
+      compareUtcTimestamps("2026-01-01T00:00:00.12345Z", "2026-01-01T00:00:00.1235Z"),
+    ).toBeLessThan(0);
+  });
+
+  it("отклоняет неканонический timestamp", () => {
+    expect(() => compareUtcTimestamps("2026-01-01T00:00:00", "2026-01-01T00:00:00Z")).toThrowError(
+      TypeError,
+    );
+  });
+});
+
 describe("compareNullableDueAt", () => {
   it("ставит null последними в обоих направлениях", () => {
     expect(compareNullableDueAt(null, createdAt, "asc")).toBeGreaterThan(0);
@@ -72,6 +94,12 @@ describe("compareNullableDueAt", () => {
     expect(compareNullableDueAt(createdAt, null, "desc")).toBeLessThan(0);
     expect(compareNullableDueAt(createdAt, later, "asc")).toBeLessThan(0);
     expect(compareNullableDueAt(createdAt, later, "desc")).toBeGreaterThan(0);
+    expect(compareNullableDueAt("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.100Z", "asc")).toBe(
+      0,
+    );
+    expect(compareNullableDueAt("2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.100Z", "desc")).toBe(
+      0,
+    );
   });
 });
 
@@ -132,6 +160,14 @@ describe("matchesDueRange", () => {
     expect(matchesDueRange(later, later, undefined)).toBe(true);
     expect(matchesDueRange(later, undefined, later)).toBe(true);
     expect(matchesDueRange(latest, later, undefined)).toBe(false);
+  });
+
+  it("сравнивает границы с переменной дробной точностью", () => {
+    expect(matchesDueRange("2026-01-01T00:00:00.100Z", "2026-01-01T00:00:00.1Z")).toBe(true);
+    expect(matchesDueRange("2026-01-01T00:00:00.100Z", undefined, "2026-01-01T00:00:00.1Z")).toBe(
+      true,
+    );
+    expect(matchesDueRange("2026-01-01T00:00:00.1001Z", "2026-01-01T00:00:00.1Z")).toBe(false);
   });
 
   it("не включает null в ограниченный диапазон и пропускает без границ", () => {

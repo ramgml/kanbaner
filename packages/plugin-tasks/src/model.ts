@@ -125,14 +125,32 @@ export const TaskSchema = Type.Union([DoneTaskSchema, OpenTaskSchema], DRAFT_202
 export type Task = Static<typeof TaskSchema>;
 
 /**
+ * Вычисляет `resourceVersion` delete-события.
+ *
+ * В БД сохраняется только последняя версия сущности, tombstone не создаётся.
+ * Event envelope использует следующую версию: update(v3) → delete event(v4).
+ * Для каждой задачи каскада версия вычисляется от её собственной последней
+ * сохранённой версии.
+ */
+export function deleteEventVersion(lastSavedVersion: number): number {
+  if (!Number.isInteger(lastSavedVersion) || lastSavedVersion < 1) {
+    throw new TypeError("Последняя сохранённая версия должна быть целым числом ≥ 1");
+  }
+
+  return lastSavedVersion + 1;
+}
+
+/**
  * Дескриптор удалённой задачи.
  *
- * `version` — последняя сохранённая версия до удаления. Store не создаёт
- * tombstone-версию; события delete и очистка поиска используют это значение.
+ * `version` — последняя сохранённая версия до удаления. `eventVersion` —
+ * значение для `resourceVersion` delete-события этой задачи
+ * (`deleteEventVersion(version)`). Store не создаёт tombstone-версию.
  */
 export interface DeletedTaskDescriptor {
   readonly id: string;
   readonly projectId: string;
   readonly resourceRef: ResourceRef;
   readonly version: number;
+  readonly eventVersion: number;
 }

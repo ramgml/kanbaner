@@ -14,6 +14,7 @@ import type { Task, TaskStatus } from "./model.ts";
 export const TASKS_VALIDATION_CODES = [
   "INVALID_TITLE",
   "INVALID_TAGS",
+  "INVALID_NORMALIZED_TAGS",
   "INVALID_TAG",
   "TAG_EMPTY",
   "TAG_TOO_LONG",
@@ -146,6 +147,77 @@ export function normalizeTag(value: string): string {
   }
 
   return tag;
+}
+
+/**
+ * Проверяет, что массив тегов уже нормализован.
+ *
+ * Сравнивает вход с результатом `validateTags`, поэтому отклоняет верхний
+ * регистр, внешние пробелы и дубликаты, включая Unicode-регистр (`Ä`/`ä`).
+ * Store обязан вызывать эту функцию на границе сохранённой модели: перед
+ * записью и после чтения задачи.
+ */
+export function validateNormalizedTags(value: unknown): TasksValidationResult<readonly string[]> {
+  const normalized = validateTags(value);
+
+  if (!normalized.ok) {
+    return normalized;
+  }
+
+  if (!Array.isArray(value)) {
+    return failure("INVALID_TAGS", "Теги должны быть массивом строк");
+  }
+
+  const input = value as readonly string[];
+
+  if (input.length !== normalized.value.length) {
+    return failure("INVALID_NORMALIZED_TAGS", "Сохранённые теги не должны содержать дубликаты");
+  }
+
+  for (let index = 0; index < input.length; index += 1) {
+    if (input[index] !== normalized.value[index]) {
+      return failure(
+        "INVALID_NORMALIZED_TAGS",
+        "Сохранённые теги должны быть trim и в нижнем регистре",
+      );
+    }
+  }
+
+  return normalized;
+}
+
+/**
+ * Проверяет сохранённую модель задачи: инвариант `completedAt` и
+ * нормализованные теги.
+ *
+ * Это граница Store: реализация KAN-011 обязана вызывать функцию перед
+ * записью и после чтения.
+ */
+export function validateStoredTask(
+  task: Pick<Task, "status" | "completedAt" | "tags">,
+): TasksValidationResult<true> {
+  const completion = validateCompletionInvariant(task);
+
+  if (!completion.ok) {
+    return completion;
+  }
+
+  const tags = validateNormalizedTags(task.tags);
+
+  if (!tags.ok) {
+    return tags;
+  }
+
+  return { ok: true, value: true };
+}
+
+/** Бросает `TasksValidationError`, если сохранённая задача невалидна. */
+export function assertStoredTask(task: Pick<Task, "status" | "completedAt" | "tags">): void {
+  const result = validateStoredTask(task);
+
+  if (!result.ok) {
+    throw new TasksValidationError(result.code, result.message);
+  }
 }
 
 /**

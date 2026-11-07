@@ -8,18 +8,23 @@ import {
 import { PLUGIN_ID, TASK_RESOURCE_TYPE } from "./constants.ts";
 import type { Task } from "./model.ts";
 import { formatTaskRef } from "./resources.ts";
+import { assertStoredTask } from "./validation.ts";
 
 /**
  * Преобразует задачу в `SearchDocumentInput`.
  *
  * Функция ничего не пишет в индекс и не добавляет `pluginId`: ответственный
  * плагин подставляет фасад поиска. `ref` обязан принадлежать домену задач и
- * указывать на ту же задачу; чужой `ResourceRef` отклоняется.
+ * указывать на ту же задачу; чужой `ResourceRef` отклоняется. Перед
+ * преобразованием проверяется граница сохранённой модели: инвариант
+ * `completedAt` и нормализованные теги.
  */
 export function toTaskSearchDocument(
   task: Task,
   ref: ResourceRef = formatTaskRef(task.id),
 ): SearchDocumentInput {
+  assertStoredTask(task);
+
   const parts = parseResourceRef(ref);
 
   if (parts.pluginId !== PLUGIN_ID) {

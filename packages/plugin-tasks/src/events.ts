@@ -23,12 +23,15 @@ export interface ProjectUpdatedEventPayload extends ProjectEventPayload {
 /**
  * Payload `kanbaner.tasks.project.deleted`.
  *
- * `version` — последняя сохранённая версия проекта; `deletedTasks` содержат
- * последние версии задач. Tombstone-версия не создаётся.
+ * `version` — последняя сохранённая версия проекта; `eventVersion` — значение
+ * `resourceVersion` envelope-а (`version + 1`). `deletedTasks` содержат
+ * последние версии задач и их собственные `eventVersion`. Tombstone-версия не
+ * создаётся.
  */
 export interface ProjectDeletedEventPayload {
   readonly projectId: string;
   readonly version: number;
+  readonly eventVersion: number;
   readonly deletedTasks: readonly DeletedTaskDescriptor[];
 }
 
@@ -66,14 +69,16 @@ export interface TaskCompletedEventPayload extends TaskEventPayload {
 /**
  * Payload `kanbaner.tasks.task.deleted`.
  *
- * `version` — последняя сохранённая версия корневой задачи; `deletedTasks`
- * включают корень и подзадачи с их последними версиями. Tombstone-версия не
- * создаётся.
+ * `version` — последняя сохранённая версия корневой задачи; `eventVersion` —
+ * значение `resourceVersion` envelope-а (`version + 1`). `deletedTasks`
+ * включают корень и подзадачи с их последними версиями и собственными
+ * `eventVersion`. Tombstone-версия не создаётся.
  */
 export interface TaskDeletedEventPayload {
   readonly taskId: string;
   readonly projectId: string;
   readonly version: number;
+  readonly eventVersion: number;
   readonly deletedTasks: readonly DeletedTaskDescriptor[];
 }
 

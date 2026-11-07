@@ -225,6 +225,7 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     expect(contract.toTaskSearchDocument).toBeTypeOf("function");
     expect(contract.validateSubtaskParent).toBeTypeOf("function");
     expect(contract.normalizeTag).toBeTypeOf("function");
+    expect(contract.deleteEventVersion).toBeTypeOf("function");
     expect(contract.compareTaskList).toBeTypeOf("function");
 
     expect(contract.TASKS_COMMAND_LIST).toBeUndefined();

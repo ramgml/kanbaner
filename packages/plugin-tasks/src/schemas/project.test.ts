@@ -112,11 +112,13 @@ describe("project schemas", () => {
       projectId: "project-1",
       resourceRef: "kanbaner.tasks:task:task-1",
       version: 3,
+      eventVersion: 4,
     };
     const success = {
       deleted: true,
       resource: "kanbaner.tasks:project:project-1",
       version: 2,
+      eventVersion: 3,
       deletedResourceRefs: ["kanbaner.tasks:project:project-1", "kanbaner.tasks:task:task-1"],
       deletedTasks: [deletedTask],
       eventId: "event-2",
@@ -133,10 +135,19 @@ describe("project schemas", () => {
     expect(validateWithSchema(ProjectDeleteOutputSchema, { ...success, version: 0 }).ok).toBe(
       false,
     );
+    expect(validateWithSchema(ProjectDeleteOutputSchema, { ...success, eventVersion: 1 }).ok).toBe(
+      false,
+    );
     expect(
       validateWithSchema(ProjectDeleteOutputSchema, {
         ...success,
         deletedTasks: [{ ...deletedTask, version: 0 }],
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ProjectDeleteOutputSchema, {
+        ...success,
+        deletedTasks: [{ ...deletedTask, eventVersion: 1 }],
       }).ok,
     ).toBe(false);
   });

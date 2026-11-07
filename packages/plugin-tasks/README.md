@@ -78,8 +78,12 @@ KAN-012. Представления списка и канбана — KAN-013 �
 - `tag` нормализуется так же, как теги задачи: trim, нижний регистр,
   дедупликация и лимиты (`normalizeTag`).
 - `title` сравнивается по code points Unicode, без `localeCompare`.
+- UTC timestamps сравниваются детерминированно: секунды, затем дробная часть с
+  выравниванием справа нулями. `.1Z` равно `.100Z`, `Z` меньше `.100Z`,
+  точность больше трёх знаков не теряется; `Date.parse` не используется.
 - Готовые компараторы: `compareProjects`, `compareTaskList`,
-  `compareNullableDueAt`, `matchesTaskText`, `matchesDueRange`.
+  `compareNullableDueAt`, `compareUtcTimestamps`, `matchesTaskText`,
+  `matchesDueRange`.
 
 ## Позиция задачи
 
@@ -116,8 +120,12 @@ KAN-012. Представления списка и канбана — KAN-013 �
 
 После доменной нормализации (`normalizeTags`) сохраняется не более
 `MAX_TAGS = 10` уникальных тегов длиной до `MAX_TAG_LENGTH = 32`. Схема
-`TaskSchema` проверяет уже нормализованный результат. Фильтр `task.list.tag`
-нормализуется функцией `normalizeTag` тем же способом.
+`TaskSchema` требует `uniqueItems` и запрещает внешние пробелы. Чистая
+`validateNormalizedTags` сравнивает массив с результатом `validateTags` и
+отклоняет верхний регистр, внешние пробелы и дубликаты, включая Unicode-регистр
+(`Ä`/`ä`). `validateStoredTask`/`assertStoredTask` — граница сохранённой
+модели; Store обязан вызывать их перед записью и после чтения. Фильтр
+`task.list.tag` нормализуется функцией `normalizeTag` тем же способом.
 
 ## Как использовать из другого плагина
 
@@ -170,9 +178,12 @@ kanbaner.tasks.task.created|updated|moved|completed|deleted
 
 Payload содержит минимальные идентификаторы и версию; полное состояние
 получается запросом. События `project.deleted` и `task.deleted` несут
-`version` последней сохранённой корневой сущности и `deletedTasks` с
-дескрипторами `{ id, projectId, resourceRef, version }`. Tombstone-версия не
-создаётся. Доставка best-effort, обработчик должен быть идемпотентным.
+`version` последней сохранённой корневой сущности, `eventVersion` и
+`deletedTasks` с дескрипторами `{ id, projectId, resourceRef, version,
+eventVersion }`. Envelope использует `resourceVersion = eventVersion =
+version + 1`: update(v3) → delete event(v4). У каждой задачи каскада своя
+`eventVersion`. Tombstone-версия не создаётся. Доставка best-effort,
+обработчик должен быть идемпотентным.
 
 ## TasksStore и данные
 
@@ -207,12 +218,16 @@ await store.withTransaction(async (transaction) => {
 `DeleteStoreResult` дискриминирован:
 
 - `deleted: true` содержит `version` корня (равен `expectedVersion`),
-  `deletedResourceRefs` и `deletedTasks` с последними сохранёнными версиями;
+  `eventVersion = version + 1`, `deletedResourceRefs` и `deletedTasks` с
+  последними сохранёнными версиями и их `eventVersion`;
 - `deleted: false` — идемпотентный no-op без события и без `eventId`.
 
 Ответы `project.delete` и `task.delete` используют ту же дискриминацию:
 `deleted: true` содержит `eventId`, `deleted: false` — нет. Tombstone-версия
-не создаётся; события удаления используют последнюю сохранённую версию.
+не создаётся. Delete-событие каждого ресурса использует
+`resourceVersion = version + 1`; у каждой задачи каскада версия считается от её
+собственной последней сохранённой версии. Готовая чистая функция —
+`deleteEventVersion(version)`.
 
 Физическое хранение проектируется как namespaced document collections плагина:
 

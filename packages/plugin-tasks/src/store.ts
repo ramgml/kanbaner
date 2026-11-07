@@ -102,12 +102,15 @@ export interface DeleteProjectStoreInput {
  * Успешный результат каскадного удаления.
  *
  * `version` корневой сущности равен `expectedVersion` успешного вызова.
- * Tombstone-версия не создаётся: `deletedTasks[].version` — последняя
- * сохранённая версия задачи до удаления. События delete используют именно её.
+ * `eventVersion` — значение `resourceVersion` delete-события корня
+ * (`deleteEventVersion(version)`). Tombstone-версия не создаётся.
+ * `deletedTasks[].version`/`eventVersion` содержат последнюю сохранённую
+ * версию каждой задачи и её версию события.
  */
 export interface DeleteStoreSuccess {
   readonly deleted: true;
   readonly version: number;
+  readonly eventVersion: number;
   readonly deletedResourceRefs: readonly ResourceRef[];
   readonly deletedTasks: readonly DeletedTaskDescriptor[];
 }

@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { PluginDocumentStore, ResourceRef } from "@kanbaner/plugin-sdk";
 
-import type { DeletedTaskDescriptor, Task } from "./model.ts";
+import { deleteEventVersion, type DeletedTaskDescriptor, type Task } from "./model.ts";
 import {
   TASKS_NESTED_TRANSACTION_CODE,
   TasksNestedTransactionError,
@@ -66,8 +66,16 @@ describe("append и каскадные типы", () => {
     type Noop = Extract<DeleteStoreResult, { readonly deleted: false }>;
 
     expectTypeOf<Success["version"]>().toEqualTypeOf<number>();
+    expectTypeOf<Success["eventVersion"]>().toEqualTypeOf<number>();
     expectTypeOf<Success["deletedResourceRefs"]>().toEqualTypeOf<readonly ResourceRef[]>();
     expectTypeOf<Success["deletedTasks"]>().toEqualTypeOf<readonly DeletedTaskDescriptor[]>();
+    expectTypeOf<DeletedTaskDescriptor["eventVersion"]>().toEqualTypeOf<number>();
     expectTypeOf<Noop>().toEqualTypeOf<{ readonly deleted: false }>();
+  });
+
+  it("вычисляет eventVersion delete-события от последней сохранённой версии", () => {
+    expect(deleteEventVersion(3)).toBe(4);
+    expect(deleteEventVersion(1)).toBe(2);
+    expect(() => deleteEventVersion(0)).toThrowError(TypeError);
   });
 });
