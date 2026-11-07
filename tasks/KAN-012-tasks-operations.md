@@ -133,11 +133,18 @@ specs:
 - `packages/plugin-tasks/README.md`;
 - `tests/integration/tasks-activation*.test.ts`;
 - `scripts/check-import-boundaries.mjs`;
+- `packages/plugin-sdk/src/errors.ts`, `packages/plugin-sdk/src/index.ts` —
+  только additive публичный throwable-тип ошибки операции;
+- `packages/kernel/src/operations/errors.ts` и его тесты — совместимость
+  `OperationFailure` с публичным SDK-типом;
+- `specs/plugin-contract.md` — только фиксация способа выброса ожидаемой
+  ошибки операции;
 - `pnpm-lock.yaml` — только если изменились зависимости.
 
 Запрещено:
 
-- `packages/kernel/**`, `packages/plugin-sdk/**`, `packages/storage-sqlite/**`;
+- `packages/kernel/**`, `packages/plugin-sdk/**`, `packages/storage-sqlite/**`,
+  кроме явно разрешённого additive error contract выше;
 - `apps/web/**` и `tests/contract/**`;
 - другие плагины;
 - изменение публичных схем без согласования с KAN-010;
@@ -195,6 +202,12 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Независимое ревью нашло deadlock при вызове tasks-команды из
+  обработчика события и непереносимый capture приватного `OperationFailure`.
+  Оркестратор согласовал additive SDK throwable-тип ошибки операции и
+  совместимое наследование существующего kernel `OperationFailure`; capture-shim
+  запрещён. Дополнительно требуются normalized idempotency input и реальные
+  race/sibling/failure-тесты.
 - 2026-11-07 — После ревью KAN-012 уточнена событийная модель: сдвинутые
   соседи получают `task.updated`, а delete использует `eventVersion`. Это
   предотвращает устаревшие проекции у подписчиков.
