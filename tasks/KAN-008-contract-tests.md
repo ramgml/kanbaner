@@ -1,7 +1,7 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-008
@@ -139,6 +139,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker коммитом `a52720a` реализовал bound PluginStorage, поисковый lifecycle, AST import boundaries и остальные исправления; 61 focused-тест, 37 Conformance integration, 729 workspace-тестов, 7 E2E и deferred SIGTERM зелёные. Задача повторно в review.
 - 2026-11-07 — Независимое ревью нашло blocker raw StorageProvider в plugin context и отсутствие обязательного search provider, а также transaction/event lifecycle/ownership/import-boundary/pagination дефекты. Задача возвращена worker-у для bound Storage facade, поискового lifecycle и остальных исправлений без изменения storage providers.
 - 2026-11-07 — Worker завершил fixture и контрактные проверки коммитом `9424ad9`; 53 focused-теста, 37 Conformance integration, 718 workspace-тестов, 7 Playwright E2E и deferred SIGTERM test зелёные. `check:imports` и self-test работают, production fixture загружается через public lifecycle. Создан отчёт, задача переведена в review.
 - 2026-11-07 — Пользователь выбрал расширение lifecycle. Оркестратор назначил worker-kan-008, ветку `feat/kan-008-contract-tests` и worktree `.worktrees/kan-008-contract-tests`; разрешены точечные изменения SDK/KAN-003/KAN-004/KAN-005 и composition services для commands/queries/resources/storage/events, обновление Plugin Contract и согласованных test configs.
