@@ -455,6 +455,84 @@ describe("InMemoryStorageProvider", () => {
     }
   });
 
+  it("восстанавливает snapshot rejected savepoint после sealing родителя", async () => {
+    const memory = provider({ backendId: "memory-savepoint-sealed", operationMs: 1 });
+    const nestedId = "01JDOC00000000000000000002";
+
+    await memory.open();
+
+    try {
+      const original = await memory.documents.put(doc());
+      const nestedPutDone = deferred();
+      const rejectSavepoint = deferred();
+      let savepointPromise: Promise<unknown> | undefined;
+
+      await memory.withTransaction(async (transaction) => {
+        savepointPromise = transaction.withSavepoint(async (nested) => {
+          // Nested put успевает примениться до deferred reject.
+          await nested.documents.put(doc(nestedId));
+          nestedPutDone.resolve();
+          await rejectSavepoint.promise;
+          throw new Error("deferred savepoint reject");
+        });
+
+        // Вызывающий обрабатывает Promise; родитель намеренно не ждёт savepoint.
+        void savepointPromise.catch(() => undefined);
+        await nestedPutDone.promise;
+        setTimeout(() => rejectSavepoint.resolve(), 0);
+      });
+
+      if (savepointPromise === undefined) {
+        throw new Error("savepoint должен был начаться");
+      }
+
+      await expect(savepointPromise).rejects.toThrow("deferred savepoint reject");
+
+      expect(await memory.documents.get(PLUGIN, COLLECTION, nestedId)).toBeNull();
+
+      const stored = await memory.documents.get(PLUGIN, COLLECTION, DOC_ID);
+
+      expect(stored?.version).toBe(original.version);
+      expect(stored?.data).toEqual(original.data);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  it("возвращает TRANSACTION_CLOSED для операции, начатой до sealing", async () => {
+    const memory = provider({ backendId: "memory-sealed-operation", operationMs: 5 });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on("unhandledRejection", onUnhandled);
+    await memory.open();
+
+    try {
+      let pending: Promise<unknown> | undefined;
+
+      await memory.withTransaction(async (transaction) => {
+        pending = transaction.documents.put(doc());
+      });
+
+      if (pending === undefined) {
+        throw new Error("операция должна была начаться");
+      }
+
+      await expect(pending).rejects.toMatchObject({ code: "TRANSACTION_CLOSED" });
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+
+      expect(unhandled).toEqual([]);
+      expect(await memory.documents.get(PLUGIN, COLLECTION, DOC_ID)).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await memory.close();
+    }
+  });
+
   it("использует savepoint только при capability", async () => {
     const memory = provider({ backendId: "memory-savepoints" });
     const noSavepoints = provider({

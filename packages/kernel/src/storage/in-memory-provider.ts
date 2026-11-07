@@ -49,16 +49,18 @@ export interface InMemoryStorageProviderOptions {
  *
  * `active` сбрасывается сразу после завершения callback: новые операции
  * запрещены, а уже начатые обязаны завершиться до commit/rollback/release.
+ * `rolledBack` фиксирует фактический откат области, а не только sealing.
  * `pending` хранит все начатые, но ещё не завершённые Store-операции области.
  */
 interface TransactionScope {
   active: boolean;
+  rolledBack: boolean;
   readonly parent: TransactionScope | null;
   readonly pending: Set<Promise<unknown>>;
 }
 
 function createScope(parent: TransactionScope | null): TransactionScope {
-  return { active: true, parent, pending: new Set<Promise<unknown>>() };
+  return { active: true, rolledBack: false, parent, pending: new Set<Promise<unknown>>() };
 }
 
 function isScopeActive(scope: TransactionScope): boolean {
@@ -73,6 +75,28 @@ function isScopeActive(scope: TransactionScope): boolean {
   }
 
   return true;
+}
+
+/**
+ * Проверяет, что предок уже фактически откатился.
+ *
+ * Sealed-предок ещё не означает rollback: родитель ждёт завершения tracked
+ * child-областей. Поэтому вложенный rejected savepoint обязан восстановить
+ * собственный snapshot при sealed-родителе и пропустить restore только после
+ * реального rollback предка.
+ */
+function hasRolledBackAncestor(scope: TransactionScope): boolean {
+  let current: TransactionScope | null = scope;
+
+  while (current !== null) {
+    if (current.rolledBack) {
+      return true;
+    }
+
+    current = current.parent;
+  }
+
+  return false;
 }
 
 function delayValue(value: number | undefined, label: string): number {
@@ -201,6 +225,7 @@ export class InMemoryStorageProvider implements StorageProvider {
 
       if (failed) {
         this.#state = snapshot;
+        scope.rolledBack = true;
         throw failure;
       }
 
@@ -316,11 +341,14 @@ export class InMemoryStorageProvider implements StorageProvider {
     );
 
     if (failed) {
-      // Родитель уже откатился: не перезаписываем его восстановленное состояние.
-      if (isScopeActive(parent)) {
+      // Родитель может быть уже sealed, но ещё не откатился: он ждёт drain
+      // этой tracked child-области. Восстанавливаем свой snapshot, пока
+      // фактического rollback предка не было; иначе не перезаписываем его.
+      if (!hasRolledBackAncestor(parent)) {
         this.#state = snapshot;
       }
 
+      child.rolledBack = true;
       throw failure;
     }
 
@@ -359,13 +387,13 @@ export class InMemoryStorageProvider implements StorageProvider {
   /**
    * Регистрирует задачу области и снимает регистрацию после завершения.
    *
-   * Отдельный `catch` помечает Promise обработанным, чтобы неawait-нутая
-   * операция не порождала `unhandledRejection`; исходная задача по-прежнему
-   * отклоняется для вызывающего кода.
+   * Провайдер не подавляет reject внешнего Promise: вызывающий обязан
+   * обработать возвращённое значение, как в обычном JS. Внутренняя задача
+   * дожидается через `allSettled` при sealing, но это не делает внешний
+   * Promise «обработанным».
    */
   async #track<T>(scope: TransactionScope, task: Promise<T>): Promise<T> {
     scope.pending.add(task);
-    void task.catch(() => undefined);
 
     try {
       return await task;

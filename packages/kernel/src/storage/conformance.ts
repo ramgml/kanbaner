@@ -905,6 +905,57 @@ export function createStorageProviderConformanceSuite(
       },
     },
     {
+      name: "savepoint: rejected после sealing родителя восстанавливает snapshot",
+      async run(provider) {
+        if (!provider.capabilities.savepoints) {
+          await assertRejectsCode(
+            provider.withTransaction(async (transaction) =>
+              transaction.withSavepoint(async () => undefined),
+            ),
+            "SAVEPOINTS_UNSUPPORTED",
+            "savepoint без capability",
+          );
+
+          return;
+        }
+
+        const nestedId = "01JDOC00000000000000000003";
+        const nestedPutDone = deferred();
+        const rejectSavepoint = deferred();
+        let savepointPromise: Promise<unknown> | undefined;
+
+        await provider.documents.put(documentInput());
+
+        await provider.withTransaction(async (transaction) => {
+          savepointPromise = transaction.withSavepoint(async (nested) => {
+            // Nested put успевает примениться до deferred reject.
+            await nested.documents.put(
+              documentInput(nestedId, { title: "Nested sealed savepoint" }),
+            );
+            nestedPutDone.resolve();
+            await rejectSavepoint.promise;
+            throw new Error("deferred savepoint rejection");
+          });
+
+          // Вызывающий обрабатывает Promise; родитель намеренно не ждёт savepoint.
+          void savepointPromise.catch(() => undefined);
+          await nestedPutDone.promise;
+          setTimeout(() => rejectSavepoint.resolve(), 0);
+        });
+
+        if (savepointPromise === undefined) {
+          assert.fail("savepoint должен был начаться");
+        }
+
+        await assertRejectsError(savepointPromise, "rejected savepoint после sealing родителя");
+        assert.equal(await provider.documents.get(PLUGIN, COLLECTION, nestedId), null);
+
+        const original = await provider.documents.get(PLUGIN, COLLECTION, DOC_ID);
+        assert.equal(original?.version, 1);
+        assert.deepEqual(original?.data, { title: "Widget", status: "open" });
+      },
+    },
+    {
       name: "поиск: индексирует, находит и полностью переиндексирует",
       async run(provider) {
         const expectedStrategy = provider.capabilities.fullTextSearch ? "full-text" : "substring";
