@@ -8,6 +8,7 @@ import {
   getColumn,
   placementForIndex,
   resolveMovePosition,
+  visibleMoveIntent,
 } from "./ui/board-state.ts";
 
 function task(id: string, status: TaskStatus, position: number, projectId = "project-1"): Task {
@@ -88,18 +89,46 @@ describe("board-state", () => {
     expect(resolveMovePosition(items, "a", { kind: "before", beforeId: "missing" })).toBe(2);
   });
 
-  it("считает up/down по полному scope, включая скрытого фильтром соседа", () => {
-    const visibleNeighbour = task("visible", "todo", 0);
-    const moved = task("moved", "todo", 1);
-    const hiddenNeighbour = task("hidden", "todo", 2);
-    const fullScope = [visibleNeighbour, moved, hiddenNeighbour];
+  it("переводит видимое «ниже» в anchor, не используя currentIndex полного scope", () => {
+    const visibleA = task("visible-a", "todo", 0);
+    const hidden = task("hidden", "todo", 1);
+    const visibleC = task("visible-c", "todo", 2);
+    const fullScope = [visibleA, hidden, visibleC];
+    const visible = [visibleA, visibleC];
 
-    // В отфильтрованном виде «ниже» выглядит как конец списка, но в полном
-    // scope после moved есть скрытый сосед, поэтому позиция = 2.
-    expect(resolveMovePosition(fullScope, "moved", { kind: "relative", direction: "up" })).toBe(0);
-    expect(resolveMovePosition(fullScope, "moved", { kind: "relative", direction: "down" })).toBe(
-      2,
-    );
+    // В видимом списке [A, C] «ниже» для A — конец; anchor-а нет, значит
+    // append по полному scope даёт позицию 2 и порядок B, C, A.
+    const downPlacement = placementForIndex("todo", visible, "visible-a", 1);
+
+    expect(downPlacement).toEqual({ status: "todo", beforeId: null });
+    const downIntent = visibleMoveIntent(visible, "visible-a", downPlacement);
+
+    expect(downIntent).toEqual({ kind: "append" });
+    expect(resolveMovePosition(fullScope, "visible-a", downIntent)).toBe(2);
+
+    // «Выше» для C в видимом списке ставит anchor на A; в полном scope A
+    // находится на позиции 0, а не рядом с hidden.
+    const upPlacement = placementForIndex("todo", visible, "visible-c", 0);
+
+    expect(upPlacement).toEqual({ status: "todo", beforeId: "visible-a" });
+    const upIntent = visibleMoveIntent(visible, "visible-c", upPlacement);
+
+    expect(upIntent).toEqual({ kind: "before", beforeId: "visible-a" });
+    expect(resolveMovePosition(fullScope, "visible-c", upIntent)).toBe(0);
+  });
+
+  it("строит anchor по следующей видимой карточке после оптимистичной вставки", () => {
+    const a = task("a", "todo", 0);
+    const b = task("b", "todo", 1);
+    const c = task("c", "todo", 2);
+
+    // [A, B, C], «ниже» A → [B, A, C], anchor — C.
+    const placement = placementForIndex("todo", [a, b, c], "a", 1);
+
+    expect(visibleMoveIntent([a, b, c], "a", placement)).toEqual({
+      kind: "before",
+      beforeId: "c",
+    });
   });
 
   it("строит вставку перед следующей карточкой для целевого индекса", () => {

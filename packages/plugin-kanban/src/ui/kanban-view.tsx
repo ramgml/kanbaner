@@ -26,6 +26,7 @@ import {
   getColumn,
   placementForIndex,
   resolveMovePosition,
+  visibleMoveIntent,
   type KanbanColumns,
   type MoveIntent,
   type Placement,
@@ -52,9 +53,18 @@ interface ColumnPage {
   readonly nextOffset: number | null;
 }
 
+/**
+ * Требование видимости карточки после move.
+ *
+ * Требования хранятся по taskId, потому что одновременных перемещений может
+ * быть несколько. `filterKey` привязывает требование к scope запроса: reload
+ * с другим фильтром не должен преждевременно его снимать.
+ */
 interface VisibilityRequirement {
-  readonly status: TaskStatus;
   readonly taskId: string;
+  readonly status: TaskStatus;
+  readonly position: number;
+  readonly filterKey: string;
 }
 
 interface DropTarget {
@@ -88,9 +98,11 @@ function listInput(
 /**
  * Читает страницу колонки, последовательно добирая до нужного количества.
  *
- * `mustIncludeId` нужен после перемещения: карточка не должна исчезнуть за
- * границей страницы, поэтому чтение продолжается, пока она не появится или
- * сервер не сообщит об окончании списка.
+ * `mustIncludeIds` нужен после перемещений: каждая карточка не должна
+ * исчезнуть за границей страницы, поэтому чтение продолжается, пока не
+ * появятся все required ID или сервер не сообщит об окончании списка.
+ * Одного `max(position)` недостаточно: при нескольких одновременных move
+ * требования могут относиться к разным позициям.
  */
 async function fetchColumnPage(
   invoke: UiOperationInvoker,
@@ -98,9 +110,10 @@ async function fetchColumnPage(
   projectId: string,
   tag: string,
   targetCount: number,
-  mustIncludeId: string | null = null,
+  mustIncludeIds: readonly string[] = [],
 ): Promise<ColumnPage> {
   const items: Task[] = [];
+  const required = new Set(mustIncludeIds);
   let total = 0;
   let nextOffset: number | null = null;
   let remaining = Math.max(1, targetCount);
@@ -118,13 +131,10 @@ async function fetchColumnPage(
     nextOffset = data.nextOffset;
     remaining -= data.items.length;
 
-    const found = mustIncludeId !== null && items.some((task) => task.id === mustIncludeId);
+    const loadedIds = new Set(items.map((task) => task.id));
+    const foundAll = [...required].every((id) => loadedIds.has(id));
 
-    if (
-      data.nextOffset === null ||
-      data.items.length === 0 ||
-      (remaining <= 0 && (mustIncludeId === null || found))
-    ) {
+    if (data.nextOffset === null || data.items.length === 0 || (remaining <= 0 && foundAll)) {
       break;
     }
   }
@@ -220,7 +230,7 @@ export function KanbanView({
   const filtersRef = useRef({ projectId: query.projectId, tag: query.tag });
   const reloadSequenceRef = useRef(0);
   const loadMoreSequenceRef = useRef<Record<TaskStatus, number>>(emptyCounts(0));
-  const visibilityRef = useRef<VisibilityRequirement | null>(null);
+  const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
 
@@ -252,11 +262,16 @@ export function KanbanView({
 
   const reloadBoard = useCallback(async (): Promise<void> => {
     const sequence = reloadSequenceRef.current + 1;
-    const visibility = visibilityRef.current;
     // Читаем актуальные фильтры из ref, а не из замыкания: запоздавший
     // reload после move не должен перезаписать колонку старым фильтром.
     const filters = filtersRef.current;
     const filterKey = filterKeyRef.current;
+    // Снимок требований видимости: одновременно может быть несколько moves.
+    // Reload с другим фильтром не должен их снимать, поэтому учитываем только
+    // требования текущего filterKey.
+    const requirements = [...visibilityRef.current.values()].filter(
+      (requirement) => requirement.filterKey === filterKey,
+    );
 
     reloadSequenceRef.current = sequence;
 
@@ -282,14 +297,30 @@ export function KanbanView({
 
     const results = await Promise.all(
       KANBAN_STATUSES.map(async (status) => {
+        const statusRequirements = requirements.filter(
+          (requirement) => requirement.status === status,
+        );
+        const requiredIds = statusRequirements.map((requirement) => requirement.taskId);
+        const requiredPosition =
+          statusRequirements.length === 0
+            ? 0
+            : Math.max(...statusRequirements.map((requirement) => requirement.position + 1));
+        // Цель по количеству — максимум из уже догруженного и required
+        // позиций. Сами ID проверяются отдельно: только max position может
+        // не покрыть все одновременные требования.
+        const targetCount = Math.max(
+          loadedCountsRef.current[status] ?? KANBAN_PAGE_SIZE,
+          requiredPosition,
+        );
+
         try {
           const page = await fetchColumnPage(
             invoke,
             status,
             filters.projectId,
             filters.tag,
-            loadedCountsRef.current[status] ?? KANBAN_PAGE_SIZE,
-            visibility?.status === status ? visibility.taskId : null,
+            targetCount,
+            requiredIds,
           );
 
           return { status, page, error: null } as const;
@@ -303,8 +334,21 @@ export function KanbanView({
       return;
     }
 
-    if (visibilityRef.current === visibility) {
-      visibilityRef.current = null;
+    // Требование снимается только когда актуальный reload действительно
+    // содержит этот ID. Не найденная карточка остаётся в наборе, чтобы
+    // следующий подходящий reload продолжил догрузку.
+    for (const result of results) {
+      if (result.page === null) {
+        continue;
+      }
+
+      const loadedIds = new Set(result.page.items.map((task) => task.id));
+
+      for (const requirement of requirements) {
+        if (requirement.status === result.status && loadedIds.has(requirement.taskId)) {
+          visibilityRef.current.delete(requirement.taskId);
+        }
+      }
     }
 
     setColumns((current) => {
@@ -487,7 +531,14 @@ export function KanbanView({
         loadedCountsRef.current[status] ?? KANBAN_PAGE_SIZE,
         position + 1,
       );
-      visibilityRef.current = { status, taskId: task.id };
+      // Требования накапливаются по taskId: одновременные moves в одну
+      // колонку не должны затирать друг друга.
+      visibilityRef.current.set(task.id, {
+        taskId: task.id,
+        status,
+        position,
+        filterKey: filterKeyRef.current,
+      });
 
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskMove, {
         id: task.id,
@@ -501,8 +552,11 @@ export function KanbanView({
       // догружает target колонку минимум до позиции перемещённой карточки.
       await reloadBoard();
     } catch (commandError) {
+      // Команда не применилась: требование видимости для неё больше не
+      // актуально, остальные одновременные требования сохраняются.
+      visibilityRef.current.delete(task.id);
+
       if (isVersionConflict(commandError)) {
-        visibilityRef.current = null;
         setConflict(task.id, true);
         setError(VERSION_CONFLICT_MESSAGE);
         await reloadBoard();
@@ -533,8 +587,10 @@ export function KanbanView({
       return;
     }
 
-    // Оптимистичное отображение строится по видимым карточкам, а команда —
-    // по полному scope. Скрытый сосед не ломает ни порядок, ни индекс.
+    // Действия относятся к видимому порядку. Для «Выше»/«Ниже» anchor
+    // берётся из уже построенного optimistic placement (следующая видимая
+    // карточка), а полный scope нужен только для перевода anchor-а в позицию.
+    // Скрытые соседи не сдвигают направление.
     const targetIndex =
       kind === "start" ? 0 : kind === "end" ? items.length : kind === "up" ? index - 1 : index + 1;
     const placement = placementForIndex(status, items, task.id, targetIndex);
@@ -543,7 +599,7 @@ export function KanbanView({
         ? { kind: "start" }
         : kind === "end"
           ? { kind: "append" }
-          : { kind: "relative", direction: kind };
+          : visibleMoveIntent(items, task.id, placement);
 
     void moveTask(task, status, intent, placement);
   };
@@ -592,9 +648,14 @@ export function KanbanView({
         const appended = data.items.filter((task) => !known.has(task.id));
 
         if (appended.length === 0) {
-          // Дубликаты или пустая страница не означают конец пагинации:
-          // перечитываем колонку с начала, чтобы восстановить курсор.
-          if (data.nextOffset === null) {
+          // Полностью дублированная или пустая страница не доказывает конец
+          // пагинации: `nextOffset === null` мог прийти при сдвинувшихся
+          // позициях, а `total` всё ещё больше загруженного. Закрываем
+          // пагинацию только когда все уникальные ID уже загружены;
+          // иначе перечитываем колонку с начала независимо от nextOffset.
+          const loadedUnique = new Set(current.items.map((task) => task.id)).size;
+
+          if (data.nextOffset === null && loadedUnique >= data.total) {
             setColumns((previous) => {
               if (!isCurrent()) {
                 return previous;

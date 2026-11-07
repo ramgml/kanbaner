@@ -143,7 +143,6 @@ export function applyPlacements(
 export type MoveIntent =
   | { readonly kind: "append" }
   | { readonly kind: "start" }
-  | { readonly kind: "relative"; readonly direction: "up" | "down" }
   | { readonly kind: "before"; readonly beforeId: string };
 
 /**
@@ -170,18 +169,31 @@ export function resolveMovePosition(
 
       return index === -1 ? others.length : index;
     }
-    case "relative": {
-      const currentIndex = tasks.findIndex((task) => task.id === taskId);
-
-      if (currentIndex === -1) {
-        return others.length;
-      }
-
-      return intent.direction === "up"
-        ? Math.max(0, currentIndex - 1)
-        : Math.min(others.length, currentIndex + 1);
-    }
   }
+}
+
+/**
+ * Переводит optimistic placement в намерение для полного scope.
+ *
+ * Действия «Выше»/«Ниже» относятся к видимому порядку: после вставки берётся
+ * следующая видимая карточка. Её ID становится anchor-ом для `before`, а
+ * отсутствие следующей означает `append`. Полный scope используется только
+ * для перевода anchor-а в позицию, поэтому скрытые соседи не сдвигают
+ * направление.
+ */
+export function visibleMoveIntent(
+  items: readonly Task[],
+  taskId: string,
+  placement: Placement,
+): MoveIntent {
+  const rest = items.filter((task) => task.id !== taskId);
+  const insertion =
+    placement.beforeId === null
+      ? rest.length
+      : rest.findIndex((task) => task.id === placement.beforeId);
+  const next = insertion === -1 ? undefined : rest[insertion];
+
+  return next === undefined ? { kind: "append" } : { kind: "before", beforeId: next.id };
 }
 
 /** Строит placement для целевого индекса внутри колонки. */

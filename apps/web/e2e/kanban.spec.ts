@@ -631,6 +631,83 @@ test.describe("канбан в production shell", () => {
         .toEqual([hiddenId, secondId, visibleId]);
     });
 
+    test("«Выше» и «Ниже» в filtered-колонке работают по видимому порядку", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект видимого порядка");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const beforeId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Скрытая до"),
+        status: "todo",
+        tags: "backend",
+      });
+      const visibleAId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Видимая A"),
+        status: "todo",
+        tags: "release",
+      });
+      const middleId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Скрытая между"),
+        status: "todo",
+        tags: "backend",
+      });
+      const visibleCId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Видимая C"),
+        status: "todo",
+        tags: "release",
+      });
+      const afterId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Скрытая после"),
+        status: "todo",
+        tags: "backend",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect
+        .poll(async () => cardTitles(page, "todo"))
+        .toEqual([beforeId, visibleAId, middleId, visibleCId, afterId]);
+
+      const filters = page.getByTestId("kanban-filters");
+      const tagInput = filters.getByLabel("Тег", { exact: true });
+
+      await tagInput.fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleAId, visibleCId]);
+
+      // «Ниже» для A должно опустить её под C в видимом списке, а не
+      // остановиться перед скрытой M: полный порядок заканчивается на A.
+      await reorderWithMenu(page, visibleAId, "Ниже");
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleCId, visibleAId]);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleCId, visibleAId]);
+
+      await tagInput.fill("");
+      await expect
+        .poll(async () => cardTitles(page, "todo"))
+        .toEqual([beforeId, middleId, visibleCId, afterId, visibleAId]);
+
+      // «Выше» для A из [C, A] поднимает её над C, сохраняя скрытые соседи
+      // по обе стороны от видимой пары.
+      await tagInput.fill("release");
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleCId, visibleAId]);
+      await reorderWithMenu(page, visibleAId, "Выше");
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([visibleAId, visibleCId]);
+
+      await tagInput.fill("");
+      await expect
+        .poll(async () => cardTitles(page, "todo"))
+        .toEqual([beforeId, middleId, visibleAId, visibleCId, afterId]);
+    });
+
     test("после перемещения догружает target колонку на 10 и 12 задач", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект границы страницы");
       const progressTotal = 10;

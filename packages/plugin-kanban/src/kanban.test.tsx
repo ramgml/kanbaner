@@ -564,6 +564,86 @@ describe("KanbanView", () => {
     expect(board.tasks.find((task) => task.id === "hidden")?.position).toBe(0);
   });
 
+  it.each([
+    {
+      action: "Ниже",
+      taskId: "visible-a",
+      expectedPosition: 4,
+      expectedFull: ["hidden-before", "hidden-middle", "visible-c", "hidden-after", "visible-a"],
+    },
+    {
+      action: "Выше",
+      taskId: "visible-c",
+      expectedPosition: 1,
+      expectedFull: ["hidden-before", "visible-c", "visible-a", "hidden-middle", "hidden-after"],
+    },
+  ])(
+    "«$action» в filtered-колонке относится к видимому порядку при скрытых соседях с обеих сторон",
+    async ({ action, taskId, expectedPosition, expectedFull }) => {
+      window.history.replaceState(null, "", "/view/kanban?project=project-1&tag=show");
+      resetKanbanQueryForTests("?project=project-1&tag=show");
+      const board: FakeBoard = {
+        projects: [project],
+        tasks: [
+          makeTask("hidden-before", {
+            title: "H1",
+            status: "todo",
+            position: 0,
+            tags: ["other"],
+          }),
+          makeTask("visible-a", { title: "A", status: "todo", position: 1, tags: ["show"] }),
+          makeTask("hidden-middle", {
+            title: "H2",
+            status: "todo",
+            position: 2,
+            tags: ["other"],
+          }),
+          makeTask("visible-c", { title: "C", status: "todo", position: 3, tags: ["show"] }),
+          makeTask("hidden-after", {
+            title: "H3",
+            status: "todo",
+            position: 4,
+            tags: ["other"],
+          }),
+        ],
+      };
+      const operations = createOperations(board);
+
+      render(<KanbanView invoke={operations.invoke} />);
+
+      await screen.findByTestId("kanban-card-visible-a");
+      expect(cardTitles("todo")).toEqual(["A", "C"]);
+
+      fireEvent.click(
+        within(screen.getByTestId(`kanban-card-${taskId}`)).getByRole("button", {
+          name: action,
+        }),
+      );
+
+      await waitFor(() => {
+        const lastMove = operations.calls
+          .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+          .at(-1);
+
+        expect(inputOf(lastMove?.input ?? {})).toMatchObject({
+          id: taskId,
+          status: "todo",
+          position: expectedPosition,
+        });
+      });
+      await waitFor(() => {
+        expect(cardTitles("todo")).toEqual(["C", "A"]);
+      });
+
+      const fullOrder = board.tasks
+        .filter((candidate) => candidate.status === "todo")
+        .sort(compareTasks)
+        .map((candidate) => candidate.id);
+
+      expect(fullOrder).toEqual(expectedFull);
+    },
+  );
+
   it.each([10, 12])(
     "догружает target колонку после перемещения при %i существующих задачах",
     async (existingCount) => {
@@ -628,6 +708,138 @@ describe("KanbanView", () => {
       expect(pagesAfterMove.length).toBeGreaterThan(0);
     },
   );
+
+  it("сохраняет обе карточки при одновременных append за границей страницы", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        ...Array.from({ length: 12 }, (_, index) =>
+          makeTask(`done-${String(index).padStart(2, "0")}`, {
+            title: `Готовая ${String(index)}`,
+            status: "done",
+            position: index,
+          }),
+        ),
+        makeTask("mover-a", { title: "A", status: "todo" }),
+        makeTask("mover-b", { title: "B", status: "todo" }),
+      ],
+    };
+    let deferDoneReload = false;
+    const pendingLists: Array<{
+      readonly input: JsonValue;
+      readonly gate: Deferred<UiOperationResult>;
+    }> = [];
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.move": (input) => {
+        const result = applyMove(board, input);
+
+        // Reload после move придерживаем, чтобы второй move начался, пока
+        // первый ещё не применил результаты.
+        deferDoneReload = true;
+
+        return result.ok ? ok({ task: result.task }) : fail(result.code);
+      },
+      "kanbaner.tasks.task.list": (input) => {
+        const limit = inputOf(input).limit;
+
+        // Полный scope (limit 200) не придерживаем: второй move должен
+        // увидеть уже применённую первую команду.
+        if (statusOf(input) === "done" && deferDoneReload && limit !== 200) {
+          const gate = deferred<UiOperationResult>();
+
+          pendingLists.push({ input, gate });
+
+          return gate.promise;
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-mover-a");
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-done")).toHaveTextContent("12");
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-mover-a")).getByRole("button", {
+        name: "Переместить в Готово",
+      }),
+    );
+
+    await waitFor(() => {
+      const move = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+        .at(0);
+
+      expect(inputOf(move?.input ?? {})).toMatchObject({
+        id: "mover-a",
+        status: "done",
+        position: 12,
+      });
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-card-mover-b")).getByRole("button", {
+        name: "Переместить в Готово",
+      }),
+    );
+
+    await waitFor(() => {
+      const move = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+        .at(1);
+
+      expect(inputOf(move?.input ?? {})).toMatchObject({
+        id: "mover-b",
+        status: "done",
+        position: 13,
+      });
+    });
+
+    // Обе reload-цепочки получают пагинацию за границей первой страницы.
+    // Дожидаемся и первых страниц, и следующих запросов, которые появляются
+    // после разрешения предыдущих.
+    await act(async () => {
+      let idleRounds = 0;
+
+      for (let round = 0; round < 30 && idleRounds < 3; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        if (pendingLists.length === 0) {
+          idleRounds += 1;
+
+          continue;
+        }
+
+        idleRounds = 0;
+
+        const batch = pendingLists.splice(0, pendingLists.length);
+
+        for (const entry of batch) {
+          entry.gate.resolve(listTasks(board, entry.input));
+        }
+
+        await Promise.all(batch.map((entry) => entry.gate.promise));
+      }
+    });
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("kanban-column-done")).getByTestId("kanban-card-mover-a"),
+      ).toBeTruthy();
+      expect(
+        within(screen.getByTestId("kanban-column-done")).getByTestId("kanban-card-mover-b"),
+      ).toBeTruthy();
+    });
+    expect(cardTitles("done")).toHaveLength(14);
+    expect(board.tasks.find((task) => task.id === "mover-a")?.position).toBe(12);
+    expect(board.tasks.find((task) => task.id === "mover-b")?.position).toBe(13);
+    expect(screen.queryByTestId("kanban-pending-mover-a")).toBeNull();
+    expect(screen.queryByTestId("kanban-pending-mover-b")).toBeNull();
+  });
 
   it("ставит карточку в конец после догрузки и не теряет её за границей страницы", async () => {
     const board: FakeBoard = {
@@ -889,6 +1101,78 @@ describe("KanbanView", () => {
     expect(cardTitles("backlog")).toHaveLength(10);
     expect(new Set(cardTitles("backlog")).size).toBe(10);
     expect(screen.getByTestId("kanban-load-more-backlog")).toBeInTheDocument();
+
+    serveDuplicate = false;
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toHaveLength(12);
+    });
+    expect(new Set(cardTitles("backlog")).size).toBe(12);
+    expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+  });
+
+  it("не закрывает пагинацию при terminal-дубликате с items.length < total и восстанавливает скрытые задачи", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 12 }, (_, index) =>
+        makeTask(`t${String(index).padStart(2, "0")}`, {
+          title: `T${String(index).padStart(2, "0")}`,
+          status: "backlog",
+          position: index,
+        }),
+      ),
+    };
+    const terminal = deferred<UiOperationResult>();
+    let serveDuplicate = true;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        if (statusOf(input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
+          return terminal.promise;
+        }
+
+        return listTasks(board, input);
+      },
+    });
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("12");
+    });
+    expect(cardTitles("backlog")).toHaveLength(10);
+
+    const firstPageCallsBefore = operations.calls.filter(
+      (call) =>
+        call.operationId === "kanbaner.tasks.task.list" &&
+        statusOf(call.input) === "backlog" &&
+        offsetOf(call.input) === 0,
+    ).length;
+
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await act(async () => {
+      // Сервер отдал полностью дублированную страницу и nextOffset=null,
+      // хотя total всё ещё больше числа уникально загруженных карточек.
+      terminal.resolve(ok({ items: board.tasks.slice(0, 10), total: 12, nextOffset: null }));
+      await terminal.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-load-more-backlog")).not.toBeDisabled();
+    });
+    expect(cardTitles("backlog")).toHaveLength(10);
+    expect(new Set(cardTitles("backlog")).size).toBe(10);
+
+    // Пагинация не закрыта, а колонка перечитана с начала.
+    const firstPageCallsAfter = operations.calls.filter(
+      (call) =>
+        call.operationId === "kanbaner.tasks.task.list" &&
+        statusOf(call.input) === "backlog" &&
+        offsetOf(call.input) === 0,
+    ).length;
+
+    expect(firstPageCallsAfter).toBeGreaterThan(firstPageCallsBefore);
 
     serveDuplicate = false;
     fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
