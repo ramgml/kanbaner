@@ -1,21 +1,13 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: blocked
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-  - KAN-002
-  - KAN-003
-  - KAN-004
-  - KAN-005
-  - KAN-006
-  - KAN-007
-  - KAN-009
-branch: null
-worktree: null
+owner: worker-kan-008
+blocked_by: []
+branch: feat/kan-008-contract-tests
+worktree: .worktrees/kan-008-contract-tests
 created: 2026-11-06
 updated: 2026-11-07
 specs:
@@ -68,11 +60,14 @@ specs:
 - `tests/contract/**`;
 - `tests/integration/**`;
 - `scripts/check-import-boundaries.*`;
+- публичные lifecycle/execution-контракты SDK и их реализации в KAN-003/KAN-004/KAN-005, только для согласованного расширения;
+- bootstrap/composition-файлы `apps/web/src/server/**`, UI composition и E2E, только для общих сервисов и fixture-проверок;
+- корневой `package.json`, `vitest.config.ts`, `tsconfig.tools.json` и lock-файл по координации с оркестратором;
 - собственный отчёт `tasks/reports/KAN-008.md`.
 
 Запрещено:
 
-- изменение ядра ради прохождения теста;
+- изменение ядра кроме явно согласованного расширения lifecycle и composition services;
 - ослабление Plugin Contract без решения пользователя;
 - `specs/**`;
 - файлы задач, кроме собственного отчёта;
@@ -144,6 +139,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Пользователь выбрал расширение lifecycle. Оркестратор назначил worker-kan-008, ветку `feat/kan-008-contract-tests` и worktree `.worktrees/kan-008-contract-tests`; разрешены точечные изменения SDK/KAN-003/KAN-004/KAN-005 и composition services для commands/queries/resources/storage/events, обновление Plugin Contract и согласованных test configs.
 - 2026-11-07 — Все зависимости завершены, но запуск заблокирован конфликтом: фактический `PluginActivationContext` из KAN-003 содержит только `pluginId`, `manifest`, `directory`, `hostApiVersion`, `logger`, тогда как fixture должен зарегистрировать commands/queries/events/resources через lifecycle без изменения ядра. Требуется явное решение пользователя о расширении composition-контракта и границ KAN-008.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — Добавлены in-memory PGlite и matrix Linux/Windows.
