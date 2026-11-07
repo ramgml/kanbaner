@@ -14,6 +14,7 @@ import {
   FIXTURE_COMMAND_DELETE,
   FIXTURE_COMMAND_REINDEX,
   FIXTURE_EVENT_CREATED,
+  FIXTURE_EVENT_DELETED,
   FIXTURE_ITEM_TYPE,
   FIXTURE_PLUGIN_ID,
   FIXTURE_QUERY_LIST,
@@ -429,6 +430,69 @@ describe("fixture plugin: публичный lifecycle и общие шины", 
     expect(hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "Первый" }))).toEqual([]);
   });
 
+  it("очищает поиск и связи по deleted из EventBus без команды delete, повтор идемпотентен", async () => {
+    const harness = track(await startFixtureHarness());
+    const first = await createItem(harness, "Удаляемый");
+    const second = await createItem(harness, "Связанный");
+
+    await harness.composition.resources.link(
+      String(first.resource),
+      String(second.resource),
+      "kanbaner.fixture.references",
+    );
+    await harness.composition.search.upsert(FIXTURE_PLUGIN_ID, [
+      {
+        ref: String(first.resource),
+        title: "Ручной поисковый документ",
+        text: "ручноймаркер",
+      },
+    ]);
+
+    expect(await harness.composition.resources.list(String(first.resource))).toHaveLength(1);
+    expect(
+      hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "ручноймаркер" })),
+    ).toHaveLength(1);
+
+    const publishDeleted = async (): Promise<string> => {
+      const eventId = globalThis.crypto.randomUUID();
+      const result = await harness.composition.events.publishAfterCommit(
+        {
+          eventId,
+          type: FIXTURE_EVENT_DELETED,
+          contractVersion: 1,
+          source: FIXTURE_PLUGIN_ID,
+          occurredAt: new Date().toISOString(),
+          resource: String(first.resource),
+          resourceVersion: 2,
+          payload: { itemId: String(first.id) },
+        },
+        { traceId: `trace-direct-delete-${eventId}` },
+      );
+
+      expect(result.status).toBe("accepted");
+
+      return eventId;
+    };
+
+    await publishDeleted();
+
+    expect(await harness.composition.resources.list(String(first.resource))).toEqual([]);
+    expect(hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "ручноймаркер" }))).toEqual(
+      [],
+    );
+
+    await publishDeleted();
+
+    expect(await harness.composition.resources.list(String(first.resource))).toEqual([]);
+    expect(hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "ручноймаркер" }))).toEqual(
+      [],
+    );
+    // Команда delete не вызывалась: документ плагина остаётся на месте.
+    expect(
+      await harness.provider.documents.get(FIXTURE_PLUGIN_ID, "items", String(first.id)),
+    ).not.toBeNull();
+  });
+
   it("создаёт документ поиска, находит его и переиндексирует namespace", async () => {
     const harness = track(await startFixtureHarness());
     const first = await createItem(harness, "Поисковый alpha");
@@ -452,6 +516,60 @@ describe("fixture plugin: публичный lifecycle и общие шины", 
     expect(
       hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "Поисковый" })),
     ).toHaveLength(2);
+  });
+
+  it("сериализует create с reindex и не теряет запись между чтением и заменой", async () => {
+    const harness = track(await startFixtureHarness());
+
+    await createItem(harness, "До reindex");
+
+    const originalReindex = harness.composition.search.reindex.bind(harness.composition.search);
+    let startReindex!: () => void;
+    let releaseReindex!: () => void;
+    const reindexStarted = new Promise<void>((resolve) => {
+      startReindex = resolve;
+    });
+    const reindexGate = new Promise<void>((resolve) => {
+      releaseReindex = resolve;
+    });
+
+    harness.composition.search.reindex = async (pluginId, documents) => {
+      startReindex();
+      await reindexGate;
+
+      return originalReindex(pluginId, documents);
+    };
+
+    const reindex = execute(harness, FIXTURE_COMMAND_REINDEX, {});
+
+    await reindexStarted;
+
+    let createSettled = false;
+    const create = execute(harness, FIXTURE_COMMAND_CREATE, {
+      title: "Во время reindex",
+    }).then((result) => {
+      createSettled = true;
+
+      return result;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(createSettled).toBe(false);
+
+    releaseReindex();
+
+    expect(dataOf(await reindex)).toEqual({ count: 1 });
+
+    const created = dataOf(await create);
+
+    expect(created.id).toBeTruthy();
+    expect(
+      hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "До reindex" })),
+    ).toHaveLength(1);
+    expect(
+      hitsOf(await execute(harness, FIXTURE_QUERY_SEARCH, { text: "Во время reindex" })),
+    ).toHaveLength(1);
   });
 
   it("отдаёт стабильные страницы с nextOffset", async () => {

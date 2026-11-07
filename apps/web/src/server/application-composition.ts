@@ -179,7 +179,7 @@ export function createApplicationPluginComposition(
   const registry = new ResourceRegistry({ logger });
   const links = new LinkService({ store: options.storage.links, logger });
   const resources = new KernelResourceService({ registry, links });
-  const search = createSearchService(options.storage.searchIndex);
+  const search = createSearchService(options.storage);
   const ui = new UiMetadataRegistry();
 
   const operations = createOperationBus({
@@ -239,9 +239,13 @@ export function createApplicationPluginComposition(
 
     bindPlugins(pluginIds: readonly PluginId[]): void {
       unsubscribeDeleted();
-      unsubscribeDeleted = subscribeResourceDeletedCleanup(events, links, namespacesOf(pluginIds), {
-        pluginId: "kanbaner.core",
-      });
+      unsubscribeDeleted = subscribeResourceDeletedCleanup(
+        events,
+        links,
+        namespacesOf(pluginIds),
+        { pluginId: "kanbaner.core" },
+        search,
+      );
     },
 
     listUiContributions(): readonly PluginUiContributionRecord[] {

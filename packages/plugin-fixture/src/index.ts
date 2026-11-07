@@ -369,6 +369,27 @@ export const fixtureUiContributions: readonly UiContribution[] = [
 ];
 
 /**
+ * Последовательная очередь одной активации.
+ *
+ * Не является глобальным singleton-ом: каждый activate получает собственную
+ * очередь, поэтому плагины не блокируют друг друга.
+ */
+function createSerialQueue(): <T>(operation: () => Promise<T>) => Promise<T> {
+  let tail: Promise<void> = Promise.resolve();
+
+  return <T>(operation: () => Promise<T>): Promise<T> => {
+    const current = tail.then(operation, operation);
+
+    tail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return current;
+  };
+}
+
+/**
  * Реальная активация fixture-плагина.
  *
  * Использует только публичный SDK: bound storage/search, регистраторы и
@@ -381,6 +402,9 @@ export async function activate(context: FixtureActivationContext): Promise<void>
   }
 
   const storage = context.storage;
+  // create/delete/reindex сериализуются в рамках активации: reindex не должен
+  // прочитать исходники до параллельного create и заменить индекс без него.
+  const serializeSearchMutation = createSerialQueue();
 
   context.commands.register({
     metadata: commandMetadata(
@@ -391,63 +415,65 @@ export async function activate(context: FixtureActivationContext): Promise<void>
       true,
     ),
     async handler(input, executionContext: ExecutionContext) {
-      const title = titleFrom(input);
-      const id = `item-${globalThis.crypto.randomUUID()}`;
-      const createdAt = new Date().toISOString();
-      const resource = resourceOf(id);
+      return serializeSearchMutation(async () => {
+        const title = titleFrom(input);
+        const id = `item-${globalThis.crypto.randomUUID()}`;
+        const createdAt = new Date().toISOString();
+        const resource = resourceOf(id);
 
-      // Документ и audit пишутся в одной транзакции плагина. Событие не
-      // публикуется, пока транзакция не завершилась успешно.
-      await storage.withTransaction(async (transaction) => {
-        await transaction.documents.put({
-          pluginId: FIXTURE_PLUGIN_ID,
-          collection: FIXTURE_COLLECTION,
-          id,
-          data: { title, createdAt },
-          indexedFields: { title },
-          expectedVersion: 0,
+        // Документ и audit пишутся в одной транзакции плагина. Событие не
+        // публикуется, пока транзакция не завершилась успешно.
+        await storage.withTransaction(async (transaction) => {
+          await transaction.documents.put({
+            pluginId: FIXTURE_PLUGIN_ID,
+            collection: FIXTURE_COLLECTION,
+            id,
+            data: { title, createdAt },
+            indexedFields: { title },
+            expectedVersion: 0,
+          });
         });
-      });
 
-      try {
-        await context.search.upsert([searchDocumentOf({ id, title, createdAt })]);
-      } catch (error) {
-        executionContext.logger.warn("fixture.search_upsert_failed", {
-          eventId: null,
-          errorName: safeErrorName(error),
-        });
-      }
-
-      // Публикация best-effort: ошибка шины не откатывает уже зафиксированные
-      // данные и не превращает успешную команду в INTERNAL_ERROR.
-      const eventId = globalThis.crypto.randomUUID();
-
-      try {
-        const publish = await executionContext.events.publishAfterCommit(
-          {
-            eventId,
-            type: FIXTURE_EVENT_CREATED,
-            contractVersion: 1,
-            source: FIXTURE_PLUGIN_ID,
-            occurredAt: new Date().toISOString(),
-            resource,
-            resourceVersion: 1,
-            payload: { itemId: id, title },
-          },
-          { traceId: executionContext.traceId },
-        );
-
-        if (publish.status === "invalid") {
-          executionContext.logger.warn("fixture.event_rejected", { eventId });
+        try {
+          await context.search.upsert([searchDocumentOf({ id, title, createdAt })]);
+        } catch (error) {
+          executionContext.logger.warn("fixture.search_upsert_failed", {
+            eventId: null,
+            errorName: safeErrorName(error),
+          });
         }
-      } catch (error) {
-        executionContext.logger.warn("fixture.event_publish_failed", {
-          eventId,
-          errorName: safeErrorName(error),
-        });
-      }
 
-      return { id, title, resource, eventId };
+        // Публикация best-effort: ошибка шины не откатывает уже зафиксированные
+        // данные и не превращает успешную команду в INTERNAL_ERROR.
+        const eventId = globalThis.crypto.randomUUID();
+
+        try {
+          const publish = await executionContext.events.publishAfterCommit(
+            {
+              eventId,
+              type: FIXTURE_EVENT_CREATED,
+              contractVersion: 1,
+              source: FIXTURE_PLUGIN_ID,
+              occurredAt: new Date().toISOString(),
+              resource,
+              resourceVersion: 1,
+              payload: { itemId: id, title },
+            },
+            { traceId: executionContext.traceId },
+          );
+
+          if (publish.status === "invalid") {
+            executionContext.logger.warn("fixture.event_rejected", { eventId });
+          }
+        } catch (error) {
+          executionContext.logger.warn("fixture.event_publish_failed", {
+            eventId,
+            errorName: safeErrorName(error),
+          });
+        }
+
+        return { id, title, resource, eventId };
+      });
     },
   });
 
@@ -459,72 +485,78 @@ export async function activate(context: FixtureActivationContext): Promise<void>
       "Удаляет fixture-элемент и публикует deleted после коммита",
     ),
     async handler(input, executionContext: ExecutionContext) {
-      const id = idFrom(input);
-      const resource = resourceOf(id);
+      return serializeSearchMutation(async () => {
+        const id = idFrom(input);
+        const resource = resourceOf(id);
 
-      const deleted = await storage.withTransaction(async (transaction) => {
-        const current = await transaction.documents.get(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION, id);
+        const deleted = await storage.withTransaction(async (transaction) => {
+          const current = await transaction.documents.get(
+            FIXTURE_PLUGIN_ID,
+            FIXTURE_COLLECTION,
+            id,
+          );
 
-        if (current === null) {
-          return null;
-        }
+          if (current === null) {
+            return null;
+          }
 
-        const removed = await transaction.documents.delete(
-          FIXTURE_PLUGIN_ID,
-          FIXTURE_COLLECTION,
-          id,
-          { expectedVersion: current.version },
-        );
+          const removed = await transaction.documents.delete(
+            FIXTURE_PLUGIN_ID,
+            FIXTURE_COLLECTION,
+            id,
+            { expectedVersion: current.version },
+          );
 
-        if (!removed) {
-          throw new Error("Fixture delete не изменил документ");
-        }
+          if (!removed) {
+            throw new Error("Fixture delete не изменил документ");
+          }
 
-        return current;
-      });
-
-      if (deleted === null) {
-        return { deleted: false };
-      }
-
-      // Поисковый индекс удаляется host-сервисом по владельцу ResourceRef.
-      // Cleanup события идемпотентно повторит удаление.
-      try {
-        await context.search.delete(resource);
-      } catch (error) {
-        executionContext.logger.warn("fixture.search_delete_failed", {
-          errorName: safeErrorName(error),
+          return current;
         });
-      }
 
-      const eventId = globalThis.crypto.randomUUID();
+        if (deleted === null) {
+          return { deleted: false };
+        }
 
-      try {
-        const publish = await executionContext.events.publishAfterCommit(
-          {
+        // Поисковый индекс удаляется host-сервисом по владельцу ResourceRef.
+        // Cleanup события идемпотентно повторит удаление.
+        try {
+          await context.search.delete(resource);
+        } catch (error) {
+          executionContext.logger.warn("fixture.search_delete_failed", {
+            errorName: safeErrorName(error),
+          });
+        }
+
+        const eventId = globalThis.crypto.randomUUID();
+
+        try {
+          const publish = await executionContext.events.publishAfterCommit(
+            {
+              eventId,
+              type: FIXTURE_EVENT_DELETED,
+              contractVersion: 1,
+              source: FIXTURE_PLUGIN_ID,
+              occurredAt: new Date().toISOString(),
+              resource,
+              resourceVersion: deleted.version + 1,
+              payload: { itemId: id },
+            },
+            { traceId: executionContext.traceId },
+          );
+
+          if (publish.status === "invalid") {
+            executionContext.logger.warn("fixture.event_rejected", { eventId });
+          }
+        } catch (error) {
+          executionContext.logger.warn("fixture.event_publish_failed", {
             eventId,
-            type: FIXTURE_EVENT_DELETED,
-            contractVersion: 1,
-            source: FIXTURE_PLUGIN_ID,
-            occurredAt: new Date().toISOString(),
-            resource,
-            resourceVersion: deleted.version + 1,
-            payload: { itemId: id },
-          },
-          { traceId: executionContext.traceId },
-        );
-
-        if (publish.status === "invalid") {
-          executionContext.logger.warn("fixture.event_rejected", { eventId });
+            errorName: safeErrorName(error),
+          });
         }
-      } catch (error) {
-        executionContext.logger.warn("fixture.event_publish_failed", {
-          eventId,
-          errorName: safeErrorName(error),
-        });
-      }
 
-      return { deleted: true };
+        return { deleted: true };
+      });
     },
   });
 
@@ -536,10 +568,12 @@ export async function activate(context: FixtureActivationContext): Promise<void>
       "Полностью переиндексирует документы fixture-плагина",
     ),
     async handler() {
-      const documents = await storage.documents.list(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION);
-      const count = await context.search.reindex(documents.map(itemView).map(searchDocumentOf));
+      return serializeSearchMutation(async () => {
+        const documents = await storage.documents.list(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION);
+        const count = await context.search.reindex(documents.map(itemView).map(searchDocumentOf));
 
-      return { count };
+        return { count };
+      });
     },
   });
 
