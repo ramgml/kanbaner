@@ -1,14 +1,13 @@
 ---
 id: KAN-011
 title: Хранение задач и инварианты
-status: ready
+status: in_progress
 stage: 2
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-010
-branch: null
-worktree: null
+owner: worker-kan-011
+blocked_by: []
+branch: feat/kan-011-tasks-storage
+worktree: .worktrees/kan-011-tasks-storage
 created: 2026-11-07
 updated: 2026-11-07
 specs:
