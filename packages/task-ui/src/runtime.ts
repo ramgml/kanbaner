@@ -50,6 +50,13 @@ export interface RegisteredUiContributionLike {
 export interface UiRendererProps {
   readonly contribution: RegisteredUiContributionLike;
   readonly invoke: UiOperationInvoker;
+  /**
+   * Текущий pathname App Router из shell-а.
+   *
+   * Необязателен для обратной совместимости прямых рендеров в тестах;
+   * production-shell всегда передаёт значение.
+   */
+  readonly pathname?: string | undefined;
 }
 
 export type UiRenderer = ComponentType<UiRendererProps>;

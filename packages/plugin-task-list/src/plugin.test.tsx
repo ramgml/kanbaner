@@ -252,7 +252,18 @@ describe("TaskDetailsPanel", () => {
     updateTaskListQuery({ taskId: null });
     const operations = createOperations(baseHandlers());
 
-    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" />);
+    render(
+      <TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/view/tasks" />,
+    );
+
+    expect(screen.queryByTestId("task-details-desktop")).not.toBeInTheDocument();
+    expect(operations.counts.get("kanbaner.tasks.task.get")).toBeUndefined();
+  });
+
+  it("не загружает и не рендерит детали вне /view/tasks", () => {
+    const operations = createOperations(baseHandlers());
+
+    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/plugins" />);
 
     expect(screen.queryByTestId("task-details-desktop")).not.toBeInTheDocument();
     expect(operations.counts.get("kanbaner.tasks.task.get")).toBeUndefined();
@@ -267,7 +278,9 @@ describe("TaskDetailsPanel", () => {
     };
     const operations = createOperations(handlers);
 
-    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" />);
+    render(
+      <TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/view/tasks" />,
+    );
 
     expect(await screen.findByTestId("task-details")).toHaveTextContent("Подготовить релиз");
 
@@ -293,7 +306,9 @@ describe("TaskDetailsPanel", () => {
     handlers["kanbaner.tasks.task.update"] = () => fail("VERSION_CONFLICT");
     const operations = createOperations(handlers);
 
-    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" />);
+    render(
+      <TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/view/tasks" />,
+    );
     await screen.findByTestId("task-details");
 
     fireEvent.click(screen.getByRole("button", { name: "Редактировать" }));
@@ -329,7 +344,9 @@ describe("TaskDetailsPanel", () => {
       });
     const operations = createOperations(handlers);
 
-    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" />);
+    render(
+      <TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/view/tasks" />,
+    );
     await screen.findByTestId("task-details");
 
     fireEvent.click(screen.getByTestId("task-delete"));
@@ -361,7 +378,9 @@ describe("TaskDetailsPanel", () => {
       });
     const operations = createOperations(handlers);
 
-    render(<TaskDetailsPanel invoke={operations.invoke} variant="desktop" />);
+    render(
+      <TaskDetailsPanel invoke={operations.invoke} variant="desktop" pathname="/view/tasks" />,
+    );
     await screen.findByTestId("task-details");
 
     fireEvent.click(screen.getByRole("button", { name: "Завершить" }));

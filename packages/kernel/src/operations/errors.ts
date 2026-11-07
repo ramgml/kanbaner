@@ -190,10 +190,26 @@ export function limitError(
  * Распознаётся публичный SDK `PluginOperationError` и его kernel-subclass
  * `OperationFailure`; сообщение и стек произвольного `Error` наружу не
  * передаются.
+ *
+ * Даже распознанный конверт не возвращается по ссылке: из него заново
+ * собирается `PluginError` только из `code`, `message`, `retryable` и
+ * `details`. Дополнительные поля (`stack`, `path`, `secret` и т. п.) не
+ * попадают в результат. Любое обращение к свойствам, включая accessor,
+ * изолировано: исключение в геттере превращает ошибку в `INTERNAL_ERROR`.
  */
 export function mapThrownError(error: unknown): ErrorResult {
-  if (error instanceof PluginOperationError) {
-    return toErrorResult(error.error);
+  const sanitized = pluginOperationError(error);
+
+  return sanitized === null ? internalError() : toErrorResult(sanitized);
+}
+
+function pluginOperationError(error: unknown): PluginError | null {
+  try {
+    if (error instanceof PluginOperationError) {
+      return sanitizePluginError(error.error);
+    }
+  } catch {
+    // Битый accessor в подклассе не должен ломать конверт ошибки.
   }
 
   // Серверные плагины загружаются динамическим import() из собственного dist
@@ -201,28 +217,47 @@ export function mapThrownError(error: unknown): ErrorResult {
   // ядро. В этом случае `instanceof` на границе не срабатывает, хотя ошибка
   // имеет тот же публичный конверт. Распознаём её структурно, иначе,
   // например, VERSION_CONFLICT превращается в INTERNAL_ERROR.
-  if (isPluginOperationErrorShape(error)) {
-    return toErrorResult(error.error);
-  }
+  try {
+    if (typeof error !== "object" || error === null) {
+      return null;
+    }
 
-  return internalError();
+    const candidate = error as { readonly name?: unknown; readonly error?: unknown };
+
+    if (candidate.name !== "PluginOperationError") {
+      return null;
+    }
+
+    return sanitizePluginError(candidate.error);
+  } catch {
+    return null;
+  }
 }
 
-interface PluginOperationErrorShape {
-  readonly name: "PluginOperationError";
-  readonly error: PluginError;
-}
+/**
+ * Пересобирает конверт только из разрешённых полей.
+ *
+ * `validateWithSchema` проверяет структуру, но `value` может быть исходным
+ * объектом с лишними свойствами или геттерами. Поэтому читаем поля и
+ * создаём новый `PluginError`; `details` — единственное поле, содержимое
+ * которого задаёт сам плагин.
+ */
+function sanitizePluginError(value: unknown): PluginError | null {
+  try {
+    const validation = validateWithSchema(PluginErrorSchema, value);
 
-function isPluginOperationErrorShape(error: unknown): error is PluginOperationErrorShape {
-  if (typeof error !== "object" || error === null) {
-    return false;
+    if (!validation.ok) {
+      return null;
+    }
+
+    const { code, message, retryable, details } = validation.value;
+
+    return createPluginError(
+      code,
+      message,
+      details === undefined ? { retryable } : { retryable, details },
+    );
+  } catch {
+    return null;
   }
-
-  const candidate = error as { readonly name?: unknown; readonly error?: unknown };
-
-  if (candidate.name !== "PluginOperationError") {
-    return false;
-  }
-
-  return validateWithSchema(PluginErrorSchema, candidate.error).ok;
 }

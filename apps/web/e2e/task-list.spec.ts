@@ -56,6 +56,7 @@ interface TaskSeed {
   readonly status?: string;
   readonly dueAt?: string;
   readonly tags?: string;
+  readonly parentTitle?: string;
 }
 
 async function createTask(page: Page, seed: TaskSeed): Promise<string> {
@@ -87,6 +88,13 @@ async function createTask(page: Page, seed: TaskSeed): Promise<string> {
 
   if (seed.tags !== undefined) {
     await form.getByLabel("Теги через запятую", { exact: true }).fill(seed.tags);
+  }
+
+  if (seed.parentTitle !== undefined) {
+    const parentSelect = form.getByRole("combobox", { name: "Родительская задача", exact: true });
+
+    await expect(parentSelect).toContainText(seed.parentTitle);
+    await parentSelect.selectOption({ label: seed.parentTitle });
   }
 
   await form.getByRole("button", { name: "Создать задачу" }).click();
@@ -259,13 +267,20 @@ test.describe("список задач в production shell", () => {
       const overlay = page.getByTestId("task-details-mobile");
 
       await expect(overlay).toBeVisible();
-      await expect(overlay).toHaveAttribute("role", "dialog");
+      await expect(page.getByRole("dialog", { name: "Детали задачи" })).toBeVisible();
       await expect(overlay).toContainText(taskTitle);
+      expect(await overlay.evaluate((element) => element.tagName)).toBe("DIALOG");
       await expect(page.getByTestId("task-details-desktop")).toBeHidden();
       await expectNoHorizontalOverflow(page);
 
       await overlay.getByRole("button", { name: "Закрыть детали" }).click();
       await expect(overlay).toHaveCount(0);
+      // После закрытия фокус возвращается на карточку, открывшую детали.
+      await expect
+        .poll(async () =>
+          page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? null),
+        )
+        .toBe(`Открыть карточку задачи ${taskTitle}`);
     });
 
     test("открывает карточку и закрывает детали с клавиатуры", async ({ page }) => {
@@ -298,11 +313,33 @@ test.describe("список задач в production shell", () => {
       expect(reachedCard).toBe(true);
 
       await page.keyboard.press("Enter");
-      await expect(page.getByTestId("task-details-mobile")).toBeVisible();
+
+      const dialog = page.getByRole("dialog", { name: "Детали задачи" });
+
+      await expect(dialog).toBeVisible();
+
+      // После showModal фокус находится внутри диалога, а Tab не выходит за
+      // его пределы: нативный <dialog> удерживает focus trap.
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement?.closest("dialog") !== null))
+        .toBe(true);
+
+      for (let index = 0; index < 8; index += 1) {
+        await page.keyboard.press("Tab");
+        expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(
+          true,
+        );
+      }
 
       await page.keyboard.press("Escape");
-      await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
+      await expect(dialog).toHaveCount(0);
       await expect(page).not.toHaveURL(/[?&]task=/u);
+      // Escape закрывает диалог и возвращает фокус на карточку.
+      await expect
+        .poll(async () =>
+          page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? null),
+        )
+        .toBe(`Открыть карточку задачи ${taskTitle}`);
     });
   });
 
@@ -445,6 +482,198 @@ test.describe("список задач в production shell", () => {
       await page.reload();
       await openTaskList(page);
       await expect(desktopRow(page, taskId)).toHaveCount(0);
+    });
+
+    test("не показывает детали вне /view/tasks и скрывает их при переходе по Link", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект маршрута");
+      const taskTitle = uniqueTitle("Задача маршрута");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      await closeDetails(page, "desktop");
+
+      // Прямой адрес чужого раздела с task= не должен открывать детали.
+      await page.goto(`/plugins?task=${taskId}`);
+      await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
+      await expect(page.getByTestId("task-details-desktop")).toHaveCount(0);
+      await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
+
+      // Открываем детали на своём маршруте и уходим client-side Link-ом.
+      await page.goto(`/view/tasks?task=${taskId}`);
+      await expect(page.getByTestId("task-details-desktop")).toBeVisible();
+
+      await page.getByRole("link", { name: "Плагины", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
+      await expect(page.getByTestId("task-details-desktop")).toHaveCount(0);
+      await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
+    });
+
+    test("пагинирует больше 25 задач с page=2 в URL и переживает reload", async ({ page }) => {
+      test.setTimeout(180_000);
+
+      const projectTitle = uniqueTitle("Проект пагинации");
+      const titles = Array.from(
+        { length: 26 },
+        (_, index) => `${projectTitle} задача ${String(index + 1).padStart(2, "0")}`,
+      );
+      const lastTitle = titles[25] ?? "";
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      for (const title of titles) {
+        await createTask(page, { projectTitle, title, status: "todo" });
+      }
+
+      await closeDetails(page, "desktop");
+
+      const filters = page.getByTestId("task-filters");
+
+      await filters
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .selectOption({ label: projectTitle });
+      await page.getByRole("combobox", { name: "Сортировка", exact: true }).selectOption("title");
+
+      const rows = page.locator('[data-testid^="task-row-"]');
+
+      await expect(page.getByTestId("task-pagination")).toContainText("Страница 1 из 2");
+      await expect(rows).toHaveCount(25);
+
+      await page.getByRole("button", { name: "Вперёд", exact: true }).click();
+
+      await expect(page).toHaveURL(/[?&]page=2/u);
+      await expect(page.getByTestId("task-pagination")).toContainText("Страница 2 из 2");
+      await expect(rows).toHaveCount(1);
+      await expect(rows.first()).toContainText(lastTitle);
+
+      // Offset вычисляется из URL после полной перезагрузки.
+      await page.reload();
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+      await expect(page.getByTestId("task-pagination")).toContainText("Страница 2 из 2");
+      await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);
+      await expect(page.locator('[data-testid^="task-row-"]').first()).toContainText(lastTitle);
+    });
+
+    test("переживает отключение и включение kanbaner.task-list без потери задач", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+
+      const projectTitle = uniqueTitle("Проект отключения");
+      const taskTitle = uniqueTitle("Задача отключения");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      await closeDetails(page, "desktop");
+
+      await page.goto("/plugins");
+
+      const toggle = page.getByRole("switch", {
+        name: "Включить плагин Kanbaner Task List",
+      });
+
+      await expect(toggle).toBeVisible();
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      await expect(page.getByRole("heading", { name: "Kanbaner Task List" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
+
+      // Без UI-плагина маршрут списка больше не зарегистрирован, но shell жив.
+      await page.goto("/view/tasks");
+      await expect(page.getByTestId("plugin-view-empty")).toBeVisible();
+
+      await page.goto("/plugins");
+
+      const restoredToggle = page.getByRole("switch", {
+        name: "Включить плагин Kanbaner Task List",
+      });
+
+      await restoredToggle.click();
+      await expect(restoredToggle).toHaveAttribute("aria-checked", "true");
+
+      // Данные остались в kanbaner.tasks: список снова показывает задачу.
+      await page.goto("/view/tasks");
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+      await page
+        .getByTestId("task-filters")
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .selectOption({ label: projectTitle });
+      await expect(desktopRow(page, taskId)).toContainText(taskTitle);
+    });
+
+    test("подзадача, завершение и фильтры status/tag/due", async ({ page }) => {
+      test.setTimeout(120_000);
+
+      const projectTitle = uniqueTitle("Проект подзадачи");
+      const parentTitle = uniqueTitle("Родительская задача");
+      const childTitle = uniqueTitle("Дочерняя задача");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await createTask(page, {
+        projectTitle,
+        title: parentTitle,
+        status: "todo",
+        tags: "parenttag",
+        dueAt: "2030-03-15",
+      });
+      await closeDetails(page, "desktop");
+
+      const childId = await createTask(page, {
+        projectTitle,
+        title: childTitle,
+        parentTitle,
+        status: "in_progress",
+        tags: "childtag",
+        dueAt: "2030-04-20",
+      });
+
+      await closeDetails(page, "desktop");
+
+      await page.getByRole("button", { name: `Открыть задачу ${childTitle}` }).click();
+
+      const details = page.getByTestId("task-details-desktop");
+
+      await expect(details).toContainText("Родительская задача");
+      await expect(details).toContainText(parentTitle);
+
+      // complete выставляет статус и completedAt; completedAt проверяется
+      // server-side integration-тестом, здесь — наблюдаемый статус.
+      await details.getByRole("button", { name: "Завершить", exact: true }).click();
+      await expect(details).toContainText("Готово");
+      await expect(details.getByRole("button", { name: "Завершить", exact: true })).toHaveCount(0);
+
+      const filters = page.getByTestId("task-filters");
+
+      await filters
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .selectOption({ label: projectTitle });
+
+      await filters.getByRole("combobox", { name: "Статус", exact: true }).selectOption("done");
+      await expect(desktopRow(page, childId)).toContainText(childTitle);
+      await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);
+
+      await filters.getByRole("combobox", { name: "Статус", exact: true }).selectOption("");
+      await filters.getByLabel("Тег", { exact: true }).fill("childtag");
+      await expect(desktopRow(page, childId)).toContainText(childTitle);
+      await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);
+
+      await page.getByRole("button", { name: "Сбросить фильтры", exact: true }).click();
+      await filters
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .selectOption({ label: projectTitle });
+      await filters.getByLabel("Срок с", { exact: true }).fill("2030-04-01");
+      await filters.getByLabel("Срок по", { exact: true }).fill("2030-04-30");
+
+      await expect(desktopRow(page, childId)).toContainText(childTitle);
+      await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);
     });
   });
 });

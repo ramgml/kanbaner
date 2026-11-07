@@ -423,4 +423,165 @@ describe("синхронизация серверных metadata и привяз
       "INVALID_RENDERER",
     );
   });
+
+  it("удаляет маршрут при смене view на panel с прежним route", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.resolveRoute("/view/tasks")).not.toBeNull();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: { ...viewMetadata, kind: "panel" }, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.size()).toBe(1);
+    expect(registry.list("app.main")[0]?.contribution.kind).toBe("panel");
+    expect(registry.resolveRoute("/view/tasks")).toBeNull();
+  });
+
+  it("не увеличивает версию и не будит подписчиков при структурно том же sync", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+
+    const listener = vi.fn();
+    const version = registry.getVersion();
+    const entry = registry.list("app.main")[0];
+
+    registry.subscribe(listener);
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: { ...viewMetadata }, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.getVersion()).toBe(version);
+    expect(listener).not.toHaveBeenCalled();
+    // Объект вклада переиспользован: подписчики не получают новый snapshot
+    // без изменения данных.
+    expect(registry.list("app.main")[0]).toBe(entry);
+  });
+
+  it("отклоняет чужой pre-bind до metadata без изменения состояния", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.bindRenderer("other.plugin", viewMetadata.id, realRender);
+
+    expectRegistryError(
+      () =>
+        registry.registerBatch("kanbaner.task-list", [
+          { metadata: viewMetadata, render: genericRender },
+        ]),
+      "INVALID_RENDERER",
+    );
+    expect(registry.size()).toBe(0);
+    expect(registry.getVersion()).toBe(0);
+    expect(registry.resolveRoute("/view/tasks")).toBeNull();
+
+    expectRegistryError(
+      () =>
+        registry.syncPlugin(
+          "kanbaner.task-list",
+          [{ metadata: viewMetadata, render: genericRender }],
+          genericRender,
+        ),
+      "INVALID_RENDERER",
+    );
+    expect(registry.size()).toBe(0);
+    expect(registry.getVersion()).toBe(0);
+  });
+
+  it("cleanup старого sync не удаляет вклады нового поколения", () => {
+    const registry = createUiContributionRegistry();
+    const first = registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+    const second = registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: realRender }],
+      genericRender,
+    );
+
+    first();
+
+    expect(registry.size()).toBe(1);
+    expect(registry.list("app.main")[0]?.render).toBe(realRender);
+
+    second();
+
+    expect(registry.size()).toBe(0);
+    expect(registry.resolveRoute("/view/tasks")).toBeNull();
+  });
+
+  it("после register → bind cleanup снимает вклад вместе с привязкой", () => {
+    const registry = createUiContributionRegistry();
+    const cleanup = registry.register("kanbaner.task-list", viewMetadata, genericRender);
+
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+    cleanup();
+
+    expect(registry.size()).toBe(0);
+    expect(registry.list("app.main")).toEqual([]);
+    expect(registry.resolveRoute("/view/tasks")).toBeNull();
+
+    // Следующая регистрация не получает рендерер от уже снятого вклада.
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.list("app.main")[0]?.render).toBe(genericRender);
+  });
+
+  it("после unregisterPlugin чужой sync не получает stale pre-bind", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+    registry.unregisterPlugin("kanbaner.task-list");
+
+    registry.syncPlugin(
+      "other.plugin",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.list("app.main")[0]?.pluginId).toBe("other.plugin");
+    expect(registry.list("app.main")[0]?.render).toBe(genericRender);
+  });
+
+  it("keep real renderer при повторном sync без изменений metadata", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+
+    const version = registry.getVersion();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: { ...viewMetadata }, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.getVersion()).toBe(version);
+    expect(registry.list("app.main")[0]?.render).toBe(realRender);
+  });
 });

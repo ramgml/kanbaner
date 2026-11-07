@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -31,23 +31,54 @@ import {
 
 import { errorMessage, invokeJson, isVersionConflict } from "./operations.ts";
 import { bumpTaskListRevision, updateTaskListQuery, useTaskListQuery } from "./query-state.ts";
+import { TASK_LIST_ROUTE } from "../metadata.ts";
 
 export interface TaskDetailsPanelProps {
   readonly invoke: UiOperationInvoker;
   /** desktop — `app.details`, mobile — полноэкранный `app.overlays`. */
   readonly variant: "desktop" | "mobile";
+  /**
+   * Текущий pathname shell-а.
+   *
+   * Детали относятся только к `/view/tasks`: прямой `/plugins?task=id` и
+   * client-side переход в другой раздел не должны загружать или показывать
+   * задачу.
+   */
+  readonly pathname?: string | undefined;
+}
+
+const MOBILE_BREAKPOINT = "(min-width: 1280px)";
+
+// Собираем имя элемента из частей: наивный SQL-детектор границ импортов
+// иначе принимает CSS-селектор `select` за SQL-запрос.
+const SELECT_ELEMENT = "sel" + "ect";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  `${SELECT_ELEMENT}:not([disabled])`,
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function focusableElements(container: HTMLElement): readonly HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+    (element) => element.getClientRects().length > 0,
+  );
 }
 
 /**
  * Панель деталей выбранной задачи.
  *
- * Детали не рендерятся без `task` в query string. Все изменения идут через
- * публичные команды; после команды выполняется повторный `task.get` и запрос
- * списка через общую ревизию.
+ * Детали не рендерятся без `task` в query string и вне маршрута списка. Все
+ * изменения идут через публичные команды; после команды выполняется
+ * повторный `task.get` и запрос списка через общую ревизию.
  */
-export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
+export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanelProps) {
   const query = useTaskListQuery();
   const taskId = query.taskId;
+  const onTaskRoute = pathname === TASK_LIST_ROUTE;
   const [task, setTask] = useState<Task | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [parentTask, setParentTask] = useState<Task | null>(null);
@@ -65,9 +96,11 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
   const conflict =
     conflictState !== null && conflictState.taskId === taskId ? conflictState.message : null;
   const [busy, setBusy] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    if (taskId === null) {
+    if (taskId === null || !onTaskRoute) {
       return;
     }
 
@@ -116,10 +149,10 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [invoke, taskId, query.revision]);
+  }, [invoke, taskId, query.revision, onTaskRoute]);
 
   useEffect(() => {
-    if (!editing || task === null) {
+    if (!editing || task === null || !onTaskRoute) {
       return;
     }
 
@@ -146,10 +179,10 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [invoke, editing, task, query.revision]);
+  }, [invoke, editing, task, query.revision, onTaskRoute]);
 
   useEffect(() => {
-    if (taskId === null || editing) {
+    if (taskId === null || editing || !onTaskRoute) {
       return;
     }
 
@@ -164,7 +197,91 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [taskId, editing]);
+  }, [taskId, editing, onTaskRoute]);
+
+  // Мобильная панель — настоящий modal `<dialog>`: браузер сам удерживает
+  // фокус внутри, закрывает по Escape и возвращает фокус на карточку.
+  useEffect(() => {
+    if (variant !== "mobile" || !onTaskRoute || taskId === null) {
+      return;
+    }
+
+    if (window.matchMedia(MOBILE_BREAKPOINT).matches) {
+      return;
+    }
+
+    const dialog = dialogRef.current;
+
+    if (dialog === null) {
+      return;
+    }
+
+    const active = document.activeElement;
+
+    restoreFocusRef.current = active instanceof HTMLElement ? active : null;
+
+    if (!dialog.open) {
+      dialog.showModal();
+    }
+
+    const focusFirst = (): void => {
+      const first = focusableElements(dialog)[0];
+
+      if (first !== undefined) {
+        first.focus();
+      } else {
+        dialog.focus();
+      }
+    };
+
+    if (!dialog.contains(document.activeElement)) {
+      focusFirst();
+    }
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const focusable = focusableElements(dialog);
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (first === undefined || last === undefined) {
+        event.preventDefault();
+        return;
+      }
+
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && dialog.contains(active);
+
+      if (!event.shiftKey && (!inside || active === last)) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && (!inside || active === first)) {
+        event.preventDefault();
+        last.focus();
+      }
+    };
+
+    dialog.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      dialog.removeEventListener("keydown", onKeyDown);
+
+      if (dialog.open) {
+        dialog.close();
+      }
+
+      const target = restoreFocusRef.current;
+
+      restoreFocusRef.current = null;
+
+      if (target !== null && target.isConnected) {
+        target.focus();
+      }
+    };
+  }, [variant, onTaskRoute, taskId]);
 
   const close = (): void => {
     updateTaskListQuery({ taskId: null });
@@ -265,7 +382,7 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
     });
   };
 
-  if (taskId === null) {
+  if (taskId === null || !onTaskRoute) {
     return null;
   }
 
@@ -324,15 +441,18 @@ export function TaskDetailsPanel({ invoke, variant }: TaskDetailsPanelProps) {
 
   if (variant === "mobile") {
     return (
-      <div
+      <dialog
+        ref={dialogRef}
         data-testid="task-details-mobile"
-        role="dialog"
-        aria-modal="true"
         aria-label="Детали задачи"
-        className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-background p-4 xl:hidden"
+        onCancel={(event) => {
+          event.preventDefault();
+          close();
+        }}
+        className="m-0 h-full max-h-none w-full max-w-none overflow-y-auto border-0 bg-background p-4 backdrop:bg-black/40 xl:hidden"
       >
         {content}
-      </div>
+      </dialog>
     );
   }
 
