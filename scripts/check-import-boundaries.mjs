@@ -28,6 +28,8 @@ const TESTING_TASKS_BUILTINS = new Set(["node:assert/strict"]);
 const TASK_UI_PACKAGE = "@kanbaner/task-ui";
 const TASK_LIST_PACKAGE = "@kanbaner/plugin-task-list";
 const TASK_LIST_UI_ENTRYPOINT = "@kanbaner/plugin-task-list/ui";
+const KANBAN_PACKAGE = "@kanbaner/plugin-kanban";
+const KANBAN_UI_ENTRYPOINT = "@kanbaner/plugin-kanban/ui";
 const BUILTIN_UI_COMPOSITION = "apps/web/src/ui/builtin-ui-plugins.ts";
 const ALLOWED_TASK_UI_DEPENDENCIES = new Set([
   "react",
@@ -44,8 +46,18 @@ const ALLOWED_TASK_LIST_DEPENDENCIES = new Set([
   "@kanbaner/plugin-tasks/contract",
   TASK_UI_PACKAGE,
 ]);
+const ALLOWED_KANBAN_DEPENDENCIES = new Set([
+  "react",
+  "react-dom",
+  "react/jsx-runtime",
+  "@kanbaner/plugin-sdk",
+  "@kanbaner/plugin-tasks/contract",
+  TASK_UI_PACKAGE,
+]);
 const TASK_LIST_SERVER_ENTRYPOINT = "index.ts";
 const TASK_LIST_UI_ENTRYPOINT_FILE = "ui.tsx";
+const KANBAN_SERVER_ENTRYPOINT = "index.ts";
+const KANBAN_UI_ENTRYPOINT_FILE = "ui.tsx";
 
 /**
  * Запрещённые внешние модули fixture-плагина.
@@ -609,6 +621,114 @@ function analyzeTaskListSources(root, violations) {
   }
 }
 
+function analyzeKanbanSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "plugin-kanban");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(packageRoot) || !statSync(packageRoot).isDirectory()) {
+    violations.push({
+      file: relative(root, packageRoot),
+      rule: "plugin-kanban package is missing",
+    });
+
+    return;
+  }
+
+  const serverGraph = entryGraph(sourceRoot, KANBAN_SERVER_ENTRYPOINT);
+  const uiGraph = entryGraph(sourceRoot, KANBAN_UI_ENTRYPOINT_FILE);
+  const files = sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file));
+
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const relativeFile = path.relative(sourceRoot, file).replaceAll(path.sep, "/");
+    const inServer = serverGraph.has(file);
+    const inUi = uiGraph.has(file);
+
+    if (inUi && relativeFile === KANBAN_SERVER_ENTRYPOINT) {
+      violations.push({
+        file: relative(root, path.join(sourceRoot, KANBAN_UI_ENTRYPOINT_FILE)),
+        rule: `UI entrypoint не должен достигать server entrypoint: ${relativeFile}`,
+      });
+    }
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `относительный импорт выходит за пределы plugin-kanban (${kind}): ${specifier}`,
+          });
+        }
+
+        continue;
+      }
+
+      const forbidden = forbiddenPluginUiImport(specifier) ?? null;
+
+      if (forbidden !== null) {
+        violations.push({
+          file: fileLabel,
+          rule: `запрещённый импорт (${kind}): ${specifier} [${forbidden}]`,
+        });
+
+        continue;
+      }
+
+      if (
+        inServer &&
+        (specifier === "react" ||
+          specifier === "react-dom" ||
+          specifier.startsWith("react/") ||
+          specifier === TASK_UI_PACKAGE ||
+          specifier === KANBAN_UI_ENTRYPOINT ||
+          specifier === `${KANBAN_PACKAGE}/ui`)
+      ) {
+        violations.push({
+          file: fileLabel,
+          rule: `server graph не должен импортировать React/client (${kind}): ${specifier}`,
+        });
+
+        continue;
+      }
+
+      if (!ALLOWED_KANBAN_DEPENDENCIES.has(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `plugin-kanban не должен импортировать (${kind}): ${specifier}`,
+        });
+      }
+    }
+
+    const seenSql = new Set();
+
+    for (const literal of stringLiterals(file, source)) {
+      for (const rule of SQL_PATTERNS) {
+        if (rule.pattern.test(literal) && !seenSql.has(rule.label)) {
+          seenSql.add(rule.label);
+          violations.push({
+            file: fileLabel,
+            rule: `SQL statement вне миграций (${rule.label})`,
+          });
+        }
+      }
+    }
+
+    for (const rule of SYNC_PATTERNS) {
+      if (rule.pattern.test(source)) {
+        violations.push({
+          file: fileLabel,
+          rule: `synchronous storage call: ${rule.label}`,
+        });
+      }
+    }
+  }
+}
+
 function isTasksServerOnlyRelative(relativeFile) {
   return (
     TASKS_SERVER_ONLY_FILES.has(relativeFile) ||
@@ -764,7 +884,7 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
           });
         }
 
-        const isPluginUiEntrypoint =
+        const isTaskListUiEntrypoint =
           specifier === TASK_LIST_UI_ENTRYPOINT ||
           specifier === `${TASK_LIST_PACKAGE}/ui` ||
           specifier.startsWith(`${TASK_LIST_PACKAGE}/ui/`) ||
@@ -773,6 +893,16 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
             /(?:^|\/)ui(?:\.tsx?|\/)/u.test(
               relative(path.join(root, "packages", "plugin-task-list", "src"), resolved),
             ));
+        const isKanbanUiEntrypoint =
+          specifier === KANBAN_UI_ENTRYPOINT ||
+          specifier === `${KANBAN_PACKAGE}/ui` ||
+          specifier.startsWith(`${KANBAN_PACKAGE}/ui/`) ||
+          (resolved !== null &&
+            isInside(path.join(root, "packages", "plugin-kanban", "src"), resolved) &&
+            /(?:^|\/)ui(?:\.tsx?|\/)/u.test(
+              relative(path.join(root, "packages", "plugin-kanban", "src"), resolved),
+            ));
+        const isPluginUiEntrypoint = isTaskListUiEntrypoint || isKanbanUiEntrypoint;
 
         if (isPluginUiEntrypoint && !isBuiltinComposition) {
           violations.push({
@@ -785,6 +915,17 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
           (specifier === TASK_LIST_PACKAGE || specifier.startsWith(`${TASK_LIST_PACKAGE}/`)) &&
           specifier !== TASK_LIST_UI_ENTRYPOINT &&
           specifier !== `${TASK_LIST_PACKAGE}/ui`
+        ) {
+          violations.push({
+            file: fileLabel,
+            rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
+          });
+        }
+
+        if (
+          (specifier === KANBAN_PACKAGE || specifier.startsWith(`${KANBAN_PACKAGE}/`)) &&
+          specifier !== KANBAN_UI_ENTRYPOINT &&
+          specifier !== `${KANBAN_PACKAGE}/ui`
         ) {
           violations.push({
             file: fileLabel,
@@ -856,6 +997,11 @@ function analyzeManifests(root, violations) {
     {
       file: "packages/plugin-task-list/package.json",
       name: TASK_LIST_PACKAGE,
+      allowed: new Set([TASKS_PACKAGE, ALLOWED_FIXTURE_DEPENDENCY, TASK_UI_PACKAGE]),
+    },
+    {
+      file: "packages/plugin-kanban/package.json",
+      name: KANBAN_PACKAGE,
       allowed: new Set([TASKS_PACKAGE, ALLOWED_FIXTURE_DEPENDENCY, TASK_UI_PACKAGE]),
     },
   ];
@@ -934,6 +1080,8 @@ export function analyzeImportBoundaries(root = ROOT) {
 
   analyzeTaskListSources(root, violations);
 
+  analyzeKanbanSources(root, violations);
+
   analyzeManifests(root, violations);
 
   return violations;
@@ -972,6 +1120,7 @@ function runSelfTest() {
   const tasksRoot = path.join(root, "packages", "plugin-tasks");
   const taskUiRoot = path.join(root, "packages", "task-ui");
   const taskListRoot = path.join(root, "packages", "plugin-task-list");
+  const kanbanRoot = path.join(root, "packages", "plugin-kanban");
 
   try {
     writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: {} }));
@@ -1004,6 +1153,18 @@ function runSelfTest() {
       path.join(taskListRoot, "package.json"),
       JSON.stringify({
         name: TASK_LIST_PACKAGE,
+        dependencies: {
+          "@kanbaner/plugin-sdk": "workspace:*",
+          "@kanbaner/plugin-tasks": "workspace:*",
+          "@kanbaner/task-ui": "workspace:*",
+        },
+        peerDependencies: { react: "^19.0.0", "react-dom": "^19.0.0" },
+      }),
+    );
+    writeFile(
+      path.join(kanbanRoot, "package.json"),
+      JSON.stringify({
+        name: KANBAN_PACKAGE,
         dependencies: {
           "@kanbaner/plugin-sdk": "workspace:*",
           "@kanbaner/plugin-tasks": "workspace:*",
@@ -1154,14 +1315,42 @@ function runSelfTest() {
       ].join("\n"),
     );
 
-    // 10. shell может импортировать UI-entrypoint только из composition-модуля.
+    // 10. plugin-kanban: server graph без React/client, UI без server entrypoint.
+    writeFile(
+      path.join(kanbanRoot, "src", "index.ts"),
+      'import React from "react";\nimport { register } from "./metadata.ts";\nimport { table } from "./server-mix.ts";\nexport const activate = () => [React, register, table];\n',
+    );
+    writeFile(
+      path.join(kanbanRoot, "src", "metadata.ts"),
+      'import type { UiContribution } from "@kanbaner/plugin-sdk";\nimport type { Task } from "@kanbaner/plugin-tasks/contract";\nexport const contributions: UiContribution[] = [];\nexport type Kept = Task;\n',
+    );
+    writeFile(
+      path.join(kanbanRoot, "src", "ui.tsx"),
+      [
+        'import React from "react";',
+        'import { activate } from "./index.ts";',
+        'import { PLUGIN_ID } from "@kanbaner/plugin-tasks";',
+        "export const value = [React, activate, PLUGIN_ID];",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(kanbanRoot, "src", "server-mix.ts"),
+      'import { TaskTable } from "@kanbaner/task-ui";\nexport const table = TaskTable;\n',
+    );
+
+    // 11. shell может импортировать UI-entrypoint только из composition-модуля.
     writeFile(
       path.join(root, "apps", "web", "src", "ui", "shell.tsx"),
       'import { taskListUiPlugin } from "@kanbaner/plugin-task-list/ui";\nexport const plugin = taskListUiPlugin;\n',
     );
     writeFile(
+      path.join(root, "apps", "web", "src", "ui", "shell-kanban.tsx"),
+      'import { kanbanUiPlugin } from "@kanbaner/plugin-kanban/ui";\nexport const plugin = kanbanUiPlugin;\n',
+    );
+    writeFile(
       path.join(root, "apps", "web", "src", "ui", "builtin-ui-plugins.ts"),
-      'import { taskListUiPlugin } from "@kanbaner/plugin-task-list/ui";\nexport const builtin = [taskListUiPlugin];\n',
+      'import { kanbanUiPlugin } from "@kanbaner/plugin-kanban/ui";\nimport { taskListUiPlugin } from "@kanbaner/plugin-task-list/ui";\nexport const builtin = [taskListUiPlugin, kanbanUiPlugin];\n',
     );
 
     const violations = analyzeImportBoundaries(root);
@@ -1241,8 +1430,34 @@ function runSelfTest() {
       "apps/web/src/ui/shell.tsx",
       `UI-entrypoint плагина разрешён только из ${BUILTIN_UI_COMPOSITION}`,
     );
+    assertViolation(
+      violations,
+      "packages/plugin-kanban/src/index.ts",
+      "server graph не должен импортировать React/client",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-kanban/src/ui.tsx",
+      "UI entrypoint не должен достигать server entrypoint",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-kanban/src/ui.tsx",
+      "корневой @kanbaner/plugin-tasks запрещён",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-kanban/src/server-mix.ts",
+      "server graph не должен импортировать React/client",
+    );
+    assertViolation(
+      violations,
+      "apps/web/src/ui/shell-kanban.tsx",
+      `UI-entrypoint плагина разрешён только из ${BUILTIN_UI_COMPOSITION}`,
+    );
     assertNoViolation(violations, "packages/task-ui/src/good.ts");
     assertNoViolation(violations, "packages/plugin-task-list/src/metadata.ts");
+    assertNoViolation(violations, "packages/plugin-kanban/src/metadata.ts");
     assertNoViolation(violations, "apps/web/src/ui/builtin-ui-plugins.ts");
     assertNoViolation(violations, "packages/plugin-fixture/src/good.ts");
     assertNoViolation(violations, "packages/plugin-tasks/src/good-dep.ts");
@@ -1275,6 +1490,9 @@ if (process.argv.includes("--self-test")) {
     console.log("Import boundaries: kernel/plugin-sdk/apps не зависят от fixture.");
     console.log(
       "Import boundaries: plugin-tasks не импортирует kernel, SQL, драйверы и другие плагины; contract не достигает server-модулей.",
+    );
+    console.log(
+      "Import boundaries: task-ui и plugin-kanban/plugin-task-list не смешивают server и React; UI-entrypoint импортируется только composition-модулем.",
     );
   }
 }

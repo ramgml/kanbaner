@@ -120,6 +120,21 @@ async function closeDetails(page: Page, variant: "mobile" | "desktop"): Promise<
   await expect(page).not.toHaveURL(/[?&]task=/u);
 }
 
+/**
+ * Ограничивает общий список проектом сценария.
+ *
+ * База E2E общая для всех спеков (включая kanban), поэтому новая карточка не
+ * обязана попадать на первую страницу общего списка по `position, id`.
+ * Изоляция по проекту делает проверки независимыми от накопленного dataset.
+ */
+async function filterTaskListByProject(page: Page, projectTitle: string): Promise<void> {
+  await page
+    .getByTestId("task-filters")
+    .getByRole("combobox", { name: "Проект", exact: true })
+    .selectOption({ label: projectTitle });
+  await expect(page).toHaveURL(/[?&]project=/u);
+}
+
 function mobileCard(page: Page, title: string) {
   return page.getByTestId("task-cards").getByRole("button", {
     name: `Открыть карточку задачи ${title}`,
@@ -152,6 +167,7 @@ test.describe("список задач в production shell", () => {
       });
 
       await closeDetails(page, "mobile");
+      await filterTaskListByProject(page, projectTitle);
 
       await expect(page.getByTestId(`task-card-${taskId}`)).toBeVisible();
       await expect(mobileCard(page, taskTitle)).toBeVisible();
@@ -164,6 +180,7 @@ test.describe("список задач в production shell", () => {
       // Список задач читает те же данные после полной перезагрузки.
       await page.reload();
       await openTaskList(page);
+      await filterTaskListByProject(page, projectTitle);
       await expect(mobileCard(page, taskTitle)).toBeVisible();
     });
 
@@ -191,16 +208,14 @@ test.describe("список задач в production shell", () => {
       });
       await closeDetails(page, "mobile");
 
-      await expect(mobileCard(page, alphaTitle)).toBeVisible();
-      await expect(mobileCard(page, betaTitle)).toBeVisible();
-
-      // Проект: обе задачи принадлежат выбранному проекту.
+      // Общий список уже содержит задачи kanban и других спеков, поэтому
+      // сразу ограничиваем его проектом сценария: Alpha и Beta не обязаны
+      // попадать на первую страницу по общему dataset.
       const filters = page.getByTestId("task-filters");
 
-      await filters
-        .getByRole("combobox", { name: "Проект", exact: true })
-        .selectOption({ label: projectTitle });
-      await expect(page).toHaveURL(/[?&]project=/u);
+      await filterTaskListByProject(page, projectTitle);
+      await expect(mobileCard(page, alphaTitle)).toBeVisible();
+      await expect(mobileCard(page, betaTitle)).toBeVisible();
 
       // Приоритет: остаётся только задача с высоким приоритетом.
       await filters.getByRole("combobox", { name: "Приоритет", exact: true }).selectOption("high");
@@ -217,16 +232,16 @@ test.describe("список задач в production shell", () => {
       await expect(mobileCard(page, alphaTitle)).toBeVisible();
       await expect(mobileCard(page, betaTitle)).toHaveCount(0);
 
-      // Сброс фильтров возвращает обе задачи и очищает query string.
+      // Сброс фильтров очищает query string. Проверять Beta в общем списке
+      // нельзя: база E2E общая, и вторая задача проекта может оказаться за
+      // первой страницей. Сначала снова ограничиваем список проектом.
       await page.getByRole("button", { name: "Сбросить фильтры" }).click();
       await expect(page).not.toHaveURL(/[?&](project|priority)=/u);
-      await expect(mobileCard(page, betaTitle)).toBeVisible();
+      await expect(filters.getByRole("combobox", { name: "Проект", exact: true })).toHaveValue("");
 
-      // Для детерминированной сортировки снова ограничиваем список проектом:
-      // в общей базе E2E уже есть задачи из предыдущих сценариев.
-      await filters
-        .getByRole("combobox", { name: "Проект", exact: true })
-        .selectOption({ label: projectTitle });
+      await filterTaskListByProject(page, projectTitle);
+      await expect(mobileCard(page, alphaTitle)).toBeVisible();
+      await expect(mobileCard(page, betaTitle)).toBeVisible();
 
       // Сортировка по названию: по возрастанию, затем по убыванию.
       const sortSelect = page.getByRole("combobox", { name: "Сортировка", exact: true });
@@ -257,6 +272,7 @@ test.describe("список задач в production shell", () => {
         tags: "mobile",
       });
       await closeDetails(page, "mobile");
+      await filterTaskListByProject(page, projectTitle);
 
       await expect(page.getByTestId("task-cards")).toBeVisible();
       await expect(page.getByTestId("task-table")).toBeHidden();
@@ -291,6 +307,7 @@ test.describe("список задач в production shell", () => {
       await createProject(page, projectTitle);
       await createTask(page, { projectTitle, title: taskTitle });
       await closeDetails(page, "mobile");
+      await filterTaskListByProject(page, projectTitle);
 
       // Снимаем фокус с исчезнувшей кнопки и проходим Tab-порядок shell.
       await page.locator("h1", { hasText: "Задачи" }).click();
@@ -361,6 +378,7 @@ test.describe("список задач в production shell", () => {
         tags: "ui, edit",
       });
 
+      await filterTaskListByProject(page, projectTitle);
       await expect(page.getByTestId("task-table")).toBeVisible();
       await expect(page.getByTestId("task-cards")).toBeHidden();
       await expect(desktopRow(page, taskId)).toContainText(taskTitle);
@@ -393,6 +411,7 @@ test.describe("список задач в production shell", () => {
 
       await page.reload();
       await openTaskList(page);
+      await filterTaskListByProject(page, projectTitle);
       await expect(desktopRow(page, taskId)).toContainText(updatedTitle);
     });
 
@@ -408,6 +427,9 @@ test.describe("список задач в production shell", () => {
       await openTaskList(page);
       await createProject(page, projectTitle);
       const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      await filterTaskListByProject(page, projectTitle);
+
       const taskUrl = page.url();
 
       const stalePage = await context.newPage();
@@ -446,6 +468,7 @@ test.describe("список задач в production shell", () => {
       await firstDetails.getByRole("button", { name: "Закрыть детали" }).click();
       await page.reload();
       await openTaskList(page);
+      await filterTaskListByProject(page, projectTitle);
       await expect(desktopRow(page, taskId)).toContainText(firstTitle);
       await expect(desktopRow(page, taskId)).not.toContainText(staleTitle);
 
@@ -459,6 +482,8 @@ test.describe("список задач в production shell", () => {
       await openTaskList(page);
       await createProject(page, projectTitle);
       const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      await filterTaskListByProject(page, projectTitle);
 
       const details = page.getByTestId("task-details-desktop");
 
@@ -709,6 +734,7 @@ test.describe("список задач в production shell", () => {
       });
 
       await closeDetails(page, "desktop");
+      await filterTaskListByProject(page, projectTitle);
 
       await page.getByRole("button", { name: `Открыть задачу ${childTitle}` }).click();
 

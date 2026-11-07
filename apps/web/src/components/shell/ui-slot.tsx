@@ -17,6 +17,10 @@ export interface UiSlotProps {
   readonly empty?: ReactNode;
   /** Текущий pathname shell-а; передаётся каждому рендереру. */
   readonly pathname?: string | undefined;
+  /** Текущая query string shell-а; передаётся каждому рендереру. */
+  readonly search?: string | undefined;
+  /** Обновление query string через App Router. */
+  readonly replaceSearch?: ((search: string) => void) | undefined;
 }
 
 function matchesFilters(
@@ -45,14 +49,26 @@ function matchesFilters(
 export function ContributionRenderer({
   contribution,
   pathname,
+  search,
+  replaceSearch,
 }: {
   readonly contribution: RegisteredUiContribution;
   readonly pathname?: string | undefined;
+  readonly search?: string | undefined;
+  readonly replaceSearch?: ((search: string) => void) | undefined;
 }) {
   const Component = contribution.render;
   const invoke = useUiOperationInvoker();
 
-  return <Component contribution={contribution} invoke={invoke} pathname={pathname} />;
+  return (
+    <Component
+      contribution={contribution}
+      invoke={invoke}
+      pathname={pathname}
+      search={search}
+      replaceSearch={replaceSearch}
+    />
+  );
 }
 
 /**
@@ -67,6 +83,8 @@ export function UiSlot({
   className,
   empty = null,
   pathname,
+  search,
+  replaceSearch,
 }: UiSlotProps) {
   const contributions = useUiContributions(slot);
   const visible = contributions.filter((contribution) =>
@@ -81,7 +99,12 @@ export function UiSlot({
     <div className={className} data-ui-slot={slot}>
       {visible.map((contribution) => (
         <ContributionBoundary key={contribution.contribution.id} contribution={contribution}>
-          <ContributionRenderer contribution={contribution} pathname={pathname} />
+          <ContributionRenderer
+            contribution={contribution}
+            pathname={pathname}
+            search={search}
+            replaceSearch={replaceSearch}
+          />
         </ContributionBoundary>
       ))}
     </div>

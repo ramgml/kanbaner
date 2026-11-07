@@ -57,6 +57,20 @@ export interface UiRendererProps {
    * production-shell всегда передаёт значение.
    */
   readonly pathname?: string | undefined;
+  /**
+   * Текущая query string App Router (с ведущим `?` или пустая).
+   *
+   * Additive-поле: прямые рендеры в тестах могут его не передавать.
+   */
+  readonly search?: string | undefined;
+  /**
+   * Поддерживаемое обновление query string через App Router.
+   *
+   * Нужно, чтобы `useSearchParams` оставался источником истины после
+   * локального изменения фильтров/выбранной карточки. Если shell не передал
+   * колбэк, плагин использует `history.replaceState`.
+   */
+  readonly replaceSearch?: ((search: string) => void) | undefined;
 }
 
 export type UiRenderer = ComponentType<UiRendererProps>;
