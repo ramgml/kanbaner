@@ -4,10 +4,10 @@
 модель проектов и задач, TypeBox/JSON Schema, метаданные команд и запросов,
 `TasksStore`, `ResourceRef`, события и поисковое представление.
 
-В этой итерации (KAN-010) пакет **не содержит** UI, SQL, миграций, активации и
-реализации хранения. Реализация `TasksStore` — KAN-011. Активация, регистрация
-команд и запросов, публикация событий, поиск, exposure и `Idempotency-Key` —
-KAN-012. Представления списка и канбана — KAN-013 и KAN-014.
+В этой итерации (KAN-010 и KAN-011) пакет **не содержит** UI, SQL, миграций и
+активации. `TasksStore` реализован поверх namespaced `PluginDocumentStore`.
+Активация, регистрация команд и запросов, публикация событий, поиск, exposure и
+`Idempotency-Key` — KAN-012. Представления списка и канбана — KAN-013 и KAN-014.
 
 ## Точки входа
 
@@ -19,6 +19,9 @@ KAN-012. Представления списка и канбана — KAN-013 �
   компараторы списков, payload событий и преобразование в
   `SearchDocumentInput`. Без `activate`, Store, `node:*`, SQL и серверных
   модулей. Другой плагин или UI импортирует только этот subpath.
+- `@kanbaner/plugin-tasks/testing` — тестовый entrypoint с
+  `createTasksStoreConformanceSuite`. Не входит в production entrypoint и не
+  импортирует kernel, Storage Provider, SQLite или Vitest.
 
 ## Состав
 
@@ -28,6 +31,10 @@ KAN-012. Представления списка и канбана — KAN-013 �
 - `src/operations.ts` — серверные метаданные команд и запросов для `OperationBus`.
 - `src/store.ts` — асинхронный backend-neutral контракт `TasksStore` и
   транзакционный `TasksStoreTransaction`.
+- `src/store/**` — реализация `createTasksStore` поверх bound
+  `PluginStorage`/`PluginDocumentStore`, ошибки Store и тесты subpath.
+- `src/testing.ts` — публичный `createTasksStoreConformanceSuite` для
+  провайдеров.
 - `src/validation.ts` — чистые доменные валидаторы и нормализация тегов.
 - `src/listing.ts` — backend-neutral семантика сортировки и фильтров списков.
 - `src/resources.ts` — `ResourceRef` проектов и задач.
@@ -192,6 +199,55 @@ backend-специфичных типов. Домен передаёт гото�
 проверяются по `expectedVersion`. Тип `TasksIdFactory` описывает генератор ID,
 который используется до записи.
 
+### Реализация
+
+```ts
+import { bindPluginStorage } from "@kanbaner/kernel";
+import { createTasksStore } from "@kanbaner/plugin-tasks";
+
+const storage = bindPluginStorage(provider, "kanbaner.tasks");
+const store = createTasksStore({
+  storage,
+  idFactory,
+  now: () => new Date().toISOString(),
+});
+```
+
+`createTasksStore({ storage, idFactory, now })`:
+
+- использует только публичный `PluginDocumentStore` и коллекции `projects` и
+  `tasks` в namespace `kanbaner.tasks`;
+- не содержит SQL, `PRAGMA`, имён таблиц, драйвера БД и синхронных вызовов;
+- не импортирует kernel, `storage-sqlite` и другие плагины;
+- принимает готовые ID и UTC-время из контракта KAN-010; `idFactory` и `now`
+  применяются как fallback только при отсутствии значения во входе;
+- на каждом чтении и записи вызывает `assertStoredTask`, а проект проверяет по
+  `ProjectSchema`;
+- при точных фильтрах использует `indexedFields`
+  (`projectId`, `status`, `priority`, `parentTaskId`), остальные фильтры и
+  сортировку выполняет в Store;
+- возвращает `VERSION_CONFLICT` через `TasksVersionConflictError` с
+  `expectedVersion` и `actualVersion`, не перезаписывая документ.
+
+Позиция всегда поддерживается как уникальная и непрерывная `0…N-1` в области
+`(projectId, status)`: append получает `max + 1`, явная позиция и move
+переставляют соседей в той же транзакции, delete закрывает разрыв. Перестановка
+соседей — внутренняя операция порядка: публичная `version` задачи меняется
+только при пользовательском create/update/move/complete, а внутренняя ревизия
+документа растёт. Поэтому конкурентные `create`, `complete` и `move` разных
+задач не получают ложный `VERSION_CONFLICT` из-за сдвига позиций.
+
+### Conformance Suite
+
+`createTasksStoreConformanceSuite({ createStore })` экспортируется из
+`@kanbaner/plugin-tasks/testing` и не импортирует backend. Драйвер
+`tests/integration/tasks-store-conformance.test.ts` запускает его на четырёх
+вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite
+проверяет CAS, rollback rejected Promise, вложенную транзакцию, scoped
+`documents`, конкурентные create/complete/move, уникальность позиций,
+подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию и UTC/application
+IDs.
+
 ### Транзакции и idempotency
 
 `TasksStore.withTransaction(callback)` открывает транзакцию провайдера и
@@ -253,4 +309,5 @@ tasks
 pnpm --filter @kanbaner/plugin-tasks build
 pnpm --filter @kanbaner/plugin-tasks typecheck
 pnpm exec vitest run packages/plugin-tasks
+pnpm exec vitest run tests/integration/tasks-store-conformance.test.ts
 ```
