@@ -14,6 +14,7 @@ export * from "./operations.ts";
 export * from "./plugin-id.ts";
 export * from "./resources.ts";
 export * from "./results.ts";
+export * from "./storage/index.ts";
 export * from "./time.ts";
 export * from "./ui.ts";
 export * from "./validation.ts";
