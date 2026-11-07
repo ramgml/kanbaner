@@ -14,5 +14,6 @@ export * from "./migrations.ts";
 export * from "./plugin-state.ts";
 export * from "./provider.ts";
 export * from "./search.ts";
+export * from "./plugin-storage.ts";
 export * from "./stores.ts";
 export * from "./time.ts";

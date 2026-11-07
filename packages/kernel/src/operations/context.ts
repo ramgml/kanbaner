@@ -1,20 +1,23 @@
 import type {
   EventEnvelope,
-  EventHandler,
   EventPublishOptions,
   EventPublishResult,
   EventService,
-  EventSubscription,
-  EventUnsubscribe,
-  PluginEventService,
+  PluginEventPublisher,
   PluginId,
   PluginLogger,
+  PluginSearchService,
   ResourceDescriptor,
   ResourceLink,
   ResourceService,
   OperationResult,
+  SearchHit,
+  SearchIndexDocument,
+  SearchRegistrar,
 } from "@kanbaner/plugin-sdk";
+import { isEventOwnedByPlugin } from "@kanbaner/plugin-sdk";
 
+import { bindPluginSearch } from "../search/binding.ts";
 import { OperationFailure } from "./errors.ts";
 
 /** Логгер по умолчанию: ядро не требует обязательного журналирования. */
@@ -45,12 +48,14 @@ function unavailable(): Promise<never> {
  * Не возвращает пустые данные: обращение к неприсоединённому сервису должно
  * быть явной ошибкой, а не скрытым успехом.
  */
-/** Заглушка событий, если composition root не подключил шину. */
-export function createUnavailableEventService(): EventService {
+/**
+ * Заглушка publication-only сервиса событий.
+ *
+ * ExecutionContext не умеет подписываться: регистрация подписок остаётся
+ * только в activation tracker и снимается при деактивации.
+ */
+export function createUnavailableEventPublisher(): PluginEventPublisher {
   return {
-    subscribe(): EventUnsubscribe {
-      throw new OperationFailure("PLUGIN_UNAVAILABLE", "Шина событий не подключена");
-    },
     publishAfterCommit(): Promise<EventPublishResult> {
       return Promise.reject(
         new OperationFailure("PLUGIN_UNAVAILABLE", "Шина событий не подключена"),
@@ -60,21 +65,21 @@ export function createUnavailableEventService(): EventService {
 }
 
 /**
- * Привязывает хост-сервис событий к namespace-у операции.
+ * Привязывает publication-only хост-сервис событий к namespace-у операции.
  *
- * Плагин не может подменить `pluginId` подписки или опубликовать событие
- * чужого namespace-а.
+ * Проверяются источник, тип и владелец ResourceRef. Подписка через
+ * ExecutionContext недоступна по типу и по объекту.
  */
-export function bindEventService(events: EventService, pluginId: PluginId): PluginEventService {
+export function bindEventPublisher(
+  events: Pick<EventService, "publishAfterCommit">,
+  pluginId: PluginId,
+): PluginEventPublisher {
   return {
-    subscribe(type: EventSubscription, handler: EventHandler): EventUnsubscribe {
-      return events.subscribe(type, handler, { pluginId });
-    },
     publishAfterCommit(
       envelope: EventEnvelope,
       options: EventPublishOptions,
     ): Promise<EventPublishResult> {
-      if (envelope.source !== pluginId || !envelope.type.startsWith(`${pluginId}.`)) {
+      if (!isEventOwnedByPlugin(envelope, pluginId)) {
         return Promise.reject(
           new OperationFailure(
             "PERMISSION_DENIED",
@@ -86,6 +91,39 @@ export function bindEventService(events: EventService, pluginId: PluginId): Plug
       return events.publishAfterCommit(envelope, options);
     },
   };
+}
+
+function searchUnavailable(): Promise<never> {
+  return Promise.reject(
+    new OperationFailure("PLUGIN_UNAVAILABLE", "Поисковый сервис не подключён к шине"),
+  );
+}
+
+export function createUnavailableSearchRegistrar(): SearchRegistrar {
+  return {
+    upsert(): Promise<number> {
+      return searchUnavailable();
+    },
+    delete(): Promise<boolean> {
+      return searchUnavailable();
+    },
+    list(): Promise<readonly SearchIndexDocument[]> {
+      return searchUnavailable();
+    },
+    search(): Promise<readonly SearchHit[]> {
+      return searchUnavailable();
+    },
+    reindex(): Promise<number> {
+      return searchUnavailable();
+    },
+  };
+}
+
+export function bindSearchService(
+  search: SearchRegistrar,
+  pluginId: PluginId,
+): PluginSearchService {
+  return bindPluginSearch(search, pluginId);
 }
 
 export function createUnavailableResourceService(): ResourceService {

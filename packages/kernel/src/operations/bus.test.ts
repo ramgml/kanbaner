@@ -1,6 +1,7 @@
 import type { ExecutionContext, PluginLogger } from "@kanbaner/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
 
+import { InMemoryStorageProvider } from "../storage/in-memory-provider.ts";
 import { createOperationBus } from "./bus.ts";
 import { OperationFailure } from "./errors.ts";
 import {
@@ -1182,9 +1183,9 @@ describe("OperationBus: настройки", () => {
     expect(() => createOperationBus({ maxDepth: 1.5 })).toThrow(RangeError);
   });
 
-  it("использует заданный storage и сервис ресурсов", async () => {
-    const storage = { marker: "storage" };
-    const bus = createOperationBus({ storage });
+  it("выдаёт bound storage вместо raw provider-а", async () => {
+    const provider = new InMemoryStorageProvider();
+    const bus = createOperationBus({ storage: provider });
     let seenStorage: unknown;
 
     bus.registerCommand({
@@ -1198,7 +1199,10 @@ describe("OperationBus: настройки", () => {
 
     await bus.executeCommand("test.tasks.create", { title: "x" });
 
-    expect(seenStorage).toBe(storage);
+    expect(seenStorage).not.toBe(provider);
+    expect(seenStorage).toMatchObject({ backendId: provider.backendId });
+    expect((seenStorage as { readonly open?: unknown }).open).toBeUndefined();
+    expect((seenStorage as { readonly migrations?: unknown }).migrations).toBeUndefined();
   });
 
   it("по умолчанию использует недоступный сервис ресурсов", async () => {

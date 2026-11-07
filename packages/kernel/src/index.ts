@@ -22,4 +22,5 @@ export * from "./plugins/index.ts";
 export * from "./operations/index.ts";
 export * from "./events/index.ts";
 export * from "./resources/index.ts";
+export * from "./search/index.ts";
 export * from "./storage/index.ts";

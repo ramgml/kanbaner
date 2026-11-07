@@ -21,19 +21,25 @@ import {
   type PluginHostServices,
   type PluginId,
   type PluginQueryService,
+  type PluginSearchService,
+  type PluginStorage,
   type PluginUiRegistrar,
   type ResourceDescriptor,
   type ResourceLink,
   type ResourceRef,
   type ResourceService,
+  type SearchRegistrar,
   type StorageCapabilities,
   type StorageProvider,
   type StorageStoreRegistration,
   type StorageTransaction,
   type UiContribution,
+  isEventOwnedByPlugin,
 } from "@kanbaner/plugin-sdk";
 
 import { OperationFailure } from "../operations/errors.ts";
+import { bindPluginSearch } from "../search/binding.ts";
+import { bindPluginStorage } from "../storage/plugin-storage-binding.ts";
 
 /*
  * Заглушки повторяют публичные сигнатуры SDK, но намеренно не используют
@@ -195,6 +201,19 @@ function createUnavailableEventService(): EventService {
   };
 }
 
+function createUnavailableSearchRegistrar(): SearchRegistrar {
+  const closed = (): Promise<never> =>
+    Promise.reject(unavailableError("Поисковый сервис не подключён к runtime"));
+
+  return {
+    upsert: closed,
+    delete: closed,
+    list: closed,
+    search: closed,
+    reindex: closed,
+  };
+}
+
 /** Безопасные заглушки для runtime без composition root. */
 export function createUnavailableHostServices(): PluginHostServices {
   return {
@@ -211,6 +230,7 @@ export function createUnavailableHostServices(): PluginHostServices {
     },
     events: createUnavailableEventService(),
     storage: createUnavailableStorageProvider(),
+    search: createUnavailableSearchRegistrar(),
     ui: {
       register(_pluginId: PluginId, _contributions: readonly UiContribution[]): void {
         throw unavailableError("Регистратор UI-вкладов не подключён к runtime");
@@ -237,7 +257,8 @@ class BoundServices implements BoundPluginServices {
   readonly resources: ResourceService;
   readonly resourceTypes: PluginActivationServices["resourceTypes"];
   readonly events: PluginEventService;
-  readonly storage: StorageProvider;
+  readonly storage: PluginStorage;
+  readonly search: PluginSearchService;
   readonly ui: PluginUiRegistrar;
   readonly #unregisterCommands: () => void;
   readonly #unregisterQueries: () => void;
@@ -311,7 +332,8 @@ class BoundServices implements BoundPluginServices {
         host.resourceTypes.unregister(pluginId);
       },
     };
-    this.storage = host.storage;
+    this.storage = bindPluginStorage(host.storage, pluginId);
+    this.search = bindPluginSearch(host.search, pluginId);
 
     this.events = {
       subscribe(type: EventSubscription, handler: EventHandler): EventUnsubscribe {
@@ -336,7 +358,7 @@ class BoundServices implements BoundPluginServices {
         envelope: EventEnvelope,
         options: EventPublishOptions,
       ): Promise<EventPublishResult> {
-        if (envelope.source !== pluginId || !envelope.type.startsWith(`${pluginId}.`)) {
+        if (!isEventOwnedByPlugin(envelope, pluginId)) {
           return reject(
             new OperationFailure(
               "PERMISSION_DENIED",

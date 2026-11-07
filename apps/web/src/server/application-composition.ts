@@ -1,6 +1,7 @@
 import {
   adaptResourceServiceErrors,
   createOperationBus,
+  createSearchService,
   EventBus,
   KernelResourceService,
   LinkService,
@@ -23,6 +24,7 @@ import {
   type PluginHostServices,
   type PluginId,
   type PluginLogger,
+  type SearchRegistrar,
   type StorageProvider,
   type UiContribution,
   type UiContributionRegistrar,
@@ -115,7 +117,7 @@ export class UiMetadataRegistry implements UiContributionRegistrar {
 export interface ApplicationPluginCompositionOptions {
   readonly storage: StorageProvider;
   readonly logger?: PluginLogger;
-  readonly operationBus?: Omit<OperationBusOptions, "resources" | "events" | "storage">;
+  readonly operationBus?: Omit<OperationBusOptions, "resources" | "events" | "search" | "storage">;
 }
 
 /**
@@ -131,6 +133,7 @@ export interface ApplicationPluginComposition {
   readonly registry: ResourceRegistry;
   readonly links: LinkService;
   readonly resources: KernelResourceService;
+  readonly search: SearchRegistrar;
   readonly operations: OperationBus;
   readonly ui: UiMetadataRegistry;
   readonly services: PluginHostServices;
@@ -176,6 +179,7 @@ export function createApplicationPluginComposition(
   const registry = new ResourceRegistry({ logger });
   const links = new LinkService({ store: options.storage.links, logger });
   const resources = new KernelResourceService({ registry, links });
+  const search = createSearchService(options.storage.searchIndex);
   const ui = new UiMetadataRegistry();
 
   const operations = createOperationBus({
@@ -183,6 +187,7 @@ export function createApplicationPluginComposition(
     logger,
     resources: adaptResourceServiceErrors(resources, mapResourceError),
     events,
+    search,
     storage: options.storage,
   });
 
@@ -218,6 +223,7 @@ export function createApplicationPluginComposition(
     },
     events,
     storage: options.storage,
+    search,
     ui,
   };
 
@@ -226,6 +232,7 @@ export function createApplicationPluginComposition(
     registry,
     links,
     resources,
+    search,
     operations,
     ui,
     services,

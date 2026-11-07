@@ -13,6 +13,6 @@
     "kanbaner.fixture.events.v1"
   ],
   "provides": ["kanbaner.fixture.ui.v1"],
-  "permissions": ["commands", "events", "storage", "ui"],
+  "permissions": ["commands", "events", "storage", "search", "ui"],
   "migrations": "./migrations"
 }

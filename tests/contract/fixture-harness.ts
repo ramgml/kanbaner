@@ -74,9 +74,20 @@ async function prepareProvider(
   options: FixtureHarnessOptions,
 ): Promise<{ provider: StorageProvider; storage: ApplicationStorageRuntime | null }> {
   if (options.provider !== undefined) {
-    await options.provider.open();
+    if (options.migrate === false) {
+      await options.provider.open();
 
-    return { provider: options.provider, storage: null };
+      return { provider: options.provider, storage: null };
+    }
+
+    // Даже готовый провайдер должен получить core-таблицы: без
+    // инфраструктурных миграций SQLite не знает про documents/searchIndex.
+    const storage = await createApplicationStorage({
+      dataDirectory,
+      provider: options.provider,
+    });
+
+    return { provider: storage.provider, storage };
   }
 
   const storage = await createApplicationStorage({ dataDirectory });

@@ -8,6 +8,7 @@ import type {
   EventPublishResult,
   EventUnsubscribe,
 } from "./events.ts";
+import { parseResourceRef } from "./resources.ts";
 import type { OperationId, PluginId } from "./plugin-id.ts";
 import type { CommandMetadata, QueryMetadata } from "./operations.ts";
 import type {
@@ -17,7 +18,10 @@ import type {
   ResourceType,
 } from "./resources.ts";
 import type { OperationResult } from "./results.ts";
+import type { SearchRegistrar, PluginSearchService } from "./search.ts";
+import type { PluginStorage } from "./storage/plugin-storage.ts";
 import type { StorageProvider } from "./storage/provider.ts";
+import { validateOperationResult } from "./validation.ts";
 import type { UiContribution } from "./ui.ts";
 
 /**
@@ -107,20 +111,29 @@ export interface EventService {
 }
 
 /**
- * Плагинный фасад событий.
+ * Публикация события из `ExecutionContext`.
  *
- * Подписка автоматически привязывается к plugin ID. Публикация разрешена
- * только для событий собственного namespace-а.
+ * В execution context намеренно нет `subscribe`: подписки регистрируются
+ * только activation tracker-ом и снимаются при деактивации.
  */
-export interface PluginEventService {
-  subscribe(
-    type: EventSubscription,
-    handler: (envelope: EventEnvelope, context: EventDeliveryContext) => void | Promise<void>,
-  ): EventUnsubscribe;
+export interface PluginEventPublisher {
   publishAfterCommit(
     envelope: EventEnvelope,
     options: EventPublishOptions,
   ): Promise<EventPublishResult>;
+}
+
+/**
+ * Плагинный фасад событий активации.
+ *
+ * Подписка автоматически привязывается к plugin ID. Публикация разрешена
+ * только для событий и ресурсов собственного namespace-а.
+ */
+export interface PluginEventService extends PluginEventPublisher {
+  subscribe(
+    type: EventSubscription,
+    handler: (envelope: EventEnvelope, context: EventDeliveryContext) => void | Promise<void>,
+  ): EventUnsubscribe;
 }
 
 /** Плагинный регистратор UI-метаданных; владелец подставляется runtime-ом. */
@@ -148,6 +161,7 @@ export interface PluginHostServices {
   readonly resourceTypes: ResourceRegistrar;
   readonly events: EventService;
   readonly storage: StorageProvider;
+  readonly search: SearchRegistrar;
   readonly ui: UiContributionRegistrar;
 }
 
@@ -163,7 +177,8 @@ export interface PluginActivationServices {
   readonly resources: ResourceService;
   readonly resourceTypes: PluginResourceRegistrar;
   readonly events: PluginEventService;
-  readonly storage: StorageProvider;
+  readonly storage: PluginStorage;
+  readonly search: PluginSearchService;
   readonly ui: PluginUiRegistrar;
 }
 
@@ -178,15 +193,29 @@ export function isEventOwnedBy(type: EventType, pluginId: PluginId): boolean {
 }
 
 /**
+ * Полная проверка владения событием.
+ *
+ * Источник, тип и ResourceRef обязаны принадлежать одному plugin ID. Это не
+ * даёт опубликовать событие от чужого имени или очистить чужой ресурс.
+ */
+export function isEventOwnedByPlugin(envelope: EventEnvelope, pluginId: PluginId): boolean {
+  if (envelope.source !== pluginId || !isEventOwnedBy(envelope.type, pluginId)) {
+    return false;
+  }
+
+  try {
+    return parseResourceRef(envelope.resource).pluginId === pluginId;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Структурная проверка результата операции без импорта ядра.
  *
  * Используется обработчиками, которые хотят отличить ожидаемую ошибку
  * вложенного вызова от успешного результата.
  */
 export function isOperationResult(value: unknown): value is OperationResult<unknown> {
-  if (typeof value !== "object" || value === null || !("ok" in value)) {
-    return false;
-  }
-
-  return (value as { readonly ok?: unknown }).ok === true;
+  return validateOperationResult(value).ok;
 }

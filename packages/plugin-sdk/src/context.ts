@@ -1,10 +1,12 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12 } from "./contract.ts";
-import type { PluginEventService } from "./activation.ts";
+import type { PluginEventPublisher } from "./activation.ts";
 import type { OperationId } from "./plugin-id.ts";
 import type { ResourceService } from "./resources.ts";
 import type { OperationResult } from "./results.ts";
+import type { PluginSearchService } from "./search.ts";
+import type { PluginStorage } from "./storage/plugin-storage.ts";
 
 /** Канал, из которого пришёл вызов операции. */
 export const OPERATION_SOURCE_TYPES = ["ui", "http", "mcp", "plugin", "system"] as const;
@@ -66,10 +68,10 @@ export interface PluginLogger {
 /**
  * Контекст выполнения операции, создаваемый ядром.
  *
- * `TStorage` остаётся generic/unknown до появления публичного Storage
- * Provider контракта: SDK не выдумывает доменный storage-интерфейс.
+ * `TStorage` по умолчанию — bound `PluginStorage`; generic сохранён для
+ * специализированных контекстов и тестов, но raw provider сюда не попадает.
  */
-export interface ExecutionContext<TStorage = unknown> {
+export interface ExecutionContext<TStorage = PluginStorage> {
   readonly requestId: string;
   readonly traceId: string;
   readonly source: OperationSource;
@@ -80,6 +82,7 @@ export interface ExecutionContext<TStorage = unknown> {
   readonly commands: CommandInvoker;
   readonly queries: QueryInvoker;
   readonly resources: ResourceService;
-  readonly events: PluginEventService;
+  readonly events: PluginEventPublisher;
+  readonly search: PluginSearchService;
   readonly storage: TStorage;
 }

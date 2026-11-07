@@ -11,6 +11,8 @@ import type {
   QueryMetadata,
   ResolvedExposure,
   ResourceService,
+  SearchRegistrar,
+  StorageProvider,
 } from "@kanbaner/plugin-sdk";
 
 /** Два вида операций Plugin Contract: изменяющая и читающая. */
@@ -71,7 +73,9 @@ export interface OperationBusOptions {
    * передаёт обработчику как `ctx.events`.
    */
   readonly events?: EventService;
-  readonly storage?: unknown;
+  readonly search?: SearchRegistrar;
+  /** Хост provider; OperationBus выдаёт обработчику bound PluginStorage. */
+  readonly storage?: StorageProvider;
 }
 
 /** Параметры верхнего вызова операции. */

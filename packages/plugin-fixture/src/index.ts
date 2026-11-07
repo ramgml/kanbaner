@@ -3,6 +3,7 @@ import {
   isPluginId,
   isResourceType,
   parseResourceRef,
+  toSearchDocument,
   type CommandMetadata,
   type EventEnvelope,
   type ExecutionContext,
@@ -14,6 +15,7 @@ import {
   type QueryMetadata,
   type ResourceDescriptor,
   type ResourceRef,
+  type SearchDocumentInput,
   type UiContribution,
 } from "@kanbaner/plugin-sdk";
 
@@ -23,10 +25,16 @@ export const FIXTURE_COLLECTION = "items";
 export const FIXTURE_AUDIT_COLLECTION = "audit";
 
 export const FIXTURE_EVENT_CREATED = "kanbaner.fixture.item.created";
+export const FIXTURE_EVENT_DELETED = "kanbaner.fixture.item.deleted";
 export const FIXTURE_COMMAND_CREATE = "kanbaner.fixture.item.create";
+export const FIXTURE_COMMAND_DELETE = "kanbaner.fixture.item.delete";
+export const FIXTURE_COMMAND_REINDEX = "kanbaner.fixture.item.reindex";
 export const FIXTURE_QUERY_LIST = "kanbaner.fixture.item.list";
+export const FIXTURE_QUERY_SEARCH = "kanbaner.fixture.item.search";
 
 const DEFAULT_TITLE = "Fixture item";
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
 
 const itemInputSchema: CommandMetadata["inputSchema"] = {
   type: "object",
@@ -36,9 +44,38 @@ const itemInputSchema: CommandMetadata["inputSchema"] = {
   additionalProperties: false,
 };
 
+const deleteInputSchema: CommandMetadata["inputSchema"] = {
+  type: "object",
+  properties: {
+    id: { type: "string", minLength: 1 },
+  },
+  required: ["id"],
+  additionalProperties: false,
+};
+
 const emptyInputSchema: QueryMetadata["inputSchema"] = {
   type: "object",
   properties: {},
+  additionalProperties: false,
+};
+
+const listInputSchema: QueryMetadata["inputSchema"] = {
+  type: "object",
+  properties: {
+    limit: { type: "integer", minimum: 1, maximum: MAX_LIMIT },
+    offset: { type: "integer", minimum: 0 },
+  },
+  additionalProperties: false,
+};
+
+const searchInputSchema: QueryMetadata["inputSchema"] = {
+  type: "object",
+  properties: {
+    text: { type: "string", minLength: 1 },
+    limit: { type: "integer", minimum: 1, maximum: MAX_LIMIT },
+    offset: { type: "integer", minimum: 0 },
+  },
+  required: ["text"],
   additionalProperties: false,
 };
 
@@ -51,6 +88,24 @@ const itemOutputSchema: CommandMetadata["outputSchema"] = {
     eventId: { type: "string" },
   },
   required: ["id", "title", "resource", "eventId"],
+  additionalProperties: false,
+};
+
+const deleteOutputSchema: CommandMetadata["outputSchema"] = {
+  type: "object",
+  properties: {
+    deleted: { type: "boolean" },
+  },
+  required: ["deleted"],
+  additionalProperties: false,
+};
+
+const reindexOutputSchema: CommandMetadata["outputSchema"] = {
+  type: "object",
+  properties: {
+    count: { type: "integer", minimum: 0 },
+  },
+  required: ["count"],
   additionalProperties: false,
 };
 
@@ -70,8 +125,33 @@ const listOutputSchema: QueryMetadata["outputSchema"] = {
         additionalProperties: false,
       },
     },
+    total: { type: "integer", minimum: 0 },
+    nextOffset: { anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }] },
   },
-  required: ["items"],
+  required: ["items", "total", "nextOffset"],
+  additionalProperties: false,
+};
+
+const searchOutputSchema: QueryMetadata["outputSchema"] = {
+  type: "object",
+  properties: {
+    hits: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          ref: { type: "string" },
+          title: { type: "string" },
+          excerpt: { type: "string" },
+          score: { type: "number" },
+          strategy: { type: "string" },
+        },
+        required: ["ref", "title", "excerpt", "score", "strategy"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["hits"],
   additionalProperties: false,
 };
 
@@ -93,6 +173,52 @@ function titleFrom(input: unknown): string {
   const title = (input as { readonly title?: unknown }).title;
 
   return typeof title === "string" && title.trim().length > 0 ? title.trim() : DEFAULT_TITLE;
+}
+
+function idFrom(input: unknown): string {
+  if (typeof input !== "object" || input === null || !("id" in input)) {
+    throw new TypeError("Fixture delete требует id");
+  }
+
+  const id = (input as { readonly id?: unknown }).id;
+
+  if (typeof id !== "string" || id.length === 0) {
+    throw new TypeError("Fixture delete требует непустой id");
+  }
+
+  return id;
+}
+
+function paginationFrom(input: unknown): { readonly limit: number; readonly offset: number } {
+  if (typeof input !== "object" || input === null) {
+    return { limit: DEFAULT_LIMIT, offset: 0 };
+  }
+
+  const record = input as { readonly limit?: unknown; readonly offset?: unknown };
+  const limit =
+    typeof record.limit === "number" && Number.isInteger(record.limit) && record.limit > 0
+      ? Math.min(record.limit, MAX_LIMIT)
+      : DEFAULT_LIMIT;
+  const offset =
+    typeof record.offset === "number" && Number.isInteger(record.offset) && record.offset >= 0
+      ? record.offset
+      : 0;
+
+  return { limit, offset };
+}
+
+function searchTextFrom(input: unknown): string {
+  if (typeof input !== "object" || input === null || !("text" in input)) {
+    throw new TypeError("Fixture search требует text");
+  }
+
+  const text = (input as { readonly text?: unknown }).text;
+
+  if (typeof text !== "string" || text.trim().length === 0) {
+    throw new TypeError("Fixture search требует непустой text");
+  }
+
+  return text.trim();
 }
 
 function itemView(document: PluginDocument): ItemView {
@@ -120,6 +246,20 @@ function resourceOf(id: string): ResourceRef {
     resourceType: FIXTURE_ITEM_TYPE,
     opaqueId: id,
   });
+}
+
+function searchDocumentOf(view: ItemView): SearchDocumentInput {
+  return toSearchDocument(FIXTURE_PLUGIN_ID, {
+    ref: resourceOf(view.id),
+    title: view.title,
+    text: view.title,
+    kind: FIXTURE_ITEM_TYPE,
+    updatedAt: view.createdAt,
+  });
+}
+
+function safeErrorName(error: unknown): string {
+  return error instanceof Error && error.name.length > 0 ? error.name : "UnknownError";
 }
 
 function isStorageErrorCode(error: unknown, code: string): boolean {
@@ -159,32 +299,51 @@ async function recordAudit(documents: PluginDocumentStore, envelope: EventEnvelo
   }
 }
 
-function commandMetadata(): CommandMetadata {
+/**
+ * Метаданные fixture-операции.
+ *
+ * `exposure.ui` включается явно только у операций, которые реально вызывает
+ * UI-вклад (`item.create` и `item.list`). Остальные операции остаются
+ * default-off по всем каналам, как требует Plugin Contract.
+ */
+function commandMetadata(
+  id: string,
+  inputSchema: CommandMetadata["inputSchema"],
+  outputSchema: CommandMetadata["outputSchema"],
+  description: string,
+  exposureUi = false,
+): CommandMetadata {
   return {
-    id: FIXTURE_COMMAND_CREATE,
+    id,
     contract: "kanbaner.fixture.commands.v1",
     version: 1,
     kind: "mutation",
-    risk: "write",
+    risk: id === FIXTURE_COMMAND_DELETE ? "destructive" : "write",
     idempotency: "none",
-    exposure: { ui: true, http: false, mcp: false },
-    inputSchema: itemInputSchema,
-    outputSchema: itemOutputSchema,
-    description: "Создаёт fixture-элемент через PluginDocumentStore",
+    exposure: { ui: exposureUi, http: false, mcp: false },
+    inputSchema,
+    outputSchema,
+    description,
   };
 }
 
-function queryMetadata(): QueryMetadata {
+function queryMetadata(
+  id: string,
+  inputSchema: QueryMetadata["inputSchema"],
+  outputSchema: QueryMetadata["outputSchema"],
+  description: string,
+  exposureUi = false,
+): QueryMetadata {
   return {
-    id: FIXTURE_QUERY_LIST,
+    id,
     contract: "kanbaner.fixture.queries.v1",
     version: 1,
     kind: "query",
     risk: "read",
-    exposure: { ui: true, http: false, mcp: false },
-    inputSchema: emptyInputSchema,
-    outputSchema: listOutputSchema,
-    description: "Возвращает fixture-элементы",
+    exposure: { ui: exposureUi, http: false, mcp: false },
+    inputSchema,
+    outputSchema,
+    description,
   };
 }
 
@@ -212,8 +371,8 @@ export const fixtureUiContributions: readonly UiContribution[] = [
 /**
  * Реальная активация fixture-плагина.
  *
- * Использует только публичный SDK: регистраторы, Storage Provider и события
- * приходят из composition root. SQL, драйвер БД и kernel-модули не
+ * Использует только публичный SDK: bound storage/search, регистраторы и
+ * события приходят из composition root. SQL, драйвер БД и kernel-модули не
  * импортируются; все операции хранилища асинхронны.
  */
 export async function activate(context: FixtureActivationContext): Promise<void> {
@@ -221,60 +380,215 @@ export async function activate(context: FixtureActivationContext): Promise<void>
     throw new Error("Fixture activation context получил другой Plugin ID");
   }
 
-  const documents = context.storage.documents;
+  const storage = context.storage;
 
   context.commands.register({
-    metadata: commandMetadata(),
+    metadata: commandMetadata(
+      FIXTURE_COMMAND_CREATE,
+      itemInputSchema,
+      itemOutputSchema,
+      "Создаёт fixture-элемент в транзакции и публикует событие после коммита",
+      true,
+    ),
     async handler(input, executionContext: ExecutionContext) {
       const title = titleFrom(input);
       const id = `item-${globalThis.crypto.randomUUID()}`;
       const createdAt = new Date().toISOString();
       const resource = resourceOf(id);
 
-      await documents.put({
-        pluginId: FIXTURE_PLUGIN_ID,
-        collection: FIXTURE_COLLECTION,
-        id,
-        data: { title, createdAt },
-        indexedFields: { title },
-        expectedVersion: 0,
+      // Документ и audit пишутся в одной транзакции плагина. Событие не
+      // публикуется, пока транзакция не завершилась успешно.
+      await storage.withTransaction(async (transaction) => {
+        await transaction.documents.put({
+          pluginId: FIXTURE_PLUGIN_ID,
+          collection: FIXTURE_COLLECTION,
+          id,
+          data: { title, createdAt },
+          indexedFields: { title },
+          expectedVersion: 0,
+        });
       });
 
-      // Событие публикуется только после успешного завершения put. Шина
-      // считается best-effort и не откатывает уже зафиксированные данные.
-      const eventId = globalThis.crypto.randomUUID();
-      const publish = await executionContext.events.publishAfterCommit(
-        {
-          eventId,
-          type: FIXTURE_EVENT_CREATED,
-          contractVersion: 1,
-          source: FIXTURE_PLUGIN_ID,
-          occurredAt: new Date().toISOString(),
-          resource,
-          resourceVersion: 1,
-          payload: { itemId: id, title },
-        },
-        { traceId: executionContext.traceId },
-      );
+      try {
+        await context.search.upsert([searchDocumentOf({ id, title, createdAt })]);
+      } catch (error) {
+        executionContext.logger.warn("fixture.search_upsert_failed", {
+          eventId: null,
+          errorName: safeErrorName(error),
+        });
+      }
 
-      if (publish.status === "invalid") {
-        throw new Error("Fixture event не прошёл валидацию контракта");
+      // Публикация best-effort: ошибка шины не откатывает уже зафиксированные
+      // данные и не превращает успешную команду в INTERNAL_ERROR.
+      const eventId = globalThis.crypto.randomUUID();
+
+      try {
+        const publish = await executionContext.events.publishAfterCommit(
+          {
+            eventId,
+            type: FIXTURE_EVENT_CREATED,
+            contractVersion: 1,
+            source: FIXTURE_PLUGIN_ID,
+            occurredAt: new Date().toISOString(),
+            resource,
+            resourceVersion: 1,
+            payload: { itemId: id, title },
+          },
+          { traceId: executionContext.traceId },
+        );
+
+        if (publish.status === "invalid") {
+          executionContext.logger.warn("fixture.event_rejected", { eventId });
+        }
+      } catch (error) {
+        executionContext.logger.warn("fixture.event_publish_failed", {
+          eventId,
+          errorName: safeErrorName(error),
+        });
       }
 
       return { id, title, resource, eventId };
     },
   });
 
-  context.queries.register({
-    metadata: queryMetadata(),
-    async handler() {
-      const documentsList = await documents.query({
-        pluginId: FIXTURE_PLUGIN_ID,
-        collection: FIXTURE_COLLECTION,
-        sort: { field: "createdAt", direction: "desc" },
+  context.commands.register({
+    metadata: commandMetadata(
+      FIXTURE_COMMAND_DELETE,
+      deleteInputSchema,
+      deleteOutputSchema,
+      "Удаляет fixture-элемент и публикует deleted после коммита",
+    ),
+    async handler(input, executionContext: ExecutionContext) {
+      const id = idFrom(input);
+      const resource = resourceOf(id);
+
+      const deleted = await storage.withTransaction(async (transaction) => {
+        const current = await transaction.documents.get(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION, id);
+
+        if (current === null) {
+          return null;
+        }
+
+        const removed = await transaction.documents.delete(
+          FIXTURE_PLUGIN_ID,
+          FIXTURE_COLLECTION,
+          id,
+          { expectedVersion: current.version },
+        );
+
+        if (!removed) {
+          throw new Error("Fixture delete не изменил документ");
+        }
+
+        return current;
       });
 
-      return { items: documentsList.map(itemView) };
+      if (deleted === null) {
+        return { deleted: false };
+      }
+
+      // Поисковый индекс удаляется host-сервисом по владельцу ResourceRef.
+      // Cleanup события идемпотентно повторит удаление.
+      try {
+        await context.search.delete(resource);
+      } catch (error) {
+        executionContext.logger.warn("fixture.search_delete_failed", {
+          errorName: safeErrorName(error),
+        });
+      }
+
+      const eventId = globalThis.crypto.randomUUID();
+
+      try {
+        const publish = await executionContext.events.publishAfterCommit(
+          {
+            eventId,
+            type: FIXTURE_EVENT_DELETED,
+            contractVersion: 1,
+            source: FIXTURE_PLUGIN_ID,
+            occurredAt: new Date().toISOString(),
+            resource,
+            resourceVersion: deleted.version + 1,
+            payload: { itemId: id },
+          },
+          { traceId: executionContext.traceId },
+        );
+
+        if (publish.status === "invalid") {
+          executionContext.logger.warn("fixture.event_rejected", { eventId });
+        }
+      } catch (error) {
+        executionContext.logger.warn("fixture.event_publish_failed", {
+          eventId,
+          errorName: safeErrorName(error),
+        });
+      }
+
+      return { deleted: true };
+    },
+  });
+
+  context.commands.register({
+    metadata: commandMetadata(
+      FIXTURE_COMMAND_REINDEX,
+      emptyInputSchema,
+      reindexOutputSchema,
+      "Полностью переиндексирует документы fixture-плагина",
+    ),
+    async handler() {
+      const documents = await storage.documents.list(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION);
+      const count = await context.search.reindex(documents.map(itemView).map(searchDocumentOf));
+
+      return { count };
+    },
+  });
+
+  context.queries.register({
+    metadata: queryMetadata(
+      FIXTURE_QUERY_LIST,
+      listInputSchema,
+      listOutputSchema,
+      "Возвращает fixture-элементы стабильными страницами",
+      true,
+    ),
+    async handler(input) {
+      const { limit, offset } = paginationFrom(input);
+      const documents = await storage.documents.query({
+        pluginId: FIXTURE_PLUGIN_ID,
+        collection: FIXTURE_COLLECTION,
+      });
+      const sorted = [...documents].sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+      );
+      const page = sorted.slice(offset, offset + limit);
+      const nextOffset = offset + page.length < sorted.length ? offset + page.length : null;
+
+      return { items: page.map(itemView), total: sorted.length, nextOffset };
+    },
+  });
+
+  context.queries.register({
+    metadata: queryMetadata(
+      FIXTURE_QUERY_SEARCH,
+      searchInputSchema,
+      searchOutputSchema,
+      "Ищет только документы fixture-плагина в публичном индексе",
+    ),
+    async handler(input) {
+      const text = searchTextFrom(input);
+      const { limit, offset } = paginationFrom(input);
+      const hits = await context.search.search({ text, limit, offset });
+
+      return {
+        hits: hits.map((hit) => ({
+          ref: hit.ref,
+          title: hit.title,
+          excerpt: hit.excerpt,
+          score: hit.score,
+          strategy: hit.strategy,
+        })),
+      };
     },
   });
 
@@ -293,7 +607,11 @@ export async function activate(context: FixtureActivationContext): Promise<void>
           return null;
         }
 
-        const document = await documents.get(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION, parts.opaqueId);
+        const document = await storage.documents.get(
+          FIXTURE_PLUGIN_ID,
+          FIXTURE_COLLECTION,
+          parts.opaqueId,
+        );
 
         return document === null
           ? null
@@ -314,8 +632,9 @@ export async function activate(context: FixtureActivationContext): Promise<void>
     },
   });
 
+  // Подписка принадлежит activation tracker и снимается runtime-ом при stop.
   context.events.subscribe(FIXTURE_EVENT_CREATED, async (envelope) => {
-    await recordAudit(documents, envelope);
+    await recordAudit(storage.documents, envelope);
   });
 
   context.ui.register(fixtureUiContributions);

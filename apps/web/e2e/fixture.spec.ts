@@ -22,7 +22,7 @@ test.describe("fixture plugin в production shell", () => {
 
     await expect(page.getByTestId("plugin-contribution-kanbaner.fixture.panel")).toBeVisible();
     await expect(page.getByTestId("plugin-contribution-kanbaner.fixture.list-panel")).toBeVisible();
-    await expect(page.getByTestId("safe-mode-panel")).toHaveCount(0);
+    await expect(page.getByTestId("safe-mode-notice")).toHaveCount(0);
   });
 
   test("выполняет команду через общий composition и server action", async ({ page }) => {

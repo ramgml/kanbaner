@@ -9,4 +9,5 @@ export * from "./conformance.ts";
 export * from "./errors.ts";
 export * from "./in-memory-provider.ts";
 export * from "./migrations.ts";
+export { bindPluginStorage } from "./plugin-storage-binding.ts";
 export * from "./registry.ts";

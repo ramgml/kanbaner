@@ -20,8 +20,11 @@ describe("автоматическая проверка границ импор�
     expect(run()).toContain("plugin-fixture использует только @kanbaner/plugin-sdk");
   });
 
-  it("обнаруживает запрещённый импорт kernel и SQL в fixture", () => {
-    expect(run(["--self-test"])).toMatch(/detected [1-9][0-9]* violation/u);
+  it("self-test проверяет relative, side-effect, SQL и production-ссылки", () => {
+    const output = run(["--self-test"]);
+
+    expect(output).toMatch(/Import boundary self-test: [1-9][0-9]* violation/u);
+    expect(output).toContain("relative/side-effect/SQL/production");
   });
 
   it("scripts/check-import-boundaries.mjs существует и кроссплатформенный", () => {
