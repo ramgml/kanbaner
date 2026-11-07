@@ -33,10 +33,10 @@ specs:
 
 - Пакет `@kanbaner/plugin-tasks` собирается и экспортирует типы, схемы, ID и
   чистые функции валидации.
-- Серверный entrypoint `@kanbaner/plugin-tasks` содержит `activate` и Store, а
-  client-safe entrypoint `@kanbaner/plugin-tasks/contract` — только типы, схемы,
-  ID, валидаторы и преобразование в поисковый документ, без Node.js и серверного
-  кода.
+- Серверный entrypoint `@kanbaner/plugin-tasks` содержит Store и метаданные
+  операций, а client-safe entrypoint `@kanbaner/plugin-tasks/contract` — только
+  типы, схемы, ID, валидаторы и преобразование в поисковый документ, без
+  Node.js и серверного кода. Экспорт `activate` добавляет KAN-012.
 - Команды и запросы описаны JSON Schema через TypeBox и пригодны для
   регистрации в OperationBus без дополнительного слоя.
 - `TasksStore` описывает асинхронный backend-neutral контракт хранения.
@@ -173,6 +173,11 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Первое независимое ревью нашло high-пробелы в транзакционной
+  композиции Store/idempotency и атомарном append/complete, а также medium по
+  каскадному удалению, completedAt, сырым тегам, delete-ответам и семантике
+  списков. Задача остаётся в работе до исправления. Заодно уточнено, что
+  `activate` экспортирует KAN-012, а не KAN-010.
 - 2026-11-07 — По итогам проверки задач добавлены client-safe entrypoint
   `./contract`, явный manifest `provides` и инвариант позиции
   `(projectId, status)`.
