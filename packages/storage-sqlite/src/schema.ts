@@ -1,9 +1,31 @@
 /**
+ * Минимальная стабильная схема, необходимая runner-у миграций до применения
+ * версионируемой схемы.
+ *
+ * `open()` создаёт только журнал миграций. Все остальные core-таблицы создаёт
+ * инфраструктурная миграция в общей транзакции с записью журнала.
+ */
+export const JOURNAL_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS core_plugin_migrations (
+  backend_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  applied_at TEXT NOT NULL,
+  PRIMARY KEY (backend_id, plugin_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS core_plugin_migrations_backend_idx
+  ON core_plugin_migrations (backend_id, plugin_id, version);
+`;
+
+/**
  * Внутренняя схема SQLite provider-а.
  *
  * Имена таблиц, SQL и FTS-колонок не входят в публичный контракт SDK.
- * DDL идемпотентен: open создаёт операционный baseline, а инфраструктурная
- * миграция фиксирует его версию и checksum в `core_plugin_migrations`.
+ * Версионируемая схема применяется только инфраструктурной миграцией
+ * в транзакции; `CORE_SCHEMA_SQL` не выполняется в `open()`.
  */
 export const CORE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS core_plugin_migrations (

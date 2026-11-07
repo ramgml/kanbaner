@@ -17,7 +17,8 @@ import type {
   PluginManagerProblem,
   PluginManagerState,
 } from "../lib/plugin-manager-types";
-import { getApplicationStorage } from "./application-storage";
+import { getApplicationStorage, type ApplicationStorageRuntime } from "./application-storage";
+import { migratePluginWithSqlite } from "./sqlite-plugin-migrations";
 
 const SERVICE_KEY = "__kanbanerWebPluginServiceV1";
 
@@ -407,6 +408,21 @@ class PluginService {
     this.hooks = options.hooks ?? {};
     this.disabledPlugins = new Set(options.disabledPlugins ?? configuredDisabledPlugins());
     this.bootstrap = options.bootstrap;
+
+    const providedHooks = options.hooks ?? {};
+
+    // Плагин с объявленным каталогом миграций не должен активироваться
+    // молча, если composition root забыл подключить Storage hook.
+    this.hooks = {
+      ...providedHooks,
+      migrate:
+        providedHooks.migrate ??
+        (async (context) => {
+          if (context.migrationsPath !== null) {
+            throw new Error("Storage migrations hook не настроен");
+          }
+        }),
+    };
   }
 
   getState(): Promise<PluginManagerState> {
@@ -627,13 +643,31 @@ export function createPluginService(options: PluginServiceOptions = {}): PluginS
 
 /** Singleton сервиса для Next.js с учётом hot reload. */
 export function getPluginService(): PluginService {
-  globalHolder[SERVICE_KEY] ??= createPluginService({
-    bootstrap: async () => {
-      await getApplicationStorage();
-    },
-  });
+  globalHolder[SERVICE_KEY] ??= createDefaultPluginService();
 
   return globalHolder[SERVICE_KEY];
+}
+
+function createDefaultPluginService(): PluginService {
+  let storage: ApplicationStorageRuntime | null = null;
+
+  return createPluginService({
+    bootstrap: async () => {
+      storage = await getApplicationStorage();
+    },
+    hooks: {
+      migrate: async (context) => {
+        const runtime = storage ?? (await getApplicationStorage());
+
+        storage = runtime;
+
+        await migratePluginWithSqlite(context, {
+          provider: runtime.provider,
+          health: runtime.health,
+        });
+      },
+    },
+  });
 }
 
 /** Безопасное состояние для layout и plugin manager; не раскрывает пути. */

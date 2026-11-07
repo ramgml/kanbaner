@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { StorageMigrationRunner, computeMigrationChecksum } from "@kanbaner/kernel";
 import type { StorageMigration } from "@kanbaner/plugin-sdk";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createCoreInfrastructureMigrations } from "./infrastructure-migrations.ts";
@@ -15,7 +16,11 @@ import {
   normalizeSearchText,
   tokenizeSearchText,
 } from "./normalizer.ts";
-import { createSqliteStorageProvider, type SqliteStorageProvider } from "./provider.ts";
+import {
+  createSqliteStorageProvider,
+  SqliteStorageTransaction,
+  type SqliteStorageProvider,
+} from "./provider.ts";
 
 const PLUGIN = "acme.widgets";
 const OTHER_PLUGIN = "acme.gadgets";
@@ -48,6 +53,16 @@ async function createProvider(
 
   providers.push(provider);
   await provider.open();
+  await new StorageMigrationRunner(provider).run(createCoreInfrastructureMigrations());
+
+  const database = new Database(provider.databasePath);
+
+  try {
+    database.prepare("DELETE FROM core_plugin_migrations WHERE plugin_id = ?").run("kanbaner.core");
+    database.pragma("wal_checkpoint(TRUNCATE)");
+  } finally {
+    database.close();
+  }
 
   return provider;
 }
@@ -627,5 +642,110 @@ describe("SearchIndexStore: FTS5, нормализация и excerpt", () => {
     await expect(
       provider.searchIndex.upsert([{ ref: WIDGET, pluginId: PLUGIN, title: " ", text: "y" }]),
     ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+  });
+});
+
+describe("миграции: DDL и checksum", () => {
+  function tableExists(databasePath: string, table: string): boolean {
+    const database = new Database(databasePath, { readonly: true });
+
+    try {
+      const row = database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(table) as { readonly name?: string } | undefined;
+
+      return row?.name === table;
+    } finally {
+      database.close();
+    }
+  }
+
+  it("откатывает DDL, выполненный посередине, и не пишет журнал", async () => {
+    const provider = await createProvider();
+    const migration: StorageMigration = {
+      pluginId: PLUGIN,
+      version: 1,
+      name: "midway",
+      source: "CREATE TABLE plugin_acme_widgets_midway (...); INSERT INTO missing ...",
+      async up({ transaction }) {
+        if (!(transaction instanceof SqliteStorageTransaction)) {
+          throw new Error("Ожидалась SQLite-транзакция");
+        }
+
+        transaction.execMigrationSql(
+          "CREATE TABLE plugin_acme_widgets_midway (id TEXT PRIMARY KEY);",
+        );
+        transaction.execMigrationSql("INSERT INTO plugin_acme_widgets_missing (id) VALUES ('x');");
+      },
+    };
+
+    await expect(new StorageMigrationRunner(provider).run([migration])).rejects.toMatchObject({
+      code: "MIGRATION_FAILED",
+    });
+
+    expect(await provider.migrations.list("sqlite")).toEqual([]);
+    expect(tableExists(provider.databasePath, "plugin_acme_widgets_midway")).toBe(false);
+  });
+
+  it("при несовпадении checksum не меняет ни схему, ни журнал", async () => {
+    const provider = await createProvider();
+    const runner = new StorageMigrationRunner(provider);
+    const applied = computeMigrationChecksum({
+      pluginId: PLUGIN,
+      version: 1,
+      name: "schema",
+      source: "CREATE TABLE plugin_acme_widgets_schema_a (id TEXT PRIMARY KEY);",
+      async up() {
+        return undefined;
+      },
+    });
+
+    await runner.run([
+      {
+        pluginId: PLUGIN,
+        version: 1,
+        name: "schema",
+        source: "CREATE TABLE plugin_acme_widgets_schema_a (id TEXT PRIMARY KEY);",
+        async up({ transaction }) {
+          if (!(transaction instanceof SqliteStorageTransaction)) {
+            throw new Error("Ожидалась SQLite-транзакция");
+          }
+
+          transaction.execMigrationSql(
+            "CREATE TABLE plugin_acme_widgets_schema_a (id TEXT PRIMARY KEY);",
+          );
+        },
+      },
+    ]);
+
+    const journalBefore = await provider.migrations.list("sqlite");
+
+    expect(journalBefore).toHaveLength(1);
+    expect(journalBefore[0]?.checksum).toBe(applied);
+    expect(tableExists(provider.databasePath, "plugin_acme_widgets_schema_a")).toBe(true);
+
+    await expect(
+      runner.run([
+        {
+          pluginId: PLUGIN,
+          version: 1,
+          name: "schema",
+          source: "CREATE TABLE plugin_acme_widgets_schema_b (id TEXT PRIMARY KEY);",
+          async up({ transaction }) {
+            if (!(transaction instanceof SqliteStorageTransaction)) {
+              throw new Error("Ожидалась SQLite-транзакция");
+            }
+
+            transaction.execMigrationSql(
+              "CREATE TABLE plugin_acme_widgets_schema_b (id TEXT PRIMARY KEY);",
+            );
+          },
+        },
+      ]),
+    ).rejects.toMatchObject({ code: "MIGRATION_CHECKSUM_MISMATCH" });
+
+    expect(await provider.migrations.list("sqlite")).toEqual(journalBefore);
+    expect(tableExists(provider.databasePath, "plugin_acme_widgets_schema_a")).toBe(true);
+    expect(tableExists(provider.databasePath, "plugin_acme_widgets_schema_b")).toBe(false);
   });
 });

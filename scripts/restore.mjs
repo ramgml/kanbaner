@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
 
 const USAGE = [
   "Kanbaner offline restore",
@@ -71,7 +72,7 @@ async function main() {
   let restoreDatabase;
 
   try {
-    ({ restoreDatabase } = await import(modulePath));
+    ({ restoreDatabase } = await import(pathToFileURL(modulePath).href));
   } catch {
     fail("модуль @kanbaner/storage-sqlite не собран; выполните pnpm build:packages");
     return;

@@ -17,6 +17,8 @@ import {
   closeApplicationStorage,
   createApplicationStorage,
   getApplicationStorage,
+  resetApplicationStorageForTests,
+  shutdownApplicationStorage,
   type ApplicationStorageRuntime,
 } from "./application-storage";
 
@@ -49,6 +51,7 @@ function pluginMigration(
 
 afterEach(async () => {
   await closeApplicationStorage();
+  resetApplicationStorageForTests();
 
   for (const runtime of runtimes.splice(0)) {
     await runtime.registry.closeAll();
@@ -274,5 +277,62 @@ describe("getApplicationStorage", () => {
     runtimes.push(runtime);
     expect(runtime.health.ok).toBe(true);
     expect(await runtime.provider.migrations.list("sqlite")).toHaveLength(1);
+  });
+
+  it("get во время close ждёт закрытия и не открывает второе соединение", async () => {
+    const dataDirectory = temporaryDirectory();
+    const runtime = await getApplicationStorage({ dataDirectory, now: NOW });
+
+    const closing = closeApplicationStorage();
+    const recreated = await getApplicationStorage({ dataDirectory, now: NOW });
+
+    await closing;
+
+    runtimes.push(recreated);
+
+    expect(recreated).not.toBe(runtime);
+    expect((await runtime.provider.healthCheck()).ok).toBe(false);
+    expect(recreated.health.ok).toBe(true);
+  });
+
+  it("shutdown дожидается активной операции, затем закрывает соединение", async () => {
+    const dataDirectory = temporaryDirectory();
+    const provider = createSqliteStorageProvider({
+      dataDirectory,
+      now: NOW,
+      delays: { operationMs: 50 },
+    });
+    const runtime = await getApplicationStorage({ dataDirectory, now: NOW, provider });
+
+    runtimes.push(runtime);
+
+    const write = runtime.provider.pluginStates.put({
+      pluginId: PLUGIN,
+      version: "1.0.0",
+      enabled: true,
+      state: { ready: true },
+    });
+    let settled = false;
+    const shutdown = shutdownApplicationStorage().finally(() => {
+      settled = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    await write;
+    await shutdown;
+
+    expect(settled).toBe(true);
+    expect((await runtime.provider.healthCheck()).ok).toBe(false);
+  });
+
+  it("shutdown отклоняет новые runtime-ы", async () => {
+    const dataDirectory = temporaryDirectory();
+
+    await getApplicationStorage({ dataDirectory, now: NOW });
+    await shutdownApplicationStorage();
+
+    await expect(getApplicationStorage({ dataDirectory, now: NOW })).rejects.toThrow(/остановлен/u);
   });
 });

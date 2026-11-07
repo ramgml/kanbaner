@@ -4,10 +4,12 @@ import { rmSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createStorageProviderConformanceSuite } from "@kanbaner/kernel";
+import { createStorageProviderConformanceSuite, StorageMigrationRunner } from "@kanbaner/kernel";
 
+import { createCoreInfrastructureMigrations } from "./infrastructure-migrations.ts";
 import { createSqliteStorageProvider } from "./provider.ts";
 
 const FIXED_NOW = () => new Date("2026-11-06T12:00:00.000Z");
@@ -56,31 +58,64 @@ afterEach(() => {
   }
 });
 
+/**
+ * Готовит базу как composition root: open создаёт только журнал, а
+ * версионируемая схема применяется инфраструктурной миграцией.
+ */
+async function preparedProvider(
+  options: Parameters<typeof createSqliteStorageProvider>[0],
+): Promise<ReturnType<typeof createSqliteStorageProvider>> {
+  const provider = createSqliteStorageProvider(options);
+
+  await provider.open();
+
+  try {
+    await new StorageMigrationRunner(provider).run(createCoreInfrastructureMigrations());
+  } finally {
+    await provider.close();
+  }
+
+  // Conformance Suite backend-neutral и ожидает пустой журнал для своих
+  // миграций. Инфраструктурная миграция применена, но её служебная запись
+  // убирается из тестового fixture-а.
+  const database = new Database(provider.databasePath);
+
+  try {
+    database.prepare("DELETE FROM core_plugin_migrations WHERE plugin_id = ?").run("kanbaner.core");
+    database.pragma("wal_checkpoint(TRUNCATE)");
+  } finally {
+    database.close();
+  }
+
+  return provider;
+}
+
+function variantOptions(
+  variant: Variant,
+  backendId: string,
+  extra: Record<string, unknown> = {},
+): Parameters<typeof createSqliteStorageProvider>[0] {
+  return {
+    backendId,
+    dataDirectory: temporaryDirectory(),
+    now: FIXED_NOW,
+    ...(variant.delays === undefined ? {} : { delays: variant.delays }),
+    ...extra,
+  };
+}
+
 for (const variant of variants) {
   describe(`Storage Provider Conformance Suite: ${variant.name}`, () => {
     const suite = createStorageProviderConformanceSuite({
-      createProvider: () =>
-        createSqliteStorageProvider({
-          backendId: variant.backendId,
-          dataDirectory: temporaryDirectory(),
-          now: FIXED_NOW,
-          ...(variant.delays === undefined ? {} : { delays: variant.delays }),
-        }),
+      createProvider: () => preparedProvider(variantOptions(variant, variant.backendId)),
       createProviderWithoutSavepoints: () =>
-        createSqliteStorageProvider({
-          backendId: `${variant.backendId}-no-savepoints`,
-          dataDirectory: temporaryDirectory(),
-          now: FIXED_NOW,
-          savepoints: false,
-          ...(variant.delays === undefined ? {} : { delays: variant.delays }),
-        }),
+        preparedProvider(
+          variantOptions(variant, `${variant.backendId}-no-savepoints`, {
+            savepoints: false,
+          }),
+        ),
       createAlternateProvider: () =>
-        createSqliteStorageProvider({
-          backendId: variant.alternateBackendId,
-          dataDirectory: temporaryDirectory(),
-          now: FIXED_NOW,
-          ...(variant.delays === undefined ? {} : { delays: variant.delays }),
-        }),
+        preparedProvider(variantOptions(variant, variant.alternateBackendId)),
     });
 
     const baseCases = suite.filter(
@@ -97,12 +132,7 @@ for (const variant of variants) {
 
     for (const conformanceCase of suite) {
       it(conformanceCase.name, async () => {
-        const provider = createSqliteStorageProvider({
-          backendId: variant.backendId,
-          dataDirectory: temporaryDirectory(),
-          now: FIXED_NOW,
-          ...(variant.delays === undefined ? {} : { delays: variant.delays }),
-        });
+        const provider = await preparedProvider(variantOptions(variant, variant.backendId));
 
         await provider.open();
 

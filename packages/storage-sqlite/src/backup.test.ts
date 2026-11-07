@@ -1,12 +1,24 @@
 // @vitest-environment node
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { restoreDatabase, verifyDatabaseIntegrity } from "./backup.ts";
+import { StorageMigrationRunner } from "@kanbaner/kernel";
+import Database from "better-sqlite3";
+
+import { checkpointBackupDatabase, restoreDatabase, verifyDatabaseIntegrity } from "./backup.ts";
+import { createCoreInfrastructureMigrations } from "./infrastructure-migrations.ts";
 import { createSqliteStorageProvider, type SqliteStorageProvider } from "./provider.ts";
 
 const PLUGIN = "acme.widgets";
@@ -32,6 +44,16 @@ async function createProvider(
 
   providers.push(provider);
   await provider.open();
+  await new StorageMigrationRunner(provider).run(createCoreInfrastructureMigrations());
+
+  const database = new Database(provider.databasePath);
+
+  try {
+    database.prepare("DELETE FROM core_plugin_migrations WHERE plugin_id = ?").run("kanbaner.core");
+    database.pragma("wal_checkpoint(TRUNCATE)");
+  } finally {
+    database.close();
+  }
 
   return provider;
 }
@@ -329,5 +351,139 @@ describe("offline restore", () => {
     expect(
       (await provider.documents.get(PLUGIN, COLLECTION, "01JDOC00000000000000000301"))?.data,
     ).toEqual({ title });
+  });
+});
+
+describe("backup: сохранность чужих файлов и checkpoint", () => {
+  it("не перезаписывает существующий backup и его sidecar-файлы", async () => {
+    const provider = await createProvider();
+    const directory = temporaryDirectory();
+    const destination = join(directory, "old-backup.sqlite");
+    const sidecars = [`${destination}-wal`, `${destination}-shm`, `${destination}-journal`];
+
+    writeFileSync(destination, "old backup", "utf8");
+
+    for (const sidecar of sidecars) {
+      writeFileSync(sidecar, `foreign:${sidecar}`, "utf8");
+    }
+
+    await expect(provider.backupTo(destination)).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      details: { reason: "path" },
+    });
+
+    expect(readFileSync(destination, "utf8")).toBe("old backup");
+
+    for (const sidecar of sidecars) {
+      expect(readFileSync(sidecar, "utf8")).toBe(`foreign:${sidecar}`);
+    }
+
+    expect(readdirSync(directory).sort()).toEqual(
+      [
+        "old-backup.sqlite",
+        "old-backup.sqlite-journal",
+        "old-backup.sqlite-shm",
+        "old-backup.sqlite-wal",
+      ].sort(),
+    );
+  });
+
+  it("не оставляет temp и sidecar-файлов после успешного backup", async () => {
+    const provider = await createProvider();
+    const directory = temporaryDirectory();
+    const destination = join(directory, "snapshot.sqlite");
+
+    await provider.backupTo(destination);
+
+    const entries = readdirSync(directory);
+
+    expect(entries).toEqual(["snapshot.sqlite"]);
+    expect(existsSync(`${destination}-wal`)).toBe(false);
+    expect(existsSync(`${destination}-shm`)).toBe(false);
+    expect(entries.some((entry) => entry.endsWith(".tmp"))).toBe(false);
+  });
+
+  it("сообщает busy, если checkpoint удерживает читатель", { timeout: 15_000 }, () => {
+    const directory = temporaryDirectory();
+    const databasePath = join(directory, "busy.sqlite");
+    const writer = new Database(databasePath);
+    let reader: Database.Database | undefined;
+
+    try {
+      writer.pragma("journal_mode = WAL");
+      writer.exec(
+        "CREATE TABLE checkpoint_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL);" +
+          "INSERT INTO checkpoint_items (value) VALUES ('a');",
+      );
+
+      reader = new Database(databasePath);
+      reader.exec("BEGIN");
+      reader.prepare("SELECT * FROM checkpoint_items").all();
+
+      expect(() => checkpointBackupDatabase(databasePath)).toThrow(/checkpoint/u);
+    } finally {
+      try {
+        reader?.exec("COMMIT");
+      } catch {
+        // Транзакция могла быть уже закрыта.
+      }
+
+      reader?.close();
+      writer.close();
+    }
+  });
+});
+
+describe("offline restore: пустой каталог и temp", () => {
+  it("отклоняет непустой каталог до открытия backup и сохраняет чужой файл", async () => {
+    const { backupPath } = await (async () => {
+      const provider = await createProvider();
+
+      await provider.documents.put({
+        pluginId: PLUGIN,
+        collection: COLLECTION,
+        id: "01JDOC00000000000000000401",
+        data: { title: "Restore" },
+        expectedVersion: 0,
+      });
+
+      const path = join(temporaryDirectory(), "backup-source.sqlite");
+
+      await provider.backupTo(path);
+      await closeProvider(provider);
+
+      return { backupPath: path };
+    })();
+
+    const dataDirectory = temporaryDirectory();
+    const foreign = join(dataDirectory, "foreign.txt");
+
+    writeFileSync(foreign, "keep me", "utf8");
+
+    await expect(restoreDatabase({ backupPath, dataDirectory })).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      details: { reason: "path" },
+    });
+
+    expect(readFileSync(foreign, "utf8")).toBe("keep me");
+    expect(existsSync(join(dataDirectory, "kanbaner.sqlite"))).toBe(false);
+    expect(readdirSync(dataDirectory)).toEqual(["foreign.txt"]);
+  });
+
+  it("создаёт несуществующий каталог и не оставляет temp после успеха", async () => {
+    const provider = await createProvider();
+    const backupPath = join(temporaryDirectory(), "backup-source.sqlite");
+
+    await provider.backupTo(backupPath);
+    await closeProvider(provider);
+
+    const dataDirectory = join(temporaryDirectory(), "nested", "data ü");
+
+    const result = await restoreDatabase({ backupPath, dataDirectory });
+
+    expect(result.databasePath).toBe(join(dataDirectory, "kanbaner.sqlite"));
+    expect(readdirSync(dataDirectory)).toEqual(["kanbaner.sqlite"]);
+    expect(existsSync(`${result.databasePath}-wal`)).toBe(false);
+    expect(existsSync(`${result.databasePath}-shm`)).toBe(false);
   });
 });

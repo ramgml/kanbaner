@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import Database from "better-sqlite3";
@@ -16,7 +16,13 @@ import {
 } from "@kanbaner/plugin-sdk";
 
 import { AsyncMutex } from "./async-mutex.ts";
-import { isSameFilesystemPath, resolveDataDirectory, resolveDatabasePath } from "./paths.ts";
+import { TransactionScheduler } from "./scheduler.ts";
+import {
+  assertLocalFilesystemPath,
+  isSameFilesystemPath,
+  resolveDataDirectory,
+  resolveDatabasePath,
+} from "./paths.ts";
 import {
   isSqliteBusyError,
   providerClosedError,
@@ -26,11 +32,14 @@ import {
   transactionClosedError,
 } from "./errors.ts";
 import {
+  assertDestinationFree,
+  backupTempPath,
   checkpointBackupDatabase,
-  removeBackupSidecars,
+  publishExclusive,
+  removeOwnedFiles,
   verifyDatabaseIntegrity,
 } from "./backup.ts";
-import { CORE_SCHEMA_SQL } from "./schema.ts";
+import { JOURNAL_SCHEMA_SQL } from "./schema.ts";
 import {
   createDocumentStore,
   createLinkStore,
@@ -110,6 +119,7 @@ interface TransactionHost {
   readonly backendId: BackendId;
   readonly savepoints: boolean;
   readonly scope: TransactionScope;
+  readonly scheduler: TransactionScheduler;
   readonly transactionRunner: (scope: TransactionScope) => StoreRunner;
   readonly createStores: (run: StoreRunner) => StorageStoreScope;
   readonly executeSavepoint: <T>(
@@ -229,6 +239,15 @@ export class SqliteStorageTransaction implements StorageTransaction {
 
     this.#host.execDdl(sql);
   }
+
+  /** @internal Используется backend-specific loader-ом миграций плагина. */
+  execMigrationSql(sql: string): void {
+    if (!isScopeActive(this.#scope)) {
+      throw transactionClosedError();
+    }
+
+    this.#host.execDdl(sql);
+  }
 }
 
 /**
@@ -328,7 +347,23 @@ export class SqliteStorageProvider implements StorageProvider {
         database.pragma("foreign_keys = ON");
         database.pragma(`busy_timeout = ${this.#busyTimeoutMs}`);
         database.pragma("synchronous = NORMAL");
-        database.exec(CORE_SCHEMA_SQL);
+        // До применения миграции создаётся только минимальный журнал,
+        // необходимый runner-у. Версионируемая схема появляется в migration.up
+        // одной транзакцией вместе с checksum-записью.
+        database.exec("BEGIN IMMEDIATE");
+
+        try {
+          database.exec(JOURNAL_SCHEMA_SQL);
+          database.exec("COMMIT");
+        } catch (error) {
+          try {
+            database.exec("ROLLBACK");
+          } catch {
+            // Первичная ошибка важнее ошибки rollback.
+          }
+
+          throw error;
+        }
 
         this.#database = database;
         this.#opened = true;
@@ -356,16 +391,36 @@ export class SqliteStorageProvider implements StorageProvider {
         return;
       }
 
+      let checkpointFailure: ReturnType<typeof toStorageError> | null = null;
+
       try {
-        database.pragma("wal_checkpoint(TRUNCATE)");
-      } catch {
-        // Checkpoint best-effort; close обязан освободить соединение.
+        const rows = database.pragma("wal_checkpoint(TRUNCATE)") as readonly {
+          readonly busy?: unknown;
+        }[];
+        const result = rows[0];
+
+        if (result === undefined || Number(result.busy) !== 0) {
+          checkpointFailure = sqliteError(
+            "INTERNAL_ERROR",
+            "WAL checkpoint при закрытии не завершён",
+            {
+              retryable: true,
+              details: { reason: "busy" },
+            },
+          );
+        }
+      } catch (error) {
+        checkpointFailure = toStorageError(error);
       }
 
       try {
         database.close();
       } catch (error) {
         throw toStorageError(error);
+      }
+
+      if (checkpointFailure !== null) {
+        throw checkpointFailure;
       }
     });
   }
@@ -437,7 +492,8 @@ export class SqliteStorageProvider implements StorageProvider {
       await this.#beginImmediate();
 
       const scope = createTransactionScope(null);
-      const transaction = this.#createTransaction(1, scope);
+      const scheduler = new TransactionScheduler();
+      const transaction = this.#createTransaction(1, scope, scheduler);
       const outcome = await this.#runScopedCallback(scope, () => callback(transaction));
 
       if (outcome.failed) {
@@ -477,6 +533,10 @@ export class SqliteStorageProvider implements StorageProvider {
     destination: string,
     options: { readonly pagesPerStep?: number } = {},
   ): Promise<SqliteOnlineBackupResult> {
+    // Проверяем исходную строку до resolve: URI/UNC не должны
+    // нормализоваться в локальный путь.
+    assertLocalFilesystemPath(destination, "destination");
+
     const targetPath = path.resolve(destination);
     const pagesPerStep = options.pagesPerStep ?? 100;
 
@@ -495,44 +555,53 @@ export class SqliteStorageProvider implements StorageProvider {
       });
     }
 
+    const parent = path.dirname(targetPath);
+
+    try {
+      mkdirSync(parent, { recursive: true });
+    } catch (error) {
+      throw sqliteError("INVALID_ARGUMENT", "Каталог backup-а недоступен для записи", {
+        details: { reason: "path" },
+        cause: error,
+      });
+    }
+
+    // Существующий destination и его sidecar-файлы никогда не удаляются и не
+    // перезаписываются. Ошибка возникает до создания временной копии.
+    assertDestinationFree(targetPath, "Backup destination");
+
     let database: Database.Database;
+    const tempPath = backupTempPath(targetPath);
 
     const release = await this.#mutex.acquire();
 
     try {
       await this.#delay(this.#delays.operationMs);
       this.#assertOpen();
+      assertDestinationFree(targetPath, "Backup destination");
 
-      const parent = path.dirname(targetPath);
-
-      try {
-        mkdirSync(parent, { recursive: true });
-      } catch (error) {
-        throw sqliteError("INVALID_ARGUMENT", "Каталог backup-а недоступен для записи", {
-          details: { reason: "path" },
-          cause: error,
-        });
-      }
-
-      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-        rmSync(`${targetPath}${suffix}`, { force: true });
-      }
-
+      removeOwnedFiles(tempPath);
       database = this.#getDatabase();
       this.#activeBackups += 1;
+    } catch (error) {
+      removeOwnedFiles(tempPath);
+      throw error;
     } finally {
       release();
     }
 
     try {
-      const metadata = await database.backup(targetPath, {
+      const metadata = await database.backup(tempPath, {
         progress: ({ remainingPages }) => Math.min(pagesPerStep, Math.max(1, remainingPages)),
       });
 
-      checkpointBackupDatabase(targetPath);
-      const integrity = verifyDatabaseIntegrity(targetPath, "INTERNAL_ERROR");
+      checkpointBackupDatabase(tempPath);
+      const integrity = verifyDatabaseIntegrity(tempPath, "INTERNAL_ERROR");
 
-      removeBackupSidecars(targetPath);
+      // Повторная проверка перед публикацией: чужой файл, появившийся во
+      // время копирования, остаётся нетронутым.
+      assertDestinationFree(targetPath, "Backup destination");
+      publishExclusive(tempPath, targetPath);
 
       return {
         path: targetPath,
@@ -542,10 +611,7 @@ export class SqliteStorageProvider implements StorageProvider {
         checkedAt: currentUtcTimestamp(this.#now),
       };
     } catch (error) {
-      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-        rmSync(`${targetPath}${suffix}`, { force: true });
-      }
-
+      removeOwnedFiles(tempPath);
       throw toStorageError(error);
     } finally {
       this.#activeBackups -= 1;
@@ -594,13 +660,13 @@ export class SqliteStorageProvider implements StorageProvider {
     };
   }
 
-  #transactionRunner(scope: TransactionScope): StoreRunner {
+  #transactionRunner(scope: TransactionScope, scheduler: TransactionScheduler): StoreRunner {
     const run = <T>(operation: () => T): Promise<T> => {
       if (!isScopeActive(scope)) {
         return Promise.reject(transactionClosedError());
       }
 
-      const task = (async () => {
+      const task = scheduler.runExclusive(scope, async () => {
         await this.#delay(this.#delays.operationMs);
 
         if (!isScopeActive(scope)) {
@@ -614,7 +680,7 @@ export class SqliteStorageProvider implements StorageProvider {
         } catch (error) {
           throw toStorageError(error);
         }
-      })();
+      });
 
       return this.#track(scope, task);
     };
@@ -622,18 +688,23 @@ export class SqliteStorageProvider implements StorageProvider {
     return { read: run, write: run };
   }
 
-  #createTransaction(depth: number, scope: TransactionScope): SqliteStorageTransaction {
+  #createTransaction(
+    depth: number,
+    scope: TransactionScope,
+    scheduler: TransactionScheduler,
+  ): SqliteStorageTransaction {
     const host: TransactionHost = {
       backendId: this.backendId,
       savepoints: this.capabilities.savepoints,
       scope,
-      transactionRunner: (transactionScope) => this.#transactionRunner(transactionScope),
+      scheduler,
+      transactionRunner: (transactionScope) => this.#transactionRunner(transactionScope, scheduler),
       createStores: (run) => this.#createStores(run),
       executeSavepoint: <T>(
         savepointDepth: number,
         parentScope: TransactionScope,
         callback: (transaction: StorageTransaction) => Promise<T>,
-      ) => this.#executeSavepoint(savepointDepth, parentScope, callback),
+      ) => this.#executeSavepoint(savepointDepth, parentScope, callback, scheduler),
       track: <T>(trackedScope: TransactionScope, task: Promise<T>) =>
         this.#track(trackedScope, task),
       assertStoreRegistration: <T>(registration: StorageStoreRegistration<T>) =>
@@ -648,58 +719,65 @@ export class SqliteStorageProvider implements StorageProvider {
     depth: number,
     parentScope: TransactionScope,
     callback: (transaction: StorageTransaction) => Promise<T>,
+    scheduler: TransactionScheduler,
   ): Promise<T> {
-    await this.#delay(this.#delays.transactionMs);
-
-    if (!isScopeActive(parentScope)) {
-      throw transactionClosedError();
-    }
-
-    this.#assertOpen();
-
-    const database = this.#getDatabase();
-    const savepointName = `kanbaner_savepoint_${depth}_${this.#savepointCounter}`;
-
-    this.#savepointCounter += 1;
-
-    try {
-      database.exec(`SAVEPOINT ${savepointName}`);
-    } catch (error) {
-      throw toStorageError(error);
-    }
-
     const child = createTransactionScope(parentScope);
-    const transaction = this.#createTransaction(depth, child);
-    const outcome = await this.#runScopedCallback(child, () => callback(transaction));
 
-    if (outcome.failed) {
-      // Родитель может быть sealed, но ещё не откатился: он ждёт drain этой
-      // tracked child-области. Восстанавливаем собственный savepoint, пока
-      // фактического rollback предка не было.
-      if (!hasRolledBackAncestor(parentScope)) {
-        try {
-          database.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`);
-          database.exec(`RELEASE SAVEPOINT ${savepointName}`);
-        } catch (error) {
-          if (!hasRolledBackAncestor(parentScope)) {
-            throw toStorageError(error);
-          }
-        }
+    // Sibling-savepoint ждёт завершения текущей savepoint-области, а
+    // parent-операции ждут child. Вложенный savepoint реентерабелен внутри
+    // уже удерживаемой области.
+    return scheduler.runExclusive(child, async () => {
+      await this.#delay(this.#delays.transactionMs);
+
+      if (!isScopeActive(parentScope)) {
+        throw transactionClosedError();
       }
 
-      child.rolledBack = true;
-      throw outcome.failure;
-    }
+      this.#assertOpen();
 
-    if (!hasRolledBackAncestor(parentScope)) {
+      const database = this.#getDatabase();
+      const savepointName = `kanbaner_savepoint_${depth}_${this.#savepointCounter}`;
+
+      this.#savepointCounter += 1;
+
       try {
-        database.exec(`RELEASE SAVEPOINT ${savepointName}`);
+        database.exec(`SAVEPOINT ${savepointName}`);
       } catch (error) {
         throw toStorageError(error);
       }
-    }
 
-    return outcome.result;
+      const transaction = this.#createTransaction(depth, child, scheduler);
+      const outcome = await this.#runScopedCallback(child, () => callback(transaction));
+
+      if (outcome.failed) {
+        // Родитель может быть sealed, но ещё не откатился: он ждёт drain этой
+        // tracked child-области. Восстанавливаем собственный savepoint, пока
+        // фактического rollback предка не было.
+        if (!hasRolledBackAncestor(parentScope)) {
+          try {
+            database.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+            database.exec(`RELEASE SAVEPOINT ${savepointName}`);
+          } catch (error) {
+            if (!hasRolledBackAncestor(parentScope)) {
+              throw toStorageError(error);
+            }
+          }
+        }
+
+        child.rolledBack = true;
+        throw outcome.failure;
+      }
+
+      if (!hasRolledBackAncestor(parentScope)) {
+        try {
+          database.exec(`RELEASE SAVEPOINT ${savepointName}`);
+        } catch (error) {
+          throw toStorageError(error);
+        }
+      }
+
+      return outcome.result;
+    });
   }
 
   async #runScopedCallback<T>(

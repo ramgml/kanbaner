@@ -32,15 +32,20 @@ export interface ApplicationStorageRuntime {
   readonly plugins: StorageMigrationRunResult;
 }
 
+interface StorageRuntimeEntry {
+  readonly key: string;
+  readonly promise: Promise<ApplicationStorageRuntime>;
+  closing: Promise<void> | null;
+}
+
 interface StorageRuntimeHolder {
-  [STORAGE_RUNTIME_KEY]?: {
-    readonly key: string;
-    readonly promise: Promise<ApplicationStorageRuntime>;
-  };
+  [STORAGE_RUNTIME_KEY]?: StorageRuntimeEntry;
 }
 
 interface ShutdownHolder {
   __kanbanerStorageShutdownHooks?: boolean;
+  __kanbanerStorageShutdownPromise?: Promise<void> | null;
+  __kanbanerStorageShuttingDown?: boolean;
 }
 
 const globalHolder = globalThis as typeof globalThis & StorageRuntimeHolder & ShutdownHolder;
@@ -113,6 +118,10 @@ function storageSingletonKey(options: ApplicationStorageOptions): string {
   });
 }
 
+function requestShutdown(): void {
+  globalHolder.__kanbanerStorageShutdownPromise ??= shutdownApplicationStorage();
+}
+
 function registerShutdownHooks(): void {
   if (globalHolder.__kanbanerStorageShutdownHooks === true) {
     return;
@@ -120,25 +129,26 @@ function registerShutdownHooks(): void {
 
   globalHolder.__kanbanerStorageShutdownHooks = true;
 
-  const shutdown = (): void => {
-    void closeApplicationStorage().catch(() => undefined);
-  };
-
-  process.once("SIGTERM", shutdown);
-  process.once("SIGINT", shutdown);
-  process.once("beforeExit", shutdown);
+  process.once("SIGTERM", requestShutdown);
+  process.once("SIGINT", requestShutdown);
+  process.once("beforeExit", requestShutdown);
 }
 
 /**
  * Singleton Storage runtime для Next.js hot reload.
  *
  * Параллельные запросы разделяют один и тот же Promise и не открывают
- * дополнительные соединения. Ошибка инициализации сбрасывает singleton,
+ * дополнительные соединения. Пока идёт close, новый get ждёт его завершения
+ * и только затем создаёт runtime. Ошибка инициализации сбрасывает singleton,
  * чтобы следующий запрос мог повторить попытку.
  */
 export function getApplicationStorage(
   options: ApplicationStorageOptions = {},
 ): Promise<ApplicationStorageRuntime> {
+  if (globalHolder.__kanbanerStorageShuttingDown === true) {
+    return Promise.reject(new Error("Storage runtime остановлен"));
+  }
+
   const key = storageSingletonKey(options);
   const existing = globalHolder[STORAGE_RUNTIME_KEY];
 
@@ -149,25 +159,36 @@ export function getApplicationStorage(
       );
     }
 
+    if (existing.closing !== null) {
+      return existing.closing.then(() => getApplicationStorage(options));
+    }
+
     return existing.promise;
   }
 
   registerShutdownHooks();
 
   const promise = createApplicationStorage(options).catch((error: unknown) => {
-    if (globalHolder[STORAGE_RUNTIME_KEY]?.promise === promise) {
+    if (globalHolder[STORAGE_RUNTIME_KEY] === entry) {
       Reflect.deleteProperty(globalHolder, STORAGE_RUNTIME_KEY);
     }
 
     throw error;
   });
+  const entry: StorageRuntimeEntry = { key, promise, closing: null };
 
-  globalHolder[STORAGE_RUNTIME_KEY] = { key, promise };
+  globalHolder[STORAGE_RUNTIME_KEY] = entry;
 
   return promise;
 }
 
-/** Закрывает активный runtime и выполняет WAL checkpoint. */
+/**
+ * Закрывает активный runtime и выполняет WAL checkpoint.
+ *
+ * Повторный вызов разделяет тот же `closing` Promise. Запись singleton-а
+ * удаляется только после успешного закрытия, поэтому get во время close
+ * ждёт и не открывает второе соединение с тем же каталогом.
+ */
 export async function closeApplicationStorage(): Promise<void> {
   const existing = globalHolder[STORAGE_RUNTIME_KEY];
 
@@ -175,9 +196,57 @@ export async function closeApplicationStorage(): Promise<void> {
     return;
   }
 
+  if (existing.closing !== null) {
+    return existing.closing;
+  }
+
+  const closing = (async () => {
+    const runtime = await existing.promise.catch(() => null);
+
+    try {
+      if (runtime !== null) {
+        await runtime.registry.closeAll();
+      }
+    } finally {
+      // Запись удаляется только после попытки close: get во время close
+      // дождался этого Promise и не открыл второе соединение.
+      if (globalHolder[STORAGE_RUNTIME_KEY] === existing) {
+        Reflect.deleteProperty(globalHolder, STORAGE_RUNTIME_KEY);
+      }
+    }
+  })();
+
+  existing.closing = closing;
+
+  try {
+    await closing;
+  } finally {
+    if (existing.closing === closing) {
+      existing.closing = null;
+    }
+  }
+}
+
+/**
+ * Останавливает приём новых runtime-ов, дожидается текущих и выполняет close.
+ *
+ * Возвращает await-able Promise; signal-handler сохраняет его, чтобы checkpoint
+ * не терялся при завершении процесса.
+ */
+export function shutdownApplicationStorage(): Promise<void> {
+  globalHolder.__kanbanerStorageShuttingDown = true;
+
+  return closeApplicationStorage();
+}
+
+/**
+ * @internal Сбрасывает singleton и shutdown-состояние между тестами.
+ *
+ * Не закрывает активный runtime: вызывающий обязан сначала дождаться
+ * `closeApplicationStorage()`.
+ */
+export function resetApplicationStorageForTests(): void {
   Reflect.deleteProperty(globalHolder, STORAGE_RUNTIME_KEY);
-
-  const runtime = await existing.promise.catch(() => undefined);
-
-  await runtime?.registry.closeAll();
+  globalHolder.__kanbanerStorageShutdownPromise = null;
+  globalHolder.__kanbanerStorageShuttingDown = false;
 }

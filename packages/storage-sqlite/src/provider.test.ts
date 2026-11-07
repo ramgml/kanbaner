@@ -7,12 +7,39 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { StorageError } from "@kanbaner/plugin-sdk";
+import { StorageMigrationRunner } from "@kanbaner/kernel";
+
+import { createCoreInfrastructureMigrations } from "./infrastructure-migrations.ts";
 
 import { createSqliteStorageProvider, type SqliteStorageProvider } from "./provider.ts";
 import { pluginNamespacePrefix, pluginNamespaceTable } from "./namespaces.ts";
 
 const directories: string[] = [];
 const providers: SqliteStorageProvider[] = [];
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
+
+  return { promise, resolve };
+}
+
+function documentInput(id: string) {
+  return {
+    pluginId: "acme.widgets",
+    collection: "widgets",
+    id,
+    data: { title: `Widget ${id}` },
+    expectedVersion: 0,
+  };
+}
 
 function temporaryDirectory(prefix = "kanbaner-sqlite-provider-"): string {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -31,6 +58,16 @@ async function createOpenedProvider(
 
   providers.push(provider);
   await provider.open();
+  await new StorageMigrationRunner(provider).run(createCoreInfrastructureMigrations());
+
+  const database = new Database(provider.databasePath);
+
+  try {
+    database.prepare("DELETE FROM core_plugin_migrations WHERE plugin_id = ?").run("kanbaner.core");
+    database.pragma("wal_checkpoint(TRUNCATE)");
+  } finally {
+    database.close();
+  }
 
   return provider;
 }
@@ -50,6 +87,43 @@ afterEach(async () => {
 });
 
 describe("SQLite provider: настройки, WAL и persistence", () => {
+  it("open создаёт только журнал, версионируемая схема — в migration.up", async () => {
+    const provider = createSqliteStorageProvider({ dataDirectory: temporaryDirectory() });
+    providers.push(provider);
+    await provider.open();
+
+    const inspect = () => {
+      const database = new Database(provider.databasePath, { readonly: true });
+
+      try {
+        return (
+          database
+            .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")
+            .all() as { readonly name: string }[]
+        ).map((row) => row.name);
+      } finally {
+        database.close();
+      }
+    };
+
+    const before = inspect();
+
+    expect(before).toContain("core_plugin_migrations");
+    expect(before).not.toContain("core_documents");
+    expect(before).not.toContain("core_plugins");
+    expect(before).not.toContain("core_resource_links");
+    expect(before).not.toContain("core_search_documents");
+
+    await new StorageMigrationRunner(provider).run(createCoreInfrastructureMigrations());
+
+    const after = inspect();
+
+    expect(after).toContain("core_documents");
+    expect(after).toContain("core_plugins");
+    expect(after).toContain("core_resource_links");
+    expect(after).toContain("core_search_documents");
+  });
+
   it("устанавливает WAL, foreign_keys, busy_timeout и synchronous=NORMAL", async () => {
     const provider = await createOpenedProvider();
     const diagnostics = await provider.diagnostics();
@@ -93,9 +167,7 @@ describe("SQLite provider: настройки, WAL и persistence", () => {
 
   it("работает с пробелами и не-ASCII в пути каталога данных", async () => {
     const directory = temporaryDirectory("kan baner-ü-");
-    const provider = createSqliteStorageProvider({ dataDirectory: directory });
-    providers.push(provider);
-    await provider.open();
+    const provider = await createOpenedProvider({ dataDirectory: directory });
 
     await provider.pluginStates.put({
       pluginId: "acme.widgets",
@@ -330,5 +402,84 @@ describe("SQLite provider: singleton, namespace и отсутствие raw SQL 
     expect("prepare" in provider).toBe(false);
     expect("database" in provider).toBe(false);
     expect("db" in provider).toBe(false);
+  });
+});
+
+describe("SQLite provider: savepoint scheduling", () => {
+  it("сериализует sibling savepoints и не даёт позднему завершиться раньше раннего", async () => {
+    const provider = await createOpenedProvider();
+    const gate = deferred<undefined>();
+    const events: string[] = [];
+
+    await provider.withTransaction(async (transaction) => {
+      const first = transaction.withSavepoint(async (nested) => {
+        events.push("first:enter");
+        await gate.promise;
+        await nested.documents.put(documentInput("01JSAVEPOINT0000000000000001"));
+        events.push("first:exit");
+      });
+      const second = transaction.withSavepoint(async (nested) => {
+        events.push("second:enter");
+        await nested.documents.put(documentInput("01JSAVEPOINT0000000000000002"));
+        events.push("second:exit");
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(events).toEqual(["first:enter"]);
+
+      gate.resolve(undefined);
+      await Promise.all([first, second]);
+    });
+
+    expect(events).toEqual(["first:enter", "first:exit", "second:enter", "second:exit"]);
+
+    const documents = await provider.documents.list("acme.widgets", "widgets");
+
+    expect(documents.map((document) => document.id).sort()).toEqual([
+      "01JSAVEPOINT0000000000000001",
+      "01JSAVEPOINT0000000000000002",
+    ]);
+  });
+
+  it("заставляет parent write ждать rollback child savepoint", async () => {
+    const provider = await createOpenedProvider();
+    const childEntered = deferred<undefined>();
+    const gate = deferred<undefined>();
+    let parentSettled = false;
+
+    await provider.withTransaction(async (transaction) => {
+      const child = transaction.withSavepoint(async (nested) => {
+        await nested.documents.put(documentInput("01JSAVEPOINT0000000000000011"));
+        childEntered.resolve(undefined);
+        await gate.promise;
+        throw new Error("child savepoint failed");
+      });
+
+      void child.catch(() => undefined);
+      await childEntered.promise;
+
+      const parentWrite = transaction.documents.put(documentInput("01JSAVEPOINT0000000000000012"));
+
+      void parentWrite.finally(() => {
+        parentSettled = true;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(parentSettled).toBe(false);
+
+      gate.resolve(undefined);
+
+      await expect(child).rejects.toThrow(/child savepoint failed/u);
+      await parentWrite;
+    });
+
+    expect(
+      await provider.documents.get("acme.widgets", "widgets", "01JSAVEPOINT0000000000000011"),
+    ).toBeNull();
+    expect(
+      await provider.documents.get("acme.widgets", "widgets", "01JSAVEPOINT0000000000000012"),
+    ).not.toBeNull();
   });
 });

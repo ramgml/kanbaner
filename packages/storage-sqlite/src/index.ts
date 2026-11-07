@@ -20,6 +20,7 @@ export {
 export { getSqliteStorageProvider, resetSqliteStorageSingleton } from "./singleton.ts";
 
 export { createCoreInfrastructureMigrations } from "./infrastructure-migrations.ts";
+export { executeSqliteMigrationSql } from "./sql-migrations.ts";
 
 export {
   CORE_INFRASTRUCTURE_NAME,
