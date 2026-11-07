@@ -120,6 +120,11 @@ specs:
 
 - `packages/plugin-kanban/**`;
 - `apps/web/src/ui/builtin-ui-plugins.ts` — только добавление регистрации;
+- `apps/web/src/ui/registry.ts`, `apps/web/src/components/shell/ui-slot.tsx`,
+  `apps/web/src/components/shell/plugin-view.tsx`,
+  `apps/web/src/components/shell/app-shell.tsx` — только additive передача
+  текущего search string в UI props;
+- `apps/web/src/app/globals.css` — только `@source` для kanban;
 - `apps/web/e2e/kanban.spec.ts`, `apps/web/e2e/test-environment.ts`;
 - `apps/web/package.json`, корневой `package.json` (`build:packages`),
   `pnpm-lock.yaml`;
@@ -195,6 +200,10 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Независимое ревью нашло high-дефекты позиции по видимой
+  странице и stale loadMore race, а также medium overlay stale task, query
+  navigation и неинвалидированные subtask counts. Оркестратор согласовал
+  additive search string в UI props и явный Tailwind `@source` для kanban.
 - 2026-11-07 — По итогам проверки задач уточнены: `consumes` контрактов
   tasks, client-safe импорт `./contract`, условный overlay только на
   `/view/kanban` и запрет новой DnD-библиотеки без согласования.
