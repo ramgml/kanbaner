@@ -1,7 +1,7 @@
 ---
 id: KAN-006
 title: Storage Provider Registry, Store-контракты и миграции
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-006
@@ -187,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Worker коммитом `1c5c84d` разделил sealing и фактический rollback, исправил rejected savepoint и стандартную Promise-семантику; 180 focused-тестов, 423 workspace-теста и 33 Conformance case зелёные. Задача повторно в review.
 - 2026-11-07 — Повторное ревью подтвердило 8 из 9 исправлений, но нашло rejected savepoint, который не откатывается после sealing родителя. Требуется различить sealed и rolledBack, добавить delayed regression в unit/conformance и уточнить обработку rejected Promise публичных операций.
 - 2026-11-07 — Worker коммитом `a65d8c8` устранил все 9 findings, включая late-write sealing, registry/bootstrap races, conformance concurrency и удаление `projectRef`; 176 focused-тестов и 419 тестов workspace, strict install и полный check зелёные. Задача повторно переведена в review.
 - 2026-11-07 — Пользователь возобновил работу. Решение по `projectRef` применено к `specs/architecture.md`; worker должен устранить все 9 findings, включая удаление поля из SDK в пользу `metadata`, повторное ревью и полные проверки.
