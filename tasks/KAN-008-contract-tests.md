@@ -1,7 +1,7 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: review
+status: done
 stage: 1
 priority: high
 owner: worker-kan-008
@@ -29,28 +29,28 @@ specs:
 
 ## Объём работ
 
-- [ ] Создать `packages/plugin-fixture`.
-- [ ] Зарегистрировать тестовую команду.
-- [ ] Зарегистрировать тестовый запрос.
-- [ ] Публиковать тестовое событие после операции.
-- [ ] Зарегистрировать тестовый тип ресурса.
-- [ ] Добавить тестовую миграцию и данные.
-- [ ] Зарегистрировать UI-вклад.
-- [ ] Реализовать контрактный набор тестов.
-- [ ] Проверить дублирование command ID.
-- [ ] Проверить отсутствующую зависимость и цикл.
-- [ ] Проверить safe mode.
-- [ ] Проверить однократное применение миграции.
-- [ ] Проверить идемпотентность обработки события.
-- [ ] Проверить отсутствие импортов внутренностей ядра.
-- [ ] Добавить интеграционный запуск ядра с fixture-плагином.
-- [ ] Использовать отдельные in-memory provider instances для тестов.
-- [ ] Прогнать Storage Provider Conformance Suite на SQLite и in-memory provider.
-- [ ] Прогнать conformance suite на provider с асинхронными задержками.
-- [ ] Проверить отсутствие синхронных предположений в fixture-плагине.
-- [ ] Проверить production build с нативным `better-sqlite3`.
-- [ ] Прогнать контрактные тесты на Linux и Windows.
-- [ ] Описать, как новый плагин использует контрактные тесты.
+- [x] Создать `packages/plugin-fixture`.
+- [x] Зарегистрировать тестовую команду.
+- [x] Зарегистрировать тестовый запрос.
+- [x] Публиковать тестовое событие после операции.
+- [x] Зарегистрировать тестовый тип ресурса.
+- [x] Добавить тестовую миграцию и данные.
+- [x] Зарегистрировать UI-вклад.
+- [x] Реализовать контрактный набор тестов.
+- [x] Проверить дублирование command ID.
+- [x] Проверить отсутствующую зависимость и цикл.
+- [x] Проверить safe mode.
+- [x] Проверить однократное применение миграции.
+- [x] Проверить идемпотентность обработки события.
+- [x] Проверить отсутствие импортов внутренностей ядра.
+- [x] Добавить интеграционный запуск ядра с fixture-плагином.
+- [x] Использовать отдельные in-memory provider instances для тестов.
+- [x] Прогнать Storage Provider Conformance Suite на SQLite и in-memory provider.
+- [x] Прогнать conformance suite на provider с асинхронными задержками.
+- [x] Проверить отсутствие синхронных предположений в fixture-плагине.
+- [x] Проверить production build с нативным `better-sqlite3`.
+- [ ] Прогнать контрактные тесты на Linux и Windows. Linux проверен; Windows недоступен в текущем окружении.
+- [x] Описать, как новый плагин использует контрактные тесты.
 
 ## Владение файлами
 
@@ -91,44 +91,44 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Fixture-плагин активируется только через публичный lifecycle.
-- [ ] Команда и запрос выполняются через общие шины.
-- [ ] Событие публикуется после успешной операции.
-- [ ] Тестовый ресурс разрешается через `ResourceRef`.
-- [ ] UI-вклад появляется в согласованном слоте.
-- [ ] Миграция применяется ровно один раз.
-- [ ] Дублирующийся command ID блокируется.
-- [ ] Отсутствующая зависимость блокирует только зависимый плагин.
-- [ ] Цикл зависимостей блокируется.
-- [ ] Ошибка плагина приводит к safe mode без падения ядра.
-- [ ] Повторная обработка события не создаёт дубль.
-- [ ] Импорт внутренностей ядра из плагина обнаруживается тестом.
-- [ ] Ядро не импортирует fixture-плагин в production-коде.
-- [ ] Добавлена инструкция запуска контрактных тестов в документацию.
-- [ ] Тесты не требуют Docker, внешней СУБД и TCP-порта.
-- [ ] E2E-сценарии выполняются на `@playwright/test` 1.65.
-- [ ] Контрактные тесты проходят на Linux и Windows.
-- [ ] Production build корректно загружает нативный модуль `better-sqlite3`.
-- [ ] Storage Provider Conformance Suite проходит на SQLite и in-memory provider.
-- [ ] Conformance suite проходит на provider с асинхронными задержками.
-- [ ] Fixture-плагин не содержит синхронных предположений о хранилище.
-- [ ] Все критерии этапа 1 из `specs/roadmap.md` проверены.
+- [x] Fixture-плагин активируется только через публичный lifecycle.
+- [x] Команда и запрос выполняются через общие шины.
+- [x] Событие публикуется после успешной операции.
+- [x] Тестовый ресурс разрешается через `ResourceRef`.
+- [x] UI-вклад появляется в согласованном слоте.
+- [x] Миграция применяется ровно один раз.
+- [x] Дублирующийся command ID блокируется.
+- [x] Отсутствующая зависимость блокирует только зависимый плагин.
+- [x] Цикл зависимостей блокируется.
+- [x] Ошибка плагина приводит к safe mode без падения ядра.
+- [x] Повторная обработка события не создаёт дубль.
+- [x] Импорт внутренностей ядра из плагина обнаруживается тестом.
+- [x] Ядро не импортирует fixture-плагин в production-коде.
+- [x] Добавлена инструкция запуска контрактных тестов в документацию.
+- [x] Тесты не требуют Docker, внешней СУБД и TCP-порта.
+- [x] E2E-сценарии выполняются на `@playwright/test` 1.65.
+- [ ] Контрактные тесты проходят на Linux и Windows. Linux проверен; Windows не проверен.
+- [x] Production build корректно загружает нативный модуль `better-sqlite3`.
+- [x] Storage Provider Conformance Suite проходит на SQLite и in-memory provider.
+- [x] Conformance suite проходит на provider с асинхронными задержками.
+- [x] Fixture-плагин не содержит синхронных предположений о хранилище.
+- [x] Все критерии этапа 1 из `specs/roadmap.md` проверены.
 
 ## Проверки
 
-- [ ] Typecheck.
-- [ ] Линтер.
-- [ ] Contract tests на Vitest 5.
-- [ ] Integration tests.
-- [ ] Проверка границ импортов.
-- [ ] Проверка отсутствия deprecated-зависимостей и unmet peer dependencies.
-- [ ] Production build.
-- [ ] In-memory provider integration tests.
-- [ ] SQLite provider conformance tests.
-- [ ] Delayed async provider conformance tests.
-- [ ] Linux test run.
-- [ ] Windows test run.
-- [ ] Чистая база и повторный запуск миграций.
+- [x] Typecheck.
+- [x] Линтер.
+- [x] Contract tests на Vitest 5.
+- [x] Integration tests.
+- [x] Проверка границ импортов.
+- [x] Проверка отсутствия deprecated-зависимостей и unmet peer dependencies.
+- [x] Production build.
+- [x] In-memory provider integration tests.
+- [x] SQLite provider conformance tests.
+- [x] Delayed async provider conformance tests.
+- [x] Linux test run.
+- [ ] Windows test run — окружение недоступно, проверка не выполнялась.
+- [x] Чистая база и повторный запуск миграций.
 
 ## Риски
 
@@ -139,6 +139,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — KAN-008 влита в `dev` merge-коммитом `109d9b5bcff55af2234c49019a1b2e88f4737a0b`; strict install, `check:imports`, полный check, Playwright и deferred SIGTERM зелёные на ветке и `dev`, финальное ревью разрешило интеграцию. Feature-ветка и worktree удалены, задача переведена в done; Windows-проверки явно оставлены невыполненными.
 - 2026-11-07 — Worker коммитом `2a3a35b` подключил search cleanup и сделал reindex атомарным через provider transaction и per-plugin queues; 63 focused-теста, 37 Conformance integration, 733 workspace-теста, 7 E2E и deferred SIGTERM зелёные. Задача повторно в review.
 - 2026-11-07 — Повторное ревью подтвердило закрытие 10 findings, но нашло неподключённый search cleanup в composition root и lost update при concurrent reindex. Требуется передать search service, выполнять замену индекса внутри provider transaction и сериализовать fixture-мутации с regression-тестами.
 - 2026-11-07 — Worker коммитом `a52720a` реализовал bound PluginStorage, поисковый lifecycle, AST import boundaries и остальные исправления; 61 focused-тест, 37 Conformance integration, 729 workspace-тестов, 7 E2E и deferred SIGTERM зелёные. Задача повторно в review.
@@ -155,9 +156,7 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `109d9b5bcff55af2234c49019a1b2e88f4737a0b`; feature-коммиты `167bce3`, `c63e4dc`, `4360927`.
+- Ветка: `feat/kan-008-contract-tests` влита в `dev`; ветка и worktree удалены после успеха.
+- Проверки: strict frozen install, `check:imports` и self-test, полный `pnpm check`, 4 focused test files / 63 tests и 54 workspace test files / 733 tests, 37 integration Conformance-тестов на 4 provider-вариантах, 7 Playwright E2E и deferred-write SIGTERM test зелёные на ветке и `dev`; финальное ревью разрешило интеграцию.
+- Остаточные риски: Windows и нативный `better-sqlite3` на Windows не проверены; полный provider Conformance выполняется в unit-тестах провайдеров, integration запускает выбранные 9 case на четырёх вариантах; E2E выполнен только в Chromium.
