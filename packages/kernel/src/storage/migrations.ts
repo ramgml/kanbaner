@@ -4,6 +4,7 @@ import type { PluginMigrationContext } from "../lifecycle/hooks.ts";
 import type {
   AppliedMigration,
   BackendId,
+  StorageHealth,
   StorageMigration,
   StorageProvider,
 } from "./contracts.ts";
@@ -18,6 +19,8 @@ export interface StorageMigrationRunResult {
 
 export interface StorageMigrationRunnerOptions {
   readonly now?: () => Date;
+  /** Уже проверенный health от bootstrap; заменяет повторный health check. */
+  readonly health?: StorageHealth;
 }
 
 /** Загрузчик миграций плагина для lifecycle hook KAN-003. */
@@ -40,7 +43,7 @@ function compareMigrations(left: StorageMigration, right: StorageMigration): num
 /** SHA-256 стабильного содержимого миграции. */
 export function computeMigrationChecksum(migration: StorageMigration): string {
   return createHash("sha256")
-    .update(`${migration.version}\n${migration.name}\n${migration.source}`, "utf8")
+    .update(JSON.stringify([migration.version, migration.name, migration.source]), "utf8")
     .digest("hex");
 }
 
@@ -55,15 +58,17 @@ export function computeMigrationChecksum(migration: StorageMigration): string {
 export class StorageMigrationRunner {
   readonly #provider: StorageProvider;
   readonly #now: () => Date;
+  readonly #health: StorageHealth | undefined;
 
   constructor(provider: StorageProvider, options: StorageMigrationRunnerOptions = {}) {
     this.#provider = provider;
     this.#now = options.now ?? (() => new Date());
+    this.#health = options.health;
   }
 
   async run(migrations: readonly StorageMigration[]): Promise<StorageMigrationRunResult> {
     const ordered = this.#prepare(migrations);
-    const health = await this.#provider.healthCheck();
+    const health = this.#health ?? (await this.#provider.healthCheck());
 
     if (!health.ok) {
       throw storageError("PROVIDER_NOT_READY", "Storage Provider не готов к миграциям", {

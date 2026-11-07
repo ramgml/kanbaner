@@ -44,8 +44,35 @@ export interface InMemoryStorageProviderOptions {
   readonly now?: () => Date;
 }
 
-interface TransactionState {
+/**
+ * Состояние области транзакции или savepoint.
+ *
+ * `active` сбрасывается сразу после завершения callback: новые операции
+ * запрещены, а уже начатые обязаны завершиться до commit/rollback/release.
+ * `pending` хранит все начатые, но ещё не завершённые Store-операции области.
+ */
+interface TransactionScope {
   active: boolean;
+  readonly parent: TransactionScope | null;
+  readonly pending: Set<Promise<unknown>>;
+}
+
+function createScope(parent: TransactionScope | null): TransactionScope {
+  return { active: true, parent, pending: new Set<Promise<unknown>>() };
+}
+
+function isScopeActive(scope: TransactionScope): boolean {
+  let current: TransactionScope | null = scope;
+
+  while (current !== null) {
+    if (!current.active) {
+      return false;
+    }
+
+    current = current.parent;
+  }
+
+  return true;
 }
 
 function delayValue(value: number | undefined, label: string): number {
@@ -166,17 +193,18 @@ export class InMemoryStorageProvider implements StorageProvider {
       this.#assertOpen();
 
       const snapshot = cloneState(this.#state);
-      const state: TransactionState = { active: true };
-      const transaction = this.#createTransaction(1, state);
+      const scope = createScope(null);
+      const transaction = this.#createTransaction(1, scope);
+      const { failed, failure, result } = await this.#runScopedCallback(scope, () =>
+        callback(transaction),
+      );
 
-      try {
-        return await callback(transaction);
-      } catch (error) {
+      if (failed) {
         this.#state = snapshot;
-        throw error;
-      } finally {
-        state.active = false;
+        throw failure;
       }
+
+      return result;
     } finally {
       release();
     }
@@ -188,35 +216,25 @@ export class InMemoryStorageProvider implements StorageProvider {
     return registration.create(this);
   }
 
-  #createTransaction(depth: number, state: TransactionState): StorageTransaction {
-    const transactionRunner: StoreRunner = async (operation) => {
-      if (!state.active) {
-        throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
-      }
-
-      await this.#delay(this.#delays.operationMs);
-      this.#assertOpen();
-
-      return operation(this.#state);
-    };
-
-    const scope: StorageStoreScope = {
-      documents: createDocumentStore(transactionRunner, this.#now),
-      links: createLinkStore(transactionRunner, this.#now),
-      pluginStates: createPluginStateStore(transactionRunner, this.#now),
-      migrations: createMigrationStore(transactionRunner),
-      searchIndex: createSearchIndexStore(transactionRunner, this.#now, this.#searchStrategy()),
+  #createTransaction(depth: number, scope: TransactionScope): StorageTransaction {
+    const runner = this.#createRunner(scope);
+    const storeScope: StorageStoreScope = {
+      documents: createDocumentStore(runner, this.#now),
+      links: createLinkStore(runner, this.#now),
+      pluginStates: createPluginStateStore(runner, this.#now),
+      migrations: createMigrationStore(runner),
+      searchIndex: createSearchIndexStore(runner, this.#now, this.#searchStrategy()),
     };
 
     const transaction: StorageTransaction = {
       backendId: this.backendId,
       depth,
-      ...scope,
+      ...storeScope,
 
       createStore: async <TStore>(
         registration: StorageStoreRegistration<TStore>,
       ): Promise<TStore> => {
-        if (!state.active) {
+        if (!isScopeActive(scope)) {
           throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
         }
 
@@ -235,28 +253,125 @@ export class InMemoryStorageProvider implements StorageProvider {
           );
         }
 
-        if (!state.active) {
+        if (!isScopeActive(scope)) {
           throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
         }
 
-        await this.#delay(this.#delays.transactionMs);
+        const task = this.#executeSavepoint(depth + 1, scope, callback);
 
-        const snapshot = cloneState(this.#state);
-        const childState: TransactionState = { active: true };
-        const child = this.#createTransaction(depth + 1, childState);
-
-        try {
-          return await callback(child);
-        } catch (error) {
-          this.#state = snapshot;
-          throw error;
-        } finally {
-          childState.active = false;
-        }
+        return this.#track(scope, task);
       },
     };
 
     return transaction;
+  }
+
+  /**
+   * Создаёт runner Store-операций области.
+   *
+   * Каждая начатая операция регистрируется в `scope.pending`. После callback
+   * область запечатывается: новые операции отклоняются, а начатые дожидаются
+   * через `allSettled` до commit/rollback. Проверка `active` повторяется и
+   * после искусственной задержки, поэтому операция, чья задержка завершилась
+   * уже после callback, не может записать данные.
+   */
+  #createRunner(scope: TransactionScope): StoreRunner {
+    return async (operation) => {
+      if (!isScopeActive(scope)) {
+        throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
+      }
+
+      const task = (async () => {
+        await this.#delay(this.#delays.operationMs);
+
+        if (!isScopeActive(scope)) {
+          throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
+        }
+
+        this.#assertOpen();
+
+        return operation(this.#state);
+      })();
+
+      return this.#track(scope, task);
+    };
+  }
+
+  async #executeSavepoint<T>(
+    depth: number,
+    parent: TransactionScope,
+    callback: (transaction: StorageTransaction) => Promise<T>,
+  ): Promise<T> {
+    await this.#delay(this.#delays.transactionMs);
+
+    if (!isScopeActive(parent)) {
+      throw storageError("TRANSACTION_CLOSED", "Транзакция уже завершена");
+    }
+
+    const snapshot = cloneState(this.#state);
+    const child = createScope(parent);
+    const childTransaction = this.#createTransaction(depth, child);
+    const { failed, failure, result } = await this.#runScopedCallback(child, () =>
+      callback(childTransaction),
+    );
+
+    if (failed) {
+      // Родитель уже откатился: не перезаписываем его восстановленное состояние.
+      if (isScopeActive(parent)) {
+        this.#state = snapshot;
+      }
+
+      throw failure;
+    }
+
+    return result;
+  }
+
+  /**
+   * Запускает callback области, затем запечатывает область и ждёт все начатые
+   * операции. Возвращает результат или ошибку callback без потери исходного
+   * значения (включая `throw undefined`).
+   */
+  async #runScopedCallback<T>(
+    scope: TransactionScope,
+    callback: () => Promise<T>,
+  ): Promise<{ readonly failed: boolean; readonly failure: unknown; readonly result: T }> {
+    let failed = false;
+    let failure: unknown;
+    let result: T | undefined;
+
+    try {
+      result = await callback();
+    } catch (error) {
+      failed = true;
+      failure = error;
+    }
+
+    scope.active = false;
+
+    while (scope.pending.size > 0) {
+      await Promise.allSettled([...scope.pending]);
+    }
+
+    return { failed, failure, result: result as T };
+  }
+
+  /**
+   * Регистрирует задачу области и снимает регистрацию после завершения.
+   *
+   * Отдельный `catch` помечает Promise обработанным, чтобы неawait-нутая
+   * операция не порождала `unhandledRejection`; исходная задача по-прежнему
+   * отклоняется для вызывающего кода.
+   */
+  async #track<T>(scope: TransactionScope, task: Promise<T>): Promise<T> {
+    scope.pending.add(task);
+    void task.catch(() => undefined);
+
+    try {
+      return await task;
+    } finally {
+      scope.pending.delete(task);
+    }
   }
 
   #assertStoreRegistration<TStore>(registration: StorageStoreRegistration<TStore>): void {

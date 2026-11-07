@@ -20,7 +20,6 @@ export interface SearchIndexDocument {
   readonly title: string;
   readonly text: string;
   readonly kind?: string;
-  readonly projectRef?: ResourceRef;
   readonly updatedAt?: UtcTimestamp;
   readonly metadata?: JsonObject;
 }

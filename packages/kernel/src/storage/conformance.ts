@@ -29,6 +29,8 @@ export interface StorageProviderConformanceOptions {
   createProvider(): StorageProvider | Promise<StorageProvider>;
   /** Дополнительный провайдер без capability savepoints. */
   createProviderWithoutSavepoints?(): StorageProvider | Promise<StorageProvider>;
+  /** Провайдер с другим `backendId` для проверки конкурентного открытия. */
+  createAlternateProvider?(): StorageProvider | Promise<StorageProvider>;
 }
 
 export interface StorageProviderConformanceCase {
@@ -90,6 +92,29 @@ async function assertRejectsError(operation: Promise<unknown>, message: string):
   }
 
   assert.fail(`${message}: операция не завершилась ошибкой`);
+}
+
+/**
+ * Проверяет исход уже начатой операции после rollback области.
+ *
+ * Операция могла успеть примениться до запечатывания области — тогда её
+ * изменения откатываются снимком. Если она завершилась после callback, она
+ * обязана быть отклонена как `TRANSACTION_CLOSED`. В обоих случаях вызывающий
+ * ниже проверяет, что старые данные сохранены.
+ */
+function assertNoLateWriteAfterRollback(
+  result: PromiseSettledResult<unknown> | undefined,
+  label: string,
+): void {
+  assert.notEqual(result, undefined, `${label}: операция должна завершиться`);
+
+  if (result?.status === "rejected") {
+    assert.equal(
+      errorCode(result.reason),
+      "TRANSACTION_CLOSED",
+      `${label}: операция после callback отклонена`,
+    );
+  }
 }
 
 function assertUtc(value: string): void {
@@ -260,6 +285,44 @@ export function createStorageProviderConformanceSuite(
       },
     },
     {
+      name: "документы: конкурентные update одной версии дают один конфликт",
+      async run(provider) {
+        await provider.documents.put(documentInput());
+
+        const results = await Promise.allSettled([
+          provider.documents.put({
+            pluginId: PLUGIN,
+            collection: COLLECTION,
+            id: DOC_ID,
+            data: { title: "First writer" },
+            expectedVersion: 1,
+          }),
+          provider.documents.put({
+            pluginId: PLUGIN,
+            collection: COLLECTION,
+            id: DOC_ID,
+            data: { title: "Second writer" },
+            expectedVersion: 1,
+          }),
+        ]);
+
+        const fulfilled = results.filter((result) => result.status === "fulfilled");
+        const rejected = results.filter((result) => result.status === "rejected");
+
+        assert.equal(fulfilled.length, 1, "ровно один update должен успешно примениться");
+        assert.equal(rejected.length, 1, "второй update должен получить конфликт версии");
+
+        const rejectedResult = rejected[0];
+
+        if (rejectedResult !== undefined && rejectedResult.status === "rejected") {
+          assert.equal(errorCode(rejectedResult.reason), "VERSION_CONFLICT");
+        }
+
+        const document = await provider.documents.get(PLUGIN, COLLECTION, DOC_ID);
+        assert.equal(document?.version, 2);
+      },
+    },
+    {
       name: "документы: expectedVersion проверяется при удалении",
       async run(provider) {
         await provider.documents.put(documentInput());
@@ -424,6 +487,31 @@ export function createStorageProviderConformanceSuite(
       },
     },
     {
+      name: "миграции: конкурентный run применяет версию ровно один раз",
+      async run(provider) {
+        const runner = new StorageMigrationRunner(provider);
+        let upCalls = 0;
+        const migrations: readonly StorageMigration[] = [
+          {
+            pluginId: PLUGIN,
+            version: 1,
+            name: "concurrent",
+            source: "concurrent migration",
+            async up() {
+              upCalls += 1;
+            },
+          },
+        ];
+
+        const [first, second] = await Promise.all([runner.run(migrations), runner.run(migrations)]);
+
+        assert.equal(upCalls, 1, "up должен выполниться один раз");
+        assert.equal(first.applied.length + second.applied.length, 1);
+        assert.equal(first.skipped.length + second.skipped.length, 1);
+        assert.equal((await provider.migrations.list(provider.backendId)).length, 1);
+      },
+    },
+    {
       name: "миграции: несовпадение checksum блокирует повтор",
       async run(provider) {
         const runner = new StorageMigrationRunner(provider);
@@ -485,10 +573,157 @@ export function createStorageProviderConformanceSuite(
       },
     },
     {
+      name: "транзакция: начатая операция не пишет после rollback",
+      async run(provider) {
+        const original = await provider.documents.put(documentInput());
+        let pending: Promise<unknown> | undefined;
+
+        await assertRejectsError(
+          provider.withTransaction(async (transaction) => {
+            pending = transaction.documents.put({
+              pluginId: PLUGIN,
+              collection: COLLECTION,
+              id: DOC_ID,
+              data: { title: "Late write" },
+              expectedVersion: 1,
+            });
+
+            await Promise.all([pending, Promise.reject(new Error("immediate rejection"))]);
+          }),
+          "rollback транзакции с начатой операцией",
+        );
+
+        if (pending === undefined) {
+          assert.fail("операция должна была начаться до rollback");
+        }
+
+        const settled = await Promise.allSettled([pending]);
+        assertNoLateWriteAfterRollback(settled[0], "транзакция");
+
+        const document = await provider.documents.get(PLUGIN, COLLECTION, DOC_ID);
+        assert.equal(document?.version, original.version);
+        assert.deepEqual(document?.data, original.data);
+      },
+    },
+    {
+      name: "savepoint: начатая операция не пишет после rollback",
+      async run(provider) {
+        if (!provider.capabilities.savepoints) {
+          await assertRejectsCode(
+            provider.withTransaction(async (transaction) =>
+              transaction.withSavepoint(async () => undefined),
+            ),
+            "SAVEPOINTS_UNSUPPORTED",
+            "savepoint без capability",
+          );
+
+          return;
+        }
+
+        const nestedId = "01JDOC00000000000000000002";
+
+        await provider.documents.put(documentInput());
+
+        await provider.withTransaction(async (transaction) => {
+          let pending: Promise<unknown> | undefined;
+
+          await assertRejectsError(
+            transaction.withSavepoint(async (nested) => {
+              pending = nested.documents.put(
+                documentInput(nestedId, { title: "Late savepoint write" }),
+              );
+
+              await Promise.all([
+                pending,
+                Promise.reject(new Error("immediate savepoint rejection")),
+              ]);
+            }),
+            "rollback savepoint с начатой операцией",
+          );
+
+          if (pending === undefined) {
+            assert.fail("savepoint-операция должна была начаться до rollback");
+          }
+
+          const settled = await Promise.allSettled([pending]);
+          assertNoLateWriteAfterRollback(settled[0], "savepoint");
+          assert.equal(await transaction.documents.get(PLUGIN, COLLECTION, nestedId), null);
+        });
+
+        assert.equal(await provider.documents.get(PLUGIN, COLLECTION, nestedId), null);
+        assert.notEqual(await provider.documents.get(PLUGIN, COLLECTION, DOC_ID), null);
+      },
+    },
+    {
+      name: "миграция: начатая операция не пишет после rollback",
+      async run(provider) {
+        const original = await provider.documents.put(documentInput());
+        const runner = new StorageMigrationRunner(provider);
+        let pending: Promise<unknown> | undefined;
+
+        await assertRejectsCode(
+          runner.run([
+            {
+              pluginId: PLUGIN,
+              version: 1,
+              name: "late-write",
+              source: "migration with pending operation",
+              async up({ transaction }) {
+                pending = transaction.documents.put({
+                  pluginId: PLUGIN,
+                  collection: COLLECTION,
+                  id: DOC_ID,
+                  data: { title: "Late migration write" },
+                  expectedVersion: 1,
+                });
+
+                await Promise.all([
+                  pending,
+                  Promise.reject(new Error("immediate migration rejection")),
+                ]);
+              },
+            },
+          ]),
+          "MIGRATION_FAILED",
+          "миграция с начатой операцией",
+        );
+
+        if (pending === undefined) {
+          assert.fail("операция миграции должна была начаться до rollback");
+        }
+
+        const settled = await Promise.allSettled([pending]);
+        assertNoLateWriteAfterRollback(settled[0], "миграция");
+
+        const document = await provider.documents.get(PLUGIN, COLLECTION, DOC_ID);
+        assert.equal(document?.version, original.version);
+        assert.deepEqual(document?.data, original.data);
+        assert.equal((await provider.migrations.list(provider.backendId)).length, 0);
+      },
+    },
+    {
       name: "миграции: backend isolation и ключ backendId",
       async run(provider) {
+        const otherBackendId =
+          provider.backendId === "other-backend" ? "other-backend-2" : "other-backend";
+        const checksum = "a".repeat(64);
+
+        await provider.migrations.record({
+          backendId: otherBackendId,
+          pluginId: PLUGIN,
+          version: 1,
+          name: "other-backend",
+          checksum,
+          appliedAt: "2026-11-06T12:00:00.000Z",
+        });
+
+        assert.equal((await provider.migrations.list(provider.backendId)).length, 0);
+        assert.equal((await provider.migrations.list(otherBackendId)).length, 1);
+        assert.equal(await provider.migrations.find(provider.backendId, PLUGIN, 1), null);
+        assert.notEqual(await provider.migrations.find(otherBackendId, PLUGIN, 1), null);
+
         const runner = new StorageMigrationRunner(provider);
-        const migrations: readonly StorageMigration[] = [
+        const result = await runner.run([
           {
             pluginId: PLUGIN,
             version: 1,
@@ -498,24 +733,11 @@ export function createStorageProviderConformanceSuite(
               return undefined;
             },
           },
-        ];
+        ]);
 
-        await runner.run(migrations);
-
-        const other = await options.createProvider();
-
-        try {
-          await other.open();
-          assert.equal((await other.migrations.list(other.backendId)).length, 0);
-
-          const otherRunner = new StorageMigrationRunner(other);
-          const result = await otherRunner.run(migrations);
-
-          assert.equal(result.applied.length, 1);
-          assert.equal((await provider.migrations.list(provider.backendId)).length, 1);
-        } finally {
-          await other.close();
-        }
+        assert.equal(result.applied.length, 1);
+        assert.equal((await provider.migrations.list(provider.backendId)).length, 1);
+        assert.equal((await provider.migrations.list(otherBackendId)).length, 1);
       },
     },
     {
@@ -805,6 +1027,50 @@ export function createStorageProviderConformanceSuite(
           }
         } finally {
           await other.close();
+          await registry.closeAll();
+        }
+      },
+    },
+    {
+      name: "реестр: конкурентные open не открывают два backend",
+      async run(provider) {
+        if (options.createAlternateProvider === undefined) {
+          return;
+        }
+
+        const alternate = await options.createAlternateProvider();
+
+        if (alternate.backendId === provider.backendId) {
+          return;
+        }
+
+        const registry = new StorageProviderRegistry();
+
+        registry.register(provider);
+        registry.register(alternate);
+
+        try {
+          const results = await Promise.allSettled([
+            registry.open(provider.backendId),
+            registry.open(alternate.backendId),
+          ]);
+          const fulfilled = results.filter((result) => result.status === "fulfilled");
+          const rejected = results.filter((result) => result.status === "rejected");
+
+          assert.equal(fulfilled.length, 1, "один open должен завершиться успешно");
+          assert.equal(rejected.length, 1, "второй open должен получить конфликт");
+
+          const rejectedResult = rejected[0];
+
+          if (rejectedResult !== undefined && rejectedResult.status === "rejected") {
+            assert.equal(errorCode(rejectedResult.reason), "ACTIVE_BACKEND_CONFLICT");
+          }
+
+          const healths = await Promise.all([provider.healthCheck(), alternate.healthCheck()]);
+          const healthy = healths.filter((health) => health.ok);
+
+          assert.equal(healthy.length, 1, "открытым должен остаться ровно один backend");
+        } finally {
           await registry.closeAll();
         }
       },

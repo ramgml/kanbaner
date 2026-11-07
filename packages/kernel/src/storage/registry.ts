@@ -9,8 +9,14 @@ import type {
   StorageStoreContract,
   StorageStoreRegistration,
 } from "./contracts.ts";
+import { AsyncMutex } from "./async-mutex.ts";
 import { storageError } from "./errors.ts";
 import { assertBackendId, assertPositiveVersion } from "./validation.ts";
+
+export interface StorageProviderOpenResult {
+  readonly provider: StorageProvider;
+  readonly health: StorageHealth;
+}
 
 interface ProviderEntry {
   readonly provider: StorageProvider;
@@ -34,6 +40,7 @@ function isFunction(value: unknown): value is (...parameters: readonly unknown[]
  */
 export class StorageProviderRegistry {
   readonly #entries = new Map<BackendId, ProviderEntry>();
+  readonly #lifecycle = new AsyncMutex();
   #activeBackendId: BackendId | null = null;
 
   /** Регистрирует провайдер; повторный `backendId` отклоняется. */
@@ -97,53 +104,78 @@ export class StorageProviderRegistry {
   /**
    * Открывает провайдер и проверяет здоровье до каких-либо миграций.
    *
-   * Активным может быть только один backend (MVP).
+   * Активным может быть только один backend (MVP). Lifecycle-операции
+   * сериализуются мьютексом: два параллельных `open` не могут открыть два
+   * backend-а, второй получает `ACTIVE_BACKEND_CONFLICT`.
    */
   async open(backendId: BackendId): Promise<StorageProvider> {
-    const provider = this.get(backendId);
+    return (await this.openChecked(backendId)).provider;
+  }
 
-    if (this.#activeBackendId !== null && this.#activeBackendId !== backendId) {
-      throw storageError("ACTIVE_BACKEND_CONFLICT", "Другой Storage backend уже активен", {
-        details: { backendId, activeBackendId: this.#activeBackendId },
-      });
-    }
+  /**
+   * Открывает провайдер и возвращает ровно один проверенный `StorageHealth`.
+   *
+   * Bootstrap использует этот результат вместо повторного health check.
+   * При ошибке открытия или health check провайдер закрывается; исходная
+   * ошибка сохраняется, даже если cleanup тоже завершился ошибкой.
+   */
+  async openChecked(backendId: BackendId): Promise<StorageProviderOpenResult> {
+    return this.#lifecycle.runExclusive(async () => {
+      const provider = this.get(backendId);
 
-    await provider.open();
+      if (this.#activeBackendId !== null && this.#activeBackendId !== backendId) {
+        throw storageError("ACTIVE_BACKEND_CONFLICT", "Другой Storage backend уже активен", {
+          details: { backendId, activeBackendId: this.#activeBackendId },
+        });
+      }
 
-    let health: StorageHealth;
+      try {
+        await provider.open();
 
-    try {
-      health = await provider.healthCheck();
-    } catch (error) {
-      await provider.close();
+        let health: StorageHealth;
 
-      throw storageError("HEALTH_CHECK_FAILED", "Health check Storage Provider не выполнен", {
-        details: { backendId },
-        cause: error,
-      });
-    }
+        try {
+          health = await provider.healthCheck();
+        } catch (error) {
+          throw storageError("HEALTH_CHECK_FAILED", "Health check Storage Provider не выполнен", {
+            details: { backendId },
+            cause: error,
+          });
+        }
 
-    if (!health.ok) {
-      await provider.close();
+        if (!health.ok) {
+          throw storageError("HEALTH_CHECK_FAILED", "Storage Provider не прошёл health check", {
+            details: { backendId },
+          });
+        }
 
-      throw storageError("HEALTH_CHECK_FAILED", "Storage Provider не прошёл health check", {
-        details: { backendId },
-      });
-    }
+        this.#activeBackendId = backendId;
 
-    this.#activeBackendId = backendId;
+        return { provider, health };
+      } catch (error) {
+        await this.#closeQuietly(provider);
 
-    return provider;
+        if (this.#activeBackendId === backendId) {
+          this.#activeBackendId = null;
+        }
+
+        throw error;
+      }
+    });
   }
 
   async close(backendId: BackendId): Promise<void> {
-    const provider = this.get(backendId);
+    await this.#lifecycle.runExclusive(async () => {
+      const provider = this.get(backendId);
 
-    await provider.close();
-
-    if (this.#activeBackendId === backendId) {
-      this.#activeBackendId = null;
-    }
+      try {
+        await provider.close();
+      } finally {
+        if (this.#activeBackendId === backendId) {
+          this.#activeBackendId = null;
+        }
+      }
+    });
   }
 
   async healthCheck(backendId: BackendId): Promise<StorageHealth> {
@@ -200,13 +232,40 @@ export class StorageProviderRegistry {
   }
 
   async closeAll(): Promise<void> {
-    const providers = [...this.#entries.values()].map((entry) => entry.provider);
+    await this.#lifecycle.runExclusive(async () => {
+      const providers = [...this.#entries.values()].map((entry) => entry.provider);
+      let failed = false;
+      let failure: unknown;
 
-    for (const provider of providers) {
+      for (const provider of providers) {
+        try {
+          await provider.close();
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+      }
+
+      this.#activeBackendId = null;
+
+      if (failed) {
+        throw failure;
+      }
+    });
+  }
+
+  /**
+   * Закрывает провайдер, не затирая первичную ошибку открытия/миграции.
+   * Ошибка cleanup намеренно подавляется: вызывающий получает исходную причину.
+   */
+  async #closeQuietly(provider: StorageProvider): Promise<void> {
+    try {
       await provider.close();
+    } catch {
+      // Первичная ошибка важнее ошибки cleanup.
     }
-
-    this.#activeBackendId = null;
   }
 
   #entry(backendId: BackendId): ProviderEntry {

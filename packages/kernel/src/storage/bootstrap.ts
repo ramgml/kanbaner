@@ -20,9 +20,12 @@ export interface StorageBootstrapResult {
 /**
  * Bootstrap Storage-слоя.
  *
- * Порядок обязателен: регистрация провайдера, открытие, health check, затем
- * миграции. Ошибка регистрации или открытия не запускает ни одной миграции,
- * поэтому частичного применения не возникает.
+ * Порядок обязателен: регистрация провайдера, открытие с одним health check,
+ * затем миграции. Bootstrap использует проверенный `StorageHealth`, полученный
+ * при открытии, и не выполняет второй health check.
+ *
+ * При ошибке миграции провайдер закрывается, активный backend очищается, а
+ * исходная ошибка сохраняется даже если cleanup завершился ошибкой.
  */
 export async function bootstrapStorage(
   options: StorageBootstrapOptions,
@@ -31,13 +34,23 @@ export async function bootstrapStorage(
 
   registry.register(provider);
 
-  const opened = await registry.open(provider.backendId);
-  const health = await opened.healthCheck();
-  const runner = new StorageMigrationRunner(
-    opened,
-    options.now === undefined ? {} : { now: options.now },
-  );
-  const migrations = await runner.run(options.migrations ?? []);
+  const opened = await registry.openChecked(provider.backendId);
+  const runner = new StorageMigrationRunner(opened.provider, {
+    health: opened.health,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
 
-  return { provider: opened, health, migrations };
+  try {
+    const migrations = await runner.run(options.migrations ?? []);
+
+    return { provider: opened.provider, health: opened.health, migrations };
+  } catch (error) {
+    try {
+      await registry.close(opened.provider.backendId);
+    } catch {
+      // Первичная ошибка миграции важнее ошибки cleanup.
+    }
+
+    throw error;
+  }
 }

@@ -137,9 +137,63 @@ describe("StorageProviderRegistry", () => {
     registry.register(unhealthy);
     await expectCode(() => registry.open("memory-unhealthy"), "HEALTH_CHECK_FAILED");
 
+    expect((await unhealthy.healthCheck()).ok).toBe(false);
     expect(() => registry.getActive()).toThrowError(
       expect.objectContaining({ code: "NO_ACTIVE_BACKEND" }),
     );
+  });
+
+  it("сериализует конкурентные open и не открывает два backend", async () => {
+    const registry = new StorageProviderRegistry();
+    const first = new InMemoryStorageProvider({
+      backendId: "memory-race-first",
+      now: NOW,
+      delays: { openMs: 1, healthCheckMs: 1 },
+    });
+    const second = new InMemoryStorageProvider({
+      backendId: "memory-race-second",
+      now: NOW,
+      delays: { openMs: 1, healthCheckMs: 1 },
+    });
+
+    registry.register(first);
+    registry.register(second);
+
+    const results = await Promise.allSettled([
+      registry.open("memory-race-first"),
+      registry.open("memory-race-second"),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const rejectedResult = rejected[0];
+
+    if (rejectedResult !== undefined && rejectedResult.status === "rejected") {
+      expect((rejectedResult.reason as { readonly code?: string }).code).toBe(
+        "ACTIVE_BACKEND_CONFLICT",
+      );
+    }
+
+    const healths = await Promise.all([first.healthCheck(), second.healthCheck()]);
+
+    expect(healths.filter((health) => health.ok)).toHaveLength(1);
+  });
+
+  it("возвращает один проверенный health при openChecked", async () => {
+    const registry = new StorageProviderRegistry();
+    const memory = provider("memory-open-checked");
+
+    registry.register(memory);
+
+    const opened = await registry.openChecked("memory-open-checked");
+
+    expect(opened.provider).toBe(memory);
+    expect(opened.health.ok).toBe(true);
+    expect(opened.health.backendId).toBe("memory-open-checked");
+    expect(registry.getActive()).toBe(memory);
   });
 
   it("регистрирует и создаёт доменный Store по контракту", async () => {

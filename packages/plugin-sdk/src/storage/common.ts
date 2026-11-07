@@ -60,9 +60,25 @@ export function assertContractId(value: unknown): asserts value is ContractId {
   }
 }
 
-/** Проверяет, что значение является JSON-объектом, а не массивом или классом. */
+/**
+ * Проверяет, что значение является plain JSON-объектом.
+ *
+ * Массивы, экземпляры классов (`Date`, `Map`), циклические ссылки и значения
+ * с `undefined`, `NaN` или `Infinity` внутри отклоняются: граница Store не
+ * должна принимать данные, которые нельзя сериализовать без потерь.
+ */
 export function isJsonObjectValue(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+
+  if (prototype !== Object.prototype && prototype !== null) {
+    return false;
+  }
+
+  return validateJsonValue(value).ok;
 }
 
 export function assertJsonObjectValue(value: unknown, label: string): asserts value is JsonObject {

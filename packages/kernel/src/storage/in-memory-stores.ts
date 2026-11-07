@@ -32,7 +32,8 @@ import {
 } from "./in-memory-state.ts";
 import {
   assertApplicationId,
-  assertCollection,
+  assertBackendId,
+  assertCollectionName,
   assertExpectedVersion,
   assertJsonObject,
   assertJsonValue,
@@ -159,7 +160,7 @@ export function createDocumentStore(run: StoreRunner, now: () => Date): PluginDo
   return {
     async get(pluginId, collection, id) {
       assertPluginIdValue(pluginId);
-      assertCollection(collection);
+      assertCollectionName(collection);
       assertApplicationId(id);
 
       return run((state) => {
@@ -171,7 +172,7 @@ export function createDocumentStore(run: StoreRunner, now: () => Date): PluginDo
 
     async put(input) {
       assertPluginIdValue(input.pluginId);
-      assertCollection(input.collection);
+      assertCollectionName(input.collection);
       assertApplicationId(input.id);
       assertJsonValue(input.data, "data");
       assertOptionalExpectedVersion(input.expectedVersion);
@@ -209,7 +210,7 @@ export function createDocumentStore(run: StoreRunner, now: () => Date): PluginDo
 
     async delete(pluginId, collection, id, options) {
       assertPluginIdValue(pluginId);
-      assertCollection(collection);
+      assertCollectionName(collection);
       assertApplicationId(id);
       assertOptionalExpectedVersion(options?.expectedVersion);
 
@@ -240,7 +241,7 @@ export function createDocumentStore(run: StoreRunner, now: () => Date): PluginDo
       assertPageNumber(query.offset ?? 0, "offset");
 
       if (query.collection !== undefined) {
-        assertCollection(query.collection);
+        assertCollectionName(query.collection);
       }
 
       if (query.indexedFields !== undefined) {
@@ -276,7 +277,7 @@ export function createDocumentStore(run: StoreRunner, now: () => Date): PluginDo
       assertPluginIdValue(pluginId);
 
       if (collection !== undefined) {
-        assertCollection(collection);
+        assertCollectionName(collection);
       }
 
       return run((state) =>
@@ -472,14 +473,11 @@ function assertChecksum(value: unknown): asserts value is string {
 }
 
 function validateMigration(migration: AppliedMigration): void {
+  assertBackendId(migration.backendId);
   assertPluginIdValue(migration.pluginId);
   assertPositiveVersion(migration.version, "version");
   assertChecksum(migration.checksum);
   assertUtcTimestamp(migration.appliedAt, "appliedAt");
-
-  if (typeof migration.backendId !== "string" || migration.backendId.length === 0) {
-    throw storageError("INVALID_BACKEND_ID", "Некорректный backendId миграции");
-  }
 
   if (typeof migration.name !== "string" || migration.name.trim().length === 0) {
     throw storageError("INVALID_ARGUMENT", "Имя миграции не может быть пустым");
@@ -491,7 +489,7 @@ export function createMigrationStore(run: StoreRunner): MigrationStore {
   return {
     async list(backendId) {
       if (backendId !== undefined) {
-        assertBackendIdValue(backendId);
+        assertBackendId(backendId);
       }
 
       return run((state) =>
@@ -503,7 +501,7 @@ export function createMigrationStore(run: StoreRunner): MigrationStore {
     },
 
     async find(backendId, pluginId, version) {
-      assertBackendIdValue(backendId);
+      assertBackendId(backendId);
       assertPluginIdValue(pluginId);
       assertPositiveVersion(version, "version");
 
@@ -538,12 +536,6 @@ export function createMigrationStore(run: StoreRunner): MigrationStore {
   };
 }
 
-function assertBackendIdValue(value: unknown): void {
-  if (typeof value !== "string" || !/^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*$/.test(value)) {
-    throw storageError("INVALID_BACKEND_ID", "Некорректный идентификатор Storage backend");
-  }
-}
-
 function normalizeSearchText(value: string): string {
   return value.normalize("NFKC").toLowerCase();
 }
@@ -575,10 +567,6 @@ function validateSearchDocument(document: SearchIndexDocument): void {
 
   if (document.kind !== undefined && typeof document.kind !== "string") {
     throw storageError("INVALID_ARGUMENT", "kind поискового документа должен быть строкой");
-  }
-
-  if (document.projectRef !== undefined) {
-    assertResourceRefValue(document.projectRef, "projectRef");
   }
 
   if (document.updatedAt !== undefined) {

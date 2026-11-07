@@ -59,6 +59,15 @@ function doc(id = DOC_ID) {
   } as const;
 }
 
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolvePromise: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  return { promise, resolve: resolvePromise };
+}
+
 describe("InMemoryStorageProvider", () => {
   it("совместим с портом LinkStore из KAN-005", () => {
     const memory = provider();
@@ -370,6 +379,82 @@ describe("InMemoryStorageProvider", () => {
     }
   });
 
+  it("не пишет после rollback, если операция задержалась дольше callback", async () => {
+    const memory = provider({ backendId: "memory-late-tx", operationMs: 5 });
+
+    await memory.open();
+
+    try {
+      const original = await memory.documents.put(doc());
+      let pending: Promise<unknown> | undefined;
+
+      await expect(
+        memory.withTransaction(async (transaction) => {
+          pending = transaction.documents.put({
+            pluginId: PLUGIN,
+            collection: COLLECTION,
+            id: DOC_ID,
+            data: { title: "Late" },
+            expectedVersion: 1,
+          });
+          throw new Error("rollback");
+        }),
+      ).rejects.toThrow("rollback");
+
+      const settled = await Promise.allSettled([pending]);
+
+      expect(settled[0]?.status).toBe("rejected");
+
+      if (settled[0]?.status === "rejected") {
+        expect((settled[0].reason as { readonly code?: string }).code).toBe("TRANSACTION_CLOSED");
+      }
+
+      const document = await memory.documents.get(PLUGIN, COLLECTION, DOC_ID);
+
+      expect(document?.version).toBe(original.version);
+      expect(document?.data).toEqual(original.data);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  it("не пишет после rollback savepoint, если операция задержалась дольше callback", async () => {
+    const memory = provider({ backendId: "memory-late-savepoint", operationMs: 5 });
+    const nestedId = "01JDOC00000000000000000002";
+
+    await memory.open();
+
+    try {
+      await memory.documents.put(doc());
+
+      await memory.withTransaction(async (transaction) => {
+        let pending: Promise<unknown> | undefined;
+
+        await expect(
+          transaction.withSavepoint(async (nested) => {
+            pending = nested.documents.put(doc(nestedId));
+            throw new Error("nested rollback");
+          }),
+        ).rejects.toThrow("nested rollback");
+
+        const settled = await Promise.allSettled([pending]);
+
+        expect(settled[0]?.status).toBe("rejected");
+
+        if (settled[0]?.status === "rejected") {
+          expect((settled[0].reason as { readonly code?: string }).code).toBe("TRANSACTION_CLOSED");
+        }
+
+        expect(await transaction.documents.get(PLUGIN, COLLECTION, nestedId)).toBeNull();
+      });
+
+      expect(await memory.documents.get(PLUGIN, COLLECTION, nestedId)).toBeNull();
+      expect(await memory.documents.get(PLUGIN, COLLECTION, DOC_ID)).not.toBeNull();
+    } finally {
+      await memory.close();
+    }
+  });
+
   it("использует savepoint только при capability", async () => {
     const memory = provider({ backendId: "memory-savepoints" });
     const noSavepoints = provider({
@@ -415,21 +500,18 @@ describe("InMemoryStorageProvider", () => {
     await memory.open();
 
     try {
-      const started = Date.now();
       await memory.documents.put(doc());
-      expect(Date.now() - started).toBeGreaterThanOrEqual(0);
 
+      const transactionStarted = deferred();
+      const gate = deferred();
       let outsideDone = false;
-      let releaseTransaction: () => void = () => undefined;
-      const gate = new Promise<void>((resolve) => {
-        releaseTransaction = () => {
-          resolve();
-        };
-      });
       const transaction = memory.withTransaction(async (tx) => {
         await tx.documents.put(doc("01JDOC00000000000000000002"));
-        await gate;
+        transactionStarted.resolve();
+        await gate.promise;
       });
+
+      await transactionStarted.promise;
 
       const outside = memory.documents.list(PLUGIN).then((documents) => {
         outsideDone = true;
@@ -437,12 +519,12 @@ describe("InMemoryStorageProvider", () => {
         return documents;
       });
 
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 10);
-      });
+      // Пока gate закрыт, операция снаружи не должна начать выполнение.
+      await Promise.resolve();
+      await Promise.resolve();
       expect(outsideDone).toBe(false);
 
-      releaseTransaction();
+      gate.resolve();
       await transaction;
       expect((await outside).length).toBe(2);
     } finally {

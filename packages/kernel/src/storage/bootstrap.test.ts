@@ -16,6 +16,11 @@ class RecordingProvider extends InMemoryStorageProvider {
     await super.open();
   }
 
+  override async close(): Promise<void> {
+    this.events.push("close");
+    await super.close();
+  }
+
   override async healthCheck() {
     this.events.push("health");
     return super.healthCheck();
@@ -25,6 +30,20 @@ class RecordingProvider extends InMemoryStorageProvider {
 class FailingOpenProvider extends InMemoryStorageProvider {
   override async open(): Promise<void> {
     throw new Error("open failed");
+  }
+}
+
+class PartiallyFailingOpenProvider extends RecordingProvider {
+  override async open(): Promise<void> {
+    await super.open();
+    throw new Error("open failed after opening");
+  }
+}
+
+class FailingCloseProvider extends RecordingProvider {
+  override async close(): Promise<void> {
+    this.events.push("close-failed");
+    throw new Error("close failed");
   }
 }
 
@@ -74,6 +93,7 @@ describe("bootstrapStorage", () => {
     expect(result.provider).toBe(provider);
     expect(result.health.ok).toBe(true);
     expect(result.migrations.applied).toHaveLength(1);
+    expect(provider.events.filter((event) => event === "health")).toHaveLength(1);
     expect(registry.getActive()).toBe(provider);
 
     await registry.closeAll();
@@ -142,5 +162,103 @@ describe("bootstrapStorage", () => {
 
     expect(migrated).toBe(false);
     await registry.closeAll();
+  });
+
+  it("закрывает провайдер при неуспешном health check", async () => {
+    const registry = new StorageProviderRegistry();
+    const provider = new UnhealthyProvider({
+      backendId: "memory-bootstrap-unhealthy-close",
+      now: NOW,
+    });
+
+    await expect(
+      bootstrapStorage({
+        registry,
+        provider,
+      }),
+    ).rejects.toMatchObject({ code: "HEALTH_CHECK_FAILED" });
+
+    expect((await provider.healthCheck()).ok).toBe(false);
+    expect(() => registry.getActive()).toThrowError(
+      expect.objectContaining({ code: "NO_ACTIVE_BACKEND" }),
+    );
+  });
+
+  it("закрывает частично открытый провайдер при ошибке open", async () => {
+    const registry = new StorageProviderRegistry();
+    const provider = new PartiallyFailingOpenProvider({
+      backendId: "memory-partial-open",
+      now: NOW,
+    });
+
+    await expect(
+      bootstrapStorage({
+        registry,
+        provider,
+      }),
+    ).rejects.toThrow("open failed after opening");
+
+    expect(provider.events).toContain("close");
+    expect((await provider.healthCheck()).ok).toBe(false);
+    expect(() => registry.getActive()).toThrowError(
+      expect.objectContaining({ code: "NO_ACTIVE_BACKEND" }),
+    );
+  });
+
+  it("закрывает провайдер и очищает активный backend при ошибке миграции", async () => {
+    const registry = new StorageProviderRegistry();
+    const provider = new RecordingProvider({ backendId: "memory-migration-fails", now: NOW });
+
+    await expect(
+      bootstrapStorage({
+        registry,
+        provider,
+        migrations: [
+          {
+            pluginId: PLUGIN,
+            version: 1,
+            name: "failing",
+            source: "failing migration",
+            async up() {
+              throw new Error("migration failed");
+            },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "MIGRATION_FAILED" });
+
+    expect(provider.events).toContain("close");
+    expect((await provider.healthCheck()).ok).toBe(false);
+    expect(() => registry.getActive()).toThrowError(
+      expect.objectContaining({ code: "NO_ACTIVE_BACKEND" }),
+    );
+  });
+
+  it("сохраняет первичную ошибку миграции при ошибке cleanup", async () => {
+    const registry = new StorageProviderRegistry();
+    const provider = new FailingCloseProvider({ backendId: "memory-cleanup-fails", now: NOW });
+
+    await expect(
+      bootstrapStorage({
+        registry,
+        provider,
+        migrations: [
+          {
+            pluginId: PLUGIN,
+            version: 1,
+            name: "failing",
+            source: "failing migration",
+            async up() {
+              throw new Error("migration failed");
+            },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "MIGRATION_FAILED" });
+
+    expect(provider.events).toContain("close-failed");
+    expect(() => registry.getActive()).toThrowError(
+      expect.objectContaining({ code: "NO_ACTIVE_BACKEND" }),
+    );
   });
 });

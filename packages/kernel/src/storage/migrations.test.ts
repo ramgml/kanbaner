@@ -56,6 +56,21 @@ describe("StorageMigrationRunner", () => {
     expect(first).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("различает name и source с переносами строк", () => {
+    const first = computeMigrationChecksum({
+      ...migration(1),
+      name: "a\nb",
+      source: "c",
+    });
+    const second = computeMigrationChecksum({
+      ...migration(1),
+      name: "a",
+      source: "b\nc",
+    });
+
+    expect(first).not.toBe(second);
+  });
+
   it("применяет миграции в детерминированном порядке ровно один раз", async () => {
     const memory = provider();
     const order: string[] = [];
@@ -163,6 +178,60 @@ describe("StorageMigrationRunner", () => {
       );
 
       expect(await memory.documents.get(PLUGIN, "widgets", DOC_ID)).toBeNull();
+      expect(await memory.migrations.list(memory.backendId)).toEqual([]);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  it("не пишет после rollback миграции, если операция задержалась дольше callback", async () => {
+    const memory = new InMemoryStorageProvider({
+      backendId: "memory-migration-late",
+      now: NOW,
+      delays: { operationMs: 5 },
+    });
+    const runner = new StorageMigrationRunner(memory, { now: NOW });
+
+    await memory.open();
+
+    try {
+      const original = await memory.documents.put({
+        pluginId: PLUGIN,
+        collection: "widgets",
+        id: DOC_ID,
+        data: { title: "Original" },
+        expectedVersion: 0,
+      });
+      let pending: Promise<unknown> | undefined;
+
+      await expectCode(
+        runner.run([
+          migration(1, "late", async ({ transaction }) => {
+            pending = transaction.documents.put({
+              pluginId: PLUGIN,
+              collection: "widgets",
+              id: DOC_ID,
+              data: { title: "Late" },
+              expectedVersion: 1,
+            });
+            throw new Error("migration rollback");
+          }),
+        ]),
+        "MIGRATION_FAILED",
+      );
+
+      const settled = await Promise.allSettled([pending]);
+
+      expect(settled[0]?.status).toBe("rejected");
+
+      if (settled[0]?.status === "rejected") {
+        expect((settled[0].reason as { readonly code?: string }).code).toBe("TRANSACTION_CLOSED");
+      }
+
+      const document = await memory.documents.get(PLUGIN, "widgets", DOC_ID);
+
+      expect(document?.version).toBe(original.version);
+      expect(document?.data).toEqual(original.data);
       expect(await memory.migrations.list(memory.backendId)).toEqual([]);
     } finally {
       await memory.close();

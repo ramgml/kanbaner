@@ -13,6 +13,7 @@ import {
   isApplicationId,
   isBackendId,
   isCollectionName,
+  isJsonObjectValue,
   isJsonValueInput,
   isMvpStorageProvider,
   isSameStoreContract,
@@ -117,5 +118,16 @@ describe("публичные контракты Storage", () => {
     expect(isJsonValueInput(undefined)).toBe(false);
     expect(isJsonValueInput(Number.NaN)).toBe(false);
     expect(isJsonValueInput(new Date())).toBe(false);
+  });
+
+  it("проверяет plain JSON-объект глубоко", () => {
+    expect(isJsonObjectValue({ nested: { value: 1 } })).toBe(true);
+    expect(isJsonObjectValue(Object.assign(Object.create(null), { value: 1 }))).toBe(true);
+    expect(isJsonObjectValue({ value: undefined })).toBe(false);
+    expect(isJsonObjectValue({ value: Number.NaN })).toBe(false);
+    expect(isJsonObjectValue({ value: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(isJsonObjectValue(new Date())).toBe(false);
+    expect(isJsonObjectValue(new Map())).toBe(false);
+    expect(isJsonObjectValue([1, 2])).toBe(false);
   });
 });
