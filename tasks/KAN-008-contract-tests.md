@@ -1,7 +1,7 @@
 ---
 id: KAN-008
 title: Тестовый плагин и контрактные проверки
-status: backlog
+status: blocked
 stage: 1
 priority: high
 owner: unassigned
@@ -17,7 +17,7 @@ blocked_by:
 branch: null
 worktree: null
 created: 2026-11-06
-updated: 2026-11-06
+updated: 2026-11-07
 specs:
   - specs/technology-stack.md
   - specs/plugin-contract.md
@@ -144,6 +144,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Все зависимости завершены, но запуск заблокирован конфликтом: фактический `PluginActivationContext` из KAN-003 содержит только `pluginId`, `manifest`, `directory`, `hostApiVersion`, `logger`, тогда как fixture должен зарегистрировать commands/queries/events/resources через lifecycle без изменения ядра. Требуется явное решение пользователя о расширении composition-контракта и границ KAN-008.
 - 2026-11-06 — Задача создана.
 - 2026-11-06 — Добавлены in-memory PGlite и matrix Linux/Windows.
 - 2026-11-06 — PGlite заменён на SQLite WAL; добавлен Storage Provider Conformance Suite.
