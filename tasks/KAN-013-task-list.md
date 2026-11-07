@@ -1,14 +1,13 @@
 ---
 id: KAN-013
 title: Список задач
-status: ready
+status: in_progress
 stage: 2
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-012
-branch: null
-worktree: null
+owner: worker-kan-013
+blocked_by: []
+branch: feat/kan-013-task-list
+worktree: .worktrees/kan-013-task-list
 created: 2026-11-07
 updated: 2026-11-07
 specs:
