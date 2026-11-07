@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/contract.ts"],
+  entry: ["src/index.ts", "src/contract.ts", "src/testing.ts"],
   format: ["esm"],
   target: "node24",
   // Каждый entrypoint собирается отдельно: client-safe `contract.js` не должен
