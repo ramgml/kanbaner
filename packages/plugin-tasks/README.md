@@ -4,16 +4,18 @@
 модель проектов и задач, TypeBox/JSON Schema, метаданные команд и запросов,
 `TasksStore`, `ResourceRef`, события и поисковое представление.
 
-В этой итерации (KAN-010 и KAN-011) пакет **не содержит** UI, SQL, миграций и
-активации. `TasksStore` реализован поверх namespaced `PluginDocumentStore`.
-Активация, регистрация команд и запросов, публикация событий, поиск, exposure и
-`Idempotency-Key` — KAN-012. Представления списка и канбана — KAN-013 и KAN-014.
+Начиная с KAN-012 пакет — рабочий **headless-плагин**: `activate` регистрирует
+команды, запросы и типы ресурсов, выполняет мутации в транзакциях, публикует
+события после коммита, поддерживает `Idempotency-Key` и обновляет поисковый
+индекс. UI, SQL и миграций в пакете нет: `TasksStore` работает поверх
+namespaced `PluginDocumentStore`. Представления списка и канбана — KAN-013 и
+KAN-014.
 
 ## Точки входа
 
-- `@kanbaner/plugin-tasks` — серверная точка входа. Экспортирует client-safe
-  контракт, метаданные операций и контракт `TasksStore`. Её используют
-  composition root и реализация плагина.
+- `@kanbaner/plugin-tasks` — серверная точка входа. Экспортирует `activate`,
+  client-safe контракт, метаданные операций и контракт `TasksStore`. Её
+  используют composition root и runtime плагинов.
 - `@kanbaner/plugin-tasks/contract` — client-safe entrypoint. Только типы,
   TypeBox-схемы, ID, `ResourceRef`, чистые валидаторы, backend-neutral
   компараторы списков, payload событий и преобразование в
@@ -29,6 +31,10 @@
 - `src/model.ts` — `Project`, `Task`, статусы, приоритеты и сортировка.
 - `src/schemas/*.ts` — TypeBox-схемы и производные TS-типы.
 - `src/operations.ts` — серверные метаданные команд и запросов для `OperationBus`.
+- `src/activation.ts` — `activate(context)`: регистрация операций, ресурсов,
+  idempotency, событий и поиска.
+- `src/activation/**` — idempotency, конверт ошибок, события, поисковый индекс,
+  снимки задач для diff соседей и per-activation очередь.
 - `src/store.ts` — асинхронный backend-neutral контракт `TasksStore` и
   транзакционный `TasksStoreTransaction`.
 - `src/store/**` — реализация `createTasksStore` поверх bound
@@ -39,7 +45,50 @@
 - `src/listing.ts` — backend-neutral семантика сортировки и фильтров списков.
 - `src/resources.ts` — `ResourceRef` проектов и задач.
 - `src/events.ts` — типы и payload событий после коммита.
-- `src/search.ts` — `toTaskSearchDocument` без записи в индекс.
+- `src/search.ts` — `toTaskSearchDocument`.
+
+## Запуск и активация
+
+Плагин активируется штатным runtime через `KANBANER_PLUGIN_DIRS`. Каталог должен
+содержать пакеты плагинов (для репозитория — `packages/`):
+
+```bash
+KANBANER_PLUGIN_DIRS=packages pnpm dev
+```
+
+`activate` использует только публичный `PluginActivationContext`:
+`commands`, `queries`, `resourceTypes`, `events`, `storage`, `search` и
+`logger`. Ядро и Storage Provider напрямую не импортируются.
+
+Активация:
+
+- проверяет `pluginId === "kanbaner.tasks"`;
+- регистрирует все команды и запросы KAN-010 с `exposure.ui: true`,
+  `http: false`, `mcp: false`;
+- регистрирует типы ресурсов `project` и `task` с `resolve`;
+- запускает best-effort полную переиндексацию задач;
+- создаёт собственную последовательную очередь, которая сериализует доменные
+  транзакции, поисковые эффекты и переиндексацию, чтобы reindex не пересёкся с
+  create/update/delete.
+
+Мутации, idempotency и снимки для diff выполняются в транзакции
+`TasksStore.withTransaction`. Поисковые upsert/delete применяются сразу после
+коммита внутри очереди активации. События публикуются после выхода из очереди,
+но публикация всё ещё ожидается вызывающей командой. Поэтому подписчик может
+через общий `OperationBus` вызвать следующую команду без deadlock: очередь уже
+свободна, а порядок tx → search → events сохранён. Ошибка события или индекса
+логируется и не отменяет зафиксированную команду.
+
+## Ошибки операций
+
+Доменные и storage-ошибки сводятся к стабильным кодам Plugin Contract и
+выбрасываются из обработчика как публичный SDK `PluginOperationError`.
+Kernel `OperationFailure` является его subclass-ом, поэтому шина мапит оба типа
+в `VERSION_CONFLICT`, `NOT_FOUND`, `VALIDATION_ERROR`,
+`IDEMPOTENCY_CONFLICT` и другие коды. Произвольный `Error` остаётся
+`INTERNAL_ERROR` и не раскрывает сообщение, стек или внутренние пути.
+
+Плагин не импортирует ядро и не извлекает конструкторы ошибок из bound-сервисов.
 
 ## Команды
 
@@ -57,6 +106,11 @@
 `project.delete` и `task.delete` требуют `confirm: true` в схеме. Все изменения
 версионируемой сущности требуют `expectedVersion`; создание принимает только
 `expectedVersion: 0`.
+
+Все операции регистрируются с `exposure.ui: true` и выключенными HTTP/MCP.
+Схемы входа и выхода берутся из KAN-010 и не дублируются в activation.
+Разрушительные команды помечены `risk = destructive`, `task.complete` —
+`write`, запросы — `read`.
 
 ## Запросы
 
@@ -155,8 +209,8 @@ await context.commands.execute(TASKS_COMMAND_IDS.taskComplete, {
 // Ссылка на ресурс для связей, поиска и навигации.
 const ref = formatTaskRef("task-1"); // "kanbaner.tasks:task:task-1"
 
-// Чистое преобразование задачи в SearchDocumentInput выполняет сам плагин
-// задач в KAN-012; функция ничего не пишет в индекс и не добавляет pluginId.
+// Чистое преобразование задачи в SearchDocumentInput. Функция ничего не
+// пишет в индекс и не добавляет pluginId; запись выполняет activation.
 const document = toTaskSearchDocument(task);
 ```
 
@@ -191,6 +245,56 @@ eventVersion }`. Envelope использует `resourceVersion = eventVersion =
 version + 1`: update(v3) → delete event(v4). У каждой задачи каскада своя
 `eventVersion`. Tombstone-версия не создаётся. Доставка best-effort,
 обработчик должен быть идемпотентным.
+
+При insert/move/complete/delete activation сравнивает снимки задач проекта до и
+после мутации в той же транзакции. Каждый фактически сдвинутый сосед получает
+`task.updated` со своей новой `position` и `resourceVersion`; основная задача
+операции в этот список не попадает. Для `task.delete` события удалённых задач
+публикуются отдельно от `task.updated` оставшихся соседей.
+
+Все события имеют `source = "kanbaner.tasks"` и `contractVersion = 1`.
+Ошибка публикации или отклонённый конверт логируются и не превращают успешную
+команду в ошибку.
+
+## Idempotency-Key
+
+Команды поддерживают `Idempotency-Key` из `ExecutionContext`:
+
+- результат успешной команды хранится в коллекции `idempotency` namespace
+  `kanbaner.tasks`;
+- проверка ключа, доменная мутация и запись результата выполняются в одной
+  транзакции `TasksStore`; при откате не остаётся ни мутации, ни записи;
+- ID записи — SHA-256 от `operationId` и ключа, а не сам ключ;
+- сравнение ввода выполняется по канонизированному JSON (рекурсивная
+  сортировка ключей) и SHA-256; для create/update ввод заранее нормализуется,
+  включая `normalizeTags`, и нормализованные теги передаются в Store;
+- повтор с тем же operation ID и тем же вводом возвращает сохранённый
+  результат без мутации, события и повторной индексации;
+- другой operation ID или другой ввод с тем же ключом возвращает
+  `IDEMPOTENCY_CONFLICT`;
+- записи с истёкшим TTL (24 часа) не блокируют повторное использование;
+- операции без ключа не дедуплицируются.
+
+Запись результата использует document CAS, поэтому конкурентное использование
+одного ключа не создаёт две успешные мутации.
+
+## Поиск
+
+`toTaskSearchDocument` превращает задачу в документ с `title` и
+`descriptionMarkdown` в тексте, `metadata.projectId` и `metadata.status`.
+Activation:
+
+- делает `upsert` после коммита для созданной, изменённой задачи и сдвинутых
+  соседей;
+- удаляет документы задач при `task.delete` и все документы задач проекта при
+  `project.delete` по `deletedResourceRefs` из Store;
+- при активации выполняет полную переиндексацию задач через
+  `search.reindex`. Она best-effort, идемпотентна и сериализована с мутациями
+  той же активацией, поэтому параллельно созданная задача не теряется;
+- не индексирует проекты: контракт поиска описывает только задачи.
+
+Ошибка индекса логируется; полная переиндексация при следующей активации
+восстанавливает состояние.
 
 ## TasksStore и данные
 
@@ -230,14 +334,14 @@ const store = createTasksStore({
 - возвращает `VERSION_CONFLICT` через `TasksVersionConflictError` с
   `expectedVersion` и `actualVersion`, не перезаписывая документ.
 
-Позиция всегда поддерживается как уникальная и непрерывная `0…N-1` в области
-`(projectId, status)`: append получает `max + 1`, явная позиция и move
+Контракт требует только уникальность и порядок; непрерывность не обязательна.
+Текущая реализация Store на практике поддерживает непрерывную `0…N-1` в
+области `(projectId, status)`: append получает `max + 1`, явная позиция и move
 переставляют соседей в той же транзакции, delete закрывает разрыв. Любой
 фактический сдвиг соседа увеличивает его `Task.version` и `updatedAt` и
 сохраняется через document CAS с текущей `expectedVersion`; публичная версия и
 версия документа всегда синхронны. Соседи меняются атомарно вместе с
-операцией. Отдельные события для них Store пока не публикует — это уточнение
-для KAN-012.
+операцией; `activate` публикует для них `task.updated`.
 
 Все scoped-методы одной `TasksStoreTransaction`, включая чтения, выполняются
 через локальную FIFO-очередь этой транзакции. Составные read-modify-write
@@ -315,6 +419,10 @@ tasks
 ```bash
 pnpm --filter @kanbaner/plugin-tasks build
 pnpm --filter @kanbaner/plugin-tasks typecheck
+pnpm exec vitest run packages/plugin-sdk/src/errors.test.ts packages/kernel/src/operations/bus.test.ts
 pnpm exec vitest run packages/plugin-tasks
 pnpm exec vitest run tests/integration/tasks-store-conformance.test.ts
+pnpm exec vitest run tests/integration/tasks-activation.test.ts
+pnpm check:imports
+node scripts/check-import-boundaries.mjs --self-test
 ```

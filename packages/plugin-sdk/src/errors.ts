@@ -139,6 +139,33 @@ export function createPluginError(
   return error;
 }
 
+/**
+ * Ожидаемая ошибка выполнения операции.
+ *
+ * Плагин выбрасывает её из обработчика, чтобы шина вернула стабильный код
+ * Plugin Contract. Любые другие исключения шина заменяет на безопасный
+ * `INTERNAL_ERROR`. Публичный тип не зависит от ядра.
+ */
+export class PluginOperationError extends Error {
+  override name = "PluginOperationError";
+  readonly error: PluginError;
+
+  constructor(code: PluginErrorCode, message: string, options: PluginErrorOptions = {}) {
+    super(message);
+    this.error = createPluginError(code, message, options);
+  }
+
+  /** Создаёт ошибку из готового конверта `PluginError`. */
+  static from(error: PluginError): PluginOperationError {
+    const options: PluginErrorOptions =
+      error.details === undefined
+        ? { retryable: error.retryable }
+        : { retryable: error.retryable, details: error.details };
+
+    return new PluginOperationError(error.code, error.message, options);
+  }
+}
+
 /** Оборачивает ошибку в единый конверт результата. */
 export function toErrorResult(error: PluginError): ErrorResult {
   return { ok: false, error };
