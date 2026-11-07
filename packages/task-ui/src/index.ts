@@ -59,3 +59,5 @@ export {
   type ErrorStateProps,
   type LoadingStateProps,
 } from "./components/states.tsx";
+export { ModalDialog, type ModalDialogProps } from "./components/modal-dialog.tsx";
+export { useMediaQuery } from "./hooks/use-media-query.ts";

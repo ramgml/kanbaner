@@ -16,6 +16,7 @@
     "@kanbaner/kernel": "workspace:*",
     "@kanbaner/plugin-sdk": "workspace:*",
     "@kanbaner/plugin-task-list": "workspace:*",
+    "@kanbaner/plugin-kanban": "workspace:*",
     "@kanbaner/storage-sqlite": "workspace:*",
     "@kanbaner/task-ui": "workspace:*",
     "class-variance-authority": "0.7.1",
