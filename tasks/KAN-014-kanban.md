@@ -1,14 +1,13 @@
 ---
 id: KAN-014
 title: Канбан
-status: ready
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-013
-branch: null
-worktree: null
+owner: worker-kan-014
+blocked_by: []
+branch: feat/kan-014-kanban
+worktree: .worktrees/kan-014-kanban
 created: 2026-11-07
 updated: 2026-11-07
 specs:
@@ -126,7 +125,9 @@ specs:
   `pnpm-lock.yaml`;
 - `scripts/check-import-boundaries.mjs` — только при необходимости общего
   правила;
-- `packages/plugin-kanban/README.md`.
+- `packages/plugin-kanban/README.md`;
+- `packages/task-ui/**` — только additive общие компоненты/hooks диалога или
+  карточки, если они нужны канбану; существующий API не ломать.
 
 Запрещено:
 
@@ -134,8 +135,8 @@ specs:
 - `packages/plugin-tasks/src/**` — только публичный импорт контракта;
 - `packages/plugin-task-list/**` — только публичный UI-entrypoint, если это
   явно согласовано;
-- `packages/task-ui/**` — использует существующий API; изменения только по
-  согласованию с KAN-013;
+- `packages/task-ui/**` — только существующий API и согласованные additive
+  общие компоненты; breaking changes запрещены;
 - `specs/**`, `tests/contract/**`, файлы других задач.
 
 Общие файлы:
