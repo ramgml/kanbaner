@@ -1,7 +1,7 @@
 ---
 id: KAN-012
 title: Команды, события и поиск задач
-status: in_progress
+status: done
 stage: 2
 priority: high
 owner: worker-kan-012
@@ -44,24 +44,24 @@ specs:
 
 ## Объём работ
 
-- [ ] Реализовать `activate(context)` в `packages/plugin-tasks/src/activation.ts`
+- [x] Реализовать `activate(context)` в `packages/plugin-tasks/src/activation.ts`
       только через публичный `PluginActivationContext`.
-- [ ] Зарегистрировать команды:
+- [x] Зарегистрировать команды:
   - `kanbaner.tasks.project.create|update|delete`;
   - `kanbaner.tasks.task.create|update|move|complete|delete`.
-- [ ] Зарегистрировать запросы:
+- [x] Зарегистрировать запросы:
   - `kanbaner.tasks.project.list|get`;
   - `kanbaner.tasks.task.get|list`.
-- [ ] Использовать схемы KAN-010 в метаданных операций; не дублировать
+- [x] Использовать схемы KAN-010 в метаданных операций; не дублировать
       валидацию вручную.
-- [ ] Назначить риски: `delete` — `destructive`, `complete` — `write`,
+- [x] Назначить риски: `delete` — `destructive`, `complete` — `write`,
       `get`/`list` — `read`.
-- [ ] Включить `exposure.ui: true` только для операций, которые реально нужны
+- [x] Включить `exposure.ui: true` только для операций, которые реально нужны
       UI KAN-013/KAN-014:
       `project.list|get`, `task.get|list`, `project.create|update|delete`,
       `task.create|update|move|complete|delete`. HTTP и MCP оставить
       выключенными до отдельного решения.
-- [ ] Реализовать `Idempotency-Key`:
+- [x] Реализовать `Idempotency-Key`:
   - хранить результат успешной команды в коллекции `idempotency` в namespace
     `kanbaner.tasks`;
   - запись результата и доменная мутация выполняются в одной транзакции;
@@ -74,7 +74,7 @@ specs:
   - неуспешная команда не оставляет записи;
   - записи старше 24 часов можно не учитывать;
   - операции без ключа не дедуплицируются.
-- [ ] Публиковать события после коммита:
+- [x] Публиковать события после коммита:
   - `project.created|updated|deleted`;
   - `task.created|updated|moved|completed|deleted`;
   - `source = "kanbaner.tasks"`, `contractVersion = 1`,
@@ -85,10 +85,10 @@ specs:
     той же транзакции и публиковать `task.updated` для сдвинутых соседей с их
     новыми `position` и `resourceVersion`;
   - ошибка публикации логируется и не отменяет результат команды.
-- [ ] Зарегистрировать типы ресурсов `project` и `task`:
+- [x] Зарегистрировать типы ресурсов `project` и `task`:
   - `resolve` возвращает `ResourceDescriptor` или `null`;
   - `open` не требуется для headless-этапа.
-- [ ] Индексировать задачи:
+- [x] Индексировать задачи:
   - `title` и `descriptionMarkdown` в поисковый документ;
   - `metadata.projectId`, `metadata.status`;
   - `upsert` после коммита;
@@ -96,11 +96,11 @@ specs:
   - полная переиндексация задач при активации плагина: best-effort, не
     блокирует активацию, идемпотентна и не выполняется параллельно с
     create/update/delete через per-plugin очередь.
-- [ ] При удалении проекта вернуть из Store удалённые ссылки и очистить
+- [x] При удалении проекта вернуть из Store удалённые ссылки и очистить
       поисковые документы всех задач проекта.
-- [ ] Убедиться, что удаление ресурса через существующий cleanup подписки
+- [x] Убедиться, что удаление ресурса через существующий cleanup подписки
       ядра не затрагивает чужие связи.
-- [ ] Добавить интеграционные тесты с реальным composition root и SQLite:
+- [x] Добавить интеграционные тесты с реальным composition root и SQLite:
   - полный жизненный цикл проекта и задачи;
   - подзадача и запрет второго уровня;
   - все четыре статуса и `completedAt`;
@@ -117,10 +117,10 @@ specs:
   - переиндексация при активации не теряет параллельно созданную задачу;
   - перезапуск и повторная активация не создают дублей;
   - работа на delayed SQLite.
-- [ ] Расширить `scripts/check-import-boundaries.mjs`: `plugin-tasks` может
+- [x] Расширить `scripts/check-import-boundaries.mjs`: `plugin-tasks` может
       импортировать только `@kanbaner/plugin-sdk` и собственные модули, не
       ядро и не другие плагины.
-- [ ] Обновить README пакета: запуск с `KANBANER_PLUGIN_DIRS`, список
+- [x] Обновить README пакета: запуск с `KANBANER_PLUGIN_DIRS`, список
       операций и событий.
 
 ## Владение файлами
@@ -165,27 +165,27 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Все команды и запросы KAN-010 доступны через общий OperationBus.
-- [ ] Валидация выполняется до записи; частичный успех невозможен.
-- [ ] `expectedVersion` соблюдается, конфликт возвращает `VERSION_CONFLICT`.
-- [ ] `Idempotency-Key` не создаёт дубль и не подменяет чужую операцию.
-- [ ] События публикуются только после коммита; сбой публикации не отменяет
+- [x] Все команды и запросы KAN-010 доступны через общий OperationBus.
+- [x] Валидация выполняется до записи; частичный успех невозможен.
+- [x] `expectedVersion` соблюдается, конфликт возвращает `VERSION_CONFLICT`.
+- [x] `Idempotency-Key` не создаёт дубль и не подменяет чужую операцию.
+- [x] События публикуются только после коммита; сбой публикации не отменяет
       изменения.
-- [ ] `ResourceRef` проекта и задачи разрешается.
-- [ ] Поиск находит задачу и очищается при удалении задачи или проекта.
-- [ ] Плагин не импортирует ядро, SQL и другие плагины.
-- [ ] Перезапуск приложения сохраняет данные и не дублирует индексацию.
-- [ ] Integration-тесты проходят на SQLite и delayed SQLite.
+- [x] `ResourceRef` проекта и задачи разрешается.
+- [x] Поиск находит задачу и очищается при удалении задачи или проекта.
+- [x] Плагин не импортирует ядро, SQL и другие плагины.
+- [x] Перезапуск приложения сохраняет данные и не дублирует индексацию.
+- [x] Integration-тесты проходят на SQLite и delayed SQLite.
 
 ## Проверки
 
-- [ ] Typecheck.
-- [ ] Линтер.
-- [ ] Focused-тесты activation.
-- [ ] Integration-тесты с реальным composition root.
-- [ ] `pnpm check:imports`.
-- [ ] Полный `pnpm check`.
-- [ ] Проверка перезапуска и сохранности данных.
+- [x] Typecheck.
+- [x] Линтер.
+- [x] Focused-тесты activation.
+- [x] Integration-тесты с реальным composition root.
+- [x] `pnpm check:imports`.
+- [x] Полный `pnpm check`.
+- [x] Проверка перезапуска и сохранности данных.
 
 ## Риски
 
@@ -202,6 +202,10 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — KAN-012 влита в `dev` merge-коммитом
+  `11317b407e3ce57995cd06daa908c54675be8401`; strict install, check:imports и
+  полный check зелёные на ветке и `dev`, повторное ревью разрешило интеграцию.
+  Feature-ветка и worktree удалены, задача переведена в done.
 - 2026-11-07 — Независимое ревью нашло deadlock при вызове tasks-команды из
   обработчика события и непереносимый capture приватного `OperationFailure`.
   Оркестратор согласовал additive SDK throwable-тип ошибки операции и
@@ -219,9 +223,13 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `11317b407e3ce57995cd06daa908c54675be8401`; feature-коммиты
+  `17a9ecd`, `6cb63c5`.
+- Ветка: `feat/kan-012-tasks-operations` влита в `dev`; ветка и worktree удалены.
+- Проверки: strict frozen install, `check:imports` и self-test, полный
+  `pnpm check` на ветке и `dev`; 17 focused files / 181 tests, 71 workspace
+  file / 985 tests; 25 activation integration-тестов на SQLite/delayed SQLite.
+- Остаточные риски: события параллельных команд могут переупорядочиваться,
+  подписчики обязаны учитывать `resourceVersion`; sibling payload `position`
+  остаётся additive-полем для отдельного уточнения; полная переиндексация и
+  сдвиги O(N); UI helper пока не принимает Idempotency-Key; Windows не проверен.
