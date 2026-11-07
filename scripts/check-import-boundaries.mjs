@@ -19,6 +19,10 @@ import ts from "typescript";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_PACKAGE = "@kanbaner/plugin-fixture";
 const ALLOWED_FIXTURE_DEPENDENCY = "@kanbaner/plugin-sdk";
+const TASKS_PACKAGE = "@kanbaner/plugin-tasks";
+const TASKS_CONTRACT_ENTRYPOINT = "contract.ts";
+const ALLOWED_TASKS_DEPENDENCIES = new Set(["@kanbaner/plugin-sdk", "@sinclair/typebox"]);
+const SERVER_ONLY_TASKS_BUILTINS = new Set(["node:crypto"]);
 
 /**
  * Запрещённые внешние модули fixture-плагина.
@@ -42,6 +46,32 @@ const FORBIDDEN_MODULE_PATTERNS = [
   { pattern: /(?:^|\/)apps\//iu, label: "apps" },
   { pattern: /packages\/kernel/iu, label: "kernel internals" },
 ];
+
+/**
+ * Запрещённые внешние модули plugin-tasks.
+ *
+ * Плагин может импортировать только публичный SDK, TypeBox для схем и
+ * собственные файлы. `node:crypto` разрешён только серверному графу
+ * (activation/idempotency), но не client-safe contract entrypoint.
+ */
+const FORBIDDEN_TASKS_MODULE_PATTERNS = [
+  { pattern: /^@kanbaner\/kernel(?:\/|$)/iu, label: "kernel" },
+  { pattern: /^@kanbaner\/storage-sqlite(?:\/|$)/iu, label: "storage provider" },
+  {
+    pattern: /^@kanbaner\/plugin-(?:fixture|notes|kanban|search|task-list)(?:\/|$)/iu,
+    label: "другой плагин",
+  },
+  {
+    pattern: /^(?:better-sqlite3|node:sqlite|sqlite3|pg|mysql2?)(?:\/|$)/iu,
+    label: "database driver",
+  },
+  { pattern: /^react(?:-dom)?(?:\/|$)/iu, label: "React" },
+  { pattern: /(?:^|\/)apps\//iu, label: "apps" },
+  { pattern: /packages\/kernel/iu, label: "kernel internals" },
+];
+
+/** Файлы, недостижимые из client-safe contract entrypoint. */
+const TASKS_SERVER_ONLY_FILES = new Set(["store.ts", "operations.ts", "index.ts", "activation.ts"]);
 
 const SQL_PATTERNS = [
   { label: "SELECT", pattern: /\bSELECT\b/iu },
@@ -270,6 +300,166 @@ function analyzeFixtureSources(root, violations) {
   return fixtureRoot;
 }
 
+function resolveRelativeModule(fromFile, specifier) {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.js`,
+    `${base}.mjs`,
+    path.join(base, "index.ts"),
+    path.join(base, "index.js"),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+
+  return base;
+}
+
+/**
+ * Строит граф client-safe entrypoint `contract.ts`.
+ *
+ * В граф попадают только относительные импорты; внешние модули проверяются
+ * отдельно по каждому файлу.
+ */
+function tasksContractGraph(sourceRoot) {
+  const entrypoint = path.join(sourceRoot, TASKS_CONTRACT_ENTRYPOINT);
+  const graph = new Set();
+
+  const visit = (file) => {
+    if (graph.has(file) || !existsSync(file)) {
+      return;
+    }
+
+    graph.add(file);
+
+    for (const reference of moduleReferences(file, readFileSync(file, "utf8"))) {
+      if (reference.specifier.startsWith(".")) {
+        visit(resolveRelativeModule(file, reference.specifier));
+      }
+    }
+  };
+
+  visit(entrypoint);
+
+  return graph;
+}
+
+function isTasksServerOnlyRelative(relativeFile) {
+  return (
+    TASKS_SERVER_ONLY_FILES.has(relativeFile) ||
+    relativeFile === "testing.ts" ||
+    relativeFile.startsWith("activation/") ||
+    relativeFile.startsWith("store/")
+  );
+}
+
+function analyzePluginTasksSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "plugin-tasks");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(packageRoot) || !statSync(packageRoot).isDirectory()) {
+    violations.push({ file: relative(root, packageRoot), rule: "plugin-tasks package is missing" });
+
+    return;
+  }
+
+  const contractGraph = tasksContractGraph(sourceRoot);
+  const files = sourceFiles(sourceRoot).filter((file) => !file.endsWith(".test.ts"));
+
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const relativeFile = path.relative(sourceRoot, file).replaceAll(path.sep, "/");
+    const inContract = contractGraph.has(file);
+
+    if (inContract && isTasksServerOnlyRelative(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: `client-safe contract не должен достигать server-модуля: ${relativeFile}`,
+      });
+    }
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `относительный импорт выходит за пределы plugin-tasks (${kind}): ${specifier}`,
+          });
+        }
+
+        continue;
+      }
+
+      const forbidden = FORBIDDEN_TASKS_MODULE_PATTERNS.find((rule) =>
+        rule.pattern.test(specifier),
+      );
+
+      if (forbidden !== undefined) {
+        violations.push({
+          file: fileLabel,
+          rule: `запрещённый импорт (${kind}): ${specifier} [${forbidden.label}]`,
+        });
+
+        continue;
+      }
+
+      if (ALLOWED_TASKS_DEPENDENCIES.has(specifier)) {
+        continue;
+      }
+
+      if (SERVER_ONLY_TASKS_BUILTINS.has(specifier) || specifier.startsWith("node:")) {
+        if (inContract) {
+          violations.push({
+            file: fileLabel,
+            rule: `client-safe contract не должен импортировать ${specifier} (${kind})`,
+          });
+        }
+
+        continue;
+      }
+
+      violations.push({
+        file: fileLabel,
+        rule: `запрещённый импорт (${kind}): ${specifier}`,
+      });
+    }
+
+    const seenSql = new Set();
+
+    for (const literal of stringLiterals(file, source)) {
+      for (const rule of SQL_PATTERNS) {
+        if (rule.pattern.test(literal) && !seenSql.has(rule.label)) {
+          seenSql.add(rule.label);
+          violations.push({
+            file: fileLabel,
+            rule: `SQL statement вне миграций (${rule.label})`,
+          });
+        }
+      }
+    }
+
+    for (const rule of SYNC_PATTERNS) {
+      if (rule.pattern.test(source)) {
+        violations.push({
+          file: fileLabel,
+          rule: `synchronous storage call: ${rule.label}`,
+        });
+      }
+    }
+  }
+}
+
 function analyzeProductionSources(root, fixtureRoot, violations) {
   const productionRoots = [
     { directory: path.join(root, "packages", "kernel", "src"), label: "ядро" },
@@ -353,6 +543,28 @@ function analyzeManifests(root, violations) {
       }
     }
   }
+
+  const tasksManifest = readJson(path.join(root, "packages", "plugin-tasks", "package.json"));
+
+  if (tasksManifest !== null) {
+    if (tasksManifest.name !== TASKS_PACKAGE) {
+      violations.push({
+        file: "packages/plugin-tasks/package.json",
+        rule: `plugin-tasks package name должен быть ${TASKS_PACKAGE}`,
+      });
+    }
+
+    for (const field of ["dependencies", "peerDependencies"]) {
+      for (const dependency of Object.keys(tasksManifest[field] ?? {})) {
+        if (!ALLOWED_TASKS_DEPENDENCIES.has(dependency)) {
+          violations.push({
+            file: "packages/plugin-tasks/package.json",
+            rule: `plugin-tasks ${field} содержит запрещённую зависимость ${dependency}`,
+          });
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -369,6 +581,8 @@ export function analyzeImportBoundaries(root = ROOT) {
   if (fixtureRoot !== undefined) {
     analyzeProductionSources(root, fixtureRoot, violations);
   }
+
+  analyzePluginTasksSources(root, violations);
 
   analyzeManifests(root, violations);
 
@@ -405,12 +619,23 @@ function assertNoViolation(violations, fileSuffix) {
 function runSelfTest() {
   const root = mkdtempSync(path.join(tmpdir(), "kanbaner-import-boundaries-"));
   const fixtureRoot = path.join(root, "packages", "plugin-fixture");
+  const tasksRoot = path.join(root, "packages", "plugin-tasks");
 
   try {
     writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: {} }));
     writeFile(
       path.join(fixtureRoot, "package.json"),
       JSON.stringify({ dependencies: { [ALLOWED_FIXTURE_DEPENDENCY]: "workspace:*" } }),
+    );
+    writeFile(
+      path.join(tasksRoot, "package.json"),
+      JSON.stringify({
+        name: "@kanbaner/plugin-tasks",
+        dependencies: {
+          "@kanbaner/plugin-sdk": "workspace:*",
+          "@sinclair/typebox": "0.34.52",
+        },
+      }),
     );
     writeFile(
       path.join(root, "packages", "kernel", "package.json"),
@@ -471,6 +696,51 @@ function runSelfTest() {
       ].join("\n"),
     );
 
+    // 7. plugin-tasks: server-модуль может использовать node:crypto.
+    writeFile(
+      path.join(tasksRoot, "src", "activation.ts"),
+      [
+        'import { createHash } from "node:crypto";',
+        'import { constant } from "./good-dep.ts";',
+        "export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');",
+        "export const kept = constant;",
+        "",
+      ].join("\n"),
+    );
+    writeFile(path.join(tasksRoot, "src", "good-dep.ts"), "export const constant = 1;\n");
+    writeFile(
+      path.join(tasksRoot, "src", "contract.ts"),
+      [
+        'import { Type } from "@sinclair/typebox";',
+        'import { constant } from "./good-dep.ts";',
+        'import { serverValue } from "./store.ts";',
+        'import { builtinValue } from "./contract-node.ts";',
+        "export const schema = Type.String();",
+        "export const values = [constant, serverValue, builtinValue];",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(tasksRoot, "src", "store.ts"),
+      'import type { PluginId } from "@kanbaner/plugin-sdk";\nexport const serverValue: PluginId = `kanbaner.tasks`;\n',
+    );
+    writeFile(
+      path.join(tasksRoot, "src", "contract-node.ts"),
+      'import { createHash } from "node:crypto";\nexport const builtinValue = createHash("sha256");\n',
+    );
+    writeFile(
+      path.join(tasksRoot, "src", "kernel-import.ts"),
+      'import { describeKernel } from "@kanbaner/kernel";\nexport const value = describeKernel;\n',
+    );
+    writeFile(
+      path.join(tasksRoot, "src", "other-plugin.ts"),
+      'import { activate } from "@kanbaner/plugin-fixture";\nexport const value = activate;\n',
+    );
+    writeFile(
+      path.join(tasksRoot, "src", "sql.ts"),
+      'export const statement = "select * from tasks";\n',
+    );
+
     const violations = analyzeImportBoundaries(root);
 
     assertViolation(
@@ -492,12 +762,36 @@ function runSelfTest() {
       "packages/kernel/src/leak.ts",
       "ядро не должен ссылаться на fixture",
     );
-    assertNoViolation(violations, "good.ts");
+    assertViolation(
+      violations,
+      "packages/plugin-tasks/src/store.ts",
+      "client-safe contract не должен достигать server-модуля",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-tasks/src/contract-node.ts",
+      "client-safe contract не должен импортировать node:crypto",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-tasks/src/kernel-import.ts",
+      "запрещённый импорт (import): @kanbaner/kernel",
+    );
+    assertViolation(
+      violations,
+      "packages/plugin-tasks/src/other-plugin.ts",
+      "запрещённый импорт (import): @kanbaner/plugin-fixture",
+    );
+    assertViolation(violations, "packages/plugin-tasks/src/sql.ts", "SQL statement вне миграций");
+    assertNoViolation(violations, "packages/plugin-fixture/src/good.ts");
+    assertNoViolation(violations, "packages/plugin-tasks/src/good-dep.ts");
+    assertNoViolation(violations, "packages/plugin-tasks/src/activation.ts");
+    assertNoViolation(violations, "packages/plugin-tasks/src/contract.ts");
 
     console.log(
       `Import boundary self-test: ${String(violations.length)} violation(s) в ${String(
         new Set(violations.map((violation) => violation.file)).size,
-      )} файле(ах); правила relative/side-effect/SQL/production проверены.`,
+      )} файле(ах); правила relative/side-effect/SQL/production/contract проверены.`,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -518,5 +812,8 @@ if (process.argv.includes("--self-test")) {
   } else {
     console.log("Import boundaries: plugin-fixture использует только @kanbaner/plugin-sdk.");
     console.log("Import boundaries: kernel/plugin-sdk/apps не зависят от fixture.");
+    console.log(
+      "Import boundaries: plugin-tasks не импортирует kernel, SQL, драйверы и другие плагины; contract не достигает server-модулей.",
+    );
   }
 }

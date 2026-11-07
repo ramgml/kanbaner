@@ -9,3 +9,4 @@ export * from "./contract.ts";
 export * from "./operations.ts";
 export * from "./store.ts";
 export * from "./store/index.ts";
+export { activate, type TasksActivationContext } from "./activation.ts";
