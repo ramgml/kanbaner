@@ -299,40 +299,47 @@ created_at
 
 ### 8.5. Плагин задач
 
+Доменные данные задач хранятся в namespaced document collections плагина:
+
 ```text
-tasks_projects
-tasks_tasks
-tasks_tags
-tasks_task_tags
+projects
+tasks
 ```
 
-Основные поля задачи:
+Теги входят в документ задачи. Конкретные имена `tasks_*` и физическая схема
+остаются деталью Storage Provider и не входят в публичный контракт.
+
+Логические поля задачи:
 
 ```text
 id
-project_id
-parent_task_id
+projectId
+parentTaskId
 title
-description_markdown
+descriptionMarkdown
 status
 priority
-due_at
+dueAt
 position
+tags
 version
-created_at
-updated_at
-completed_at
+createdAt
+updatedAt
+completedAt
 ```
 
 Правила:
 
 - `status` ограничен четырьмя фиксированными значениями;
-- `parent_task_id` допускает только один уровень вложенности;
-- `position` определяет порядок внутри проекта и статуса;
+- `parentTaskId` допускает только один уровень вложенности;
+- `position` уникальна и определяет порядок в области `(projectId, status)`;
+  `parentTaskId` на область не влияет, непрерывность `0…N-1` не требуется;
+- теги нормализуются и ограничены по количеству и длине;
 - `version` увеличивается при каждом изменении;
-- изменения принимают `expectedVersion`;
+- изменения принимают `expectedVersion`, создание принимает `0`;
 - при конфликте возвращается `VERSION_CONFLICT`;
-- проект и его задачи изменяются в транзакции плагина.
+- проект и его задачи изменяются в транзакции плагина;
+- удаление проекта и задачи требует явного подтверждения.
 
 ### 8.6. Плагин заметок
 

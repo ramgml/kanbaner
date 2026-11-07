@@ -1,0 +1,283 @@
+import { isUtcTimestamp, type UtcTimestamp } from "@kanbaner/plugin-sdk";
+
+import {
+  DEFAULT_LIST_LIMIT,
+  MAX_LIST_LIMIT,
+  MAX_POSITION,
+  MAX_TAG_LENGTH,
+  MAX_TAGS,
+  MAX_TITLE_LENGTH,
+} from "./constants.ts";
+import type { TaskStatus } from "./model.ts";
+
+/** Коды доменных ошибок валидации. */
+export const TASKS_VALIDATION_CODES = [
+  "INVALID_TITLE",
+  "INVALID_TAGS",
+  "INVALID_TAG",
+  "TAG_EMPTY",
+  "TAG_TOO_LONG",
+  "TAG_LIMIT",
+  "INVALID_POSITION",
+  "INVALID_LIMIT",
+  "INVALID_OFFSET",
+  "INVALID_EXPECTED_VERSION",
+  "INVALID_TIMESTAMP",
+  "PARENT_NOT_FOUND",
+  "PARENT_IN_OTHER_PROJECT",
+  "SUBTASK_DEPTH_EXCEEDED",
+] as const;
+
+export type TasksValidationCode = (typeof TASKS_VALIDATION_CODES)[number];
+
+export interface TasksValidationFailure {
+  readonly ok: false;
+  readonly code: TasksValidationCode;
+  readonly message: string;
+}
+
+export type TasksValidationResult<Value> =
+  { readonly ok: true; readonly value: Value } | TasksValidationFailure;
+
+/** Ошибка чистой доменной валидации с безопасным сообщением. */
+export class TasksValidationError extends Error {
+  override readonly name = "TasksValidationError";
+  readonly code: TasksValidationCode;
+
+  constructor(code: TasksValidationCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function failure(code: TasksValidationCode, message: string): TasksValidationFailure {
+  return { ok: false, code, message };
+}
+
+/** Минимальный снимок родительской задачи для проверки вложенности. */
+export interface ParentTaskSnapshot {
+  readonly id: string;
+  readonly projectId: string;
+  readonly parentTaskId: string | null;
+}
+
+/** Проверяет и нормализует заголовок. */
+export function validateTitle(value: unknown): TasksValidationResult<string> {
+  if (typeof value !== "string") {
+    return failure("INVALID_TITLE", "Заголовок должен быть строкой");
+  }
+
+  const title = value.trim();
+
+  if (title.length === 0) {
+    return failure("INVALID_TITLE", "Заголовок не может быть пустым");
+  }
+
+  if (title.length > MAX_TITLE_LENGTH) {
+    return failure("INVALID_TITLE", `Заголовок не может быть длиннее ${MAX_TITLE_LENGTH} символов`);
+  }
+
+  return { ok: true, value: title };
+}
+
+/** Нормализует теги и проверяет лимиты; бросает `TasksValidationError`. */
+export function normalizeTags(tags: readonly string[]): readonly string[] {
+  const result = validateTags(tags);
+
+  if (!result.ok) {
+    throw new TasksValidationError(result.code, result.message);
+  }
+
+  return result.value;
+}
+
+/**
+ * Проверяет и нормализует теги: trim, нижний регистр, дедупликация,
+ * лимит количества и длины.
+ */
+export function validateTags(value: unknown): TasksValidationResult<readonly string[]> {
+  if (!Array.isArray(value)) {
+    return failure("INVALID_TAGS", "Теги должны быть массивом строк");
+  }
+
+  const normalized: string[] = [];
+
+  for (const candidate of value) {
+    if (typeof candidate !== "string") {
+      return failure("INVALID_TAG", "Каждый тег должен быть строкой");
+    }
+
+    const tag = candidate.trim().toLowerCase();
+
+    if (tag.length === 0) {
+      return failure("TAG_EMPTY", "Тег не может быть пустым");
+    }
+
+    if (tag.length > MAX_TAG_LENGTH) {
+      return failure("TAG_TOO_LONG", `Тег не может быть длиннее ${MAX_TAG_LENGTH} символов`);
+    }
+
+    if (!normalized.includes(tag)) {
+      normalized.push(tag);
+    }
+  }
+
+  if (normalized.length > MAX_TAGS) {
+    return failure("TAG_LIMIT", `У задачи не может быть больше ${MAX_TAGS} тегов`);
+  }
+
+  return { ok: true, value: Object.freeze(normalized) };
+}
+
+/**
+ * Проверяет родителя подзадачи.
+ *
+ * Подзадача может ссылаться только на корневую задачу того же проекта.
+ * `null` и `undefined` означают, что родитель не найден.
+ */
+export function validateSubtaskParent(
+  childProjectId: string,
+  parent: ParentTaskSnapshot | null | undefined,
+): TasksValidationResult<{ readonly parentTaskId: string | null }> {
+  if (parent === null || parent === undefined) {
+    return failure("PARENT_NOT_FOUND", "Родительская задача не найдена");
+  }
+
+  if (parent.projectId !== childProjectId) {
+    return failure("PARENT_IN_OTHER_PROJECT", "Родительская задача принадлежит другому проекту");
+  }
+
+  if (parent.parentTaskId !== null) {
+    return failure(
+      "SUBTASK_DEPTH_EXCEEDED",
+      "Подзадача может иметь только один уровень вложенности",
+    );
+  }
+
+  return { ok: true, value: { parentTaskId: parent.id } };
+}
+
+/**
+ * Вычисляет `completedAt` при смене статуса.
+ *
+ * `done` фиксирует время один раз, выход из `done` очищает поле.
+ */
+export function resolveCompletedAt(
+  status: TaskStatus,
+  previousCompletedAt: UtcTimestamp | null,
+  now: UtcTimestamp,
+): UtcTimestamp | null {
+  if (!isUtcTimestamp(now)) {
+    throw new TasksValidationError("INVALID_TIMESTAMP", "Текущее время должно быть UTC timestamp");
+  }
+
+  if (previousCompletedAt !== null && !isUtcTimestamp(previousCompletedAt)) {
+    throw new TasksValidationError(
+      "INVALID_TIMESTAMP",
+      "Предыдущий completedAt должен быть UTC timestamp",
+    );
+  }
+
+  if (status !== "done") {
+    return null;
+  }
+
+  return previousCompletedAt ?? now;
+}
+
+/**
+ * Возвращает ключ области уникальности позиции `(projectId, status)`.
+ *
+ * `parentTaskId` намеренно не входит в область: подзадачи и корневые задачи
+ * одного проекта и статуса упорядочиваются вместе. Непрерывность `0…N-1` не
+ * требуется.
+ */
+export function taskPositionScopeKey(projectId: string, status: TaskStatus): string {
+  return `${projectId}:${status}`;
+}
+
+/**
+ * Проверяет позицию задачи.
+ *
+ * Проверяется только диапазон; уникальность и порядок обеспечиваются Store в
+ * области `(projectId, status)`. Непрерывность позиций не требуется.
+ */
+export function validatePosition(value: unknown): TasksValidationResult<number> {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return failure("INVALID_POSITION", "Позиция должна быть целым числом");
+  }
+
+  if (value < 0 || value > MAX_POSITION) {
+    return failure("INVALID_POSITION", `Позиция должна быть в диапазоне 0..${MAX_POSITION}`);
+  }
+
+  return { ok: true, value };
+}
+
+/** Проверяет лимит страницы. */
+export function validateLimit(
+  value: unknown,
+  options: { readonly defaultLimit?: number; readonly maxLimit?: number } = {},
+): TasksValidationResult<number> {
+  const maxLimit = options.maxLimit ?? MAX_LIST_LIMIT;
+
+  if (value === undefined) {
+    return { ok: true, value: options.defaultLimit ?? DEFAULT_LIST_LIMIT };
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > maxLimit) {
+    return failure("INVALID_LIMIT", `Лимит должен быть целым числом в диапазоне 1..${maxLimit}`);
+  }
+
+  return { ok: true, value };
+}
+
+/** Проверяет смещение страницы. */
+export function validateOffset(value: unknown): TasksValidationResult<number> {
+  if (value === undefined) {
+    return { ok: true, value: 0 };
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return failure("INVALID_OFFSET", "Смещение должно быть целым неотрицательным числом");
+  }
+
+  return { ok: true, value };
+}
+
+/** Проверяет `limit`/`offset` и подставляет значения по умолчанию. */
+export function validatePagination(
+  input: { readonly limit?: unknown; readonly offset?: unknown },
+  options: { readonly defaultLimit?: number; readonly maxLimit?: number } = {},
+): TasksValidationResult<{ readonly limit: number; readonly offset: number }> {
+  const limit = validateLimit(input.limit, options);
+
+  if (!limit.ok) {
+    return limit;
+  }
+
+  const offset = validateOffset(input.offset);
+
+  if (!offset.ok) {
+    return offset;
+  }
+
+  return { ok: true, value: { limit: limit.value, offset: offset.value } };
+}
+
+/** Проверяет `expectedVersion`; для создания допустим только 0. */
+export function validateExpectedVersion(
+  value: unknown,
+  options: { readonly allowZero?: boolean } = {},
+): TasksValidationResult<number> {
+  const minimum = options.allowZero === true ? 0 : 1;
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
+    return failure(
+      "INVALID_EXPECTED_VERSION",
+      `expectedVersion должен быть целым числом ≥ ${minimum}`,
+    );
+  }
+
+  return { ok: true, value };
+}
