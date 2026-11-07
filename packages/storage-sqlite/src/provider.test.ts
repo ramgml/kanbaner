@@ -593,3 +593,129 @@ describe("SQLite provider: stack-aware savepoint scheduling", () => {
     ).not.toBeNull();
   });
 });
+
+describe("SQLite provider: deadlock планировщика", () => {
+  it(
+    "depth 1: await операции parent scope внутри child callback даёт SCHEDULING_DEADLOCK",
+    { timeout: 3_000 },
+    async () => {
+      const provider = await createOpenedProvider();
+
+      const result = await provider.withTransaction(async (transaction) => {
+        return transaction.withSavepoint(async (nested) => {
+          await expect(
+            transaction.documents.put(documentInput("01JDEADLOCK00000000000000001")),
+          ).rejects.toMatchObject({
+            code: "INVALID_ARGUMENT",
+            details: { reason: "SCHEDULING_DEADLOCK", operation: "operation" },
+          });
+
+          // Собственный scope продолжает работать после обработанной ошибки.
+          await nested.documents.put(documentInput("01JDEADLOCK00000000000000002"));
+
+          return "committed";
+        });
+      });
+
+      expect(result).toBe("committed");
+
+      const documents = await provider.documents.list("acme.widgets", "widgets");
+
+      expect(documents.map((document) => document.id)).toEqual(["01JDEADLOCK00000000000000002"]);
+
+      // Provider принимает новые операции и корректно закрывается.
+      await provider.documents.put(documentInput("01JDEADLOCK00000000000000003"));
+      await provider.close();
+    },
+  );
+
+  it(
+    "depth 2: await операции parent scope внутри grandchild callback даёт SCHEDULING_DEADLOCK",
+    { timeout: 3_000 },
+    async () => {
+      const provider = await createOpenedProvider();
+
+      await provider.withTransaction(async (transaction) => {
+        await transaction.withSavepoint(async (child) => {
+          await child.withSavepoint(async (grandchild) => {
+            await expect(
+              child.documents.put(documentInput("01JDEADLOCK00000000000000011")),
+            ).rejects.toMatchObject({
+              code: "INVALID_ARGUMENT",
+              details: { reason: "SCHEDULING_DEADLOCK", operation: "operation" },
+            });
+
+            await grandchild.documents.put(documentInput("01JDEADLOCK00000000000000012"));
+          });
+        });
+      });
+
+      const documents = await provider.documents.list("acme.widgets", "widgets");
+
+      expect(documents.map((document) => document.id)).toEqual(["01JDEADLOCK00000000000000012"]);
+
+      await provider.close();
+    },
+  );
+
+  it(
+    "await sibling savepoint из активного callback даёт SCHEDULING_DEADLOCK",
+    { timeout: 3_000 },
+    async () => {
+      const provider = await createOpenedProvider();
+
+      await provider.withTransaction(async (transaction) => {
+        await transaction.withSavepoint(async (child) => {
+          await expect(
+            transaction.withSavepoint(async (sibling) => {
+              await sibling.documents.put(documentInput("01JDEADLOCK00000000000000021"));
+            }),
+          ).rejects.toMatchObject({
+            code: "INVALID_ARGUMENT",
+            details: { reason: "SCHEDULING_DEADLOCK", operation: "savepoint" },
+          });
+
+          // Допустимый вложенный savepoint и store op в своём scope работают.
+          await child.withSavepoint(async (nested) => {
+            await nested.documents.put(documentInput("01JDEADLOCK00000000000000022"));
+          });
+          await child.documents.put(documentInput("01JDEADLOCK00000000000000023"));
+        });
+      });
+
+      const documents = await provider.documents.list("acme.widgets", "widgets");
+
+      expect(documents.map((document) => document.id).sort()).toEqual([
+        "01JDEADLOCK00000000000000022",
+        "01JDEADLOCK00000000000000023",
+      ]);
+
+      await provider.close();
+    },
+  );
+
+  it(
+    "необработанный scheduling deadlock откатывает транзакцию, provider остаётся рабочим",
+    { timeout: 3_000 },
+    async () => {
+      const provider = await createOpenedProvider();
+
+      await expect(
+        provider.withTransaction(async (transaction) => {
+          await transaction.withSavepoint(async (child) => {
+            await child.documents.put(documentInput("01JDEADLOCK00000000000000031"));
+            await transaction.documents.put(documentInput("01JDEADLOCK00000000000000032"));
+          });
+        }),
+      ).rejects.toMatchObject({
+        code: "INVALID_ARGUMENT",
+        details: { reason: "SCHEDULING_DEADLOCK" },
+      });
+
+      expect(await provider.documents.list("acme.widgets", "widgets")).toEqual([]);
+
+      await provider.documents.put(documentInput("01JDEADLOCK00000000000000033"));
+      await provider.close();
+    },
+  );
+});
