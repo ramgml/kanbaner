@@ -1,13 +1,13 @@
 ---
 id: KAN-010
 title: Доменные контракты задач
-status: in_progress
+status: ready
 stage: 2
 priority: high
-owner: worker-kan-010
+owner: unassigned
 blocked_by: []
-branch: feat/kan-010-tasks-domain-contracts
-worktree: .worktrees/kan-010-tasks-domain-contracts
+branch: null
+worktree: null
 created: 2026-11-07
 updated: 2026-11-07
 specs:
@@ -33,18 +33,33 @@ specs:
 
 - Пакет `@kanbaner/plugin-tasks` собирается и экспортирует типы, схемы, ID и
   чистые функции валидации.
+- Серверный entrypoint `@kanbaner/plugin-tasks` содержит `activate` и Store, а
+  client-safe entrypoint `@kanbaner/plugin-tasks/contract` — только типы, схемы,
+  ID, валидаторы и преобразование в поисковый документ, без Node.js и серверного
+  кода.
 - Команды и запросы описаны JSON Schema через TypeBox и пригодны для
   регистрации в OperationBus без дополнительного слоя.
 - `TasksStore` описывает асинхронный backend-neutral контракт хранения.
-- Другие плагины используют только публичные command/query ID и `ResourceRef`,
-  не импортируя внутренние модули `plugin-tasks`.
+- Другие плагины используют только публичные command/query ID, `ResourceRef` и
+  `@kanbaner/plugin-tasks/contract`, не импортируя внутренние модули и серверный
+  entrypoint `plugin-tasks`.
 
 ## Объём работ
 
 - [ ] Создать scaffold пакета: `package.json`, `tsconfig.json`, `tsup.config.ts`,
       `plugin.json`, `README.md`, точка входа `src/index.ts`.
+- [ ] Выделить client-safe entrypoint:
+  - `src/contract.ts` без импортов Node.js, Store, `activate` и серверных
+    модулей;
+  - subpath export `./contract` в `package.json`;
+  - тест, что импорт `@kanbaner/plugin-tasks/contract` не тянет серверный
+    entrypoint и не содержит обращений к `node:*`.
 - [ ] Зафиксировать константы: `PLUGIN_ID = "kanbaner.tasks"`, коллекции,
       типы ресурсов `project` и `task`, ID команд, запросов и событий.
+- [ ] Зафиксировать manifest: `provides` содержит
+      `kanbaner.tasks.commands.v1`, `kanbaner.tasks.queries.v1` и
+      `kanbaner.tasks.events.v1`; `migrations` не указывается, пока нет
+      SQL-миграций.
 - [ ] Описать модель:
   - `Project`: `id`, `title`, `descriptionMarkdown`, `version`, `createdAt`,
     `updatedAt`;
@@ -53,6 +68,8 @@ specs:
     `version`, `createdAt`, `updatedAt`, `completedAt`.
 - [ ] Зафиксировать перечисления: статусы `backlog | todo | in_progress | done`,
       приоритеты `low | medium | high`.
+- [ ] Зафиксировать инвариант позиции: она уникальна в пределах
+      `(projectId, status)` и не зависит от `parentTaskId`.
 - [ ] Описать TypeBox-схемы и производные TS-типы для операций:
   - `project.create`, `project.update`, `project.delete`;
   - `task.create`, `task.update`, `task.move`, `task.complete`, `task.delete`;
@@ -119,6 +136,9 @@ specs:
 ## Критерии приёмки
 
 - [ ] `pnpm build:packages` собирает пакет и `.d.ts`.
+- [ ] `@kanbaner/plugin-tasks/contract` не импортирует `activate`, Store,
+      `node:*`, SQL и серверные модули.
+- [ ] Manifest объявляет `provides` для commands/queries/events контрактов.
 - [ ] Схемы принимают валидный ввод и отклоняют неверные статусы, приоритеты,
       пустые заголовки, отрицательные позиции и слишком большие `limit`.
 - [ ] Доменные валидаторы запрещают подзадачу второго уровня и задачу с
@@ -153,6 +173,14 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — По итогам проверки задач добавлены client-safe entrypoint
+  `./contract`, явный manifest `provides` и инвариант позиции
+  `(projectId, status)`.
+- 2026-11-07 — Работа остановлена до реализации по требованию пользователя.
+  Задача возвращена в `ready`, `owner`, `branch` и `worktree` очищены. В
+  `.worktrees/kan-010-tasks-domain-contracts` остаётся незакоммиченная
+  заготовка; она не считается принятой и будет пересоздана или продолжена
+  только после отдельного решения.
 - 2026-11-07 — Задача создана при старте этапа 2. Зафиксировано решение:
   домен хранится через namespaced document collections, потому что публичный
   storage facade плагина не раскрывает SQL и не даёт создавать собственные

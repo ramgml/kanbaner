@@ -47,10 +47,17 @@ specs:
 - [ ] Расширить публичные props UI-вклада: передавать `invoke(operationId,
       input)` из shell. Плагин не импортирует server actions и не обращается к
       базе.
+- [ ] Описать React-free тип `UiOperationInvoker` и props представления в
+      `packages/task-ui`; `apps/web` передаёт структурно совместимую
+      реализацию. UI-плагины не импортируют `apps/web/src/ui/**`, server
+      actions и типы shell.
 - [ ] Добавить в клиентский реестр способ привязать реальный React-рендерер к
-      уже полученным с сервера метаданным без дублирования вклада.
+      уже полученным с сервера метаданным без дублирования вклада. Привязка
+      идемпотентна, заменяет прежний рендерер и очищается при регистрации
+      нового набора.
 - [ ] Серверные метаданные остаются источником доступности: если плагин
       отключён, его вклад не рендерится, даже если код есть в бандле.
+      Исчезновение метаданных удаляет и рендерер.
 - [ ] Добавить `apps/web/src/ui/builtin-ui-plugins.ts` — composition-модуль,
       который импортирует UI-entrypoint встроенных плагинов. Shell и слоты не
       импортируют доменные плагины напрямую.
@@ -62,11 +69,15 @@ specs:
 
 - [ ] Создать `packages/task-ui` — библиотеку представления без собственного
       plugin ID: `TaskCard`, `TaskTable`, `TaskDetails`, `TaskForm`,
-      `TaskFilters`, состояния загрузки/пустоты/ошибки.
+      `TaskFilters`, состояния загрузки/пустоты/ошибки, React-free тип
+      `UiOperationInvoker`.
+- [ ] Зафиксировать `packages/task-ui` в `specs/architecture.md` как общую
+      библиотеку представления задач, не являющуюся плагином.
 - [ ] Использовать только React, Tailwind-классы и семантические элементы.
       Не подключать вторую component library и не импортировать
       `apps/web/src/components/ui/**`.
-- [ ] Типы операций брать из публичного контракта `@kanbaner/plugin-tasks`;
+- [ ] Типы операций, ID и схемы брать только из
+      `@kanbaner/plugin-tasks/contract`; корневой серверный entrypoint и
       внутренние модули пакета не импортировать.
 - [ ] Обеспечить клавиатурную навигацию, видимый фокус, `aria-*` для фильтров,
       таблицы, диалогов и сообщений об ошибках.
@@ -76,7 +87,8 @@ specs:
 - [ ] Создать `packages/plugin-task-list`: manifest, `server` entrypoint без
       доменной логики, `ui` entrypoint.
 - [ ] Manifest: `requires: { "kanbaner.tasks": "^1.0.0" }`, permissions
-      `commands`, `events`, `ui`.
+      `commands`, `events`, `ui`, `provides: ["kanbaner.task-list.ui.v1"]`,
+      `consumes: ["kanbaner.tasks.commands.v1", "kanbaner.tasks.queries.v1"]`.
 - [ ] Зарегистрировать вклад `kind: "view"`, `slot: "app.main"`,
       `route: "/view/tasks"`.
 - [ ] Зарегистрировать навигационный вклад в `app.sidebar`.
@@ -129,6 +141,8 @@ specs:
 - `apps/web/e2e/task-list.spec.ts`, `apps/web/e2e/test-environment.ts`;
 - `apps/web/package.json`, корневой `package.json` (`build:packages`),
   `pnpm-lock.yaml`;
+- `specs/architecture.md` — только фиксация `packages/task-ui` в package
+  layout;
 - `scripts/check-import-boundaries.mjs` — только правило для UI-entrypoint;
 - `packages/plugin-task-list/README.md`.
 
@@ -137,7 +151,9 @@ specs:
 - `packages/kernel/**`, `packages/plugin-sdk/**`, `packages/storage-sqlite/**`;
 - `packages/plugin-tasks/src/**` — только публичный импорт контракта;
 - `packages/plugin-kanban/**`;
-- `specs/**`, `tests/contract/**`, файлы других задач.
+- `specs/**`, кроме точечной фиксации `packages/task-ui` в
+  `specs/architecture.md`;
+- `tests/contract/**`, файлы других задач.
 
 Общие файлы:
 
@@ -166,6 +182,10 @@ specs:
 - [ ] Drag-and-drop не используется как единственный способ действия.
 - [ ] Shell не импортирует доменные плагины; импорт есть только в
       composition-модуле UI.
+- [ ] UI-плагины используют только `@kanbaner/plugin-tasks/contract`, не
+      корневой серверный entrypoint.
+- [ ] Привязка рендерера идемпотентна: повторная регистрация не создаёт
+      дубликат, а исчезновение серверных метаданных убирает вклад.
 - [ ] Отключение списка не влияет на данные и API задач.
 - [ ] Нет второй component library и импортов внутренностей `apps/web` из
       плагинов.
@@ -192,6 +212,10 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — По итогам проверки задач зафиксированы React-free тип
+  `invoke` в `task-ui`, импорт только из `@kanbaner/plugin-tasks/contract`,
+  `consumes` контрактов tasks, идемпотентная привязка рендерера и запись
+  `task-ui` в architecture package layout.
 - 2026-11-07 — Задача создана. Для UI принят минимальный статический
   composition: встроенные UI-плагины импортируются только в
   `builtin-ui-plugins.ts`, а shell работает с ними через реестр.
