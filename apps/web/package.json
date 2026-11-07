@@ -15,7 +15,9 @@
   "dependencies": {
     "@kanbaner/kernel": "workspace:*",
     "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/plugin-task-list": "workspace:*",
     "@kanbaner/storage-sqlite": "workspace:*",
+    "@kanbaner/task-ui": "workspace:*",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "lucide-react": "1.70.0",

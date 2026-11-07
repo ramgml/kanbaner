@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import type { UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
 
-import { useUiContributions } from "../../ui/provider";
+import { useUiContributions, useUiOperationInvoker } from "../../ui/provider";
 import type { RegisteredUiContribution } from "../../ui/registry";
 import { ContributionBoundary } from "./contribution-boundary";
 
@@ -46,8 +46,9 @@ export function ContributionRenderer({
   readonly contribution: RegisteredUiContribution;
 }) {
   const Component = contribution.render;
+  const invoke = useUiOperationInvoker();
 
-  return <Component contribution={contribution} />;
+  return <Component contribution={contribution} invoke={invoke} />;
 }
 
 /**

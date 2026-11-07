@@ -247,9 +247,15 @@ importers:
       '@kanbaner/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@kanbaner/plugin-task-list':
+        specifier: workspace:*
+        version: link:../../packages/plugin-task-list
       '@kanbaner/storage-sqlite':
         specifier: workspace:*
         version: link:../../packages/storage-sqlite
+      '@kanbaner/task-ui':
+        specifier: workspace:*
+        version: link:../../packages/task-ui
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -338,6 +344,31 @@ importers:
         specifier: 7.8.0
         version: 7.8.0
 
+  packages/plugin-task-list:
+    dependencies:
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      '@kanbaner/plugin-tasks':
+        specifier: workspace:*
+        version: link:../plugin-tasks
+      '@kanbaner/task-ui':
+        specifier: workspace:*
+        version: link:../task-ui
+    devDependencies:
+      '@types/react':
+        specifier: 19.3.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: 19.3.0
+        version: 19.3.0(@types/react@19.3.0)
+      react:
+        specifier: 19.3.1
+        version: 19.3.1
+      react-dom:
+        specifier: 19.3.1
+        version: 19.3.1(react@19.3.1)
+
   packages/plugin-tasks:
     dependencies:
       '@kanbaner/plugin-sdk':
@@ -362,6 +393,28 @@ importers:
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0
+
+  packages/task-ui:
+    dependencies:
+      '@kanbaner/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      '@kanbaner/plugin-tasks':
+        specifier: workspace:*
+        version: link:../plugin-tasks
+    devDependencies:
+      '@types/react':
+        specifier: 19.3.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: 19.3.0
+        version: 19.3.0(@types/react@19.3.0)
+      react:
+        specifier: 19.3.1
+        version: 19.3.1
+      react-dom:
+        specifier: 19.3.1
+        version: 19.3.1(react@19.3.1)
 
 packages:
 

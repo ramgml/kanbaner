@@ -2,6 +2,8 @@ import type { ComponentType } from "react";
 
 import type { UiContribution, UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
 
+import type { UiOperationInvoker } from "./operation-types";
+
 /**
  * Клиентский реестр UI-вкладов Plugin Contract v1.
  *
@@ -40,11 +42,31 @@ export interface UiContributionRegistration {
 
 export type UiComponent = ComponentType<{
   readonly contribution: RegisteredUiContribution;
+  /** Вызов публичной операции через общий OperationBus. */
+  readonly invoke: UiOperationInvoker;
 }>;
 
 export interface UiContributionRegistry {
   register(pluginId: string, contribution: UiContribution, render: UiComponent): () => void;
   registerBatch(pluginId: string, contributions: readonly UiContributionRegistration[]): () => void;
+  /**
+   * Идемпотентно синхронизирует серверные metadata плагина.
+   *
+   * Вклады с прежними ID обновляются, отсутствующие в новом наборе —
+   * удаляются. Маршруты и счётчик реестра не создают дубликатов.
+   */
+  syncPlugin(
+    pluginId: string,
+    contributions: readonly UiContributionRegistration[],
+    fallbackRender: UiComponent,
+  ): () => void;
+  /**
+   * Привязывает реальный React-рендерер к metadata по ID вклада.
+   *
+   * Повторная привязка заменяет рендерер, не создавая второй вклад. Привязка
+   * может прийти до metadata: она сохраняется и применяется при регистрации.
+   */
+  bindRenderer(pluginId: string, contributionId: string, render: UiComponent): () => void;
   unregisterPlugin(pluginId: string): void;
   list(slot: UiSlotId): readonly RegisteredUiContribution[];
   listAll(): readonly RegisteredUiContribution[];
@@ -215,9 +237,18 @@ function isRouteContribution(contribution: UiContribution): boolean {
   );
 }
 
+interface BoundRenderer {
+  readonly pluginId: string;
+  readonly render: UiComponent;
+}
+
 class UiContributionRegistryImpl implements UiContributionRegistry {
   private readonly entries = new Map<string, RegisteredUiContribution>();
   private readonly routes = new Map<string, RegisteredUiContribution>();
+  /** Реальные рендереры, привязанные composition-модулем по ID вклада. */
+  private readonly boundRenderers = new Map<string, BoundRenderer>();
+  /** Рендерер по умолчанию, который вернётся при снятии привязки. */
+  private readonly fallbackRenderers = new Map<string, UiComponent>();
   private readonly listeners = new Set<() => void>();
   private version = 0;
 
@@ -277,8 +308,9 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
         pluginId,
         contribution:
           normalizedRoute === null ? { ...metadata } : { ...metadata, route: normalizedRoute },
-        render: registration.render,
+        render: this.boundRenderers.get(metadata.id)?.render ?? registration.render,
       });
+      this.fallbackRenderers.set(metadata.id, registration.render);
     }
 
     const added: RegisteredUiContribution[] = [];
@@ -309,10 +341,197 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
     };
   }
 
+  syncPlugin(
+    pluginId: string,
+    contributions: readonly UiContributionRegistration[],
+    fallbackRender: UiComponent,
+  ): () => void {
+    assertPluginId(pluginId);
+    assertRenderer(fallbackRender);
+
+    if (!Array.isArray(contributions)) {
+      throw new UiRegistryError("INVALID_CONTRIBUTION", "Набор UI-вкладов должен быть массивом");
+    }
+
+    const desired = new Map<string, RegisteredUiContribution>();
+    const seenRoutes = new Set<string>();
+
+    for (const registration of contributions) {
+      assertRenderer(registration.render);
+
+      const metadata = assertContribution(registration.metadata);
+      const existing = this.entries.get(metadata.id);
+
+      if (existing !== undefined && existing.pluginId !== pluginId) {
+        throw new UiRegistryError(
+          "DUPLICATE_CONTRIBUTION_ID",
+          `UI-вклад с ID ${metadata.id} принадлежит другому плагину`,
+        );
+      }
+
+      if (desired.has(metadata.id)) {
+        throw new UiRegistryError(
+          "DUPLICATE_CONTRIBUTION_ID",
+          `UI-вклад с ID ${metadata.id} повторяется в наборе`,
+        );
+      }
+
+      const normalizedRoute =
+        metadata.route === undefined ? null : normalizeUiViewRoute(metadata.route);
+
+      if (normalizedRoute !== null && isRouteContribution(metadata)) {
+        const owner = this.routes.get(normalizedRoute);
+
+        if (
+          seenRoutes.has(normalizedRoute) ||
+          (owner !== undefined && owner.pluginId !== pluginId)
+        ) {
+          throw new UiRegistryError(
+            "DUPLICATE_ROUTE",
+            `Маршрут ${normalizedRoute} уже занят другим UI-вкладом`,
+          );
+        }
+
+        seenRoutes.add(normalizedRoute);
+      }
+
+      desired.set(metadata.id, {
+        pluginId,
+        contribution:
+          normalizedRoute === null ? { ...metadata } : { ...metadata, route: normalizedRoute },
+        render: this.boundRenderers.get(metadata.id)?.render ?? registration.render,
+      });
+    }
+
+    const stale = [...this.entries.values()].filter(
+      (entry) => entry.pluginId === pluginId && !desired.has(entry.contribution.id),
+    );
+    let changed = this.removeEntries(stale);
+
+    for (const [route, entry] of [...this.routes]) {
+      if (entry.pluginId !== pluginId) {
+        continue;
+      }
+
+      const next = desired.get(entry.contribution.id);
+
+      if (next === undefined || next.contribution.route !== route) {
+        this.routes.delete(route);
+        changed = true;
+      }
+    }
+
+    for (const [id, entry] of desired) {
+      const previous = this.entries.get(id);
+      const render = this.boundRenderers.get(id)?.render ?? entry.render;
+      const next = render === entry.render ? entry : { ...entry, render };
+
+      this.fallbackRenderers.set(id, fallbackRender);
+
+      if (
+        previous === undefined ||
+        previous.contribution !== next.contribution ||
+        previous.render !== next.render
+      ) {
+        this.entries.set(id, next);
+        changed = true;
+      }
+
+      const route = next.contribution.route;
+
+      if (route !== undefined && isRouteContribution(next.contribution)) {
+        if (this.routes.get(route) !== next) {
+          this.routes.set(route, next);
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      this.emit();
+    }
+
+    return () => {
+      const removed = [...this.entries.values()].filter(
+        (entry) => entry.pluginId === pluginId && desired.has(entry.contribution.id),
+      );
+
+      if (this.removeEntries(removed)) {
+        this.emit();
+      }
+    };
+  }
+
+  bindRenderer(pluginId: string, contributionId: string, render: UiComponent): () => void {
+    assertPluginId(pluginId);
+    assertNonEmptyString(contributionId, "contributionId");
+    assertRenderer(render);
+
+    const previous = this.boundRenderers.get(contributionId);
+    const existingEntry = this.entries.get(contributionId);
+
+    if (
+      (previous !== undefined && previous.pluginId !== pluginId) ||
+      (existingEntry !== undefined && existingEntry.pluginId !== pluginId)
+    ) {
+      throw new UiRegistryError(
+        "INVALID_RENDERER",
+        `Рендерер вклада ${contributionId} принадлежит другому плагину`,
+      );
+    }
+
+    if (previous?.render === render) {
+      return () => undefined;
+    }
+
+    this.boundRenderers.set(contributionId, { pluginId, render });
+
+    const entry = this.entries.get(contributionId);
+
+    if (entry !== undefined && entry.pluginId === pluginId) {
+      const next = { ...entry, render };
+
+      this.entries.set(contributionId, next);
+
+      const route = entry.contribution.route;
+
+      if (route !== undefined && this.routes.get(route) === entry) {
+        this.routes.set(route, next);
+      }
+
+      this.emit();
+    }
+
+    return () => {
+      if (this.boundRenderers.get(contributionId)?.render !== render) {
+        return;
+      }
+
+      this.boundRenderers.delete(contributionId);
+
+      const fallback = this.fallbackRenderers.get(contributionId);
+      const current = this.entries.get(contributionId);
+
+      if (fallback !== undefined && current !== undefined && current.pluginId === pluginId) {
+        const restored = { ...current, render: fallback };
+
+        this.entries.set(contributionId, restored);
+
+        const route = current.contribution.route;
+
+        if (route !== undefined && this.routes.get(route) === current) {
+          this.routes.set(route, restored);
+        }
+
+        this.emit();
+      }
+    };
+  }
+
   unregisterPlugin(pluginId: string): void {
     const removed = [...this.entries.values()].filter((entry) => entry.pluginId === pluginId);
 
-    if (removed.length > 0 && this.removeEntries(removed)) {
+    if (removed.length > 0 && this.removeEntries(removed, true)) {
       this.emit();
     }
   }
@@ -351,7 +570,10 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
     return this.entries.size;
   }
 
-  private removeEntries(entries: readonly RegisteredUiContribution[]): boolean {
+  private removeEntries(
+    entries: readonly RegisteredUiContribution[],
+    dropBoundRenderer = false,
+  ): boolean {
     let changed = false;
 
     for (const entry of entries) {
@@ -362,6 +584,11 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
       }
 
       this.entries.delete(entry.contribution.id);
+      this.fallbackRenderers.delete(entry.contribution.id);
+
+      if (dropBoundRenderer) {
+        this.boundRenderers.delete(entry.contribution.id);
+      }
 
       const route = entry.contribution.route;
 

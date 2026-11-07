@@ -1,4 +1,5 @@
 import {
+  createPluginError,
   PluginOperationError,
   type ExecutionContext,
   type PluginLogger,
@@ -1209,6 +1210,52 @@ describe("OperationBus: ошибки", () => {
 
     if (!result.ok) {
       expect(result.error.message).not.toContain("Секретная деталь");
+    }
+  });
+
+  it("распознаёт PluginOperationError из другого экземпляра SDK", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        // Плагин загружен динамическим import() и получил собственную копию
+        // SDK, поэтому instanceof на границе ядра не срабатывает.
+        throw {
+          name: "PluginOperationError",
+          message: "Сущность была изменена другой операцией",
+          error: createPluginError("VERSION_CONFLICT", "Сущность была изменена другой операцией"),
+        };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("VERSION_CONFLICT");
+      expect(result.error.message).toBe("Сущность была изменена другой операцией");
+    }
+  });
+
+  it("не принимает подделку с невалидным конвертом ошибки", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw { name: "PluginOperationError", error: { code: "VERSION_CONFLICT" } };
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result.ok).toBe(false);
+
+    if (!result.ok) {
+      expect(result.error.code).toBe("INTERNAL_ERROR");
+      expect(result.error.message).toBe("Внутренняя ошибка операции");
     }
   });
 });

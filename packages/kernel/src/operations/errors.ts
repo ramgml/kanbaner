@@ -1,7 +1,9 @@
 import {
   createPluginError,
+  PluginErrorSchema,
   PluginOperationError,
   toErrorResult,
+  validateWithSchema,
   type ErrorResult,
   type JsonObject,
   type PluginError,
@@ -190,5 +192,37 @@ export function limitError(
  * передаются.
  */
 export function mapThrownError(error: unknown): ErrorResult {
-  return error instanceof PluginOperationError ? toErrorResult(error.error) : internalError();
+  if (error instanceof PluginOperationError) {
+    return toErrorResult(error.error);
+  }
+
+  // Серверные плагины загружаются динамическим import() из собственного dist
+  // и могут получить другой экземпляр `@kanbaner/plugin-sdk`, чем собранное
+  // ядро. В этом случае `instanceof` на границе не срабатывает, хотя ошибка
+  // имеет тот же публичный конверт. Распознаём её структурно, иначе,
+  // например, VERSION_CONFLICT превращается в INTERNAL_ERROR.
+  if (isPluginOperationErrorShape(error)) {
+    return toErrorResult(error.error);
+  }
+
+  return internalError();
+}
+
+interface PluginOperationErrorShape {
+  readonly name: "PluginOperationError";
+  readonly error: PluginError;
+}
+
+function isPluginOperationErrorShape(error: unknown): error is PluginOperationErrorShape {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const candidate = error as { readonly name?: unknown; readonly error?: unknown };
+
+  if (candidate.name !== "PluginOperationError") {
+    return false;
+  }
+
+  return validateWithSchema(PluginErrorSchema, candidate.error).ok;
 }

@@ -332,3 +332,95 @@ describe("клиентский реестр UI-вкладов", () => {
     expect(registry.getVersion()).toBe(version + 2);
   });
 });
+
+describe("синхронизация серверных metadata и привязка рендерера", () => {
+  const viewMetadata: UiContribution = {
+    id: "kanbaner.task-list.view",
+    slot: "app.main",
+    kind: "view",
+    priority: 60,
+    title: "Задачи",
+    route: "/view/tasks",
+  };
+
+  const genericRender: UiComponent = () => null;
+  const realRender: UiComponent = () => null;
+
+  it("идемпотентно синхронизирует metadata без дубликатов", () => {
+    const registry = createUiContributionRegistry();
+    const registration = { metadata: viewMetadata, render: genericRender };
+
+    registry.syncPlugin("kanbaner.task-list", [registration], genericRender);
+    registry.syncPlugin("kanbaner.task-list", [registration], genericRender);
+
+    expect(registry.size()).toBe(1);
+    expect(registry.list("app.main")).toHaveLength(1);
+    expect(registry.resolveRoute("/view/tasks")?.contribution.id).toBe("kanbaner.task-list.view");
+  });
+
+  it("привязывает реальный рендерер после metadata и заменяет его повтором", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+    expect(registry.list("app.main")[0]?.render).toBe(genericRender);
+
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+
+    expect(registry.size()).toBe(1);
+    expect(registry.list("app.main")[0]?.render).toBe(realRender);
+
+    const version = registry.getVersion();
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+
+    // Повторная привязка того же рендерера ничего не дублирует и не
+    // увеличивает версию.
+    expect(registry.getVersion()).toBe(version);
+    expect(registry.list("app.main")).toHaveLength(1);
+  });
+
+  it("применяет привязку, пришедшую до metadata", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.list("app.main")[0]?.render).toBe(realRender);
+    expect(registry.size()).toBe(1);
+  });
+
+  it("удаляет вклад и маршрут, когда серверные metadata исчезли", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.syncPlugin(
+      "kanbaner.task-list",
+      [{ metadata: viewMetadata, render: genericRender }],
+      genericRender,
+    );
+    registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender);
+
+    registry.syncPlugin("kanbaner.task-list", [], genericRender);
+
+    expect(registry.size()).toBe(0);
+    expect(registry.list("app.main")).toEqual([]);
+    expect(registry.resolveRoute("/view/tasks")).toBeNull();
+  });
+
+  it("не даёт привязать рендерер к вкладу другого плагина", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.register("example.test-ui", viewMetadata, genericRender);
+
+    expectRegistryError(
+      () => registry.bindRenderer("kanbaner.task-list", viewMetadata.id, realRender),
+      "INVALID_RENDERER",
+    );
+  });
+});

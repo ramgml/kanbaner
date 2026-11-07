@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Доменные UI-пакеты находятся вне apps/web, поэтому автоматическое
+   сканирование Tailwind их не видит. Без этих директив классы адаптивной
+   раскладки (`md:block`, `xl:hidden` и т. д.) остаются в prebuilt dist, но
+   не попадают в CSS. */
+@source "../../../../packages/task-ui/src";
+@source "../../../../packages/plugin-task-list/src";
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
