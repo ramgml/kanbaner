@@ -1,7 +1,7 @@
 ---
 id: KAN-009
 title: SQLite WAL Storage Provider
-status: review
+status: in_progress
 stage: 1
 priority: high
 owner: worker-kan-009
@@ -202,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Независимое ревью нашло blocker удаления существующего backup/чужих sidecar, DDL в open до checksum и вне миграции, нарушение LIFO savepoint, непроверенный checkpoint, shutdown race, неподключённые plugin migrations, обходы path validation, непустой restore dir и Windows import в CLI. Задача возвращена worker-у для исправления всех findings.
 - 2026-11-07 — Worker завершил SQLite provider коммитом `3be5367`; 166 focused-тестов, 627 workspace-тестов и 70 Conformance-тестов (33 базовых + no-savepoints, normal/delayed) зелёные. Production smoke `/plugins` 200, WAL и одна запись `kanbaner.core` подтверждены. Создан отчёт, задача переведена в review.
 - 2026-11-07 — KAN-001/KAN-006 завершены. Оркестратор назначил worker-kan-009, ветку `feat/kan-009-sqlite-wal-storage` и worktree `.worktrees/kan-009-sqlite-wal-storage`. Согласованы изменения `packages/storage-sqlite/**`, bootstrap-файлов `apps/web/src/server/**`, `apps/web/package.json`, `next.config.ts` только для native externals, `scripts/restore.*`, корневого `package.json` для build/restore scripts и `pnpm-lock.yaml`; kernel/SDK/UI/specs менять запрещено.
 - 2026-11-06 — Задача создана при переходе с PGlite на SQLite WAL.
