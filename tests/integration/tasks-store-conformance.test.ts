@@ -137,7 +137,7 @@ afterEach(async () => {
   }
 });
 
-const SUITE_SIZE = 24;
+const SUITE_SIZE = 28;
 
 for (const variant of variants) {
   describe(`TasksStore Conformance: ${variant.name}`, () => {

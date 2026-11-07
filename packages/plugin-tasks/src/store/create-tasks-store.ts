@@ -130,7 +130,7 @@ function isDate(value: unknown): value is Date {
 
 function readNow(source: TasksNowSource | undefined): UtcTimestamp {
   if (source === undefined) {
-    throw new TasksStoreValidationError("UTC-время должно быть передано до записи");
+    return new Date().toISOString();
   }
 
   const value = typeof source === "function" ? source() : source.now();
@@ -272,8 +272,10 @@ function parseProjectDocument(document: PluginDocument): Project {
 function parseTaskDocument(document: PluginDocument): Task {
   const task = buildTask(document.data);
 
-  if (task.id !== document.id) {
-    throw new TasksStoreValidationError("Документ задачи не совпадает с сохранённой моделью");
+  if (task.id !== document.id || task.version !== document.version) {
+    throw new TasksStoreValidationError(
+      "Документ задачи и публичная версия не совпадают с сохранённой моделью",
+    );
   }
 
   return task;
@@ -392,6 +394,10 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       expectedVersion,
     });
 
+    if (document.version !== project.version) {
+      throw new TasksStoreValidationError("Версия документа проекта не совпадает с моделью");
+    }
+
     return { project, document };
   }
 
@@ -407,28 +413,46 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       expectedVersion: expectedDocumentVersion,
     });
 
+    if (document.version !== task.version) {
+      throw new TasksStoreValidationError("Версия документа задачи не совпадает с моделью");
+    }
+
     return { task, document };
   }
 
   /**
-   * Меняет только позицию соседа.
+   * Сдвигает соседа на новую позицию как обычное изменение сущности.
    *
-   * Публичная версия доменной сущности не меняется: перестановка соседей —
-   * внутренняя операция сохранения порядка, а не пользовательское изменение.
-   * Внутренняя ревизия документа при этом растёт, поэтому CAS по документу
-   * всё равно защищает от гонок.
+   * Публичная `version` и `updatedAt` увеличиваются вместе с внутренней
+   * ревизией документа, поэтому они остаются синхронными. Запись выполняется
+   * через CAS с текущей версией документа: конкурентная операция не может
+   * потерять или перезаписать сдвиг.
+   *
+   * Событие для такого сдвига Store не публикует; это обязанность KAN-012.
    */
-  async function shiftRecord(record: TaskRecord, position: number): Promise<TaskRecord> {
+  async function shiftRecord(
+    record: TaskRecord,
+    position: number,
+    updatedAt: UtcTimestamp,
+  ): Promise<TaskRecord> {
     if (record.task.position === position) {
       return record;
     }
 
-    const shifted = buildTask({ ...record.task, position });
+    const shifted = buildTask({
+      ...record.task,
+      position,
+      version: record.task.version + 1,
+      updatedAt,
+    });
 
     return saveTask(shifted, record.document.version);
   }
 
-  async function reindexScopes(records: readonly TaskRecord[]): Promise<void> {
+  async function reindexScopes(
+    records: readonly TaskRecord[],
+    updatedAt: UtcTimestamp,
+  ): Promise<void> {
     const scopes = new Map<string, { readonly projectId: string; readonly status: TaskStatus }>();
 
     for (const record of records) {
@@ -445,7 +469,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         const record = remaining[index];
 
         if (record !== undefined) {
-          await shiftRecord(record, index);
+          await shiftRecord(record, index, updatedAt);
         }
       }
     }
@@ -479,7 +503,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         const candidate = others[position];
 
         if (candidate !== undefined) {
-          await shiftRecord(candidate, position < index ? position : position + 1);
+          await shiftRecord(candidate, position < index ? position : position + 1, updatedAt);
         }
       }
     } else {
@@ -491,7 +515,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         const candidate = sourceRemaining[position];
 
         if (candidate !== undefined) {
-          await shiftRecord(candidate, position);
+          await shiftRecord(candidate, position, updatedAt);
         }
       }
 
@@ -505,7 +529,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         const candidate = targetRecords[position];
 
         if (candidate !== undefined) {
-          await shiftRecord(candidate, position < index ? position : position + 1);
+          await shiftRecord(candidate, position < index ? position : position + 1, updatedAt);
         }
       }
     }
@@ -743,7 +767,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         const record = records[position];
 
         if (record !== undefined) {
-          await shiftRecord(record, position < index ? position : position + 1);
+          await shiftRecord(record, position < index ? position : position + 1, createdAt);
         }
       }
 
@@ -858,7 +882,9 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         throw new TasksStoreValidationError("Задача исчезла во время удаления");
       }
 
-      await reindexScopes([record, ...children]);
+      const reindexedAt = resolveTimestamp(undefined, now, "updatedAt");
+
+      await reindexScopes([record, ...children], reindexedAt);
 
       const deletedTasks = [
         taskDescriptor(record.task),
@@ -877,6 +903,33 @@ function createCore(dependencies: StoreDependencies): CoreStore {
   };
 }
 
+/**
+ * FIFO-очередь одной transaction-scoped области.
+ *
+ * Очередь создаётся на каждый `TasksStoreTransaction`, а не глобально:
+ * параллельные транзакции разных вызовов по-прежнему сериализуются
+ * провайдером. Внутри одной транзакции все scoped-методы, включая чтения,
+ * выполняются по одному, поэтому составные read-modify-write операции не
+ * перемешиваются.
+ *
+ * Core-методы вызываются напрямую и не проходят через эту обёртку повторно,
+ * поэтому очередь не создаёт реентерабельный deadlock.
+ */
+class ScopedOperationQueue {
+  #tail: Promise<void> = Promise.resolve();
+
+  run<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.#tail.then(operation, operation);
+
+    this.#tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return result;
+  }
+}
+
 function createScopedTransaction(
   documents: PluginDocumentStore,
   dependencies: {
@@ -889,21 +942,22 @@ function createScopedTransaction(
     idFactory: dependencies.idFactory,
     now: dependencies.now,
   });
+  const queue = new ScopedOperationQueue();
 
   return {
     documents,
-    getProject: (id) => core.getProject(id),
-    listProjects: (query) => core.listProjects(query),
-    createProject: (input) => core.createProject(input),
-    updateProject: (input) => core.updateProject(input),
-    deleteProject: (input) => core.deleteProject(input),
-    getTask: (id) => core.getTask(id),
-    listTasks: (query) => core.listTasks(query),
-    createTask: (input) => core.createTask(input),
-    updateTask: (input) => core.updateTask(input),
-    moveTask: (input) => core.moveTask(input),
-    completeTask: (input) => core.completeTask(input),
-    deleteTask: (input) => core.deleteTask(input),
+    getProject: (id) => queue.run(() => core.getProject(id)),
+    listProjects: (query) => queue.run(() => core.listProjects(query)),
+    createProject: (input) => queue.run(() => core.createProject(input)),
+    updateProject: (input) => queue.run(() => core.updateProject(input)),
+    deleteProject: (input) => queue.run(() => core.deleteProject(input)),
+    getTask: (id) => queue.run(() => core.getTask(id)),
+    listTasks: (query) => queue.run(() => core.listTasks(query)),
+    createTask: (input) => queue.run(() => core.createTask(input)),
+    updateTask: (input) => queue.run(() => core.updateTask(input)),
+    moveTask: (input) => queue.run(() => core.moveTask(input)),
+    completeTask: (input) => queue.run(() => core.completeTask(input)),
+    deleteTask: (input) => queue.run(() => core.deleteTask(input)),
     async withTransaction() {
       throw new TasksNestedTransactionError();
     },
@@ -916,6 +970,11 @@ function createScopedTransaction(
  * Root-методы открывают собственную транзакцию через `PluginStorage`.
  * `withTransaction` передаёт transaction-scoped Store с `documents` этой же
  * транзакции; scoped-методы не открывают вложенную транзакцию.
+ *
+ * Все scoped-методы одной транзакции, включая чтения, сериализуются локальной
+ * FIFO-очередью. Сдвиг соседа по позиции увеличивает его `version` и
+ * `updatedAt` и сохраняется через CAS; отдельные события для соседей Store не
+ * публикует.
  *
  * Все коллекции принадлежат namespace `kanbaner.tasks`: `projects` и `tasks`.
  * SQL, имена таблиц и драйвер БД в реализации отсутствуют.

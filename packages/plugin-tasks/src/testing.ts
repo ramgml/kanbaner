@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import type { UtcTimestamp } from "@kanbaner/plugin-sdk";
 
-import { PLUGIN_ID, PROJECT_COLLECTION } from "./constants.ts";
+import { PLUGIN_ID, PROJECT_COLLECTION, TASK_COLLECTION } from "./constants.ts";
 import {
   deleteEventVersion,
   type Project,
@@ -193,6 +193,82 @@ async function rejectsInvalidTags(operation: Promise<unknown>, message: string):
   const error = await rejectsCode(operation, "TAG_EMPTY", message);
 
   assert.equal(error instanceof TasksValidationError, true, `${message}: TasksValidationError`);
+}
+
+/**
+ * Выполняет complete с повтором после VERSION_CONFLICT.
+ *
+ * Сдвиг соседей — обычное изменение их версии, поэтому параллельная операция
+ * над другой задачей может легально получить конфликт. Повтор читает
+ * актуальную версию; потерянных и дублированных задач быть не должно.
+ */
+async function completeWithRetry(
+  store: TasksStore,
+  context: TasksStoreConformanceContext,
+  taskId: string,
+): Promise<Task> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const current = await store.getTask(taskId);
+
+    if (current === null) {
+      throw new Error(`Задача ${taskId} исчезла во время complete`);
+    }
+
+    if (current.status === "done") {
+      return current;
+    }
+
+    try {
+      return await store.completeTask({
+        id: taskId,
+        expectedVersion: current.version,
+        updatedAt: context.at(1),
+      });
+    } catch (error) {
+      if (errorCode(error) !== "VERSION_CONFLICT") {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`Не удалось завершить задачу ${taskId} за 1000 попыток`);
+}
+
+/** Выполняет move с повтором после VERSION_CONFLICT. */
+async function moveWithRetry(
+  store: TasksStore,
+  context: TasksStoreConformanceContext,
+  taskId: string,
+  status: TaskStatus,
+  position: number,
+): Promise<Task> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const current = await store.getTask(taskId);
+
+    if (current === null) {
+      throw new Error(`Задача ${taskId} исчезла во время move`);
+    }
+
+    if (current.status === status) {
+      return current;
+    }
+
+    try {
+      return await store.moveTask({
+        id: taskId,
+        expectedVersion: current.version,
+        status,
+        position,
+        updatedAt: context.at(1),
+      });
+    } catch (error) {
+      if (errorCode(error) !== "VERSION_CONFLICT") {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`Не удалось переместить задачу ${taskId} за 1000 попыток`);
 }
 
 /**
@@ -419,20 +495,41 @@ export function createTasksStoreConformanceSuite(
             projectId: project.id,
             title: "X",
             position: 1,
+            createdAtOffset: 1,
           });
 
           const afterInsert = await listScope(store, project.id, "todo");
+          const shiftedSecond = afterInsert.find((task) => task.id === second.id);
+          const shiftedThird = afterInsert.find((task) => task.id === third.id);
 
           assert.deepEqual(
             afterInsert.map((task) => task.id),
             [first.id, inserted.id, second.id, third.id],
           );
           assert.deepEqual(positionsOf(afterInsert), [0, 1, 2, 3]);
+          assert.equal(shiftedSecond?.version, 2);
+          assert.equal(shiftedSecond?.updatedAt, context.at(1));
+          assert.equal(shiftedThird?.version, 2);
+          assert.equal(shiftedThird?.updatedAt, context.at(1));
+
+          await rejectsVersionConflict(
+            store.updateTask({
+              id: second.id,
+              expectedVersion: 1,
+              title: "Stale after shift",
+              updatedAt: context.at(2),
+            }),
+            1,
+            2,
+            "устаревший update соседа после insert",
+          );
+          assert.equal((await store.getTask(second.id))?.title, "B");
 
           const appended = await createTask(store, context, {
             projectId: project.id,
             title: "Y",
             position: 999,
+            createdAtOffset: 2,
           });
           const afterAppend = await listScope(store, project.id, "todo");
 
@@ -465,16 +562,37 @@ export function createTasksStoreConformanceSuite(
             [third.id, first.id, second.id],
           );
 
+          const afterFirstMove = await listScope(store, project.id, "todo");
+
+          assert.equal(afterFirstMove.find((task) => task.id === first.id)?.version, 2);
+          assert.equal(afterFirstMove.find((task) => task.id === second.id)?.version, 2);
+          assert.equal(
+            afterFirstMove.find((task) => task.id === second.id)?.updatedAt,
+            context.at(1),
+          );
+
+          await rejectsVersionConflict(
+            store.updateTask({
+              id: second.id,
+              expectedVersion: 1,
+              title: "Stale after move",
+              updatedAt: context.at(2),
+            }),
+            1,
+            2,
+            "устаревший update соседа после move",
+          );
+
           await store.moveTask({
             id: first.id,
-            expectedVersion: 1,
+            expectedVersion: 2,
             status: "in_progress",
             position: 0,
             updatedAt: context.at(2),
           });
           await store.moveTask({
             id: second.id,
-            expectedVersion: 1,
+            expectedVersion: 3,
             status: "in_progress",
             position: 1,
             updatedAt: context.at(3),
@@ -521,11 +639,29 @@ export function createTasksStoreConformanceSuite(
             [second.id],
           );
           assert.equal(await store.getTask(second.id), null);
+          const remaining = await listScope(store, project.id, "todo");
+
           assert.deepEqual(
-            (await listScope(store, project.id, "todo")).map((task) => task.id),
+            remaining.map((task) => task.id),
             [first.id, third.id],
           );
-          assert.deepEqual(positionsOf(await listScope(store, project.id, "todo")), [0, 1]);
+          assert.deepEqual(positionsOf(remaining), [0, 1]);
+          assert.equal(remaining.find((task) => task.id === first.id)?.version, 1);
+          assert.equal(remaining.find((task) => task.id === third.id)?.version, 2);
+
+          await rejectsVersionConflict(
+            store.updateTask({
+              id: third.id,
+              expectedVersion: 1,
+              title: "Stale after delete",
+              updatedAt: context.at(1),
+            }),
+            1,
+            2,
+            "устаревший update соседа после delete",
+          );
+          assert.equal((await store.getTask(third.id))?.title, "C");
+
           assert.deepEqual(await store.deleteTask({ id: second.id, expectedVersion: 1 }), {
             deleted: false,
           });
@@ -552,6 +688,14 @@ export function createTasksStoreConformanceSuite(
           assert.equal(completedFirst.completedAt, context.at(5));
           assert.equal(completedFirst.position, 0);
 
+          const afterCompleteFirst = await listScope(store, project.id, "todo");
+
+          assert.equal(afterCompleteFirst.find((task) => task.id === second.id)?.version, 2);
+          assert.equal(
+            afterCompleteFirst.find((task) => task.id === second.id)?.updatedAt,
+            context.at(5),
+          );
+
           const repeated = await store.completeTask({
             id: first.id,
             expectedVersion: 2,
@@ -565,20 +709,29 @@ export function createTasksStoreConformanceSuite(
 
           const completedSecond = await store.completeTask({
             id: second.id,
-            expectedVersion: 1,
+            expectedVersion: 2,
             position: 0,
             updatedAt: context.at(7),
           });
 
           assert.equal(completedSecond.position, 0);
+          assert.equal(completedSecond.version, 3);
+
+          const afterCompleteSecond = await listScope(store, project.id, "done");
+
           assert.deepEqual(
-            (await listScope(store, project.id, "done")).map((task) => task.id),
+            afterCompleteSecond.map((task) => task.id),
             [second.id, first.id],
+          );
+          assert.equal(afterCompleteSecond.find((task) => task.id === first.id)?.version, 3);
+          assert.equal(
+            afterCompleteSecond.find((task) => task.id === first.id)?.updatedAt,
+            context.at(7),
           );
 
           const reopened = await store.moveTask({
             id: first.id,
-            expectedVersion: 2,
+            expectedVersion: 3,
             status: "todo",
             position: 0,
             updatedAt: context.at(8),
@@ -589,13 +742,14 @@ export function createTasksStoreConformanceSuite(
 
           const recompleted = await store.moveTask({
             id: first.id,
-            expectedVersion: 3,
+            expectedVersion: 4,
             status: "done",
             position: 0,
             updatedAt: context.at(9),
           });
 
           assert.equal(recompleted.completedAt, context.at(9));
+          assert.equal(recompleted.version, 5);
 
           const createdDone = await createTask(store, context, {
             projectId: project.id,
@@ -704,8 +858,24 @@ export function createTasksStoreConformanceSuite(
           assert.equal(await store.getTask(root.id), null);
           assert.equal(await store.getTask(firstChild.id), null);
           assert.equal(await store.getTask(secondChild.id), null);
-          assert.equal((await store.getTask(survivor.id))?.id, survivor.id);
-          assert.deepEqual(positionsOf(await listScope(store, project.id, "todo")), [0]);
+
+          const remaining = await listScope(store, project.id, "todo");
+
+          assert.equal(remaining[0]?.id, survivor.id);
+          assert.equal(remaining[0]?.version, 2);
+          assert.deepEqual(positionsOf(remaining), [0]);
+
+          await rejectsVersionConflict(
+            store.updateTask({
+              id: survivor.id,
+              expectedVersion: 1,
+              title: "Stale survivor",
+              updatedAt: context.at(2),
+            }),
+            1,
+            2,
+            "устаревший update соседа после каскадного delete",
+          );
         });
       },
     },
@@ -1310,6 +1480,152 @@ export function createTasksStoreConformanceSuite(
       },
     },
     {
+      name: "scoped concurrency: Promise.all append даёт уникальные позиции",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+
+          const created = await store.withTransaction(async (transaction) => {
+            const tasks = await Promise.all(
+              Array.from({ length: 10 }, () =>
+                createTask(transaction, context, { projectId: project.id }),
+              ),
+            );
+            const page = await transaction.listTasks({
+              projectId: project.id,
+              status: "todo",
+              limit: 200,
+              offset: 0,
+            });
+
+            assert.equal(page.total, 10);
+            assertContiguous(positionsOf(page.items), "scoped append внутри транзакции");
+
+            return tasks;
+          });
+
+          const committed = await listScope(store, project.id, "todo");
+
+          assert.equal(committed.length, 10);
+          assert.deepEqual(
+            new Set(committed.map((task) => task.id)),
+            new Set(created.map((task) => task.id)),
+          );
+          assertContiguous(positionsOf(committed), "scoped append после коммита");
+        });
+      },
+    },
+    {
+      name: "scoped concurrency: одинаковый ID даёт один успех и VERSION_CONFLICT",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+
+          const results = await store.withTransaction(async (transaction) => {
+            const duplicateId = "scoped-duplicate-task";
+
+            return Promise.allSettled([
+              createTask(transaction, context, {
+                projectId: project.id,
+                id: duplicateId,
+                title: "First",
+              }),
+              createTask(transaction, context, {
+                projectId: project.id,
+                id: duplicateId,
+                title: "Second",
+              }),
+            ]);
+          });
+
+          const fulfilled = results.filter((result) => result.status === "fulfilled");
+          const rejected = results.filter((result) => result.status === "rejected");
+
+          assert.equal(fulfilled.length, 1);
+          assert.equal(rejected.length, 1);
+
+          const reason = rejected[0]?.reason;
+
+          assert.equal(errorCode(reason), "VERSION_CONFLICT");
+          assert.equal((reason as { readonly actualVersion?: unknown }).actualVersion, 1);
+          assert.equal((await listScope(store, project.id, "todo")).length, 1);
+        });
+      },
+    },
+    {
+      name: "scoped concurrency: чтение не видит промежуточное состояние мутации",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+
+          await store.withTransaction(async (transaction) => {
+            const taskId = context.nextId("task");
+            const createPromise = createTask(transaction, context, {
+              projectId: project.id,
+              id: taskId,
+              title: "Atomic",
+              position: 0,
+              createdAtOffset: 1,
+            });
+            const listPromise = transaction.listTasks({
+              projectId: project.id,
+              status: "todo",
+              limit: 200,
+              offset: 0,
+            });
+            const getPromise = transaction.getTask(taskId);
+            const [created, page, read] = await Promise.all([
+              createPromise,
+              listPromise,
+              getPromise,
+            ]);
+
+            assert.equal(read?.id, created.id);
+            assert.equal(page.total, 1);
+            assert.deepEqual(
+              page.items.map((task) => task.id),
+              [created.id],
+            );
+            assertContiguous(positionsOf(page.items), "scoped read после create");
+          });
+        });
+      },
+    },
+    {
+      name: "store: расхождение data.version и версии документа — доменная ошибка",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+
+          await store.withTransaction(async (transaction) => {
+            const task = await createTask(transaction, context, { projectId: project.id });
+
+            await transaction.documents.put({
+              pluginId: PLUGIN_ID,
+              collection: TASK_COLLECTION,
+              id: "corrupted-version",
+              data: {
+                ...task,
+                id: "corrupted-version",
+                version: 2,
+              },
+              expectedVersion: 0,
+            });
+
+            await rejectsCode(
+              transaction.getTask("corrupted-version"),
+              "VALIDATION_ERROR",
+              "расхождение версий документа и данных",
+            );
+          });
+        });
+      },
+    },
+    {
       name: "concurrency: параллельный append не создаёт дублей позиций",
       async run() {
         await withStore(async (store) => {
@@ -1343,15 +1659,7 @@ export function createTasksStoreConformanceSuite(
             created.push(await createTask(store, context, { projectId: project.id }));
           }
 
-          await Promise.all(
-            created.map((task) =>
-              store.completeTask({
-                id: task.id,
-                expectedVersion: task.version,
-                updatedAt: context.at(1),
-              }),
-            ),
-          );
+          await Promise.all(created.map((task) => completeWithRetry(store, context, task.id)));
 
           const done = await listScope(store, project.id, "done");
           const todo = await listScope(store, project.id, "todo");
@@ -1380,15 +1688,9 @@ export function createTasksStoreConformanceSuite(
           }
 
           await Promise.all(
-            created.slice(0, 10).map((task) =>
-              store.moveTask({
-                id: task.id,
-                expectedVersion: task.version,
-                status: "in_progress",
-                position: 0,
-                updatedAt: context.at(1),
-              }),
-            ),
+            created
+              .slice(0, 10)
+              .map((task) => moveWithRetry(store, context, task.id, "in_progress", 0)),
           );
 
           const todo = await listScope(store, project.id, "todo");
