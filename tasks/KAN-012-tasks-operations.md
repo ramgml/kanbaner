@@ -1,14 +1,13 @@
 ---
 id: KAN-012
 title: Команды, события и поиск задач
-status: ready
+status: in_progress
 stage: 2
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-011
-branch: null
-worktree: null
+owner: worker-kan-012
+blocked_by: []
+branch: feat/kan-012-tasks-operations
+worktree: .worktrees/kan-012-tasks-operations
 created: 2026-11-07
 updated: 2026-11-07
 specs:
@@ -80,6 +79,11 @@ specs:
   - `task.created|updated|moved|completed|deleted`;
   - `source = "kanbaner.tasks"`, `contractVersion = 1`,
     `resourceVersion` равен новой версии сущности;
+  - для delete использовать `eventVersion` из Store, а не последнюю сохранённую
+    версию;
+  - при insert/move/complete/delete вычислять diff снимков затронутых задач в
+    той же транзакции и публиковать `task.updated` для сдвинутых соседей с их
+    новыми `position` и `resourceVersion`;
   - ошибка публикации логируется и не отменяет результат команды.
 - [ ] Зарегистрировать типы ресурсов `project` и `task`:
   - `resolve` возвращает `ResourceDescriptor` или `null`;
@@ -106,6 +110,8 @@ specs:
     `IDEMPOTENCY_CONFLICT`;
   - сбой между мутацией и записью результата не оставляет idempotency-запись;
   - событие наблюдается после коммита;
+  - сдвинутые соседи получают `task.updated` с новой позицией и версией;
+  - delete использует `eventVersion = последняя сохранённая версия + 1`;
   - `ResourceRef` разрешается;
   - поиск находит задачу по кириллице и очищается при удалении;
   - переиндексация при активации не теряет параллельно созданную задачу;
@@ -189,6 +195,9 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — После ревью KAN-012 уточнена событийная модель: сдвинутые
+  соседи получают `task.updated`, а delete использует `eventVersion`. Это
+  предотвращает устаревшие проекции у подписчиков.
 - 2026-11-07 — По итогам проверки задач уточнены: список UI-операций,
   атомарная запись idempotency вместе с мутацией, hash ключа, конфликт по
   operation ID/вводу и сериализация переиндексации с изменениями задач.
