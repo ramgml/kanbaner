@@ -512,6 +512,79 @@ test.describe("список задач в production shell", () => {
       await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
     });
 
+    test("синхронизирует native dialog с breakpoint mobile→desktop→mobile", async ({ page }) => {
+      test.setTimeout(120_000);
+
+      const projectTitle = uniqueTitle("Проект resize");
+      const taskTitle = uniqueTitle("Задача resize");
+
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      const dialog = page.getByTestId("task-details-mobile");
+
+      await expect(dialog).toBeVisible();
+      expect(
+        await dialog.evaluate(
+          (element) => (element as HTMLDialogElement).open && element.matches(":modal"),
+        ),
+      ).toBe(true);
+
+      // mobile → desktop: modal закрывается, :modal/inert-блокировка снята.
+      await page.setViewportSize(DESKTOP_VIEWPORT);
+      await expect
+        .poll(async () => dialog.evaluate((element) => (element as HTMLDialogElement).open))
+        .toBe(false);
+      expect(
+        await page.evaluate(() => document.querySelector("dialog")?.matches(":modal") ?? false),
+      ).toBe(false);
+
+      const details = page.getByTestId("task-details-desktop");
+
+      await expect(details).toBeVisible();
+
+      // Фокус возвращён на видимый desktop-элемент, а не на скрытую карточку.
+      await expect
+        .poll(async () =>
+          page.evaluate(() => {
+            const element = document.activeElement as HTMLElement | null;
+
+            return (
+              element !== null &&
+              element.getClientRects().length > 0 &&
+              element.closest('[data-testid="task-cards"]') === null
+            );
+          }),
+        )
+        .toBe(true);
+
+      // Desktop-панель полностью интерактивна при закрытом modal.
+      await details.getByRole("button", { name: "Редактировать", exact: true }).click();
+
+      const form = page.getByTestId("task-form-edit");
+
+      await expect(form).toBeVisible();
+      await form.getByRole("button", { name: "Отмена", exact: true }).click();
+      await expect(form).toHaveCount(0);
+
+      // desktop → mobile: showModal и initial focus выполняются заново.
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await expect
+        .poll(async () =>
+          dialog.evaluate(
+            (element) => (element as HTMLDialogElement).open && element.matches(":modal"),
+          ),
+        )
+        .toBe(true);
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement?.closest("dialog") !== null))
+        .toBe(true);
+      await expect(dialog).toContainText(taskTitle);
+      await expect(page.locator(`[data-testid="task-row-${taskId}"]`)).toBeHidden();
+    });
+
     test("пагинирует больше 25 задач с page=2 в URL и переживает reload", async ({ page }) => {
       test.setTimeout(180_000);
 

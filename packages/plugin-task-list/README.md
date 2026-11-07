@@ -49,6 +49,10 @@ UI-плагин адаптивного списка задач Kanbaner. Пла�
 - Мобильная панель — нативный `<dialog>` с `showModal()`: браузер удерживает
   фокус внутри, Escape закрывает панель, а фокус возвращается на карточку.
   На десктопе modal не открывается (`min-width: 1280px`).
+- Breakpoint синхронизирован с modal через `MediaQueryList.change`: при
+  resize mobile→desktop dialog закрывается и снимает trap/inert, при обратном
+  переходе снова выполняется `showModal()` с initial focus. Фокус
+  возвращается только на видимый элемент.
 - Shell передаёт текущий `pathname` в публичные props рендерера
   (`UiSlot` → `ContributionRenderer` → `UiRendererProps`), поэтому плагин не
   читает `next/navigation` напрямую.

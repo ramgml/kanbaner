@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -47,7 +47,31 @@ export interface TaskDetailsPanelProps {
   readonly pathname?: string | undefined;
 }
 
-const MOBILE_BREAKPOINT = "(min-width: 1280px)";
+const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
+
+function subscribeDesktopViewport(onChange: () => void): () => void {
+  if (typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+
+  const query = window.matchMedia(DESKTOP_MEDIA_QUERY);
+
+  query.addEventListener("change", onChange);
+
+  return () => {
+    query.removeEventListener("change", onChange);
+  };
+}
+
+function getDesktopViewportSnapshot(): boolean {
+  return typeof window.matchMedia === "function"
+    ? window.matchMedia(DESKTOP_MEDIA_QUERY).matches
+    : false;
+}
+
+function getDesktopViewportServerSnapshot(): boolean {
+  return false;
+}
 
 // Собираем имя элемента из частей: наивный SQL-детектор границ импортов
 // иначе принимает CSS-селектор `select` за SQL-запрос.
@@ -79,6 +103,11 @@ export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanel
   const query = useTaskListQuery();
   const taskId = query.taskId;
   const onTaskRoute = pathname === TASK_LIST_ROUTE;
+  const isDesktopViewport = useSyncExternalStore(
+    subscribeDesktopViewport,
+    getDesktopViewportSnapshot,
+    getDesktopViewportServerSnapshot,
+  );
   const [task, setTask] = useState<Task | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [parentTask, setParentTask] = useState<Task | null>(null);
@@ -201,12 +230,10 @@ export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanel
 
   // Мобильная панель — настоящий modal `<dialog>`: браузер сам удерживает
   // фокус внутри, закрывает по Escape и возвращает фокус на карточку.
+  // Breakpoint входит в зависимости: resize mobile→desktop закрывает modal и
+  // снимает trap, обратный переход снова вызывает showModal и initial focus.
   useEffect(() => {
-    if (variant !== "mobile" || !onTaskRoute || taskId === null) {
-      return;
-    }
-
-    if (window.matchMedia(MOBILE_BREAKPOINT).matches) {
+    if (variant !== "mobile" || !onTaskRoute || taskId === null || isDesktopViewport) {
       return;
     }
 
@@ -273,15 +300,26 @@ export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanel
         dialog.close();
       }
 
-      const target = restoreFocusRef.current;
+      const preferred = restoreFocusRef.current;
 
       restoreFocusRef.current = null;
 
-      if (target !== null && target.isConnected) {
-        target.focus();
-      }
+      // После mobile→desktop мобильная карточка скрыта. Возвращаем фокус
+      // только на видимый элемент: предпочтительно исходный, иначе кнопку
+      // той же задачи в desktop-таблице.
+      const fallback = document.querySelector<HTMLElement>(
+        `[data-testid="task-row-${taskId}"] button`,
+      );
+      const target = [preferred, fallback].find(
+        (element): element is HTMLElement =>
+          element instanceof HTMLElement &&
+          element.isConnected &&
+          element.getClientRects().length > 0,
+      );
+
+      target?.focus();
     };
-  }, [variant, onTaskRoute, taskId]);
+  }, [variant, onTaskRoute, taskId, isDesktopViewport]);
 
   const close = (): void => {
     updateTaskListQuery({ taskId: null });
