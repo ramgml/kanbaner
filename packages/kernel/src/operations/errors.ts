@@ -1,5 +1,6 @@
 import {
   createPluginError,
+  PluginOperationError,
   toErrorResult,
   type ErrorResult,
   type JsonObject,
@@ -43,20 +44,19 @@ export class OperationRegistrationError extends Error {
 /**
  * Ожидаемая ошибка выполнения операции.
  *
- * Обработчик должен использовать её для стабильных кодов Plugin Contract.
- * Любые другие исключения шина заменяет на безопасный `INTERNAL_ERROR`.
+ * Наследует публичный SDK `PluginOperationError`, чтобы плагины могли
+ * использовать один тип, а ядро — свои конструкторы без изменения внешнего
+ * контракта. Любые другие исключения шина заменяет на безопасный
+ * `INTERNAL_ERROR`.
  */
-export class OperationFailure extends Error {
-  readonly error: PluginError;
-
+export class OperationFailure extends PluginOperationError {
   constructor(code: PluginErrorCode, message: string, options: PluginErrorOptions = {}) {
-    super(message);
+    super(code, message, options);
     this.name = "OperationFailure";
-    this.error = createPluginError(code, message, options);
   }
 
   /** Создаёт ошибку из конверта `PluginError`, например из результата вложенного вызова. */
-  static from(error: PluginError): OperationFailure {
+  static override from(error: PluginError): OperationFailure {
     const options: PluginErrorOptions =
       error.details === undefined
         ? { retryable: error.retryable }
@@ -185,8 +185,10 @@ export function limitError(
 /**
  * Преобразует исключение обработчика в безопасный конверт ошибки.
  *
- * Сообщение и стек произвольного `Error` наружу не передаются.
+ * Распознаётся публичный SDK `PluginOperationError` и его kernel-subclass
+ * `OperationFailure`; сообщение и стек произвольного `Error` наружу не
+ * передаются.
  */
 export function mapThrownError(error: unknown): ErrorResult {
-  return error instanceof OperationFailure ? toErrorResult(error.error) : internalError();
+  return error instanceof PluginOperationError ? toErrorResult(error.error) : internalError();
 }

@@ -23,6 +23,7 @@ const TASKS_PACKAGE = "@kanbaner/plugin-tasks";
 const TASKS_CONTRACT_ENTRYPOINT = "contract.ts";
 const ALLOWED_TASKS_DEPENDENCIES = new Set(["@kanbaner/plugin-sdk", "@sinclair/typebox"]);
 const SERVER_ONLY_TASKS_BUILTINS = new Set(["node:crypto"]);
+const TESTING_TASKS_BUILTINS = new Set(["node:assert/strict"]);
 
 /**
  * Запрещённые внешние модули fixture-плагина.
@@ -418,13 +419,28 @@ function analyzePluginTasksSources(root, violations) {
         continue;
       }
 
-      if (SERVER_ONLY_TASKS_BUILTINS.has(specifier) || specifier.startsWith("node:")) {
+      if (SERVER_ONLY_TASKS_BUILTINS.has(specifier)) {
         if (inContract) {
           violations.push({
             file: fileLabel,
             rule: `client-safe contract не должен импортировать ${specifier} (${kind})`,
           });
         }
+
+        continue;
+      }
+
+      // Тестовый entrypoint — не server-граф; ему разрешён только явный
+      // node:assert/strict. Любой другой node builtin запрещён везде.
+      if (relativeFile === "testing.ts" && TESTING_TASKS_BUILTINS.has(specifier)) {
+        continue;
+      }
+
+      if (specifier.startsWith("node:")) {
+        violations.push({
+          file: fileLabel,
+          rule: `запрещённый node builtin вне whitelist (${kind}): ${specifier}`,
+        });
 
         continue;
       }
@@ -740,6 +756,10 @@ function runSelfTest() {
       path.join(tasksRoot, "src", "sql.ts"),
       'export const statement = "select * from tasks";\n',
     );
+    writeFile(
+      path.join(tasksRoot, "src", "fs-import.ts"),
+      'import { readFileSync } from "node:fs";\nexport const read = readFileSync;\n',
+    );
 
     const violations = analyzeImportBoundaries(root);
 
@@ -783,6 +803,11 @@ function runSelfTest() {
       "запрещённый импорт (import): @kanbaner/plugin-fixture",
     );
     assertViolation(violations, "packages/plugin-tasks/src/sql.ts", "SQL statement вне миграций");
+    assertViolation(
+      violations,
+      "packages/plugin-tasks/src/fs-import.ts",
+      "запрещённый node builtin вне whitelist",
+    );
     assertNoViolation(violations, "packages/plugin-fixture/src/good.ts");
     assertNoViolation(violations, "packages/plugin-tasks/src/good-dep.ts");
     assertNoViolation(violations, "packages/plugin-tasks/src/activation.ts");

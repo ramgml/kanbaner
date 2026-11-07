@@ -1,4 +1,8 @@
-import type { ExecutionContext, PluginLogger } from "@kanbaner/plugin-sdk";
+import {
+  PluginOperationError,
+  type ExecutionContext,
+  type PluginLogger,
+} from "@kanbaner/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import { InMemoryStorageProvider } from "../storage/in-memory-provider.ts";
@@ -1125,6 +1129,38 @@ describe("OperationBus: ошибки", () => {
         message: "Задача изменена",
         retryable: false,
         details: { expectedVersion: 3, actualVersion: 4 },
+      },
+    });
+  });
+
+  it("OperationFailure остаётся subclass публичного PluginOperationError", () => {
+    const failure = new OperationFailure("NOT_FOUND", "Задача не найдена");
+
+    expect(failure).toBeInstanceOf(PluginOperationError);
+    expect(failure.error.code).toBe("NOT_FOUND");
+  });
+
+  it("маппит ошибку плагина, выброшенную как PluginOperationError", async () => {
+    const bus = createOperationBus();
+
+    bus.registerCommand({
+      metadata: commandMetadata(),
+      handler: () => {
+        throw new PluginOperationError("NOT_FOUND", "Задача не найдена", {
+          details: { entity: "task", id: "task-1" },
+        });
+      },
+    });
+
+    const result = await bus.executeCommand("test.tasks.create", { title: "x" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Задача не найдена",
+        retryable: false,
+        details: { entity: "task", id: "task-1" },
       },
     });
   });

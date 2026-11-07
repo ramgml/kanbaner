@@ -1,5 +1,6 @@
 import {
   type CommandMetadata,
+  type EventEnvelope,
   type ExecutionContext,
   type JsonValue,
   type PluginActivationServices,
@@ -27,7 +28,7 @@ import {
   hashIdempotencyInput,
   saveIdempotency,
 } from "./activation/idempotency.ts";
-import { captureOperationFailureConstructor, runMapped } from "./activation/errors.ts";
+import { runMapped } from "./activation/errors.ts";
 import { createSerialQueue } from "./activation/serial-queue.ts";
 import {
   deleteSearchDocuments,
@@ -54,16 +55,27 @@ import type {
 import { formatProjectRef, formatTaskRef, tryParseTasksResourceRef } from "./resources.ts";
 import { TasksNotFoundError, createTasksStore } from "./store/index.ts";
 import type { TasksIdFactory, TasksStore, TasksStoreTransaction } from "./store.ts";
+import { normalizeTags } from "./validation.ts";
+
+/** Структурный логгер runtime ядра без зависимости от его типа. */
+interface RuntimeLoggerLike {
+  log(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    details?: Readonly<Record<string, JsonValue>>,
+  ): void | Promise<void>;
+}
 
 /**
  * Публичный контекст активации.
  *
  * Runtime передаёт bound-сервисы `PluginActivationServices` и `pluginId`.
- * Дополнительный `logger` входит в публичный `PluginActivationContext` ядра.
+ * `logger` допускает как SDK `PluginLogger`, так и структурный runtime-логгер
+ * ядра с методом `log`; активация приводит его к `PluginLogger`.
  */
 export interface TasksActivationContext extends PluginActivationServices {
   readonly pluginId: PluginId;
-  readonly logger?: PluginLogger;
+  readonly logger?: PluginLogger | RuntimeLoggerLike;
 }
 
 /** Эффекты команды, применяемые только после успешного коммита. */
@@ -78,12 +90,18 @@ interface MutationOutcome<Result> {
   readonly effects: MutationEffects;
 }
 
+/** Результат команды: данные для ответа и события после коммита. */
+interface CommandExecution<Result = unknown> {
+  readonly result: Result;
+  readonly events: readonly EventEnvelope[];
+}
+
 type CommandFn = (
   input: unknown,
   executionContext: ExecutionContext,
   operationId: string,
   dependencies: ActivationDependencies,
-) => Promise<unknown>;
+) => Promise<CommandExecution>;
 
 type QueryFn = (input: unknown, dependencies: ActivationDependencies) => Promise<unknown>;
 
@@ -109,6 +127,52 @@ const NOOP_LOGGER: PluginLogger = Object.freeze({
     // Намеренно пусто.
   },
 });
+
+function isPluginLogger(logger: PluginLogger | RuntimeLoggerLike): logger is PluginLogger {
+  const candidate = logger as Partial<PluginLogger>;
+
+  return (
+    typeof candidate.debug === "function" &&
+    typeof candidate.info === "function" &&
+    typeof candidate.warn === "function" &&
+    typeof candidate.error === "function"
+  );
+}
+
+/** Приводит SDK-логгер или структурный runtime-логгер к `PluginLogger`. */
+function normalizeLogger(logger: PluginLogger | RuntimeLoggerLike | undefined): PluginLogger {
+  if (logger === undefined) {
+    return NOOP_LOGGER;
+  }
+
+  if (isPluginLogger(logger)) {
+    return logger;
+  }
+
+  const runtime = logger;
+  const emit = (
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    fields?: Readonly<Record<string, unknown>>,
+  ): void => {
+    try {
+      void Promise.resolve(
+        runtime.log(level, message, fields as Readonly<Record<string, JsonValue>> | undefined),
+      ).catch(() => {
+        // Ошибка логгера не влияет на результат операции.
+      });
+    } catch {
+      // Ошибка логгера не влияет на результат операции.
+    }
+  };
+
+  return {
+    debug: (message, fields) => emit("debug", message, fields),
+    info: (message, fields) => emit("info", message, fields),
+    warn: (message, fields) => emit("warn", message, fields),
+    error: (message, fields) => emit("error", message, fields),
+  };
+}
 
 function newEventId(): string {
   return globalThis.crypto.randomUUID();
@@ -253,9 +317,11 @@ function taskCompletedEvent(task: Task, completedAt: UtcTimestamp, eventId: stri
  * Выполняет команду с Idempotency-Key и отложенными эффектами.
  *
  * Проверка ключа, доменная мутация и запись успешного результата выполняются
- * в одной транзакции `TasksStore`. События и поиск применяются только после
- * коммита. Повтор с тем же ключом возвращает сохранённый результат без
- * мутации, событий и повторного индексирования.
+ * в одной транзакции `TasksStore`. Поисковые эффекты применяются сразу после
+ * коммита внутри вызывающей очереди, а события возвращаются вызывающей
+ * стороне для публикации после выхода из очереди. Повтор с тем же ключом
+ * возвращает сохранённый результат без мутации, событий и повторного
+ * индексирования.
  */
 async function executeMutation<Result>(
   dependencies: ActivationDependencies,
@@ -263,7 +329,7 @@ async function executeMutation<Result>(
   operationId: string,
   normalizedInput: unknown,
   work: (transaction: TasksStoreTransaction, now: UtcTimestamp) => Promise<MutationOutcome<Result>>,
-): Promise<Result> {
+): Promise<CommandExecution<Result>> {
   const idempotencyKey = executionContext.idempotencyKey;
   const inputHash = idempotencyKey === undefined ? null : hashIdempotencyInput(normalizedInput);
   const now = dependencies.now();
@@ -306,17 +372,24 @@ async function executeMutation<Result>(
   });
 
   if (outcome.replay) {
-    return outcome.result;
+    return { result: outcome.result, events: [] };
   }
 
-  await applyEffects(dependencies, executionContext, outcome.executed.effects);
+  await applySearchEffects(dependencies, outcome.executed.effects);
 
-  return outcome.executed.result;
+  return {
+    result: outcome.executed.result,
+    events: outcome.executed.effects.events,
+  };
 }
 
-async function applyEffects(
+/**
+ * Применяет поисковые эффекты после коммита в детерминированном порядке:
+ * сначала upsert, затем delete. Вызывается внутри очереди активации, чтобы
+ * соседняя мутация не перезаписала индекс устаревшим снимком.
+ */
+async function applySearchEffects(
   dependencies: ActivationDependencies,
-  executionContext: ExecutionContext,
   mutationEffects: MutationEffects,
 ): Promise<void> {
   await upsertTaskSearchDocuments(
@@ -329,7 +402,6 @@ async function applyEffects(
     mutationEffects.searchDeleteRefs,
     dependencies.logger,
   );
-  await publishDomainEvents(executionContext, mutationEffects.events, dependencies.logger);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -503,7 +575,7 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
     status: data.status ?? "todo",
     priority: data.priority ?? "medium",
     dueAt: data.dueAt ?? null,
-    tags: data.tags ?? [],
+    tags: normalizeTags(data.tags ?? []),
     expectedVersion: 0 as const,
     ...(data.position === undefined ? {} : { position: data.position }),
   };
@@ -555,7 +627,7 @@ const taskUpdate: CommandFn = async (input, executionContext, operationId, depen
       : { descriptionMarkdown: data.descriptionMarkdown }),
     ...(data.priority === undefined ? {} : { priority: data.priority }),
     ...(data.dueAt === undefined ? {} : { dueAt: data.dueAt }),
-    ...(data.tags === undefined ? {} : { tags: data.tags }),
+    ...(data.tags === undefined ? {} : { tags: normalizeTags(data.tags) }),
   };
 
   return executeMutation(
@@ -579,7 +651,7 @@ const taskUpdate: CommandFn = async (input, executionContext, operationId, depen
           : { descriptionMarkdown: data.descriptionMarkdown }),
         ...(data.priority === undefined ? {} : { priority: data.priority }),
         ...(data.dueAt === undefined ? {} : { dueAt: data.dueAt }),
-        ...(data.tags === undefined ? {} : { tags: data.tags }),
+        ...(normalized.tags === undefined ? {} : { tags: normalized.tags }),
         updatedAt: now,
       });
       const eventId = newEventId();
@@ -880,7 +952,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     throw new Error("Активация kanbaner.tasks получила другой Plugin ID");
   }
 
-  const logger = context.logger ?? NOOP_LOGGER;
+  const logger = normalizeLogger(context.logger);
   const now = (): UtcTimestamp => new Date().toISOString();
   const idFactory: TasksIdFactory = {
     nextProjectId: () => `project-${globalThis.crypto.randomUUID()}`,
@@ -896,8 +968,6 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     logger,
   };
 
-  await captureOperationFailureConstructor(context.search, logger);
-
   for (const metadata of TASKS_COMMAND_LIST) {
     const handler = COMMAND_HANDLERS[metadata.id];
 
@@ -907,10 +977,18 @@ export async function activate(context: TasksActivationContext): Promise<void> {
 
     context.commands.register({
       metadata: withUiExposure(metadata),
-      handler: (input, executionContext) =>
-        serialize(() =>
+      handler: async (input, executionContext) => {
+        // В очереди остаются только доменная транзакция и поисковые эффекты.
+        // События публикуются после освобождения очереди, чтобы подписчик мог
+        // вызвать следующую команду через общий OperationBus без deadlock.
+        const execution = await serialize(() =>
           runMapped(() => handler(input, executionContext, metadata.id, dependencies)),
-        ),
+        );
+
+        await publishDomainEvents(executionContext, execution.events, dependencies.logger);
+
+        return execution.result;
+      },
     });
   }
 

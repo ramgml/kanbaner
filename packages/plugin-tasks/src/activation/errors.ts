@@ -1,12 +1,8 @@
 import {
-  createPluginError,
   isStorageErrorShape,
-  parseResourceRef,
+  PluginOperationError,
   type JsonObject,
-  type PluginError,
   type PluginErrorCode,
-  type PluginLogger,
-  type PluginSearchService,
 } from "@kanbaner/plugin-sdk";
 
 import {
@@ -18,106 +14,16 @@ import { TasksValidationError } from "../validation.ts";
 import { IdempotencyConflictError } from "./idempotency.ts";
 
 /**
- * Форма ожидаемой ошибки операции.
- *
- * Ядро (KAN-004) распознаёт только собственный `OperationFailure`. Публичный
- * SDK не предоставляет аналогичный throwable-тип, а плагину запрещено
- * импортировать ядро. Поэтому activation получает конструктор ошибки хоста
- * через публичный отказ bound-сервиса (см. `captureOperationFailureConstructor`)
- * и создаёт ошибку этого класса. Если хост не предоставил такой класс,
- * используется локальный носитель конверта `PluginError`; шина в этом случае
- * вернёт безопасный `INTERNAL_ERROR`.
- */
-export interface OperationFailureLike extends Error {
-  readonly error: PluginError;
-}
-
-export interface OperationFailureOptions {
-  readonly details?: JsonObject;
-  readonly retryable?: boolean;
-}
-
-export type OperationFailureConstructor = new (
-  code: PluginErrorCode,
-  message: string,
-  options?: OperationFailureOptions,
-) => OperationFailureLike;
-
-/** Локальный носитель ошибки для хостов без `OperationFailure`. */
-export class TasksOperationError extends Error implements OperationFailureLike {
-  override readonly name = "TasksOperationError";
-  readonly error: PluginError;
-
-  constructor(code: PluginErrorCode, message: string, options: OperationFailureOptions = {}) {
-    super(message);
-    this.error = createPluginError(code, message, options);
-  }
-}
-
-let hostOperationFailure: OperationFailureConstructor | null = null;
-
-function isOperationFailureLike(value: unknown): value is OperationFailureLike {
-  if (!(value instanceof Error) || value.name !== "OperationFailure") {
-    return false;
-  }
-
-  const candidate = value as { readonly error?: unknown };
-
-  return (
-    typeof candidate.error === "object" &&
-    candidate.error !== null &&
-    typeof (candidate.error as { readonly code?: unknown }).code === "string"
-  );
-}
-
-/**
- * Получает конструктор `OperationFailure` активного хоста.
- *
- * Bound-поиск отклоняет ResourceRef чужого плагина ожидаемой ошибкой ядра.
- * Вызов не имеет побочных эффектов: документ не читается и не изменяется.
- * Возвращает `true`, если конструктор удалось запомнить.
- */
-export async function captureOperationFailureConstructor(
-  search: PluginSearchService,
-  logger: PluginLogger,
-): Promise<boolean> {
-  const foreign = "kanbaner.fixture:item:activation-probe";
-
-  try {
-    parseResourceRef(foreign);
-    await search.delete(foreign);
-  } catch (error) {
-    if (isOperationFailureLike(error)) {
-      hostOperationFailure = error.constructor as OperationFailureConstructor;
-
-      return true;
-    }
-  }
-
-  logger.warn("tasks.operation_failure_unavailable", {
-    reason: "host OperationFailure не получен",
-  });
-
-  return false;
-}
-
-interface MappedError {
-  readonly code: PluginErrorCode;
-  readonly message: string;
-  readonly details?: JsonObject;
-}
-
-function mapped(code: PluginErrorCode, message: string, details?: JsonObject): MappedError {
-  return details === undefined ? { code, message } : { code, message, details };
-}
-
-/**
  * Переводит доменные и storage-ошибки в стабильные коды Plugin Contract.
  *
  * Сообщения фиксированные; детали содержат только безопасные идентификаторы и
  * целочисленные версии, но не содержимое задач.
  */
-export function mapTasksError(error: unknown): MappedError {
+export function mapTasksError(error: unknown): {
+  readonly code: PluginErrorCode;
+  readonly message: string;
+  readonly details?: JsonObject;
+} {
   if (error instanceof IdempotencyConflictError) {
     return mapped("IDEMPOTENCY_CONFLICT", error.message, { reason: "idempotency_key" });
   }
@@ -162,26 +68,29 @@ export function mapTasksError(error: unknown): MappedError {
   return mapped("INTERNAL_ERROR", "Внутренняя ошибка операции");
 }
 
+function mapped(
+  code: PluginErrorCode,
+  message: string,
+  details?: JsonObject,
+): { readonly code: PluginErrorCode; readonly message: string; readonly details?: JsonObject } {
+  return details === undefined ? { code, message } : { code, message, details };
+}
+
 /**
  * Преобразует произвольную ошибку в ожидаемую ошибку операции.
  *
- * Уже созданный хостом `OperationFailure` пробрасывается без изменений, чтобы
- * не потерять исходный код (например, `PERMISSION_DENIED` bound-сервиса).
+ * Уже созданный `PluginOperationError` (включая kernel `OperationFailure`)
+ * пробрасывается без изменений, чтобы не потерять исходный код.
  */
 export function toOperationError(error: unknown): Error {
-  if (isOperationFailureLike(error)) {
+  if (error instanceof PluginOperationError) {
     return error;
   }
 
   const mappedError = mapTasksError(error);
-  const options: OperationFailureOptions =
-    mappedError.details === undefined ? {} : { details: mappedError.details };
+  const options = mappedError.details === undefined ? {} : { details: mappedError.details };
 
-  if (hostOperationFailure !== null) {
-    return new hostOperationFailure(mappedError.code, mappedError.message, options);
-  }
-
-  return new TasksOperationError(mappedError.code, mappedError.message, options);
+  return new PluginOperationError(mappedError.code, mappedError.message, options);
 }
 
 /** Бросает ожидаемую ошибку операции. */
@@ -196,14 +105,4 @@ export async function runMapped<Result>(operation: () => Promise<Result>): Promi
   } catch (error) {
     throwOperationError(error);
   }
-}
-
-/**
- * Сбрасывает запомненный конструктор.
- *
- * Нужен только тестам активации, чтобы изолировать глобальное состояние
- * модуля между сценариями.
- */
-export function resetOperationFailureConstructor(): void {
-  hostOperationFailure = null;
 }

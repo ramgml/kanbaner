@@ -67,13 +67,28 @@ KANBANER_PLUGIN_DIRS=packages pnpm dev
   `http: false`, `mcp: false`;
 - регистрирует типы ресурсов `project` и `task` с `resolve`;
 - запускает best-effort полную переиндексацию задач;
-- создаёт собственную последовательную очередь, которая сериализует мутации и
-  переиндексацию, чтобы reindex не пересёкся с create/update/delete.
+- создаёт собственную последовательную очередь, которая сериализует доменные
+  транзакции, поисковые эффекты и переиндексацию, чтобы reindex не пересёкся с
+  create/update/delete.
 
 Мутации, idempotency и снимки для diff выполняются в транзакции
-`TasksStore.withTransaction`. События и поиск применяются только после
-успешного коммита. Ошибка события или индекса логируется и не отменяет
-зафиксированную команду.
+`TasksStore.withTransaction`. Поисковые upsert/delete применяются сразу после
+коммита внутри очереди активации. События публикуются после выхода из очереди,
+но публикация всё ещё ожидается вызывающей командой. Поэтому подписчик может
+через общий `OperationBus` вызвать следующую команду без deadlock: очередь уже
+свободна, а порядок tx → search → events сохранён. Ошибка события или индекса
+логируется и не отменяет зафиксированную команду.
+
+## Ошибки операций
+
+Доменные и storage-ошибки сводятся к стабильным кодам Plugin Contract и
+выбрасываются из обработчика как публичный SDK `PluginOperationError`.
+Kernel `OperationFailure` является его subclass-ом, поэтому шина мапит оба типа
+в `VERSION_CONFLICT`, `NOT_FOUND`, `VALIDATION_ERROR`,
+`IDEMPOTENCY_CONFLICT` и другие коды. Произвольный `Error` остаётся
+`INTERNAL_ERROR` и не раскрывает сообщение, стек или внутренние пути.
+
+Плагин не импортирует ядро и не извлекает конструкторы ошибок из bound-сервисов.
 
 ## Команды
 
@@ -251,7 +266,8 @@ version + 1`: update(v3) → delete event(v4). У каждой задачи ка
   транзакции `TasksStore`; при откате не остаётся ни мутации, ни записи;
 - ID записи — SHA-256 от `operationId` и ключа, а не сам ключ;
 - сравнение ввода выполняется по канонизированному JSON (рекурсивная
-  сортировка ключей) и SHA-256;
+  сортировка ключей) и SHA-256; для create/update ввод заранее нормализуется,
+  включая `normalizeTags`, и нормализованные теги передаются в Store;
 - повтор с тем же operation ID и тем же вводом возвращает сохранённый
   результат без мутации, события и повторной индексации;
 - другой operation ID или другой ввод с тем же ключом возвращает
@@ -403,6 +419,7 @@ tasks
 ```bash
 pnpm --filter @kanbaner/plugin-tasks build
 pnpm --filter @kanbaner/plugin-tasks typecheck
+pnpm exec vitest run packages/plugin-sdk/src/errors.test.ts packages/kernel/src/operations/bus.test.ts
 pnpm exec vitest run packages/plugin-tasks
 pnpm exec vitest run tests/integration/tasks-store-conformance.test.ts
 pnpm exec vitest run tests/integration/tasks-activation.test.ts
