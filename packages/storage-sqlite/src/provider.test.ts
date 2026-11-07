@@ -483,3 +483,113 @@ describe("SQLite provider: savepoint scheduling", () => {
     ).not.toBeNull();
   });
 });
+
+describe("SQLite provider: stack-aware savepoint scheduling", () => {
+  it("parent write, начатый первым, заставляет child savepoint ждать", async () => {
+    const provider = await createOpenedProvider({ delays: { operationMs: 25 } });
+    const events: string[] = [];
+
+    await provider.withTransaction(async (transaction) => {
+      const parentWrite = transaction.documents.put(documentInput("01JSTACK00000000000000000001"));
+
+      const child = transaction.withSavepoint(async (nested) => {
+        // Child стартует после SQL parent-операции: в собственной транзакции
+        // parent-запись уже видна, хотя её Promise-обработчик ещё не выполнен.
+        const parentDocument = await nested.documents.get(
+          "acme.widgets",
+          "widgets",
+          "01JSTACK00000000000000000001",
+        );
+
+        events.push(parentDocument === null ? "child:missing-parent" : "child:sees-parent");
+        await nested.documents.put(documentInput("01JSTACK00000000000000000002"));
+        events.push("child:exit");
+      });
+
+      await Promise.all([parentWrite, child]);
+    });
+
+    expect(events).toEqual(["child:sees-parent", "child:exit"]);
+  });
+
+  it("сериализует sibling savepoints внутри вложенного savepoint", async () => {
+    const provider = await createOpenedProvider();
+    const gate = deferred<undefined>();
+    const events: string[] = [];
+
+    await provider.withTransaction(async (transaction) => {
+      await transaction.withSavepoint(async (outer) => {
+        const first = outer.withSavepoint(async (nested) => {
+          events.push("first:enter");
+          await gate.promise;
+          await nested.documents.put(documentInput("01JSTACK00000000000000000011"));
+          events.push("first:exit");
+        });
+        const second = outer.withSavepoint(async (nested) => {
+          events.push("second:enter");
+          await nested.documents.put(documentInput("01JSTACK00000000000000000012"));
+          events.push("second:exit");
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(events).toEqual(["first:enter"]);
+
+        gate.resolve(undefined);
+        await Promise.all([first, second]);
+      });
+    });
+
+    expect(events).toEqual(["first:enter", "first:exit", "second:enter", "second:exit"]);
+
+    const documents = await provider.documents.list("acme.widgets", "widgets");
+
+    expect(documents.map((document) => document.id).sort()).toEqual([
+      "01JSTACK00000000000000000011",
+      "01JSTACK00000000000000000012",
+    ]);
+  });
+
+  it("rollback inner savepoint не откатывает write parent scope", async () => {
+    const provider = await createOpenedProvider();
+    const innerEntered = deferred<undefined>();
+    const gate = deferred<undefined>();
+    let parentWriteSettled = false;
+
+    await provider.withTransaction(async (transaction) => {
+      await transaction.withSavepoint(async (outer) => {
+        const inner = outer.withSavepoint(async (deep) => {
+          await deep.documents.put(documentInput("01JSTACK00000000000000000021"));
+          innerEntered.resolve(undefined);
+          await gate.promise;
+          throw new Error("inner savepoint failed");
+        });
+
+        void inner.catch(() => undefined);
+        await innerEntered.promise;
+
+        const parentScopeWrite = outer.documents.put(documentInput("01JSTACK00000000000000000022"));
+
+        void parentScopeWrite.finally(() => {
+          parentWriteSettled = true;
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(parentWriteSettled).toBe(false);
+
+        gate.resolve(undefined);
+
+        await expect(inner).rejects.toThrow(/inner savepoint failed/u);
+        await parentScopeWrite;
+      });
+    });
+
+    expect(
+      await provider.documents.get("acme.widgets", "widgets", "01JSTACK00000000000000000021"),
+    ).toBeNull();
+    expect(
+      await provider.documents.get("acme.widgets", "widgets", "01JSTACK00000000000000000022"),
+    ).not.toBeNull();
+  });
+});

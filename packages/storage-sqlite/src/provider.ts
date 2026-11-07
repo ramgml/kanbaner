@@ -40,6 +40,7 @@ import {
   verifyDatabaseIntegrity,
 } from "./backup.ts";
 import { JOURNAL_SCHEMA_SQL } from "./schema.ts";
+import { assertNoTransactionControlStatements } from "./sql-scanner.ts";
 import {
   createDocumentStore,
   createLinkStore,
@@ -502,6 +503,17 @@ export class SqliteStorageProvider implements StorageProvider {
         throw outcome.failure;
       }
 
+      // Belt-and-suspenders: после callback-а (включая migration.up) соединение
+      // обязано оставаться в транзакции. Scanner выше не даёт выполнить
+      // COMMIT/ROLLBACK, но проверка не полагается только на него.
+      if (!this.#getDatabase().inTransaction) {
+        this.#rollbackQuietly();
+        scope.rolledBack = true;
+        throw sqliteError("INTERNAL_ERROR", "Транзакция закрыта внутри callback-а", {
+          details: { reason: "transaction" },
+        });
+      }
+
       try {
         this.#getDatabase().exec("COMMIT");
       } catch (error) {
@@ -666,7 +678,7 @@ export class SqliteStorageProvider implements StorageProvider {
         return Promise.reject(transactionClosedError());
       }
 
-      const task = scheduler.runExclusive(scope, async () => {
+      const task = scheduler.runOperation(scope, async () => {
         await this.#delay(this.#delays.operationMs);
 
         if (!isScopeActive(scope)) {
@@ -723,10 +735,11 @@ export class SqliteStorageProvider implements StorageProvider {
   ): Promise<T> {
     const child = createTransactionScope(parentScope);
 
-    // Sibling-savepoint ждёт завершения текущей savepoint-области, а
-    // parent-операции ждут child. Вложенный savepoint реентерабелен внутри
-    // уже удерживаемой области.
-    return scheduler.runExclusive(child, async () => {
+    // Savepoint push становится владельцем SQL-стека: parent/sibling
+    // операции ждут RELEASE/ROLLBACK, затем восстанавливается предыдущий
+    // владелец. Вложенный savepoint получает собственный вложенный
+    // планировщик.
+    return scheduler.runSavepoint(child, async () => {
       await this.#delay(this.#delays.transactionMs);
 
       if (!isScopeActive(parentScope)) {
@@ -918,6 +931,9 @@ export class SqliteStorageProvider implements StorageProvider {
   }
 
   #execDdl(sql: string): void {
+    // Backend-specific SQL не может управлять внешней транзакцией runner-а:
+    // проверка выполняется сканером до первого statement.
+    assertNoTransactionControlStatements(sql);
     this.#getDatabase().exec(sql);
   }
 

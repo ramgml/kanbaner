@@ -281,6 +281,68 @@ describe("migratePluginWithSqlite", () => {
     }
   });
 
+  it("отклоняет COMMIT до выполнения DDL и не оставляет таблицу или журнал", async () => {
+    const provider = await createOpenedProvider();
+    const directory = migrationsDirectory({
+      "001_commit.sql": "CREATE TABLE plugin_acme_widgets_commit (id TEXT PRIMARY KEY);\nCOMMIT;\n",
+    });
+
+    try {
+      await expect(
+        migratePluginWithSqlite(migrationContext(directory), { provider }),
+      ).rejects.toMatchObject({ code: "MIGRATION_FAILED" });
+
+      expect(await provider.migrations.list("sqlite")).toEqual([]);
+      expect(tableNames(provider.databasePath)).not.toContain("plugin_acme_widgets_commit");
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it("отклоняет ROLLBACK до выполнения DDL и не оставляет таблицу или журнал", async () => {
+    const provider = await createOpenedProvider();
+    const directory = migrationsDirectory({
+      "001_rollback.sql":
+        "CREATE TABLE plugin_acme_widgets_rollback (id TEXT PRIMARY KEY);\nROLLBACK;\n",
+    });
+
+    try {
+      await expect(
+        migratePluginWithSqlite(migrationContext(directory), { provider }),
+      ).rejects.toMatchObject({ code: "MIGRATION_FAILED" });
+
+      expect(await provider.migrations.list("sqlite")).toEqual([]);
+      expect(tableNames(provider.databasePath)).not.toContain("plugin_acme_widgets_rollback");
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it("допускает COMMIT/ROLLBACK в комментариях, строках и quoted identifiers", async () => {
+    const provider = await createOpenedProvider();
+    const directory = migrationsDirectory({
+      "001_safe.sql": `
+        -- COMMIT; ROLLBACK;
+        CREATE TABLE plugin_acme_widgets_safe (
+          id TEXT PRIMARY KEY,
+          "COMMIT" TEXT,
+          note TEXT DEFAULT 'ROLLBACK'
+        );
+        /* SAVEPOINT s1; RELEASE s1; */
+        CREATE INDEX plugin_acme_widgets_safe_idx ON plugin_acme_widgets_safe (id);
+      `,
+    });
+
+    try {
+      await migratePluginWithSqlite(migrationContext(directory), { provider });
+
+      expect(await provider.migrations.list("sqlite")).toHaveLength(1);
+      expect(tableNames(provider.databasePath)).toContain("plugin_acme_widgets_safe");
+    } finally {
+      await provider.close();
+    }
+  });
+
   it("не активирует плагин с migrations без доступного каталога", async () => {
     const provider = await createOpenedProvider();
 

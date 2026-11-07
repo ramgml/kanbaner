@@ -43,9 +43,9 @@ interface StorageRuntimeHolder {
 }
 
 interface ShutdownHolder {
-  __kanbanerStorageShutdownHooks?: boolean;
-  __kanbanerStorageShutdownPromise?: Promise<void> | null;
   __kanbanerStorageShuttingDown?: boolean;
+  /** Мост для production custom server: await-able close + checkpoint. */
+  __kanbanerStorageShutdown?: (() => Promise<void>) | null;
 }
 
 const globalHolder = globalThis as typeof globalThis & StorageRuntimeHolder & ShutdownHolder;
@@ -118,21 +118,15 @@ function storageSingletonKey(options: ApplicationStorageOptions): string {
   });
 }
 
-function requestShutdown(): void {
-  globalHolder.__kanbanerStorageShutdownPromise ??= shutdownApplicationStorage();
-}
-
-function registerShutdownHooks(): void {
-  if (globalHolder.__kanbanerStorageShutdownHooks === true) {
-    return;
-  }
-
-  globalHolder.__kanbanerStorageShutdownHooks = true;
-
-  process.once("SIGTERM", requestShutdown);
-  process.once("SIGINT", requestShutdown);
-  process.once("beforeExit", requestShutdown);
-}
+/**
+ * Регистрирует мост для production custom server.
+ *
+ * Signal-handling живёт в `apps/web/scripts/server.mjs`: сначала сервер
+ * прекращает приём запросов и дожидается активных, затем вызывает этот
+ * await-able bridge, который закрывает provider и выполняет WAL checkpoint.
+ * Promise не сохраняется в globalThis в расчёте на то, что Next его дождётся.
+ */
+globalHolder.__kanbanerStorageShutdown = () => shutdownApplicationStorage();
 
 /**
  * Singleton Storage runtime для Next.js hot reload.
@@ -165,8 +159,6 @@ export function getApplicationStorage(
 
     return existing.promise;
   }
-
-  registerShutdownHooks();
 
   const promise = createApplicationStorage(options).catch((error: unknown) => {
     if (globalHolder[STORAGE_RUNTIME_KEY] === entry) {
@@ -247,6 +239,6 @@ export function shutdownApplicationStorage(): Promise<void> {
  */
 export function resetApplicationStorageForTests(): void {
   Reflect.deleteProperty(globalHolder, STORAGE_RUNTIME_KEY);
-  globalHolder.__kanbanerStorageShutdownPromise = null;
   globalHolder.__kanbanerStorageShuttingDown = false;
+  globalHolder.__kanbanerStorageShutdown = () => shutdownApplicationStorage();
 }
