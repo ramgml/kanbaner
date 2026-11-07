@@ -1,7 +1,7 @@
 ---
 id: KAN-006
 title: Storage Provider Registry, Store-контракты и миграции
-status: review
+status: in_progress
 stage: 1
 priority: high
 owner: worker-kan-006
@@ -187,6 +187,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — Повторное ревью подтвердило 8 из 9 исправлений, но нашло rejected savepoint, который не откатывается после sealing родителя. Требуется различить sealed и rolledBack, добавить delayed regression в unit/conformance и уточнить обработку rejected Promise публичных операций.
 - 2026-11-07 — Worker коммитом `a65d8c8` устранил все 9 findings, включая late-write sealing, registry/bootstrap races, conformance concurrency и удаление `projectRef`; 176 focused-тестов и 419 тестов workspace, strict install и полный check зелёные. Задача повторно переведена в review.
 - 2026-11-07 — Пользователь возобновил работу. Решение по `projectRef` применено к `specs/architecture.md`; worker должен устранить все 9 findings, включая удаление поля из SDK в пользу `metadata`, повторное ревью и полные проверки.
 - 2026-11-06 — Пользователь приостановил работу до следующего дня и выбрал решение конфликта поискового контракта: **удалить типизированное `SearchIndexDocument.projectRef`**. При возобновлении доменная ссылка на проект должна передаваться через generic `metadata`, ядро не интерпретирует её; одновременно уточнить `specs/architecture.md` (раздел поиска), не меняя инвариант отсутствия проекта в публичных типах ядра. Код и спецификация в этой паузе не изменялись.
