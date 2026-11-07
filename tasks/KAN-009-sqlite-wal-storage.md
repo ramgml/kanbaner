@@ -1,7 +1,7 @@
 ---
 id: KAN-009
 title: SQLite WAL Storage Provider
-status: in_progress
+status: review
 stage: 1
 priority: high
 owner: worker-kan-009
@@ -202,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — После разрешённого повтора worker коммитом `36cfe6d` устранил scheduling deadlock и изолировал Playwright на custom server; 164 focused-теста, 664 workspace-теста, 70 Conformance, 3 E2E и deferred SIGTERM test зелёные. Пользовательский data dir не изменился, задача повторно в review.
 - 2026-11-07 — При запуске исправления scheduler deadlock и E2E worker завершился инфраструктурной ошибкой `Internal Server Error` (`request_id: ce86f91b-1564-410f-97aa-03522badfc9f`). Worktree чистый на `ae7da96`, новых изменений и результатов исправления нет; требуется решение о повторном запуске.
 - 2026-11-07 — Ревью подтвердило SQL scanner, backup и custom shutdown, но нашло deadlock при await parent/sibling из активного savepoint и запуск Playwright через старый `next start` без изолированной БД. Требуется обнаружение scheduling conflict вместо ожидания и единый custom server для E2E.
 - 2026-11-07 — Worker коммитом `ae7da96` реализовал stack-aware AsyncLocalStorage scheduler, SQL transaction-control scanner и custom await-able production server; 160 focused-тестов, 660 workspace-тестов, 70 Conformance и отдельный deferred-write SIGTERM test зелёные. Задача повторно в review.
