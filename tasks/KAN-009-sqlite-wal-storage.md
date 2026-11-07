@@ -1,17 +1,15 @@
 ---
 id: KAN-009
 title: SQLite WAL Storage Provider
-status: backlog
+status: in_progress
 stage: 1
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-001
-  - KAN-006
-branch: null
-worktree: null
+owner: worker-kan-009
+blocked_by: []
+branch: feat/kan-009-sqlite-wal-storage
+worktree: .worktrees/kan-009-sqlite-wal-storage
 created: 2026-11-06
-updated: 2026-11-06
+updated: 2026-11-07
 specs:
   - specs/product-mvp.md
   - specs/technology-stack.md
@@ -204,6 +202,7 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — KAN-001/KAN-006 завершены. Оркестратор назначил worker-kan-009, ветку `feat/kan-009-sqlite-wal-storage` и worktree `.worktrees/kan-009-sqlite-wal-storage`. Согласованы изменения `packages/storage-sqlite/**`, bootstrap-файлов `apps/web/src/server/**`, `apps/web/package.json`, `next.config.ts` только для native externals, `scripts/restore.*`, корневого `package.json` для build/restore scripts и `pnpm-lock.yaml`; kernel/SDK/UI/specs менять запрещено.
 - 2026-11-06 — Задача создана при переходе с PGlite на SQLite WAL.
 - 2026-11-06 — Добавлены асинхронный публичный API, bootstrap-порядок и границы backup/restore.
 - 2026-11-06 — Добавлены composition root в `apps/web`, production smoke, ID/UTC и ручной async `withTransaction`.
