@@ -137,6 +137,11 @@ specs:
 - `apps/web/src/components/shell/plugin-view.tsx`;
 - `apps/web/src/components/shell/contribution-boundary.tsx`;
 - `apps/web/src/app/layout.tsx`;
+- `apps/web/src/app/globals.css` — только `@source` для классов встроенных
+  UI-пакетов;
+- `packages/kernel/src/operations/errors.ts` и
+  `packages/kernel/src/operations/bus.test.ts` — только структурное
+  распознавание `PluginOperationError` между экземплярами SDK;
 - `apps/web/e2e/task-list.spec.ts`, `apps/web/e2e/test-environment.ts`;
 - `apps/web/package.json`, корневой `package.json` (`build:packages`),
   `pnpm-lock.yaml`;
@@ -147,7 +152,8 @@ specs:
 
 Запрещено:
 
-- `packages/kernel/**`, `packages/plugin-sdk/**`, `packages/storage-sqlite/**`;
+- `packages/kernel/**`, `packages/plugin-sdk/**`, `packages/storage-sqlite/**`,
+  кроме явно разрешённого структурного error mapping выше;
 - `packages/plugin-tasks/src/**` — только публичный импорт контракта;
 - `packages/plugin-kanban/**`;
 - `specs/**`, кроме точечной фиксации `packages/task-ui` в
@@ -211,6 +217,12 @@ specs:
 
 ## Журнал
 
+- 2026-11-07 — E2E выявил потерю `VERSION_CONFLICT`: dynamic import плагина
+  создаёт второй экземпляр SDK, поэтому `instanceof PluginOperationError` в
+  kernel возвращает false. Оркестратор согласовал структурное распознавание
+  публичной ошибки с валидацией конверта и тестами кросс-экземплярного
+  случая/подделки, а также `@source` в globals.css для адаптивных классов
+  UI-пакетов.
 - 2026-11-07 — По итогам проверки задач зафиксированы React-free тип
   `invoke` в `task-ui`, импорт только из `@kanbaner/plugin-tasks/contract`,
   `consumes` контрактов tasks, идемпотентная привязка рендерера и запись
