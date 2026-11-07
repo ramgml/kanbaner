@@ -4,12 +4,12 @@ import type { StorageProvider } from "@kanbaner/plugin-sdk";
 import {
   createApplicationPluginComposition,
   type ApplicationPluginComposition,
-} from "./application-composition";
+} from "./application-composition.ts";
 import {
   createApplicationStorage,
   type ApplicationStorageOptions,
   type ApplicationStorageRuntime,
-} from "./application-storage";
+} from "./application-storage.ts";
 
 /**
  * Server composition root приложения.
