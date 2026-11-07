@@ -6,20 +6,26 @@ import { TaskPrioritySchema, TaskSchema, TaskStatusSchema } from "../model.ts";
 import {
   ConfirmSchema,
   CreateExpectedVersionSchema,
+  DeleteOutputSchema,
   DescriptionMarkdownSchema,
   EntityIdSchema,
   ExpectedVersionSchema,
   NullableUtcTimestampSchema,
   PositionSchema,
-  TagsSchema,
+  RawTagsSchema,
   TitleSchema,
+  type DeleteOutput,
 } from "./common.ts";
 
 /**
  * Вход команды `task.create`.
  *
  * `position` задаёт порядок в области `(projectId, status)` и не зависит от
- * `parentTaskId`. Непрерывность позиций не требуется.
+ * `parentTaskId`; отсутствие поля означает атомарный append. Непрерывность
+ * позиций не требуется.
+ *
+ * `tags` принимаются в сыром виде: дубликаты и trim допустимы, а лимиты
+ * `MAX_TAGS`/`MAX_TAG_LENGTH` применяются после доменной нормализации.
  */
 export const TaskCreateInputSchema = Type.Object(
   {
@@ -31,7 +37,7 @@ export const TaskCreateInputSchema = Type.Object(
     priority: Type.Optional(TaskPrioritySchema),
     dueAt: Type.Optional(NullableUtcTimestampSchema),
     position: Type.Optional(PositionSchema),
-    tags: Type.Optional(TagsSchema),
+    tags: Type.Optional(RawTagsSchema),
     expectedVersion: Type.Optional(CreateExpectedVersionSchema),
   },
   { ...DRAFT_2020_12, additionalProperties: false },
@@ -39,7 +45,12 @@ export const TaskCreateInputSchema = Type.Object(
 
 export type TaskCreateInput = Static<typeof TaskCreateInputSchema>;
 
-/** Вход команды `task.update`: текстовые поля, приоритет, срок и теги. */
+/**
+ * Вход команды `task.update`: текстовые поля, приоритет, срок и теги.
+ *
+ * `tags` принимаются сырыми: trim и дедупликация выполняются доменным
+ * валидатором, а не JSON Schema.
+ */
 export const TaskUpdateInputSchema = Type.Object(
   {
     id: EntityIdSchema,
@@ -48,7 +59,7 @@ export const TaskUpdateInputSchema = Type.Object(
     descriptionMarkdown: Type.Optional(DescriptionMarkdownSchema),
     priority: Type.Optional(TaskPrioritySchema),
     dueAt: Type.Optional(NullableUtcTimestampSchema),
-    tags: Type.Optional(TagsSchema),
+    tags: Type.Optional(RawTagsSchema),
   },
   { ...DRAFT_2020_12, additionalProperties: false },
 );
@@ -108,15 +119,12 @@ export const TaskMutationOutputSchema = Type.Object(
 
 export type TaskMutationOutput = Static<typeof TaskMutationOutputSchema>;
 
-/** Результат `task.delete` с каскадно удалёнными подзадачами. */
-export const TaskDeleteOutputSchema = Type.Object(
-  {
-    deleted: Type.Boolean(),
-    deletedTaskIds: Type.Array(EntityIdSchema),
-    resource: ResourceRefSchema,
-    eventId: Type.String({ minLength: 1 }),
-  },
-  { ...DRAFT_2020_12, additionalProperties: false },
-);
+/**
+ * Результат `task.delete`.
+ *
+ * `deleted = true` содержит `eventId` и дескрипторы последних версий удалённых
+ * задач; `deleted = false` — идемпотентный no-op без события.
+ */
+export const TaskDeleteOutputSchema = DeleteOutputSchema;
 
-export type TaskDeleteOutput = Static<typeof TaskDeleteOutputSchema>;
+export type TaskDeleteOutput = DeleteOutput;

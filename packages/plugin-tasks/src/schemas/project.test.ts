@@ -104,13 +104,40 @@ describe("project schemas", () => {
         eventId: "event-1",
       }).ok,
     ).toBe(true);
+  });
+
+  it("различает успешное удаление и идемпотентный no-op", () => {
+    const deletedTask = {
+      id: "task-1",
+      projectId: "project-1",
+      resourceRef: "kanbaner.tasks:task:task-1",
+      version: 3,
+    };
+    const success = {
+      deleted: true,
+      resource: "kanbaner.tasks:project:project-1",
+      version: 2,
+      deletedResourceRefs: ["kanbaner.tasks:project:project-1", "kanbaner.tasks:task:task-1"],
+      deletedTasks: [deletedTask],
+      eventId: "event-2",
+    };
+
+    expect(validateWithSchema(ProjectDeleteOutputSchema, success).ok).toBe(true);
+    expect(validateWithSchema(ProjectDeleteOutputSchema, { deleted: false }).ok).toBe(true);
+    expect(
+      validateWithSchema(ProjectDeleteOutputSchema, { ...success, eventId: undefined }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ProjectDeleteOutputSchema, { deleted: false, eventId: "event-3" }).ok,
+    ).toBe(false);
+    expect(validateWithSchema(ProjectDeleteOutputSchema, { ...success, version: 0 }).ok).toBe(
+      false,
+    );
     expect(
       validateWithSchema(ProjectDeleteOutputSchema, {
-        deleted: true,
-        deletedTaskIds: ["task-1", "task-2"],
-        resource: "kanbaner.tasks:project:project-1",
-        eventId: "event-2",
+        ...success,
+        deletedTasks: [{ ...deletedTask, version: 0 }],
       }).ok,
-    ).toBe(true);
+    ).toBe(false);
   });
 });

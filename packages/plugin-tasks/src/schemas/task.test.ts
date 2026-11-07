@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
-import { MAX_TAGS } from "../constants.ts";
+import { MAX_RAW_TAG_LENGTH, MAX_RAW_TAGS, MAX_TAGS } from "../constants.ts";
 import {
   TaskCompleteInputSchema,
   TaskCreateInputSchema,
@@ -87,19 +87,64 @@ describe("task schemas", () => {
     ).toBe(false);
   });
 
-  it("ограничивает количество и длину тегов", () => {
+  it("принимает сырые теги и применяет лимиты после нормализации", () => {
     expect(
       validateWithSchema(TaskCreateInputSchema, {
         projectId: "project-1",
         title: "Задача",
         tags: uniqueTags(MAX_TAGS + 1),
       }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        tags: Array.from({ length: MAX_RAW_TAGS }, () => " Work "),
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        tags: ["a".repeat(MAX_RAW_TAG_LENGTH)],
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        tags: uniqueTags(MAX_RAW_TAGS + 1),
+      }).ok,
     ).toBe(false);
     expect(
       validateWithSchema(TaskCreateInputSchema, {
         projectId: "project-1",
         title: "Задача",
-        tags: ["a".repeat(33)],
+        tags: ["a".repeat(MAX_RAW_TAG_LENGTH + 1)],
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        tags: ["   "],
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("применяет те же сырые лимиты к task.update", () => {
+    expect(
+      validateWithSchema(TaskUpdateInputSchema, {
+        id: "task-1",
+        expectedVersion: 1,
+        tags: Array.from({ length: MAX_RAW_TAGS }, () => " Work "),
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskUpdateInputSchema, {
+        id: "task-1",
+        expectedVersion: 1,
+        tags: uniqueTags(MAX_RAW_TAGS + 1),
       }).ok,
     ).toBe(false);
   });
@@ -188,28 +233,77 @@ describe("task schemas", () => {
       }).ok,
     ).toBe(true);
     expect(
-      validateWithSchema(TaskDeleteOutputSchema, {
-        deleted: true,
-        deletedTaskIds: ["task-1", "task-2"],
-        resource: "kanbaner.tasks:task:task-1",
-        eventId: "event-2",
-      }).ok,
-    ).toBe(true);
-  });
-
-  it("принимает done с заполненным completedAt", () => {
-    const doneTask = {
-      ...task,
-      status: "done",
-      completedAt: createdAt,
-    };
-
-    expect(
       validateWithSchema(TaskMutationOutputSchema, {
-        task: doneTask,
+        task: { ...task, tags: uniqueTags(MAX_TAGS + 1) },
         resource: "kanbaner.tasks:task:task-1",
         eventId: "event-1",
       }).ok,
+    ).toBe(false);
+  });
+
+  it("требует done ⇔ completedAt !== null", () => {
+    const output = (candidate: unknown) => ({
+      task: candidate,
+      resource: "kanbaner.tasks:task:task-1",
+      eventId: "event-1",
+    });
+
+    expect(
+      validateWithSchema(
+        TaskMutationOutputSchema,
+        output({ ...task, status: "done", completedAt: createdAt }),
+      ).ok,
     ).toBe(true);
+    expect(
+      validateWithSchema(
+        TaskMutationOutputSchema,
+        output({ ...task, status: "done", completedAt: null }),
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(
+        TaskMutationOutputSchema,
+        output({ ...task, status: "todo", completedAt: createdAt }),
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(TaskMutationOutputSchema, output({ ...task, status: "backlog" })).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(
+        TaskMutationOutputSchema,
+        output({ ...task, status: "in_progress", completedAt: null }),
+      ).ok,
+    ).toBe(true);
+  });
+
+  it("различает успешное удаление и идемпотентный no-op", () => {
+    const deletedTask = {
+      id: "task-1",
+      projectId: "project-1",
+      resourceRef: "kanbaner.tasks:task:task-1",
+      version: 4,
+    };
+    const success = {
+      deleted: true,
+      resource: "kanbaner.tasks:task:task-1",
+      version: 4,
+      deletedResourceRefs: ["kanbaner.tasks:task:task-1", "kanbaner.tasks:task:task-2"],
+      deletedTasks: [
+        deletedTask,
+        { ...deletedTask, id: "task-2", resourceRef: "kanbaner.tasks:task:task-2" },
+      ],
+      eventId: "event-2",
+    };
+
+    expect(validateWithSchema(TaskDeleteOutputSchema, success).ok).toBe(true);
+    expect(validateWithSchema(TaskDeleteOutputSchema, { deleted: false }).ok).toBe(true);
+    expect(validateWithSchema(TaskDeleteOutputSchema, { ...success, eventId: undefined }).ok).toBe(
+      false,
+    );
+    expect(
+      validateWithSchema(TaskDeleteOutputSchema, { deleted: false, eventId: "event-3" }).ok,
+    ).toBe(false);
+    expect(validateWithSchema(TaskDeleteOutputSchema, { ...success, version: 0 }).ok).toBe(false);
   });
 });

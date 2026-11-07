@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
-import { MAX_LIST_LIMIT } from "../constants.ts";
+import { MAX_LIST_LIMIT, MAX_RAW_TAG_LENGTH } from "../constants.ts";
 import {
   ProjectGetInputSchema,
   ProjectGetOutputSchema,
@@ -87,6 +87,17 @@ describe("query schemas", () => {
         sort: { field: "title", direction: "sideways" },
       }).ok,
     ).toBe(false);
+  });
+
+  it("принимает сырой tag и применяет те же raw-лимиты", () => {
+    expect(validateWithSchema(TaskListInputSchema, { tag: " Work " }).ok).toBe(true);
+    expect(
+      validateWithSchema(TaskListInputSchema, { tag: "a".repeat(MAX_RAW_TAG_LENGTH) }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskListInputSchema, { tag: "a".repeat(MAX_RAW_TAG_LENGTH + 1) }).ok,
+    ).toBe(false);
+    expect(validateWithSchema(TaskListInputSchema, { tag: "   " }).ok).toBe(false);
   });
 
   it("отклоняет пустой text и неверный dueBefore", () => {

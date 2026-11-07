@@ -1,5 +1,5 @@
 import { TASKS_CONTRACT_VERSION, TASKS_EVENT_TYPES, type TasksEventType } from "./constants.ts";
-import type { TaskStatus } from "./model.ts";
+import type { DeletedTaskDescriptor, TaskStatus } from "./model.ts";
 
 /** Версия контракта событий задач. */
 export const TASKS_EVENT_CONTRACT_VERSION = TASKS_CONTRACT_VERSION;
@@ -20,10 +20,16 @@ export interface ProjectUpdatedEventPayload extends ProjectEventPayload {
   readonly changed: readonly string[];
 }
 
-/** Payload `kanbaner.tasks.project.deleted`. */
+/**
+ * Payload `kanbaner.tasks.project.deleted`.
+ *
+ * `version` — последняя сохранённая версия проекта; `deletedTasks` содержат
+ * последние версии задач. Tombstone-версия не создаётся.
+ */
 export interface ProjectDeletedEventPayload {
   readonly projectId: string;
-  readonly deletedTaskIds: readonly string[];
+  readonly version: number;
+  readonly deletedTasks: readonly DeletedTaskDescriptor[];
 }
 
 /** Общие поля события задачи. */
@@ -57,11 +63,18 @@ export interface TaskCompletedEventPayload extends TaskEventPayload {
   readonly completedAt: string;
 }
 
-/** Payload `kanbaner.tasks.task.deleted`. */
+/**
+ * Payload `kanbaner.tasks.task.deleted`.
+ *
+ * `version` — последняя сохранённая версия корневой задачи; `deletedTasks`
+ * включают корень и подзадачи с их последними версиями. Tombstone-версия не
+ * создаётся.
+ */
 export interface TaskDeletedEventPayload {
   readonly taskId: string;
   readonly projectId: string;
-  readonly deletedTaskIds: readonly string[];
+  readonly version: number;
+  readonly deletedTasks: readonly DeletedTaskDescriptor[];
 }
 
 /** Проверяет, что значение — тип события домена задач. */

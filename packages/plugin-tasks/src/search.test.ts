@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { StorageError } from "@kanbaner/plugin-sdk";
+import { StorageError, type SearchDocumentInput } from "@kanbaner/plugin-sdk";
 
 import type { Task } from "./model.ts";
 import { toTaskSearchDocument } from "./search.ts";
@@ -38,8 +38,9 @@ describe("toTaskSearchDocument", () => {
   it("строит документ из заголовка, описания и метаданных", () => {
     const document = toTaskSearchDocument(task);
 
+    expectTypeOf(document).toEqualTypeOf<SearchDocumentInput>();
+    expect(document).not.toHaveProperty("pluginId");
     expect(document.ref).toBe("kanbaner.tasks:task:task-1");
-    expect(document.pluginId).toBe("kanbaner.tasks");
     expect(document.kind).toBe("task");
     expect(document.title).toBe("Подготовить релиз");
     expect(document.text).toContain("Подготовить релиз");

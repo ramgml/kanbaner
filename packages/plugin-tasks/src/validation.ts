@@ -8,7 +8,7 @@ import {
   MAX_TAGS,
   MAX_TITLE_LENGTH,
 } from "./constants.ts";
-import type { TaskStatus } from "./model.ts";
+import type { Task, TaskStatus } from "./model.ts";
 
 /** Коды доменных ошибок валидации. */
 export const TASKS_VALIDATION_CODES = [
@@ -23,6 +23,7 @@ export const TASKS_VALIDATION_CODES = [
   "INVALID_OFFSET",
   "INVALID_EXPECTED_VERSION",
   "INVALID_TIMESTAMP",
+  "INVALID_COMPLETION",
   "PARENT_NOT_FOUND",
   "PARENT_IN_OTHER_PROJECT",
   "SUBTASK_DEPTH_EXCEEDED",
@@ -130,6 +131,24 @@ export function validateTags(value: unknown): TasksValidationResult<readonly str
 }
 
 /**
+ * Нормализует один тег тем же способом, что и теги задачи.
+ *
+ * Используется для фильтра `task.list.tag`: trim, нижний регистр, лимит
+ * `MAX_TAG_LENGTH`. Пустой или слишком длинный тег даёт
+ * `TasksValidationError`.
+ */
+export function normalizeTag(value: string): string {
+  const normalized = normalizeTags([value]);
+  const tag = normalized[0];
+
+  if (tag === undefined) {
+    throw new TasksValidationError("TAG_EMPTY", "Тег не может быть пустым");
+  }
+
+  return tag;
+}
+
+/**
  * Проверяет родителя подзадачи.
  *
  * Подзадача может ссылаться только на корневую задачу того же проекта.
@@ -160,7 +179,13 @@ export function validateSubtaskParent(
 /**
  * Вычисляет `completedAt` при смене статуса.
  *
- * `done` фиксирует время один раз, выход из `done` очищает поле.
+ * Чистая доменная функция для Store:
+ * - создание в `done` — `resolveCompletedAt("done", null, createdAt)`;
+ * - перемещение в `done` — `resolveCompletedAt("done", previous, updatedAt)`;
+ * - выход из `done` — `resolveCompletedAt(status, previous, now)` даёт `null`.
+ *
+ * Повторный `completeTask` для уже завершённой задачи не вызывает обновление:
+ * Store возвращает текущую задачу без изменения версии.
  */
 export function resolveCompletedAt(
   status: TaskStatus,
@@ -183,6 +208,30 @@ export function resolveCompletedAt(
   }
 
   return previousCompletedAt ?? now;
+}
+
+/**
+ * Проверяет доменный инвариант `done ⇔ completedAt !== null`.
+ *
+ * Схема `TaskSchema` выражает то же правило, а эта функция нужна Store и
+ * обработчикам для явной проверки после вычисления `completedAt`.
+ */
+export function validateCompletionInvariant(
+  task: Pick<Task, "status" | "completedAt">,
+): TasksValidationResult<true> {
+  const isDone = task.status === "done";
+  const hasCompletedAt = task.completedAt !== null;
+
+  if (isDone !== hasCompletedAt) {
+    return failure(
+      "INVALID_COMPLETION",
+      isDone
+        ? "Задача в done обязана иметь completedAt"
+        : "completedAt допустим только для задачи в done",
+    );
+  }
+
+  return { ok: true, value: true };
 }
 
 /**

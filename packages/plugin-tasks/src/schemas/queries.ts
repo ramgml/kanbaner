@@ -10,9 +10,13 @@ import {
   TaskSortSchema,
   TaskStatusSchema,
 } from "../model.ts";
-import { EntityIdSchema, LimitSchema, OffsetSchema, TagSchema } from "./common.ts";
+import { EntityIdSchema, LimitSchema, OffsetSchema, RawTagSchema } from "./common.ts";
 
-/** Вход запроса `project.list`. */
+/**
+ * Вход запроса `project.list`.
+ *
+ * Порядок фиксирован: `createdAt asc`, затем `id asc`.
+ */
 export const ProjectListInputSchema = Type.Object(
   {
     limit: Type.Optional(LimitSchema),
@@ -48,13 +52,22 @@ export type TaskGetInput = Static<typeof TaskGetInputSchema>;
  *
  * Все фильтры комбинируются по AND. `parentTaskId = null` выбирает корневые
  * задачи, отсутствие поля не ограничивает вложенность.
+ *
+ * `tag` принимается в сыром виде и нормализуется как теги задачи (trim, нижний
+ * регистр, дедупликация, лимиты). `text` ищет подстроку без учёта регистра по
+ * NFKC-нормализованным `title`/`descriptionMarkdown`. `dueBefore`/`dueAfter`
+ * включают границу.
+ *
+ * Порядок: выбранное поле сортировки, затем `id asc`; `dueAt = null` всегда
+ * последние независимо от направления; `title` сравнивается по code points,
+ * без `localeCompare`.
  */
 export const TaskListInputSchema = Type.Object(
   {
     projectId: Type.Optional(EntityIdSchema),
     status: Type.Optional(TaskStatusSchema),
     priority: Type.Optional(TaskPrioritySchema),
-    tag: Type.Optional(TagSchema),
+    tag: Type.Optional(RawTagSchema),
     parentTaskId: Type.Optional(Type.Union([EntityIdSchema, Type.Null()])),
     text: Type.Optional(
       Type.String({ minLength: 1, maxLength: MAX_SEARCH_TEXT_LENGTH, pattern: "\\S" }),

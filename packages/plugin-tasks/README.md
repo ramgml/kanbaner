@@ -15,9 +15,10 @@ KAN-012. Представления списка и канбана — KAN-013 �
   контракт, метаданные операций и контракт `TasksStore`. Её используют
   composition root и реализация плагина.
 - `@kanbaner/plugin-tasks/contract` — client-safe entrypoint. Только типы,
-  TypeBox-схемы, ID, `ResourceRef`, чистые валидаторы, payload событий и
-  преобразование в поисковый документ. Без `activate`, Store, `node:*`, SQL и
-  серверных модулей. Другой плагин или UI импортирует только этот subpath.
+  TypeBox-схемы, ID, `ResourceRef`, чистые валидаторы, backend-neutral
+  компараторы списков, payload событий и преобразование в
+  `SearchDocumentInput`. Без `activate`, Store, `node:*`, SQL и серверных
+  модулей. Другой плагин или UI импортирует только этот subpath.
 
 ## Состав
 
@@ -25,8 +26,10 @@ KAN-012. Представления списка и канбана — KAN-013 �
 - `src/model.ts` — `Project`, `Task`, статусы, приоритеты и сортировка.
 - `src/schemas/*.ts` — TypeBox-схемы и производные TS-типы.
 - `src/operations.ts` — серверные метаданные команд и запросов для `OperationBus`.
-- `src/store.ts` — асинхронный backend-neutral контракт `TasksStore`.
-- `src/validation.ts` — чистые доменные валидаторы.
+- `src/store.ts` — асинхронный backend-neutral контракт `TasksStore` и
+  транзакционный `TasksStoreTransaction`.
+- `src/validation.ts` — чистые доменные валидаторы и нормализация тегов.
+- `src/listing.ts` — backend-neutral семантика сортировки и фильтров списков.
 - `src/resources.ts` — `ResourceRef` проектов и задач.
 - `src/events.ts` — типы и payload событий после коммита.
 - `src/search.ts` — `toTaskSearchDocument` без записи в индекс.
@@ -61,8 +64,22 @@ KAN-012. Представления списка и канбана — KAN-013 �
 `parentTaskId`, `text`, `dueBefore`, `dueAfter`. `parentTaskId: null` выбирает
 корневые задачи. Сортировка задаётся `{ field, direction }`; поля: `position`,
 `createdAt`, `updatedAt`, `dueAt`, `title`. `limit` — от 1 до 200, значение по
-умолчанию 50; `offset` — неотрицательное целое. При равных значениях порядок
-стабилизируется по `id`.
+умолчанию 50; `offset` — неотрицательное целое.
+
+### Backend-neutral семантика списков
+
+- `project.list` всегда сортирует `createdAt asc`, затем `id asc`.
+- `task.list` сортирует выбранное поле, затем `id asc` при равенстве.
+- `dueAt = null` всегда последние независимо от `asc`/`desc`.
+- `dueBefore` и `dueAfter` включают границу; `dueAt = null` не попадает в
+  ограниченный диапазон.
+- `text` сравнивается без учёта регистра как подстрока по NFKC-нормализованным
+  `title` и `descriptionMarkdown` (`normalizeSearchText`).
+- `tag` нормализуется так же, как теги задачи: trim, нижний регистр,
+  дедупликация и лимиты (`normalizeTag`).
+- `title` сравнивается по code points Unicode, без `localeCompare`.
+- Готовые компараторы: `compareProjects`, `compareTaskList`,
+  `compareNullableDueAt`, `matchesTaskText`, `matchesDueRange`.
 
 ## Позиция задачи
 
@@ -71,6 +88,36 @@ KAN-012. Представления списка и канбана — KAN-013 �
 одного проекта и статуса упорядочиваются вместе. Непрерывность `0…N-1` не
 требуется — допустимы разреженные целые позиции, если уникальность и порядок
 сохранены. Чистый ключ области даёт `taskPositionScopeKey(projectId, status)`.
+
+## Append и completedAt
+
+`position` в `CreateTaskStoreInput` и `CompleteTaskStoreInput` необязательна:
+
+- `undefined` — атомарный append в конец области `(projectId, status)`;
+- явное число — транзакционный сдвиг соседей в той же области.
+
+`completedAt` не передаётся в Store. Store вычисляет его чистой функцией
+`resolveCompletedAt`:
+
+- создание в `done` — `completedAt = createdAt`;
+- перемещение в `done` — `completedAt = updatedAt`;
+- выход из `done` — `completedAt = null`;
+- повторный `completeTask` для уже `done` возвращает текущую задачу без
+  изменения версии и сохраняет прежний `completedAt`.
+
+Схема `TaskSchema` и `validateCompletionInvariant` выражают инвариант
+`done ⇔ completedAt !== null`.
+
+## Сырые и нормализованные теги
+
+Входные команды принимают сырые теги: пробелы по краям, дубликаты и до
+`MAX_RAW_TAGS = 100` элементов длиной до `MAX_RAW_TAG_LENGTH = 256`. Схема не
+применяет trim и не отклоняет дубликаты сверх `MAX_TAGS`.
+
+После доменной нормализации (`normalizeTags`) сохраняется не более
+`MAX_TAGS = 10` уникальных тегов длиной до `MAX_TAG_LENGTH = 32`. Схема
+`TaskSchema` проверяет уже нормализованный результат. Фильтр `task.list.tag`
+нормализуется функцией `normalizeTag` тем же способом.
 
 ## Как использовать из другого плагина
 
@@ -93,8 +140,8 @@ await context.commands.execute(TASKS_COMMAND_IDS.taskComplete, {
 // Ссылка на ресурс для связей, поиска и навигации.
 const ref = formatTaskRef("task-1"); // "kanbaner.tasks:task:task-1"
 
-// Чистое преобразование задачи в поисковый документ выполняет сам плагин
-// задач в KAN-012; функция ничего не пишет в индекс.
+// Чистое преобразование задачи в SearchDocumentInput выполняет сам плагин
+// задач в KAN-012; функция ничего не пишет в индекс и не добавляет pluginId.
 const document = toTaskSearchDocument(task);
 ```
 
@@ -122,7 +169,10 @@ kanbaner.tasks.task.created|updated|moved|completed|deleted
 ```
 
 Payload содержит минимальные идентификаторы и версию; полное состояние
-получается запросом. Доставка best-effort, обработчик должен быть идемпотентным.
+получается запросом. События `project.deleted` и `task.deleted` несут
+`version` последней сохранённой корневой сущности и `deletedTasks` с
+дескрипторами `{ id, projectId, resourceRef, version }`. Tombstone-версия не
+создаётся. Доставка best-effort, обработчик должен быть идемпотентным.
 
 ## TasksStore и данные
 
@@ -130,6 +180,39 @@ Payload содержит минимальные идентификаторы и 
 backend-специфичных типов. Домен передаёт готовые ID и UTC-время; версии
 проверяются по `expectedVersion`. Тип `TasksIdFactory` описывает генератор ID,
 который используется до записи.
+
+### Транзакции и idempotency
+
+`TasksStore.withTransaction(callback)` открывает транзакцию провайдера и
+передаёт `TasksStoreTransaction`:
+
+```ts
+await store.withTransaction(async (transaction) => {
+  const task = await transaction.createTask(input);
+  await transaction.documents.put(idempotencyDocument);
+  return task;
+});
+```
+
+- Root-методы Store открывают собственную транзакцию.
+- Методы на `TasksStoreTransaction` используют текущую транзакцию и не
+  открывают вложенную.
+- `transaction.documents` — bound `PluginDocumentStore` той же транзакции.
+  KAN-012 пишет idempotency-результат в одной транзакции с доменной мутацией.
+- Вложенный `withTransaction` бросает `TasksNestedTransactionError` с кодом
+  `NESTED_TRANSACTION`. Savepoints не поддерживаются и не подразумеваются.
+
+### Каскадное удаление
+
+`DeleteStoreResult` дискриминирован:
+
+- `deleted: true` содержит `version` корня (равен `expectedVersion`),
+  `deletedResourceRefs` и `deletedTasks` с последними сохранёнными версиями;
+- `deleted: false` — идемпотентный no-op без события и без `eventId`.
+
+Ответы `project.delete` и `task.delete` используют ту же дискриминацию:
+`deleted: true` содержит `eventId`, `deleted: false` — нет. Tombstone-версия
+не создаётся; события удаления используют последнюю сохранённую версию.
 
 Физическое хранение проектируется как namespaced document collections плагина:
 

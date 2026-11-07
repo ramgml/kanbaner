@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_TAGS } from "./constants.ts";
 import {
   TasksValidationError,
+  normalizeTag,
   normalizeTags,
   resolveCompletedAt,
   taskPositionScopeKey,
+  validateCompletionInvariant,
   validateExpectedVersion,
   validateOffset,
   validatePagination,
@@ -54,6 +56,12 @@ describe("normalizeTags", () => {
       ok: true,
       value: uniqueTags(MAX_TAGS),
     });
+  });
+
+  it("нормализует один тег для фильтра task.list.tag", () => {
+    expect(normalizeTag("  Work  ")).toBe("work");
+    expect(() => normalizeTag("   ")).toThrowError(TasksValidationError);
+    expect(() => normalizeTag("a".repeat(33))).toThrowError(TasksValidationError);
   });
 });
 
@@ -105,6 +113,16 @@ describe("resolveCompletedAt", () => {
     expect(resolveCompletedAt("done", null, now)).toBe(now);
   });
 
+  it("покрывает create, move и повторный complete", () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const updatedAt = "2026-01-02T00:00:00.000Z";
+
+    expect(resolveCompletedAt("done", null, createdAt)).toBe(createdAt);
+    expect(resolveCompletedAt("done", null, updatedAt)).toBe(updatedAt);
+    expect(resolveCompletedAt("in_progress", updatedAt, now)).toBeNull();
+    expect(resolveCompletedAt("done", createdAt, updatedAt)).toBe(createdAt);
+  });
+
   it("сохраняет существующее время при повторном done", () => {
     expect(resolveCompletedAt("done", "2025-12-31T23:00:00.000Z", now)).toBe(
       "2025-12-31T23:00:00.000Z",
@@ -119,6 +137,38 @@ describe("resolveCompletedAt", () => {
 
   it("отклоняет неверный timestamp", () => {
     expect(() => resolveCompletedAt("done", null, "2026-01-01")).toThrowError(TasksValidationError);
+  });
+});
+
+describe("validateCompletionInvariant", () => {
+  it("принимает done с completedAt и остальные статусы без него", () => {
+    expect(validateCompletionInvariant({ status: "done", completedAt: now })).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(validateCompletionInvariant({ status: "backlog", completedAt: null })).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(validateCompletionInvariant({ status: "todo", completedAt: null })).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(validateCompletionInvariant({ status: "in_progress", completedAt: null })).toEqual({
+      ok: true,
+      value: true,
+    });
+  });
+
+  it("отклоняет done без completedAt и completedAt вне done", () => {
+    expect(validateCompletionInvariant({ status: "done", completedAt: null })).toMatchObject({
+      ok: false,
+      code: "INVALID_COMPLETION",
+    });
+    expect(validateCompletionInvariant({ status: "todo", completedAt: now })).toMatchObject({
+      ok: false,
+      code: "INVALID_COMPLETION",
+    });
   });
 });
 

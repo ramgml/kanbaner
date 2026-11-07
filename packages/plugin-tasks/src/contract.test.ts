@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -166,6 +165,7 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
         "src/constants.ts",
         "src/contract.ts",
         "src/events.ts",
+        "src/listing.ts",
         "src/model.ts",
         "src/resources.ts",
         "src/schemas/common.ts",
@@ -212,7 +212,7 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
       "Соберите пакет: pnpm --filter @kanbaner/plugin-tasks build",
     ).toBe(true);
 
-    const contract = (await import(pathToFileURL(contractDist).href)) as Record<string, unknown>;
+    const contract = (await import("@kanbaner/plugin-tasks/contract")) as Record<string, unknown>;
 
     expect(contract.PLUGIN_ID).toBe("kanbaner.tasks");
     expect(contract.TASKS_COMMAND_IDS).toMatchObject({
@@ -224,10 +224,13 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     expect(contract.formatTaskRef).toBeTypeOf("function");
     expect(contract.toTaskSearchDocument).toBeTypeOf("function");
     expect(contract.validateSubtaskParent).toBeTypeOf("function");
+    expect(contract.normalizeTag).toBeTypeOf("function");
+    expect(contract.compareTaskList).toBeTypeOf("function");
 
     expect(contract.TASKS_COMMAND_LIST).toBeUndefined();
     expect(contract.TASKS_QUERY_LIST).toBeUndefined();
     expect(contract.TASKS_STORE_CONTRACT_DEFINITION).toBeUndefined();
+    expect(contract.TasksNestedTransactionError).toBeUndefined();
     expect(contract.activate).toBeUndefined();
   });
 });

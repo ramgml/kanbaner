@@ -1,11 +1,13 @@
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 
-import { UtcTimestampSchema } from "@kanbaner/plugin-sdk";
+import { DRAFT_2020_12, ResourceRefSchema, UtcTimestampSchema } from "@kanbaner/plugin-sdk";
 
 import {
   MAX_DESCRIPTION_LENGTH,
   MAX_LIST_LIMIT,
   MAX_POSITION,
+  MAX_RAW_TAG_LENGTH,
+  MAX_RAW_TAGS,
   MAX_TAG_LENGTH,
   MAX_TAGS,
   MAX_TITLE_LENGTH,
@@ -30,14 +32,34 @@ export const DescriptionMarkdownSchema = Type.String({
   maxLength: MAX_DESCRIPTION_LENGTH,
 });
 
-/** Один тег до нормализации. */
+/**
+ * Один сырой тег команды до нормализации.
+ *
+ * Пробелы по краям и длина до `MAX_RAW_TAG_LENGTH` допустимы: trim, нижний
+ * регистр, дедупликация и лимит `MAX_TAG_LENGTH` применяются доменным
+ * валидатором после JSON Schema.
+ */
+export const RawTagSchema = Type.String({
+  minLength: 1,
+  maxLength: MAX_RAW_TAG_LENGTH,
+  pattern: "\\S",
+});
+
+/** Сырые теги команды; дубликаты и более `MAX_TAGS` элементов допустимы. */
+export const RawTagsSchema = Type.Array(RawTagSchema, { maxItems: MAX_RAW_TAGS });
+
+/**
+ * Один нормализованный тег в сохранённой задаче.
+ *
+ * Trim, нижний регистр и дедупликация уже выполнены доменом.
+ */
 export const TagSchema = Type.String({
   minLength: 1,
   maxLength: MAX_TAG_LENGTH,
   pattern: "\\S",
 });
 
-/** Теги задачи. Дедупликация выполняется доменным валидатором. */
+/** Нормализованные теги задачи: не более `MAX_TAGS` штук. */
 export const TagsSchema = Type.Array(TagSchema, { maxItems: MAX_TAGS });
 
 /** UTC timestamp или null. */
@@ -67,3 +89,49 @@ export const OffsetSchema = Type.Integer({ minimum: 0 });
 
 /** Явное подтверждение разрушительной операции. */
 export const ConfirmSchema = Type.Literal(true);
+
+/** Дескриптор задачи, удалённой каскадом. */
+export const DeletedTaskDescriptorSchema = Type.Object(
+  {
+    id: EntityIdSchema,
+    projectId: EntityIdSchema,
+    resourceRef: ResourceRefSchema,
+    version: Type.Integer({ minimum: 1 }),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+/** Успешный ответ удаления: событие публикуется только при `deleted = true`. */
+export const DeleteSuccessOutputSchema = Type.Object(
+  {
+    deleted: Type.Literal(true),
+    resource: ResourceRefSchema,
+    version: Type.Integer({ minimum: 1 }),
+    deletedResourceRefs: Type.Array(ResourceRefSchema),
+    deletedTasks: Type.Array(DeletedTaskDescriptorSchema),
+    eventId: Type.String({ minLength: 1 }),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+/** Идемпотентный no-op удаления: сущность уже отсутствует, события нет. */
+export const DeleteNoopOutputSchema = Type.Object(
+  {
+    deleted: Type.Literal(false),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+/**
+ * Дискриминированный ответ удаления проекта или задачи.
+ *
+ * Ветка `deleted = true` содержит `eventId` и дескрипторы последних версий.
+ * Ветка `deleted = false` не содержит `eventId`, потому что событие не
+ * публиковалось.
+ */
+export const DeleteOutputSchema = Type.Union(
+  [DeleteSuccessOutputSchema, DeleteNoopOutputSchema],
+  DRAFT_2020_12,
+);
+
+export type DeleteOutput = Static<typeof DeleteOutputSchema>;

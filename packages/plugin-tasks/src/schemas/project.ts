@@ -6,10 +6,12 @@ import { ProjectSchema } from "../model.ts";
 import {
   ConfirmSchema,
   CreateExpectedVersionSchema,
+  DeleteOutputSchema,
   DescriptionMarkdownSchema,
   EntityIdSchema,
   ExpectedVersionSchema,
   TitleSchema,
+  type DeleteOutput,
 } from "./common.ts";
 
 /** Вход команды `project.create`. */
@@ -61,15 +63,12 @@ export const ProjectMutationOutputSchema = Type.Object(
 
 export type ProjectMutationOutput = Static<typeof ProjectMutationOutputSchema>;
 
-/** Результат `project.delete` с каскадно удалёнными задачами. */
-export const ProjectDeleteOutputSchema = Type.Object(
-  {
-    deleted: Type.Boolean(),
-    deletedTaskIds: Type.Array(EntityIdSchema),
-    resource: ResourceRefSchema,
-    eventId: Type.String({ minLength: 1 }),
-  },
-  { ...DRAFT_2020_12, additionalProperties: false },
-);
+/**
+ * Результат `project.delete`.
+ *
+ * `deleted = true` содержит `eventId` и дескрипторы последних версий удалённых
+ * задач; `deleted = false` — идемпотентный no-op без события.
+ */
+export const ProjectDeleteOutputSchema = DeleteOutputSchema;
 
-export type ProjectDeleteOutput = Static<typeof ProjectDeleteOutputSchema>;
+export type ProjectDeleteOutput = DeleteOutput;

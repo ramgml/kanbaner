@@ -1,9 +1,8 @@
 import {
   StorageError,
   parseResourceRef,
-  toSearchDocument,
   type ResourceRef,
-  type SearchIndexDocument,
+  type SearchDocumentInput,
 } from "@kanbaner/plugin-sdk";
 
 import { PLUGIN_ID, TASK_RESOURCE_TYPE } from "./constants.ts";
@@ -11,15 +10,16 @@ import type { Task } from "./model.ts";
 import { formatTaskRef } from "./resources.ts";
 
 /**
- * Преобразует задачу в поисковый документ.
+ * Преобразует задачу в `SearchDocumentInput`.
  *
- * Функция ничего не пишет в индекс. `ref` обязан принадлежать домену задач и
- * указывать на ту же задачу; чужой ResourceRef отклоняется.
+ * Функция ничего не пишет в индекс и не добавляет `pluginId`: ответственный
+ * плагин подставляет фасад поиска. `ref` обязан принадлежать домену задач и
+ * указывать на ту же задачу; чужой `ResourceRef` отклоняется.
  */
 export function toTaskSearchDocument(
   task: Task,
   ref: ResourceRef = formatTaskRef(task.id),
-): SearchIndexDocument {
+): SearchDocumentInput {
   const parts = parseResourceRef(ref);
 
   if (parts.pluginId !== PLUGIN_ID) {
@@ -43,7 +43,7 @@ export function toTaskSearchDocument(
   const description = task.descriptionMarkdown.trim();
   const text = description.length === 0 ? task.title : `${task.title}\n\n${description}`;
 
-  return toSearchDocument(PLUGIN_ID, {
+  return {
     ref,
     title: task.title,
     text,
@@ -56,5 +56,5 @@ export function toTaskSearchDocument(
       tags: [...task.tags],
       ...(task.parentTaskId === null ? {} : { parentTaskId: task.parentTaskId }),
     },
-  });
+  };
 }
