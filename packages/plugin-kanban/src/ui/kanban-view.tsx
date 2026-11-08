@@ -11,6 +11,9 @@ import {
   type Project,
   type ProjectListOutput,
   type ProjectMutationOutput,
+  type ProjectSummary,
+  type ProjectSummaryOutput,
+  type ProjectSummaryTotals,
   type Task,
   type TaskCreateInput,
   type TaskListInput,
@@ -33,6 +36,7 @@ import { KANBAN_ROUTE } from "../metadata.ts";
 import { KanbanCard, type KanbanReorderKind } from "./kanban-card.tsx";
 import { KanbanColumn } from "./kanban-column.tsx";
 import { KanbanCreatePanel, type KanbanCreateMode } from "./kanban-create.tsx";
+import { ProjectsGrid } from "./projects-grid.tsx";
 import {
   KanbanQuickComposer,
   type QuickComposerDraft,
@@ -68,6 +72,11 @@ import {
 
 /** Контракт задачи ограничивает `limit` значением 200. */
 const MAX_LIST_LIMIT = 200;
+
+/** Размер страницы сетки проектов. */
+const PROJECTS_PAGE_SIZE = 12;
+
+type BoardViewMode = "board" | "projects";
 
 interface ColumnPage {
   readonly items: readonly Task[];
@@ -237,6 +246,17 @@ function columnContaining(columns: KanbanColumns, taskId: string): TaskStatus | 
   return null;
 }
 
+/** Добавляет новую страницу сводок без дублей по projectId. */
+function mergeSummaries(
+  current: readonly ProjectSummary[],
+  incoming: readonly ProjectSummary[],
+): readonly ProjectSummary[] {
+  const known = new Set(current.map((summary) => summary.project.id));
+  const fresh = incoming.filter((summary) => !known.has(summary.project.id));
+
+  return fresh.length === 0 ? current : [...current, ...fresh];
+}
+
 /** Основное представление `/view/kanban`. */
 export function KanbanView({
   invoke,
@@ -262,6 +282,15 @@ export function KanbanView({
   const [projects, setProjects] = useState<readonly Project[]>([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<BoardViewMode>("board");
+  const [projectSummaries, setProjectSummaries] = useState<readonly ProjectSummary[]>([]);
+  const [summaryTotals, setSummaryTotals] = useState<ProjectSummaryTotals | null>(null);
+  const [summaryTotalProjects, setSummaryTotalProjects] = useState(0);
+  const [summaryNextOffset, setSummaryNextOffset] = useState<number | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryLoadingMore, setSummaryLoadingMore] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [selectedSummary, setSelectedSummary] = useState<ProjectSummary | null>(null);
   const [formMode, setFormMode] = useState<KanbanCreateMode | null>(null);
   const [formSession, setFormSession] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
@@ -298,6 +327,14 @@ export function KanbanView({
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
   const submitGuardRef = useRef(false);
   const projectsSequenceRef = useRef(0);
+  const summariesRef = useRef<readonly ProjectSummary[]>([]);
+  const summarySequenceRef = useRef(0);
+  const selectedSummarySequenceRef = useRef(0);
+  const selectedProjectIdRef = useRef(query.projectId);
+
+  // Актуальный фильтр на момент запуска запроса: запоздавший ответ для
+  // прежнего проекта не должен применяться после выбора другого.
+  selectedProjectIdRef.current = query.projectId;
 
   const loadProjects = useCallback(async (): Promise<void> => {
     const sequence = projectsSequenceRef.current + 1;
@@ -326,6 +363,114 @@ export function KanbanView({
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+
+  /**
+   * Читает сводки проектов страницами.
+   *
+   * `totals` из ответа всегда описывает все подходящие проекты, поэтому
+   * заголовок «Все проекты» не зависит от уже загруженной страницы. Повторный
+   * вызов с `reset` перечитывает с начала — после create/move/complete/delete и
+   * смены ревизии.
+   */
+  const loadProjectSummaries = useCallback(
+    async (reset: boolean): Promise<void> => {
+      const sequence = summarySequenceRef.current + 1;
+      const offset = reset ? 0 : summariesRef.current.length;
+
+      summarySequenceRef.current = sequence;
+
+      if (reset) {
+        setSummaryLoading(true);
+      } else {
+        setSummaryLoadingMore(true);
+      }
+
+      try {
+        const data = await invokeJson<ProjectSummaryOutput>(
+          invoke,
+          TASKS_QUERY_IDS.projectSummary,
+          { limit: PROJECTS_PAGE_SIZE, offset },
+        );
+
+        if (summarySequenceRef.current !== sequence) {
+          return;
+        }
+
+        const next = reset ? data.items : mergeSummaries(summariesRef.current, data.items);
+
+        summariesRef.current = next;
+        setProjectSummaries(next);
+        setSummaryTotals(data.totals);
+        setSummaryTotalProjects(data.total);
+        setSummaryNextOffset(data.nextOffset);
+        setSummaryError(null);
+      } catch (loadError) {
+        if (summarySequenceRef.current === sequence) {
+          setSummaryError(errorMessage(loadError));
+        }
+      } finally {
+        if (summarySequenceRef.current === sequence) {
+          setSummaryLoading(false);
+          setSummaryLoadingMore(false);
+        }
+      }
+    },
+    [invoke],
+  );
+
+  const loadSelectedSummary = useCallback(async (): Promise<void> => {
+    const projectId = selectedProjectIdRef.current;
+    const sequence = selectedSummarySequenceRef.current + 1;
+
+    selectedSummarySequenceRef.current = sequence;
+
+    if (projectId.length === 0) {
+      setSelectedSummary(null);
+
+      return;
+    }
+
+    try {
+      const data = await invokeJson<ProjectSummaryOutput>(invoke, TASKS_QUERY_IDS.projectSummary, {
+        projectId,
+        limit: 1,
+        offset: 0,
+      });
+      const summary = data.items.find((item) => item.project.id === projectId) ?? null;
+
+      if (
+        selectedSummarySequenceRef.current === sequence &&
+        selectedProjectIdRef.current === projectId
+      ) {
+        setSelectedSummary(summary);
+      }
+    } catch {
+      // Сводка вторична: ошибка не должна скрывать саму доску.
+      if (
+        selectedSummarySequenceRef.current === sequence &&
+        selectedProjectIdRef.current === projectId
+      ) {
+        setSelectedSummary(null);
+      }
+    }
+  }, [invoke]);
+
+  const refreshSummaries = useCallback(async (): Promise<void> => {
+    await Promise.all([loadProjectSummaries(true), loadSelectedSummary()]);
+  }, [loadProjectSummaries, loadSelectedSummary]);
+
+  useEffect(() => {
+    // Смена проекта инвалидирует ответы, запущенные для прежнего ID.
+    selectedSummarySequenceRef.current += 1;
+  }, [query.projectId]);
+
+  useEffect(() => {
+    void loadProjectSummaries(true);
+  }, [loadProjectSummaries, query.revision]);
+
+  useEffect(() => {
+    void loadSelectedSummary();
+  }, [loadSelectedSummary, query.projectId, query.revision]);
 
   const reloadBoard = useCallback(async (): Promise<void> => {
     const sequence = reloadSequenceRef.current + 1;
@@ -541,8 +686,10 @@ export function KanbanView({
       });
 
       // Повторный project.list: созданный проект должен сразу появиться в
-      // фильтрах и форме. Текущий фильтр не меняется.
+      // фильтрах и форме. Текущий фильтр не меняется. Сводка перечитывается,
+      // чтобы сетка проектов и агрегат «Все проекты» не отставали.
       await loadProjects();
+      await refreshSummaries();
       setFormMode(null);
       setFormError(null);
     } catch (commandError) {
@@ -739,21 +886,48 @@ export function KanbanView({
     [columns, placements],
   );
 
-  const selectedProject = useMemo(
-    () => projects.find((project) => project.id === query.projectId) ?? null,
-    [projects, query.projectId],
-  );
+  // Сводка принимается только для текущего проекта: запоздавший ответ
+  // прежнего проекта не должен попасть в заголовок.
+  const activeSelectedSummary =
+    selectedSummary !== null && selectedSummary.project.id === query.projectId
+      ? selectedSummary
+      : null;
+  const selectedProject = useMemo(() => {
+    const fromList = projects.find((project) => project.id === query.projectId) ?? null;
+
+    return fromList ?? activeSelectedSummary?.project ?? null;
+  }, [projects, query.projectId, activeSelectedSummary]);
+  const projectOptions = useMemo(() => {
+    if (
+      query.projectId.length === 0 ||
+      activeSelectedSummary === null ||
+      projects.some((project) => project.id === query.projectId)
+    ) {
+      return projects;
+    }
+
+    // Выбранный проект мог оказаться за пределами первых 200 project.list:
+    // селект всё равно должен позволять его видеть и сохранять выбор.
+    return [...projects, activeSelectedSummary.project];
+  }, [projects, query.projectId, activeSelectedSummary]);
   const projectTitles = useMemo(
-    () => new Map(projects.map((project) => [project.id, project.title] as const)),
-    [projects],
+    () => new Map(projectOptions.map((project) => [project.id, project.title] as const)),
+    [projectOptions],
   );
   const allProjectsMode = query.projectId.length === 0;
   const hasFilters = query.projectId.length > 0 || query.tag.length > 0;
+  const showingProjects = viewMode === "projects";
+  const headerSummary = showingProjects || allProjectsMode ? summaryTotals : activeSelectedSummary;
   const boardSettled = KANBAN_STATUSES.every((status) => !getColumn(columns, status).loading);
   const visibleTotal = KANBAN_STATUSES.reduce(
     (sum, status) => sum + getColumn(renderedColumns, status).total,
     0,
   );
+
+  const openProjectBoard = useCallback((projectId: string): void => {
+    setViewMode("board");
+    updateKanbanQuery({ projectId, taskId: null });
+  }, []);
 
   const scrollToStatus = useCallback((status: TaskStatus): void => {
     setActiveStatus(status);
@@ -1032,6 +1206,9 @@ export function KanbanView({
       // перечитывается, а не пересчитывает версии вручную. reloadBoard
       // догружает target колонку минимум до позиции перемещённой карточки.
       await reloadBoard();
+      // Move меняет счётчики статусов и просроченность: та же сводка должна
+      // обновиться без ожидания другой ревизии.
+      await refreshSummaries();
     } catch (commandError) {
       // Команда не применилась: требование видимости для неё больше не
       // актуально, остальные одновременные требования сохраняются.
@@ -1294,9 +1471,20 @@ export function KanbanView({
             data-testid="kanban-board-title"
             className="m-0 truncate text-xl font-semibold tracking-tight sm:text-2xl"
           >
-            {allProjectsMode ? "Все проекты" : (selectedProject?.title ?? "Проект")}
+            {showingProjects
+              ? "Проекты"
+              : allProjectsMode
+                ? "Все проекты"
+                : (selectedProject?.title ?? "Проект")}
           </h1>
-          {allProjectsMode ? (
+          {showingProjects ? (
+            <p
+              data-testid="kanban-board-description"
+              className="m-0 max-w-2xl text-xs text-muted-foreground sm:text-sm"
+            >
+              Доски проектов с точными счётчиками задач и просроченными.
+            </p>
+          ) : allProjectsMode ? (
             <p
               data-testid="kanban-board-description"
               className="m-0 max-w-2xl text-xs text-muted-foreground sm:text-sm"
@@ -1311,10 +1499,87 @@ export function KanbanView({
               {selectedProject.descriptionMarkdown}
             </p>
           ) : null}
+          {headerSummary === null ? null : (
+            <dl
+              data-testid="kanban-board-summary"
+              aria-label="Сводка задач"
+              className="m-0 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground"
+            >
+              <div className="flex items-baseline gap-1">
+                <dt>Всего:</dt>
+                <dd
+                  data-testid="kanban-summary-total"
+                  className="m-0 font-semibold text-foreground"
+                >
+                  {headerSummary.total}
+                </dd>
+              </div>
+              {KANBAN_STATUSES.map((status) => (
+                <div key={status} className="flex items-baseline gap-1">
+                  <dt>{taskStatusLabel(status)}:</dt>
+                  <dd
+                    data-testid={`kanban-summary-${status}`}
+                    className="m-0 font-semibold text-foreground"
+                  >
+                    {headerSummary.counts[status]}
+                  </dd>
+                </div>
+              ))}
+              <div className="flex items-baseline gap-1">
+                <dt>Просрочено:</dt>
+                <dd
+                  data-testid="kanban-summary-overdue"
+                  className={
+                    headerSummary.overdueCount > 0
+                      ? "m-0 font-semibold text-destructive"
+                      : "m-0 font-semibold text-foreground"
+                  }
+                >
+                  {headerSummary.overdueCount}
+                </dd>
+              </div>
+            </dl>
+          )}
         </div>
 
         {onKanbanRoute ? (
           <div className="flex flex-wrap gap-2">
+            <div
+              role="group"
+              aria-label="Режим представления"
+              className="inline-flex overflow-hidden rounded-md border border-border"
+            >
+              <button
+                type="button"
+                data-testid="kanban-mode-board"
+                aria-pressed={!showingProjects}
+                onClick={() => {
+                  setViewMode("board");
+                }}
+                className={`inline-flex min-h-10 items-center px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8 ${
+                  showingProjects
+                    ? "bg-background hover:bg-accent"
+                    : "bg-primary text-primary-foreground"
+                }`}
+              >
+                Доска
+              </button>
+              <button
+                type="button"
+                data-testid="kanban-mode-projects"
+                aria-pressed={showingProjects}
+                onClick={() => {
+                  setViewMode("projects");
+                }}
+                className={`inline-flex min-h-10 items-center border-l border-border px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8 ${
+                  showingProjects
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background hover:bg-accent"
+                }`}
+              >
+                Проекты
+              </button>
+            </div>
             <button
               type="button"
               data-testid="kanban-create-project"
@@ -1338,144 +1603,148 @@ export function KanbanView({
         ) : null}
       </header>
 
-      <div
-        data-testid="kanban-mobile-tabs"
-        role="tablist"
-        aria-label="Колонки доски"
-        className="flex shrink-0 gap-1 overflow-x-auto pb-0.5 md:hidden"
-      >
-        {KANBAN_STATUSES.map((status) => {
-          const active = activeStatus === status;
-
-          return (
-            <button
-              key={status}
-              ref={(element) => {
-                tabRefs.current[status] = element;
-              }}
-              type="button"
-              role="tab"
-              id={`kanban-tab-${status}`}
-              data-testid={`kanban-tab-${status}`}
-              aria-selected={active}
-              aria-controls={`kanban-column-${status}`}
-              tabIndex={active ? 0 : -1}
-              onClick={() => {
-                scrollToStatus(status);
-              }}
-              onKeyDown={(event) => {
-                onTabKeyDown(event, status);
-              }}
-              className={`min-h-10 shrink-0 rounded-full px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
-                active
-                  ? "bg-primary text-primary-foreground"
-                  : "border border-border bg-background text-muted-foreground hover:bg-accent"
-              }`}
-            >
-              {taskStatusLabel(status)}
-            </button>
-          );
-        })}
-      </div>
-
-      <form
-        aria-label="Фильтры канбана"
-        data-testid="kanban-filters"
-        onSubmit={(event) => {
-          event.preventDefault();
-        }}
-        className="flex shrink-0 flex-wrap items-end gap-2"
-      >
-        <label className="flex min-w-[12rem] flex-col gap-0.5 text-[11px] text-muted-foreground">
-          Проект
-          <select
-            name="projectId"
-            value={query.projectId}
-            onChange={(event) => {
-              updateKanbanQuery({ projectId: event.target.value, taskId: null });
-            }}
-            className="h-10 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
-          >
-            <option value="">Все проекты</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.title}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="flex min-w-[10rem] flex-col gap-0.5 text-[11px] text-muted-foreground">
-          Тег
-          <input
-            name="tag"
-            type="search"
-            value={query.tag}
-            onChange={(event) => {
-              updateKanbanQuery({ tag: event.target.value, taskId: null });
-            }}
-            placeholder="например, release"
-            className="h-10 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
-          />
-        </label>
-
-        {hasFilters ? (
+      {showingProjects ? null : (
+        <>
           <div
-            data-testid="kanban-active-filters"
-            aria-label="Активные фильтры"
-            className="flex flex-wrap items-center gap-1.5"
+            data-testid="kanban-mobile-tabs"
+            role="tablist"
+            aria-label="Колонки доски"
+            className="flex shrink-0 gap-1 overflow-x-auto pb-0.5 md:hidden"
           >
-            {query.projectId.length > 0 ? (
-              <button
-                type="button"
-                data-testid="kanban-filter-chip-project"
-                aria-label={`Сбросить фильтр проекта «${
-                  selectedProject?.title ?? query.projectId
-                }»`}
-                onClick={() => {
-                  updateKanbanQuery({ projectId: "", taskId: null });
-                }}
-                className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-              >
-                Проект: {selectedProject?.title ?? query.projectId}
-                <span aria-hidden="true">×</span>
-              </button>
-            ) : null}
+            {KANBAN_STATUSES.map((status) => {
+              const active = activeStatus === status;
 
-            {query.tag.length > 0 ? (
-              <button
-                type="button"
-                data-testid="kanban-filter-chip-tag"
-                aria-label={`Сбросить фильтр тега «${query.tag}»`}
-                onClick={() => {
-                  updateKanbanQuery({ tag: "", taskId: null });
-                }}
-                className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-              >
-                Тег: {query.tag}
-                <span aria-hidden="true">×</span>
-              </button>
-            ) : null}
-
-            <button
-              type="button"
-              onClick={() => {
-                updateKanbanQuery({ taskId: null });
-                resetKanbanFilters();
-              }}
-              className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-            >
-              Сбросить фильтры
-            </button>
+              return (
+                <button
+                  key={status}
+                  ref={(element) => {
+                    tabRefs.current[status] = element;
+                  }}
+                  type="button"
+                  role="tab"
+                  id={`kanban-tab-${status}`}
+                  data-testid={`kanban-tab-${status}`}
+                  aria-selected={active}
+                  aria-controls={`kanban-column-${status}`}
+                  tabIndex={active ? 0 : -1}
+                  onClick={() => {
+                    scrollToStatus(status);
+                  }}
+                  onKeyDown={(event) => {
+                    onTabKeyDown(event, status);
+                  }}
+                  className={`min-h-10 shrink-0 rounded-full px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
+                    active
+                      ? "bg-primary text-primary-foreground"
+                      : "border border-border bg-background text-muted-foreground hover:bg-accent"
+                  }`}
+                >
+                  {taskStatusLabel(status)}
+                </button>
+              );
+            })}
           </div>
-        ) : null}
-      </form>
+
+          <form
+            aria-label="Фильтры канбана"
+            data-testid="kanban-filters"
+            onSubmit={(event) => {
+              event.preventDefault();
+            }}
+            className="flex shrink-0 flex-wrap items-end gap-2"
+          >
+            <label className="flex min-w-[12rem] flex-col gap-0.5 text-[11px] text-muted-foreground">
+              Проект
+              <select
+                name="projectId"
+                value={query.projectId}
+                onChange={(event) => {
+                  updateKanbanQuery({ projectId: event.target.value, taskId: null });
+                }}
+                className="h-10 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
+              >
+                <option value="">Все проекты</option>
+                {projectOptions.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex min-w-[10rem] flex-col gap-0.5 text-[11px] text-muted-foreground">
+              Тег
+              <input
+                name="tag"
+                type="search"
+                value={query.tag}
+                onChange={(event) => {
+                  updateKanbanQuery({ tag: event.target.value, taskId: null });
+                }}
+                placeholder="например, release"
+                className="h-10 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
+              />
+            </label>
+
+            {hasFilters ? (
+              <div
+                data-testid="kanban-active-filters"
+                aria-label="Активные фильтры"
+                className="flex flex-wrap items-center gap-1.5"
+              >
+                {query.projectId.length > 0 ? (
+                  <button
+                    type="button"
+                    data-testid="kanban-filter-chip-project"
+                    aria-label={`Сбросить фильтр проекта «${
+                      selectedProject?.title ?? query.projectId
+                    }»`}
+                    onClick={() => {
+                      updateKanbanQuery({ projectId: "", taskId: null });
+                    }}
+                    className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                  >
+                    Проект: {selectedProject?.title ?? query.projectId}
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ) : null}
+
+                {query.tag.length > 0 ? (
+                  <button
+                    type="button"
+                    data-testid="kanban-filter-chip-tag"
+                    aria-label={`Сбросить фильтр тега «${query.tag}»`}
+                    onClick={() => {
+                      updateKanbanQuery({ tag: "", taskId: null });
+                    }}
+                    className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                  >
+                    Тег: {query.tag}
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateKanbanQuery({ taskId: null });
+                    resetKanbanFilters();
+                  }}
+                  className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                >
+                  Сбросить фильтры
+                </button>
+              </div>
+            ) : null}
+          </form>
+        </>
+      )}
 
       <KanbanCreatePanel
         pathname={pathname}
         mode={formMode}
         session={formSession}
-        projects={projects}
+        projects={projectOptions}
         rootTasks={rootTasks}
         taskValues={taskDraft}
         projectValues={projectDraft}
@@ -1509,201 +1778,223 @@ export function KanbanView({
         </div>
       )}
 
-      {projectsLoaded && projects.length === 0 && projectsError === null ? (
-        <div
-          data-testid="kanban-empty-projects"
-          className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-background/60 px-4 py-3"
-        >
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <p className="m-0 text-sm font-medium">Пока нет проектов</p>
-            <p className="m-0 text-xs text-muted-foreground">
-              Создайте первый проект, чтобы добавлять на доску задачи.
-            </p>
-          </div>
-          <button
-            type="button"
-            data-testid="kanban-create-first-project"
-            onClick={openProjectForm}
-            className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-          >
-            Создать первый проект
-          </button>
-        </div>
-      ) : null}
-
-      {hasFilters && boardSettled && visibleTotal === 0 ? (
-        <div
-          data-testid="kanban-empty-filter"
-          role="status"
-          className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-background/60 px-4 py-3"
-        >
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <p className="m-0 text-sm font-medium">По фильтрам ничего не найдено</p>
-            <p className="m-0 text-xs text-muted-foreground">
-              Измените проект или тег, чтобы увидеть задачи.
-            </p>
-          </div>
-          <button
-            type="button"
-            data-testid="kanban-empty-filter-reset"
-            onClick={() => {
-              updateKanbanQuery({ taskId: null });
-              resetKanbanFilters();
-            }}
-            className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-          >
-            Сбросить фильтры
-          </button>
-        </div>
-      ) : null}
-
-      <div className="relative flex min-h-0 w-full flex-1 flex-col">
-        {scrollHints.right ? (
-          <div
-            data-testid="kanban-scroll-fade"
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-[#e2e8f0] to-transparent md:w-12 dark:from-[#1e293b]"
-          />
-        ) : null}
-
-        <div
-          ref={columnsRef}
-          data-testid="kanban-columns"
-          role="region"
-          aria-label="Колонки доски"
-          tabIndex={0}
-          className="flex min-h-0 w-full flex-1 snap-x snap-mandatory gap-3 overflow-x-auto overflow-y-hidden pr-4 pb-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:snap-none md:pr-6"
-          style={{ minWidth: 0, WebkitOverflowScrolling: "touch" }}
-        >
-          {KANBAN_STATUSES.map((status) => {
-            const column = getColumn(renderedColumns, status);
-            const items = column.items;
-            const dropActive = dragOver?.status === status;
-            const insertion = dropActive
-              ? dragOver.beforeId === null
-                ? items.length
-                : (() => {
-                    const found = items.findIndex((task) => task.id === dragOver.beforeId);
-
-                    return found === -1 ? items.length : found;
-                  })()
-              : -1;
-            const placeholder = (
-              <li
-                key={`kanban-drop-${status}`}
-                data-testid="kanban-drop-placeholder"
-                aria-hidden="true"
-                className="pointer-events-none h-12 rounded-lg border-2 border-dashed border-ring bg-ring/10"
-              />
-            );
-
-            return (
-              <KanbanColumn
-                key={status}
-                status={status}
-                total={column.total}
-                loading={column.loading}
-                error={column.error}
-                hasMore={column.nextOffset !== null}
-                dragOver={dropActive}
-                dropActive={dropActive}
-                onCreateTask={() => {
-                  openTaskForm(status, `[data-testid="kanban-create-task-${status}"]`);
-                }}
-                createVisible={onKanbanRoute}
-                createDisabled={projects.length === 0}
-                quickComposerOpen={quickOpenStatuses.has(status)}
-                onLoadMore={() => {
-                  loadMore(status);
-                }}
-                onRetry={() => {
-                  void reloadBoard();
-                }}
-                quickComposer={
-                  onKanbanRoute ? (
-                    <KanbanQuickComposer
-                      status={status}
-                      projects={projects}
-                      activeProjectId={query.projectId}
-                      disabled={projects.length === 0}
-                      resetToken={quickResetTokens[status] ?? 0}
-                      onOpenChange={(open) => {
-                        setQuickOpenStatuses((current) => {
-                          if (open) {
-                            if (current.has(status)) {
-                              return current;
-                            }
-
-                            const next = new Set(current);
-
-                            next.add(status);
-
-                            return next;
-                          }
-
-                          if (!current.has(status)) {
-                            return current;
-                          }
-
-                          const next = new Set(current);
-
-                          next.delete(status);
-
-                          return next;
-                        });
-                      }}
-                      onCreate={(input) => createQuickTask(status, input)}
-                      onOpenDetails={(draft: QuickComposerDraft) => {
-                        openTaskFormFromQuick(status, draft);
-                      }}
-                    />
-                  ) : null
-                }
+      {showingProjects ? (
+        <ProjectsGrid
+          items={projectSummaries}
+          totals={summaryTotals}
+          totalProjects={summaryTotalProjects}
+          loading={summaryLoading}
+          loadingMore={summaryLoadingMore}
+          error={summaryError}
+          hasMore={summaryNextOffset !== null}
+          onCreateProject={openProjectForm}
+          onOpenBoard={openProjectBoard}
+          onLoadMore={() => {
+            void loadProjectSummaries(false);
+          }}
+          onRetry={() => {
+            void loadProjectSummaries(true);
+          }}
+        />
+      ) : (
+        <>
+          {projectsLoaded && projects.length === 0 && projectsError === null ? (
+            <div
+              data-testid="kanban-empty-projects"
+              className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-background/60 px-4 py-3"
+            >
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <p className="m-0 text-sm font-medium">Пока нет проектов</p>
+                <p className="m-0 text-xs text-muted-foreground">
+                  Создайте первый проект, чтобы добавлять на доску задачи.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="kanban-create-first-project"
+                onClick={openProjectForm}
+                className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
               >
-                {items.map((task, index) => (
-                  <Fragment key={task.id}>
-                    {index === insertion ? placeholder : null}
-                    <li>
-                      <KanbanCard
-                        task={task}
-                        index={index}
-                        columnSize={items.length}
-                        subtaskCount={
-                          task.parentTaskId === null ? (subtaskCounts[task.id] ?? null) : 0
-                        }
-                        selected={query.taskId === task.id}
-                        pending={pending.has(task.id)}
-                        conflict={conflicts.has(task.id)}
-                        dragging={draggingId === task.id}
-                        projectTitle={
-                          allProjectsMode ? (projectTitles.get(task.projectId) ?? null) : null
-                        }
-                        onOpen={(openedTask) => {
-                          updateKanbanQuery({ taskId: openedTask.id });
-                        }}
-                        onMoveTo={moveToStatus}
-                        onReorder={reorder}
-                        onDragStart={startDrag}
-                      />
-                    </li>
-                  </Fragment>
-                ))}
-                {insertion === items.length ? placeholder : null}
-              </KanbanColumn>
-            );
-          })}
-        </div>
+                Создать первый проект
+              </button>
+            </div>
+          ) : null}
 
-        {scrollHints.right ? (
-          <div
-            data-testid="kanban-scroll-hint"
-            aria-hidden="true"
-            className="pointer-events-none absolute right-4 bottom-3 z-20 hidden items-center rounded-full border border-border bg-background/95 px-2.5 py-1 text-[11px] font-medium text-muted-foreground shadow-sm md:flex"
-          >
-            Прокрутите вправо →
+          {hasFilters && boardSettled && visibleTotal === 0 ? (
+            <div
+              data-testid="kanban-empty-filter"
+              role="status"
+              className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-background/60 px-4 py-3"
+            >
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <p className="m-0 text-sm font-medium">По фильтрам ничего не найдено</p>
+                <p className="m-0 text-xs text-muted-foreground">
+                  Измените проект или тег, чтобы увидеть задачи.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="kanban-empty-filter-reset"
+                onClick={() => {
+                  updateKanbanQuery({ taskId: null });
+                  resetKanbanFilters();
+                }}
+                className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+              >
+                Сбросить фильтры
+              </button>
+            </div>
+          ) : null}
+
+          <div className="relative flex min-h-0 w-full flex-1 flex-col">
+            {scrollHints.right ? (
+              <div
+                data-testid="kanban-scroll-fade"
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-[#e2e8f0] to-transparent md:w-12 dark:from-[#1e293b]"
+              />
+            ) : null}
+
+            <div
+              ref={columnsRef}
+              data-testid="kanban-columns"
+              role="region"
+              aria-label="Колонки доски"
+              tabIndex={0}
+              className="flex min-h-0 w-full flex-1 snap-x snap-mandatory gap-3 overflow-x-auto overflow-y-hidden pr-4 pb-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:snap-none md:pr-6"
+              style={{ minWidth: 0, WebkitOverflowScrolling: "touch" }}
+            >
+              {KANBAN_STATUSES.map((status) => {
+                const column = getColumn(renderedColumns, status);
+                const items = column.items;
+                const dropActive = dragOver?.status === status;
+                const insertion = dropActive
+                  ? dragOver.beforeId === null
+                    ? items.length
+                    : (() => {
+                        const found = items.findIndex((task) => task.id === dragOver.beforeId);
+
+                        return found === -1 ? items.length : found;
+                      })()
+                  : -1;
+                const placeholder = (
+                  <li
+                    key={`kanban-drop-${status}`}
+                    data-testid="kanban-drop-placeholder"
+                    aria-hidden="true"
+                    className="pointer-events-none h-12 rounded-lg border-2 border-dashed border-ring bg-ring/10"
+                  />
+                );
+
+                return (
+                  <KanbanColumn
+                    key={status}
+                    status={status}
+                    total={column.total}
+                    loading={column.loading}
+                    error={column.error}
+                    hasMore={column.nextOffset !== null}
+                    dragOver={dropActive}
+                    dropActive={dropActive}
+                    onCreateTask={() => {
+                      openTaskForm(status, `[data-testid="kanban-create-task-${status}"]`);
+                    }}
+                    createVisible={onKanbanRoute}
+                    createDisabled={projects.length === 0}
+                    quickComposerOpen={quickOpenStatuses.has(status)}
+                    onLoadMore={() => {
+                      loadMore(status);
+                    }}
+                    onRetry={() => {
+                      void reloadBoard();
+                    }}
+                    quickComposer={
+                      onKanbanRoute ? (
+                        <KanbanQuickComposer
+                          status={status}
+                          projects={projectOptions}
+                          activeProjectId={query.projectId}
+                          disabled={projects.length === 0}
+                          resetToken={quickResetTokens[status] ?? 0}
+                          onOpenChange={(open) => {
+                            setQuickOpenStatuses((current) => {
+                              if (open) {
+                                if (current.has(status)) {
+                                  return current;
+                                }
+
+                                const next = new Set(current);
+
+                                next.add(status);
+
+                                return next;
+                              }
+
+                              if (!current.has(status)) {
+                                return current;
+                              }
+
+                              const next = new Set(current);
+
+                              next.delete(status);
+
+                              return next;
+                            });
+                          }}
+                          onCreate={(input) => createQuickTask(status, input)}
+                          onOpenDetails={(draft: QuickComposerDraft) => {
+                            openTaskFormFromQuick(status, draft);
+                          }}
+                        />
+                      ) : null
+                    }
+                  >
+                    {items.map((task, index) => (
+                      <Fragment key={task.id}>
+                        {index === insertion ? placeholder : null}
+                        <li>
+                          <KanbanCard
+                            task={task}
+                            index={index}
+                            columnSize={items.length}
+                            subtaskCount={
+                              task.parentTaskId === null ? (subtaskCounts[task.id] ?? null) : 0
+                            }
+                            selected={query.taskId === task.id}
+                            pending={pending.has(task.id)}
+                            conflict={conflicts.has(task.id)}
+                            dragging={draggingId === task.id}
+                            projectTitle={
+                              allProjectsMode ? (projectTitles.get(task.projectId) ?? null) : null
+                            }
+                            onOpen={(openedTask) => {
+                              updateKanbanQuery({ taskId: openedTask.id });
+                            }}
+                            onMoveTo={moveToStatus}
+                            onReorder={reorder}
+                            onDragStart={startDrag}
+                          />
+                        </li>
+                      </Fragment>
+                    ))}
+                    {insertion === items.length ? placeholder : null}
+                  </KanbanColumn>
+                );
+              })}
+            </div>
+
+            {scrollHints.right ? (
+              <div
+                data-testid="kanban-scroll-hint"
+                aria-hidden="true"
+                className="pointer-events-none absolute right-4 bottom-3 z-20 hidden items-center rounded-full border border-border bg-background/95 px-2.5 py-1 text-[11px] font-medium text-muted-foreground shadow-sm md:flex"
+              >
+                Прокрутите вправо →
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
+        </>
+      )}
     </div>
   );
 }

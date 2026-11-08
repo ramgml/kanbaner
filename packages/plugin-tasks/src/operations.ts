@@ -19,6 +19,8 @@ import {
   ProjectGetOutputSchema,
   ProjectListInputSchema,
   ProjectListOutputSchema,
+  ProjectSummaryInputSchema,
+  ProjectSummaryOutputSchema,
   TaskGetInputSchema,
   TaskGetOutputSchema,
   TaskListInputSchema,
@@ -161,6 +163,12 @@ export const TASKS_QUERIES = Object.freeze({
     ProjectGetInputSchema,
     ProjectGetOutputSchema,
     "Возвращает проект по ID",
+  ),
+  projectSummary: queryMetadata(
+    TASKS_QUERY_IDS.projectSummary,
+    ProjectSummaryInputSchema,
+    ProjectSummaryOutputSchema,
+    "Возвращает точные счётчики и просроченные задачи по проектам",
   ),
   taskGet: queryMetadata(
     TASKS_QUERY_IDS.taskGet,

@@ -44,7 +44,7 @@ import type {
   ProjectUpdateInput,
 } from "./schemas/project.ts";
 import type { DeleteOutput } from "./schemas/common.ts";
-import type { ProjectListInput, TaskListInput } from "./schemas/queries.ts";
+import type { ProjectListInput, ProjectSummaryInput, TaskListInput } from "./schemas/queries.ts";
 import type {
   TaskCompleteInput,
   TaskCreateInput,
@@ -855,6 +855,16 @@ const projectGet: QueryFn = async (input, dependencies) => {
   return { project };
 };
 
+const projectSummary: QueryFn = async (input, dependencies) => {
+  const data = input as ProjectSummaryInput;
+
+  return dependencies.store.summarizeProjects({
+    ...(data.projectId === undefined ? {} : { projectId: data.projectId }),
+    limit: data.limit ?? DEFAULT_LIST_LIMIT,
+    offset: data.offset ?? 0,
+  });
+};
+
 const taskGet: QueryFn = async (input, dependencies) => {
   const data = input as { readonly id: string };
   const task = await dependencies.store.getTask(data.id);
@@ -935,6 +945,7 @@ const COMMAND_HANDLERS: Readonly<Record<string, CommandFn>> = Object.freeze({
 const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({
   [TASKS_QUERY_IDS.projectList]: projectList,
   [TASKS_QUERY_IDS.projectGet]: projectGet,
+  [TASKS_QUERY_IDS.projectSummary]: projectSummary,
   [TASKS_QUERY_IDS.taskGet]: taskGet,
   [TASKS_QUERY_IDS.taskList]: taskList,
 });

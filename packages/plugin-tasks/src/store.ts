@@ -15,6 +15,7 @@ import type {
   TaskSort,
   TaskStatus,
 } from "./model.ts";
+import type { ProjectSummary, ProjectSummaryTotals } from "./schemas/queries.ts";
 
 /** Стабильная страница результата Store. */
 export interface StorePage<Item> {
@@ -32,6 +33,25 @@ export interface StorePage<Item> {
 export interface ProjectStoreQuery {
   readonly limit: number;
   readonly offset: number;
+}
+
+/**
+ * Параметры сводки проектов.
+ *
+ * `projectId` ограничивает выборку одним проектом; его отсутствие возвращает
+ * все проекты стабильными страницами. `totals` считается по всем подходящим
+ * проектам, а не по текущей странице. Момент для overdue берётся из
+ * `now`-источника Store.
+ */
+export interface ProjectSummaryStoreQuery {
+  readonly projectId?: string;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** Страница сводок с агрегатами по полному набору проектов. */
+export interface ProjectSummaryStorePage extends StorePage<ProjectSummary> {
+  readonly totals: ProjectSummaryTotals;
 }
 
 /**
@@ -243,6 +263,15 @@ export interface TasksStore {
 
   getProject(id: string): Promise<Project | null>;
   listProjects(query: ProjectStoreQuery): Promise<StorePage<Project>>;
+
+  /**
+   * Возвращает точные сводки проектов.
+   *
+   * Счётчики и overdue считаются по полному набору задач проекта, а не по
+   * странице карточек. Явный отсутствующий `projectId` даёт `NOT_FOUND`.
+   */
+  summarizeProjects(query: ProjectSummaryStoreQuery): Promise<ProjectSummaryStorePage>;
+
   createProject(input: CreateProjectStoreInput): Promise<Project>;
   updateProject(input: UpdateProjectStoreInput): Promise<Project>;
   deleteProject(input: DeleteProjectStoreInput): Promise<DeleteStoreResult>;

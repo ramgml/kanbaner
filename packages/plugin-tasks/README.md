@@ -114,12 +114,25 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 
 ## Запросы
 
-| ID                            | Назначение                                   |
-| ----------------------------- | -------------------------------------------- |
-| `kanbaner.tasks.project.list` | Стабильная страница проектов                 |
-| `kanbaner.tasks.project.get`  | Проект по ID                                 |
-| `kanbaner.tasks.task.get`     | Задача по ID                                 |
-| `kanbaner.tasks.task.list`    | Задачи с фильтрами, сортировкой и пагинацией |
+| ID                               | Назначение                                     |
+| -------------------------------- | ---------------------------------------------- |
+| `kanbaner.tasks.project.list`    | Стабильная страница проектов                   |
+| `kanbaner.tasks.project.get`     | Проект по ID                                   |
+| `kanbaner.tasks.project.summary` | Точные счётчики и просроченные задачи проектов |
+| `kanbaner.tasks.task.get`        | Задача по ID                                   |
+| `kanbaner.tasks.task.list`       | Задачи с фильтрами, сортировкой и пагинацией   |
+
+`project.summary` принимает необязательный `projectId` и пагинацию
+`limit`/`offset` для списка проектов. Выход содержит `items` со сводкой
+каждого проекта (`project`, `total`, `counts` по статусам `backlog`, `todo`,
+`in_progress`, `done`, `overdueCount`), `total`/`nextOffset` страницы и
+`totals` — агрегат по **всем** подходящим проектам, а не по странице.
+Явный несуществующий `projectId` возвращает `NOT_FOUND`. Счётчики считаются
+по полному набору задач проекта: Store читает документы пачками и агрегирует
+их без SQL и без запроса на каждый проект. `overdueCount` включает только
+незавершённые задачи (`status !== "done"`) с `dueAt` раньше текущего UTC;
+`dueAt == now` не считается просроченным, сравнение идёт через
+`compareUtcTimestamps`.
 
 `task.list` поддерживает фильтры `projectId`, `status`, `priority`, `tag`,
 `parentTaskId`, `text`, `dueBefore`, `dueAfter`. `parentTaskId: null` выбирает
@@ -130,6 +143,8 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 ### Backend-neutral семантика списков
 
 - `project.list` всегда сортирует `createdAt asc`, затем `id asc`.
+- `project.summary` использует тот же порядок проектов и пагинацию, но
+  `totals` и счётчики не зависят от страницы.
 - `task.list` сортирует выбранное поле, затем `id asc` при равенстве.
 - `dueAt = null` всегда последние независимо от `asc`/`desc`.
 - `dueBefore` и `dueAfter` включают границу; `dueAt = null` не попадает в

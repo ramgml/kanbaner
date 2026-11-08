@@ -124,3 +124,77 @@ export type TaskGetOutput = Static<typeof TaskGetOutputSchema>;
 export const TaskListOutputSchema = createPageSchema(TaskSchema);
 
 export type TaskListOutput = Static<typeof TaskListOutputSchema>;
+
+/** Счётчики задач проекта по фиксированным статусам. */
+export const TaskStatusCountsSchema = Type.Object(
+  {
+    backlog: Type.Integer({ minimum: 0 }),
+    todo: Type.Integer({ minimum: 0 }),
+    in_progress: Type.Integer({ minimum: 0 }),
+    done: Type.Integer({ minimum: 0 }),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type TaskStatusCounts = Static<typeof TaskStatusCountsSchema>;
+
+/**
+ * Агрегированная сводка по набору проектов.
+ *
+ * `total` включает все задачи, `overdueCount` — только незавершённые задачи
+ * со сроком раньше момента запроса.
+ */
+export const ProjectSummaryTotalsSchema = Type.Object(
+  {
+    total: Type.Integer({ minimum: 0 }),
+    counts: TaskStatusCountsSchema,
+    overdueCount: Type.Integer({ minimum: 0 }),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type ProjectSummaryTotals = Static<typeof ProjectSummaryTotalsSchema>;
+
+/** Сводка одного проекта: проект и точные счётчики по полным данным. */
+export const ProjectSummarySchema = Type.Object(
+  {
+    project: ProjectSchema,
+    total: Type.Integer({ minimum: 0 }),
+    counts: TaskStatusCountsSchema,
+    overdueCount: Type.Integer({ minimum: 0 }),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type ProjectSummary = Static<typeof ProjectSummarySchema>;
+
+/**
+ * Вход запроса `project.summary`.
+ *
+ * `projectId` ограничивает сводку одним проектом; отсутствие поля возвращает
+ * все проекты стабильными страницами. `totals` всегда считается по всем
+ * подходящим проектам, а не по текущей странице.
+ */
+export const ProjectSummaryInputSchema = Type.Object(
+  {
+    projectId: Type.Optional(EntityIdSchema),
+    limit: Type.Optional(LimitSchema),
+    offset: Type.Optional(OffsetSchema),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type ProjectSummaryInput = Static<typeof ProjectSummaryInputSchema>;
+
+/** Результат `project.summary`. */
+export const ProjectSummaryOutputSchema = Type.Object(
+  {
+    items: Type.Array(ProjectSummarySchema),
+    total: Type.Integer({ minimum: 0 }),
+    nextOffset: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+    totals: ProjectSummaryTotalsSchema,
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type ProjectSummaryOutput = Static<typeof ProjectSummaryOutputSchema>;
