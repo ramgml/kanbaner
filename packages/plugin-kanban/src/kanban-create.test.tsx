@@ -307,7 +307,10 @@ describe("создание на канбане", () => {
       ["done", "Готово"],
     ] as const) {
       expect(screen.getByTestId(`kanban-create-task-${status}`)).toHaveAccessibleName(
-        `Новая задача в колонке «${label}»`,
+        `Добавить задачу с деталями в колонке «${label}»`,
+      );
+      expect(screen.getByTestId(`kanban-quick-add-${status}`)).toHaveAccessibleName(
+        `Добавить карточку в колонку «${label}»`,
       );
     }
 

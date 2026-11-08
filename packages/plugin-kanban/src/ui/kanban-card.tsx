@@ -3,7 +3,9 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import type { Task, TaskPriority, TaskStatus } from "@kanbaner/plugin-tasks/contract";
-import { formatDueAt, taskPriorityLabel, taskStatusLabel, taskStatuses } from "@kanbaner/task-ui";
+import { taskPriorityLabel, taskStatusLabel, taskStatuses } from "@kanbaner/task-ui";
+
+import { describeDue, type DueTone } from "./due.ts";
 
 export type KanbanReorderKind = "up" | "down" | "start" | "end";
 
@@ -16,6 +18,25 @@ const PRIORITY_STYLES: Readonly<
     background: "color-mix(in oklab, var(--destructive) 18%, transparent)",
     color: "var(--destructive)",
   },
+};
+
+const DUE_STYLES: Readonly<
+  Record<DueTone, { readonly background: string; readonly color: string }>
+> = {
+  overdue: {
+    background: "color-mix(in oklab, var(--destructive) 14%, transparent)",
+    color: "var(--destructive)",
+  },
+  today: {
+    background: "color-mix(in oklab, #f59e0b 18%, transparent)",
+    color: "#a16207",
+  },
+  tomorrow: {
+    background: "color-mix(in oklab, #3b82f6 14%, transparent)",
+    color: "#1d4ed8",
+  },
+  later: { background: "transparent", color: "var(--muted-foreground)" },
+  none: { background: "transparent", color: "var(--muted-foreground)" },
 };
 
 const actionButtonStyle = {
@@ -38,6 +59,8 @@ export interface KanbanCardProps {
   readonly pending: boolean;
   readonly conflict: boolean;
   readonly dragging: boolean;
+  /** Название проекта показывается только в режиме «Все проекты». */
+  readonly projectTitle?: string | null | undefined;
   readonly onOpen: (task: Task) => void;
   readonly onMoveTo: (task: Task, status: TaskStatus) => void;
   readonly onReorder: (task: Task, kind: KanbanReorderKind) => void;
@@ -45,11 +68,13 @@ export interface KanbanCardProps {
 }
 
 /**
- * Карточка доски.
+ * Компактная карточка доски.
  *
+ * Заголовок — главный элемент. Теги ограничены двумя видимыми + `+N`, срок
+ * получает семантический тон (просрочено/сегодня/завтра/дата) и текстовое
+ * описание, а pending/conflict занимают строку только пока актуальны.
  * Перемещение доступно тремя путями: drag handle, меню «Переместить в…» и
- * кнопки порядка. Меню и кнопки работают с клавиатуры и на мобильных, поэтому
- * DnD не является единственным способом изменить статус или позицию.
+ * кнопки порядка, поэтому DnD не является единственным способом.
  */
 export function KanbanCard({
   task,
@@ -60,12 +85,17 @@ export function KanbanCard({
   pending,
   conflict,
   dragging,
+  projectTitle = null,
   onOpen,
   onMoveTo,
   onReorder,
   onDragStart,
 }: KanbanCardProps) {
   const priorityStyle = PRIORITY_STYLES[task.priority];
+  const due = describeDue(task.dueAt);
+  const dueStyle = DUE_STYLES[due.tone];
+  const visibleTags = task.tags.slice(0, 2);
+  const extraTags = task.tags.length - visibleTags.length;
 
   return (
     <article
@@ -73,20 +103,14 @@ export function KanbanCard({
       data-card-id={task.id}
       aria-current={selected ? "true" : undefined}
       aria-busy={pending}
+      className="flex flex-col gap-1.5 rounded-lg border bg-card p-2.5 text-card-foreground transition-shadow"
       style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "8px",
-        border: selected ? "1px solid var(--ring)" : "1px solid var(--border)",
-        background: "var(--card)",
-        color: "var(--card-foreground)",
-        borderRadius: "10px",
-        padding: "10px",
-        opacity: dragging || pending ? 0.6 : 1,
-        boxShadow: selected ? "0 0 0 2px var(--ring)" : "0 1px 2px rgb(0 0 0 / 0.06)",
+        borderColor: selected ? "var(--ring)" : "var(--border)",
+        opacity: dragging || pending ? 0.62 : 1,
+        boxShadow: selected ? "0 0 0 2px var(--ring)" : "0 1px 2px rgb(0 0 0 / 0.10)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "6px" }}>
+      <div className="flex items-start gap-1">
         <button
           type="button"
           aria-label={`Открыть карточку задачи ${task.title}`}
@@ -94,23 +118,87 @@ export function KanbanCard({
           onClick={() => {
             onOpen(task);
           }}
-          style={{
-            flex: "1 1 auto",
-            minWidth: 0,
-            border: "none",
-            background: "transparent",
-            color: "inherit",
-            padding: 0,
-            textAlign: "left",
-            fontSize: "14px",
-            fontWeight: 600,
-            lineHeight: 1.3,
-            overflowWrap: "anywhere",
-            cursor: "pointer",
-          }}
+          className="min-w-0 flex-1 rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
           {task.title}
         </button>
+
+        <details data-testid={`kanban-menu-${task.id}`} className="relative shrink-0">
+          <summary
+            aria-label={`Действия карточки ${task.title}`}
+            title="Действия карточки"
+            className="flex min-h-10 min-w-10 cursor-pointer list-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7 xl:min-w-7"
+          >
+            <span aria-hidden="true">⋯</span>
+          </summary>
+          <div
+            role="group"
+            aria-label={`Перемещение задачи ${task.title}`}
+            className="mt-1 flex flex-col gap-1 rounded-md border border-border bg-popover p-1 shadow-md"
+          >
+            {taskStatuses()
+              .filter((status) => status !== task.status)
+              .map((status) => (
+                <button
+                  key={status}
+                  type="button"
+                  disabled={pending}
+                  onClick={() => {
+                    onMoveTo(task, status);
+                  }}
+                  className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+                  style={actionButtonStyle}
+                >
+                  Переместить в {taskStatusLabel(status)}
+                </button>
+              ))}
+
+            <button
+              type="button"
+              disabled={pending || index === 0}
+              onClick={() => {
+                onReorder(task, "up");
+              }}
+              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+              style={actionButtonStyle}
+            >
+              Выше
+            </button>
+            <button
+              type="button"
+              disabled={pending || index >= columnSize - 1}
+              onClick={() => {
+                onReorder(task, "down");
+              }}
+              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+              style={actionButtonStyle}
+            >
+              Ниже
+            </button>
+            <button
+              type="button"
+              disabled={pending || index === 0}
+              onClick={() => {
+                onReorder(task, "start");
+              }}
+              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+              style={actionButtonStyle}
+            >
+              В начало
+            </button>
+            <button
+              type="button"
+              disabled={pending || index >= columnSize - 1}
+              onClick={() => {
+                onReorder(task, "end");
+              }}
+              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+              style={actionButtonStyle}
+            >
+              В конец
+            </button>
+          </div>
+        </details>
 
         <button
           type="button"
@@ -120,171 +208,89 @@ export function KanbanCard({
             onDragStart(task, event);
           }}
           title="Перетащить карточку"
-          style={{
-            flex: "0 0 auto",
-            border: "1px solid var(--border)",
-            background: "var(--background)",
-            color: "var(--muted-foreground)",
-            borderRadius: "6px",
-            padding: "2px 6px",
-            fontSize: "12px",
-            lineHeight: 1,
-            cursor: "grab",
-            touchAction: "none",
-          }}
+          className="flex min-h-10 min-w-10 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-7 xl:min-w-7"
         >
           <span aria-hidden="true">⠿</span>
         </button>
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
-        <span
-          style={{
-            background: priorityStyle.background,
-            color: priorityStyle.color,
-            borderRadius: "999px",
-            padding: "1px 8px",
-            fontSize: "11px",
-            fontWeight: 600,
-          }}
-        >
-          {taskPriorityLabel(task.priority)}
-        </span>
-        <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>
-          {formatDueAt(task.dueAt)}
-        </span>
-      </div>
-
-      {task.tags.length === 0 ? null : (
-        <ul
-          aria-label="Теги"
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "4px",
-            margin: 0,
-            padding: 0,
-            listStyle: "none",
-          }}
-        >
-          {task.tags.map((tag) => (
+      {visibleTags.length === 0 ? null : (
+        <ul aria-label="Теги" className="flex flex-wrap items-center gap-1">
+          {visibleTags.map((tag) => (
             <li
               key={tag}
-              style={{
-                background: "var(--secondary)",
-                color: "var(--secondary-foreground)",
-                borderRadius: "4px",
-                padding: "1px 5px",
-                fontSize: "11px",
-              }}
+              className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-secondary-foreground"
             >
               {tag}
             </li>
           ))}
+          {extraTags > 0 ? (
+            <li
+              aria-label={`Ещё тегов: ${String(extraTags)}`}
+              className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+            >
+              +{extraTags}
+            </li>
+          ) : null}
         </ul>
       )}
 
-      <p
-        data-testid={`kanban-subtasks-${task.id}`}
-        style={{ margin: 0, fontSize: "11px", color: "var(--muted-foreground)" }}
-      >
-        Подзадачи: {subtaskCount ?? "—"}
-      </p>
-
-      {pending ? (
-        <p
-          role="status"
-          data-testid={`kanban-pending-${task.id}`}
-          style={{ margin: 0, fontSize: "11px", color: "var(--muted-foreground)" }}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        <span
+          className="rounded-full px-1.5 py-0.5 font-semibold"
+          style={{ background: priorityStyle.background, color: priorityStyle.color }}
         >
-          Сохранение…
-        </p>
-      ) : null}
+          {taskPriorityLabel(task.priority)}
+        </span>
 
-      {conflict ? (
-        <p
-          role="alert"
-          data-testid={`kanban-conflict-${task.id}`}
-          style={{ margin: 0, fontSize: "11px", color: "var(--destructive)" }}
+        <span
+          data-testid={`kanban-due-${task.id}`}
+          aria-label={due.ariaLabel}
+          title={due.title}
+          className="rounded px-1 py-0.5 font-medium"
+          style={{ background: dueStyle.background, color: dueStyle.color }}
         >
-          Конфликт версий
-        </p>
-      ) : null}
+          {due.label}
+        </span>
 
-      <details data-testid={`kanban-menu-${task.id}`} style={{ fontSize: "12px" }}>
-        <summary
-          aria-label={`Действия карточки ${task.title}`}
-          style={{
-            cursor: "pointer",
-            color: "var(--muted-foreground)",
-            width: "fit-content",
-          }}
-        >
-          Действия
-        </summary>
-        <div
-          role="group"
-          aria-label={`Перемещение задачи ${task.title}`}
-          style={{ display: "flex", flexWrap: "wrap", gap: "4px", paddingTop: "6px" }}
-        >
-          {taskStatuses()
-            .filter((status) => status !== task.status)
-            .map((status) => (
-              <button
-                key={status}
-                type="button"
-                disabled={pending}
-                onClick={() => {
-                  onMoveTo(task, status);
-                }}
-                style={actionButtonStyle}
-              >
-                Переместить в {taskStatusLabel(status)}
-              </button>
-            ))}
+        <span data-testid={`kanban-subtasks-${task.id}`} className="whitespace-nowrap">
+          Подзадачи: {subtaskCount ?? "—"}
+        </span>
 
-          <button
-            type="button"
-            disabled={pending || index === 0}
-            onClick={() => {
-              onReorder(task, "up");
-            }}
-            style={actionButtonStyle}
+        {projectTitle === null || projectTitle.length === 0 ? null : (
+          <span
+            data-testid={`kanban-project-badge-${task.id}`}
+            className="max-w-full truncate rounded bg-accent px-1.5 py-0.5 text-[10px] text-accent-foreground"
+            title={projectTitle}
           >
-            Выше
-          </button>
-          <button
-            type="button"
-            disabled={pending || index >= columnSize - 1}
-            onClick={() => {
-              onReorder(task, "down");
-            }}
-            style={actionButtonStyle}
-          >
-            Ниже
-          </button>
-          <button
-            type="button"
-            disabled={pending || index === 0}
-            onClick={() => {
-              onReorder(task, "start");
-            }}
-            style={actionButtonStyle}
-          >
-            В начало
-          </button>
-          <button
-            type="button"
-            disabled={pending || index >= columnSize - 1}
-            onClick={() => {
-              onReorder(task, "end");
-            }}
-            style={actionButtonStyle}
-          >
-            В конец
-          </button>
+            {projectTitle}
+          </span>
+        )}
+      </div>
+
+      {pending || conflict ? (
+        <div className="flex flex-wrap items-center gap-1">
+          {pending ? (
+            <span
+              role="status"
+              data-testid={`kanban-pending-${task.id}`}
+              className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+            >
+              Сохранение…
+            </span>
+          ) : null}
+
+          {conflict ? (
+            <span
+              role="alert"
+              data-testid={`kanban-conflict-${task.id}`}
+              className="rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive"
+            >
+              Конфликт версий
+            </span>
+          ) : null}
         </div>
-      </details>
+      ) : null}
     </article>
   );
 }
