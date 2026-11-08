@@ -54,6 +54,7 @@ export type TasksCommandName = keyof typeof TASKS_COMMAND_IDS;
 export const TASKS_QUERY_IDS = Object.freeze({
   projectList: "kanbaner.tasks.project.list",
   projectGet: "kanbaner.tasks.project.get",
+  projectSummary: "kanbaner.tasks.project.summary",
   taskGet: "kanbaner.tasks.task.get",
   taskList: "kanbaner.tasks.task.list",
 } as const);

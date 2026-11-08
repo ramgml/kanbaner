@@ -24,6 +24,7 @@ import {
   formatTaskRef,
   type DeleteOutput,
   type ProjectMutationOutput,
+  type ProjectSummaryOutput,
   type TaskMutationOutput,
 } from "../../packages/plugin-tasks/src/contract.ts";
 import { createSqliteStorageProvider } from "@kanbaner/storage-sqlite";
@@ -329,6 +330,65 @@ describe("активация kanbaner.tasks", () => {
     expect(
       harness.composition.operations.registry.get(TASKS_QUERY_IDS.taskGet)?.metadata.risk,
     ).toBe("read");
+  });
+
+  it("отдаёт project.summary через OperationBus с точными агрегатами", async () => {
+    const harness = await startHarness();
+    const project = await createProject(harness, "Сводка");
+    const other = await createProject(harness, "Вторая");
+
+    await createTask(harness, project.project.id, {
+      title: "Просроченная",
+      status: "backlog",
+      dueAt: "2020-01-01T00:00:00.000Z",
+    });
+    await createTask(harness, project.project.id, {
+      title: "Готовая",
+      status: "done",
+      dueAt: "2020-01-01T00:00:00.000Z",
+    });
+    await createTask(harness, other.project.id, { title: "Обычная", status: "todo" });
+
+    const page = expectOk<ProjectSummaryOutput>(
+      await harness.query(TASKS_QUERY_IDS.projectSummary, { limit: 1, offset: 0 }),
+    );
+
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(page.nextOffset).toBe(1);
+    expect(page.totals).toEqual({
+      total: 3,
+      counts: { backlog: 1, todo: 1, in_progress: 0, done: 1 },
+      overdueCount: 1,
+    });
+
+    const single = expectOk<ProjectSummaryOutput>(
+      await harness.query(TASKS_QUERY_IDS.projectSummary, {
+        projectId: project.project.id,
+        limit: 1,
+        offset: 0,
+      }),
+    );
+
+    expect(single.total).toBe(1);
+    expect(single.nextOffset).toBeNull();
+    expect(single.items[0]?.project.id).toBe(project.project.id);
+    expect(single.items[0]?.counts).toEqual({
+      backlog: 1,
+      todo: 0,
+      in_progress: 0,
+      done: 1,
+    });
+    expect(single.items[0]?.overdueCount).toBe(1);
+
+    const missing = await harness.query(TASKS_QUERY_IDS.projectSummary, {
+      projectId: "missing-project",
+    });
+
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.error.code).toBe("NOT_FOUND");
+    }
   });
 
   it("проходит полный жизненный цикл проекта и задачи", async () => {

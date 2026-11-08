@@ -220,7 +220,10 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     });
     expect(contract.TASKS_QUERY_IDS).toMatchObject({
       taskList: "kanbaner.tasks.task.list",
+      projectSummary: "kanbaner.tasks.project.summary",
     });
+    expect(contract.ProjectSummaryInputSchema).toBeTypeOf("object");
+    expect(contract.ProjectSummaryOutputSchema).toBeTypeOf("object");
     expect(contract.formatTaskRef).toBeTypeOf("function");
     expect(contract.toTaskSearchDocument).toBeTypeOf("function");
     expect(contract.validateSubtaskParent).toBeTypeOf("function");

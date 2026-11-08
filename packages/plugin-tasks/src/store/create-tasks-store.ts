@@ -14,6 +14,7 @@ import {
   compareCodePoints,
   compareProjects,
   compareTaskList,
+  compareUtcTimestamps,
   matchesDueRange,
   matchesTaskText,
 } from "../listing.ts";
@@ -30,6 +31,7 @@ import {
   type TaskStatus,
 } from "../model.ts";
 import { formatProjectRef, formatTaskRef } from "../resources.ts";
+import type { ProjectSummary, ProjectSummaryTotals, TaskStatusCounts } from "../schemas/queries.ts";
 import {
   TasksValidationError,
   assertStoredTask,
@@ -53,6 +55,8 @@ import {
   type DeleteTaskStoreInput,
   type MoveTaskStoreInput,
   type ProjectStoreQuery,
+  type ProjectSummaryStorePage,
+  type ProjectSummaryStoreQuery,
   type StorePage,
   type TasksIdFactory,
   type TasksStore,
@@ -111,6 +115,7 @@ interface StoreDependencies {
 interface CoreStore {
   getProject(id: string): Promise<Project | null>;
   listProjects(query: ProjectStoreQuery): Promise<StorePage<Project>>;
+  summarizeProjects(query: ProjectSummaryStoreQuery): Promise<ProjectSummaryStorePage>;
   createProject(input: CreateProjectStoreInput): Promise<Project>;
   updateProject(input: UpdateProjectStoreInput): Promise<Project>;
   deleteProject(input: DeleteProjectStoreInput): Promise<DeleteStoreResult>;
@@ -560,6 +565,88 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       return pageOf(projects, pagination.offset, pagination.limit);
     },
 
+    async summarizeProjects(query) {
+      const pagination = resolvePagination(query.limit, query.offset);
+      const observedAt = readNow(now);
+      const projectDocuments = await documents.list(PLUGIN_ID, PROJECT_COLLECTION);
+      const projects = projectDocuments.map(parseProjectDocument).sort(compareProjects);
+      const matching =
+        query.projectId === undefined
+          ? projects
+          : projects.filter((project) => project.id === query.projectId);
+
+      if (query.projectId !== undefined && matching.length === 0) {
+        throw new TasksNotFoundError("project", query.projectId);
+      }
+
+      // Счётчики строятся по полному набору задач, а не по странице карточек.
+      // При явном projectId читается только его scope, иначе — все задачи
+      // одним проходом без запроса на каждый проект (никакого N+1).
+      const taskDocuments = await queryTaskDocuments(
+        query.projectId === undefined ? undefined : { projectId: query.projectId },
+      );
+      const summaries = new Map<string, ProjectSummary>(
+        matching.map((project) => [
+          project.id,
+          {
+            project,
+            total: 0,
+            counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+            overdueCount: 0,
+          },
+        ]),
+      );
+
+      for (const document of taskDocuments) {
+        const task = parseTaskDocument(document);
+        const current = summaries.get(task.projectId);
+
+        if (current === undefined) {
+          continue;
+        }
+
+        const counts: TaskStatusCounts = {
+          backlog: current.counts.backlog + (task.status === "backlog" ? 1 : 0),
+          todo: current.counts.todo + (task.status === "todo" ? 1 : 0),
+          in_progress: current.counts.in_progress + (task.status === "in_progress" ? 1 : 0),
+          done: current.counts.done + (task.status === "done" ? 1 : 0),
+        };
+
+        const overdue =
+          task.status !== "done" &&
+          task.dueAt !== null &&
+          compareUtcTimestamps(task.dueAt, observedAt) < 0;
+
+        summaries.set(task.projectId, {
+          project: current.project,
+          total: current.total + 1,
+          counts,
+          overdueCount: current.overdueCount + (overdue ? 1 : 0),
+        });
+      }
+
+      const all = matching.map((project) => summaries.get(project.id) as ProjectSummary);
+      const totals = all.reduce<ProjectSummaryTotals>(
+        (aggregate, summary) => ({
+          total: aggregate.total + summary.total,
+          counts: {
+            backlog: aggregate.counts.backlog + summary.counts.backlog,
+            todo: aggregate.counts.todo + summary.counts.todo,
+            in_progress: aggregate.counts.in_progress + summary.counts.in_progress,
+            done: aggregate.counts.done + summary.counts.done,
+          },
+          overdueCount: aggregate.overdueCount + summary.overdueCount,
+        }),
+        {
+          total: 0,
+          counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+          overdueCount: 0,
+        },
+      );
+
+      return { ...pageOf(all, pagination.offset, pagination.limit), totals };
+    },
+
     async createProject(input) {
       const expectedVersion = assertExpectedVersion(input.expectedVersion, true);
 
@@ -948,6 +1035,7 @@ function createScopedTransaction(
     documents,
     getProject: (id) => queue.run(() => core.getProject(id)),
     listProjects: (query) => queue.run(() => core.listProjects(query)),
+    summarizeProjects: (query) => queue.run(() => core.summarizeProjects(query)),
     createProject: (input) => queue.run(() => core.createProject(input)),
     updateProject: (input) => queue.run(() => core.updateProject(input)),
     deleteProject: (input) => queue.run(() => core.deleteProject(input)),
@@ -995,6 +1083,7 @@ export function createTasksStore(options: CreateTasksStoreOptions): TasksStore {
 
     getProject: (id) => within((core) => core.getProject(id)),
     listProjects: (query) => within((core) => core.listProjects(query)),
+    summarizeProjects: (query) => within((core) => core.summarizeProjects(query)),
     createProject: (input) => within((core) => core.createProject(input)),
     updateProject: (input) => within((core) => core.updateProject(input)),
     deleteProject: (input) => within((core) => core.deleteProject(input)),

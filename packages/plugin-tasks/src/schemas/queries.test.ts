@@ -8,6 +8,8 @@ import {
   ProjectGetOutputSchema,
   ProjectListInputSchema,
   ProjectListOutputSchema,
+  ProjectSummaryInputSchema,
+  ProjectSummaryOutputSchema,
   TaskGetInputSchema,
   TaskGetOutputSchema,
   TaskListInputSchema,
@@ -133,5 +135,122 @@ describe("query schemas", () => {
     ).toBe(true);
     expect(validateWithSchema(ProjectGetOutputSchema, { project }).ok).toBe(true);
     expect(validateWithSchema(TaskGetOutputSchema, { task }).ok).toBe(true);
+  });
+
+  it("принимает ввод project.summary с проектом и пагинацией", () => {
+    expect(validateWithSchema(ProjectSummaryInputSchema, {}).ok).toBe(true);
+    expect(validateWithSchema(ProjectSummaryInputSchema, { projectId: "project-1" }).ok).toBe(true);
+    expect(
+      validateWithSchema(ProjectSummaryInputSchema, {
+        projectId: "project-1",
+        limit: 1,
+        offset: 0,
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ProjectSummaryInputSchema, {
+        limit: MAX_LIST_LIMIT,
+        offset: 10,
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("отклоняет невалидный ввод project.summary", () => {
+    expect(validateWithSchema(ProjectSummaryInputSchema, { projectId: "" }).ok).toBe(false);
+    expect(validateWithSchema(ProjectSummaryInputSchema, { projectId: "project 1" }).ok).toBe(
+      false,
+    );
+    expect(validateWithSchema(ProjectSummaryInputSchema, { limit: 0 }).ok).toBe(false);
+    expect(validateWithSchema(ProjectSummaryInputSchema, { limit: MAX_LIST_LIMIT + 1 }).ok).toBe(
+      false,
+    );
+    expect(validateWithSchema(ProjectSummaryInputSchema, { limit: 1.5 }).ok).toBe(false);
+    expect(validateWithSchema(ProjectSummaryInputSchema, { offset: -1 }).ok).toBe(false);
+    expect(
+      validateWithSchema(ProjectSummaryInputSchema, { projectId: "project-1", extra: true }).ok,
+    ).toBe(false);
+  });
+
+  it("проверяет выход project.summary с totals и счётчиками", () => {
+    const summary = {
+      project,
+      total: 4,
+      counts: { backlog: 1, todo: 1, in_progress: 1, done: 1 },
+      overdueCount: 1,
+    };
+    const totals = {
+      total: 4,
+      counts: { backlog: 1, todo: 1, in_progress: 1, done: 1 },
+      overdueCount: 1,
+    };
+
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [summary],
+        total: 1,
+        nextOffset: null,
+        totals,
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [],
+        total: 0,
+        nextOffset: 1,
+        totals: {
+          total: 0,
+          counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+          overdueCount: 0,
+        },
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("отклоняет неполный output project.summary", () => {
+    const totals = {
+      total: 1,
+      counts: { backlog: 1, todo: 0, in_progress: 0, done: 0 },
+      overdueCount: 0,
+    };
+
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [],
+        total: 0,
+        nextOffset: null,
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [],
+        total: 0,
+        nextOffset: null,
+        totals: { total: 0, counts: { backlog: 0, todo: 0, in_progress: 0 }, overdueCount: 0 },
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [
+          {
+            project,
+            total: 0,
+            counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+            overdueCount: -1,
+          },
+        ],
+        total: 1,
+        nextOffset: null,
+        totals,
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ProjectSummaryOutputSchema, {
+        items: [],
+        total: 0,
+        nextOffset: null,
+        totals,
+        extra: true,
+      }).ok,
+    ).toBe(false);
   });
 });

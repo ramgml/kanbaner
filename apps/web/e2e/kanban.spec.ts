@@ -277,7 +277,7 @@ async function openBoard(page: Page): Promise<void> {
 async function createProjectOnBoard(
   page: Page,
   title: string,
-  options: { readonly doubleSubmit?: boolean } = {},
+  options: { readonly doubleSubmit?: boolean; readonly description?: string } = {},
 ): Promise<void> {
   await page.getByTestId("kanban-create-project").click();
 
@@ -285,6 +285,10 @@ async function createProjectOnBoard(
 
   await expect(form).toBeVisible();
   await form.getByLabel("Название проекта", { exact: true }).fill(title);
+
+  if (options.description !== undefined) {
+    await form.getByLabel("Описание (Markdown)", { exact: true }).fill(options.description);
+  }
 
   const submit = form.getByRole("button", { name: "Создать проект" });
 
@@ -307,6 +311,130 @@ async function createProjectOnBoard(
 
   await expect(projectSelect).toContainText(title);
   await expect(projectSelect.locator("option").filter({ hasText: title })).toHaveCount(1);
+}
+
+async function openProjectsMode(page: Page): Promise<void> {
+  await page.getByTestId("kanban-mode-projects").click();
+  await expect(page.getByTestId("kanban-projects")).toBeVisible();
+}
+
+/**
+ * Догружает страницы сетки, пока карточка проекта не появится.
+ *
+ * Проекты упорядочены `createdAt asc`, поэтому только что созданный проект
+ * может оказаться за границей первой страницы.
+ */
+async function revealProjectCard(page: Page, projectId: string): Promise<void> {
+  const card = page.getByTestId(`kanban-project-card-${projectId}`);
+  let guard = 0;
+
+  while (
+    !(await card.isVisible()) &&
+    (await page.getByTestId("kanban-projects-load-more").count()) > 0 &&
+    guard < 30
+  ) {
+    const count = await page.locator('[data-testid^="kanban-project-card-"]').count();
+
+    await page.getByTestId("kanban-projects-load-more").click();
+    await expect
+      .poll(async () => page.locator('[data-testid^="kanban-project-card-"]').count())
+      .toBeGreaterThan(count);
+    guard += 1;
+  }
+
+  await expect(card).toBeVisible();
+}
+
+async function projectIdByTitle(page: Page, title: string): Promise<string> {
+  const card = page.locator('[data-testid^="kanban-project-card-"]').filter({ hasText: title });
+
+  await expect(card).toHaveCount(1);
+
+  const projectId = await card.getAttribute("data-project-id");
+
+  expect(projectId).not.toBeNull();
+
+  return projectId as string;
+}
+
+async function expectProjectCounts(
+  page: Page,
+  projectId: string,
+  counts: Record<keyof typeof STATUS_LABELS, number>,
+  overdue: number,
+): Promise<void> {
+  const card = page.getByTestId(`kanban-project-card-${projectId}`);
+
+  await expect(card).toBeVisible();
+
+  for (const status of Object.keys(STATUS_LABELS) as Array<keyof typeof STATUS_LABELS>) {
+    await expect(page.getByTestId(`kanban-project-${projectId}-count-${status}`)).toHaveText(
+      String(counts[status]),
+    );
+  }
+
+  await expect(page.getByTestId(`kanban-project-overdue-${projectId}`)).toHaveText(
+    `Просрочено: ${String(overdue)}`,
+  );
+}
+
+async function expectBoardSummary(
+  page: Page,
+  expected: {
+    readonly total: number;
+    readonly counts: Record<keyof typeof STATUS_LABELS, number>;
+    readonly overdue: number;
+  },
+): Promise<void> {
+  await expect(page.getByTestId("kanban-board-summary")).toBeVisible();
+  await expect(page.getByTestId("kanban-summary-total")).toHaveText(String(expected.total));
+
+  for (const status of Object.keys(STATUS_LABELS) as Array<keyof typeof STATUS_LABELS>) {
+    await expect(page.getByTestId(`kanban-summary-${status}`)).toHaveText(
+      String(expected.counts[status]),
+    );
+  }
+
+  await expect(page.getByTestId("kanban-summary-overdue")).toHaveText(String(expected.overdue));
+}
+
+async function readBoardSummary(page: Page): Promise<{
+  readonly total: number;
+  readonly counts: Record<keyof typeof STATUS_LABELS, number>;
+  readonly overdue: number;
+}> {
+  await expect(page.getByTestId("kanban-summary-total")).toBeVisible();
+
+  const read = async (testId: string): Promise<number> =>
+    Number((await page.getByTestId(testId).textContent())?.trim() ?? "NaN");
+  const counts = {
+    backlog: await read("kanban-summary-backlog"),
+    todo: await read("kanban-summary-todo"),
+    in_progress: await read("kanban-summary-in_progress"),
+    done: await read("kanban-summary-done"),
+  } as const;
+
+  return {
+    total: await read("kanban-summary-total"),
+    counts,
+    overdue: await read("kanban-summary-overdue"),
+  };
+}
+
+async function projectIdByOption(page: Page, title: string): Promise<string> {
+  const option = page
+    .getByTestId("kanban-filters")
+    .getByRole("combobox", { name: "Проект", exact: true })
+    .locator("option")
+    .filter({ hasText: title });
+
+  await expect(option).toHaveCount(1);
+
+  const projectId = await option.getAttribute("value");
+
+  expect(projectId).not.toBeNull();
+
+  return projectId as string;
 }
 
 interface BoardTaskSeed {
@@ -411,6 +539,38 @@ test.describe("канбан в production shell", () => {
 
   test.describe("десктопный viewport", () => {
     test.use({ viewport: DESKTOP_VIEWPORT });
+
+    // Выполняется первым: база E2E-прогона ещё пуста, поэтому пустое
+    // состояние можно проверить без искусственного удаления чужих данных.
+    test("показывает пустое состояние проектов и создаёт первый проект", async ({ page }) => {
+      const projectTitle = uniqueTitle("Первый проект сетки");
+
+      await openBoard(page);
+
+      await expect(page.getByTestId("kanban-empty-projects")).toBeVisible();
+      await expect(page.getByTestId("kanban-summary-total")).toHaveText("0");
+
+      await page.getByTestId("kanban-mode-projects").click();
+
+      await expect(page.getByTestId("kanban-projects-empty")).toBeVisible();
+      await page.getByTestId("kanban-projects-create-first").click();
+
+      const form = page.getByTestId("project-form");
+
+      await expect(form).toBeVisible();
+      await form.getByLabel("Название проекта", { exact: true }).fill(projectTitle);
+      await form.getByRole("button", { name: "Создать проект" }).click();
+      await expect(form).toHaveCount(0);
+
+      const projectId = await projectIdByTitle(page, projectTitle);
+
+      await expectProjectCounts(
+        page,
+        projectId,
+        { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+        0,
+      );
+    });
 
     test("показывает проект и задачи в четырёх фиксированных колонках", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект доски");
@@ -1921,6 +2081,196 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
       await expect(card(page, taskId)).toHaveCount(0);
+    test("показывает проекты карточками и открывает доску и список с проектом", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект карточек");
+      const description = uniqueTitle("Описание проекта");
+      const backlogTitle = uniqueTitle("Бэклог карточек");
+      const overdueTitle = uniqueTitle("Просроченная карточка");
+      const doneTitle = uniqueTitle("Готовая карточка");
+
+      await openBoard(page);
+      await createProjectOnBoard(page, projectTitle, { description });
+
+      const projectId = await projectIdByOption(page, projectTitle);
+
+      await openTaskList(page);
+      await createTask(page, { projectTitle, title: backlogTitle, status: "backlog" });
+      await createTask(page, {
+        projectTitle,
+        title: overdueTitle,
+        status: "todo",
+        dueAt: "2020-01-05",
+      });
+      await createTask(page, {
+        projectTitle,
+        title: doneTitle,
+        status: "done",
+        dueAt: "2020-01-06",
+      });
+
+      await openKanban(page, projectTitle);
+
+      await expectBoardSummary(page, {
+        total: 3,
+        counts: { backlog: 1, todo: 1, in_progress: 0, done: 1 },
+        overdue: 1,
+      });
+
+      await openProjectsMode(page);
+      await revealProjectCard(page, projectId);
+
+      const card = page.getByTestId(`kanban-project-card-${projectId}`);
+
+      await expect(card).toContainText(projectTitle);
+      await expect(card).toContainText(description);
+      await expectProjectCounts(
+        page,
+        projectId,
+        { backlog: 1, todo: 1, in_progress: 0, done: 1 },
+        1,
+      );
+
+      await card.getByTestId(`kanban-project-open-${projectId}`).click();
+
+      await expect(page).toHaveURL(new RegExp(`[?&]project=${projectId}`, "u"));
+      await expect(page.getByTestId("kanban-columns")).toBeVisible();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+
+      await openProjectsMode(page);
+      await revealProjectCard(page, projectId);
+      await page.getByTestId(`kanban-project-list-${projectId}`).click();
+
+      await expect(page).toHaveURL(new RegExp(`/view/tasks\\?project=${projectId}`, "u"));
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+      await expect(
+        page.getByTestId("task-filters").getByRole("combobox", { name: "Проект", exact: true }),
+      ).toHaveValue(projectId);
+    });
+
+    test("обновляет сводку после create, move, complete и delete", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект сводки");
+      const taskTitle = uniqueTitle("Задача сводки");
+
+      await openBoard(page);
+      await createProjectOnBoard(page, projectTitle);
+
+      const projectId = await projectIdByOption(page, projectTitle);
+
+      await openKanban(page, projectTitle);
+      await expectBoardSummary(page, {
+        total: 0,
+        counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+        overdue: 0,
+      });
+
+      // create
+      await page.getByTestId("kanban-quick-add-backlog").click();
+      const input = page.getByTestId("kanban-quick-add-input-backlog");
+
+      await input.fill(taskTitle);
+      await input.press("Enter");
+      const taskId = await cardIdByTitle(page, taskTitle);
+
+      await expectBoardSummary(page, {
+        total: 1,
+        counts: { backlog: 1, todo: 0, in_progress: 0, done: 0 },
+        overdue: 0,
+      });
+
+      // move
+      await moveWithMenu(page, taskId, "in_progress");
+      await expectBoardSummary(page, {
+        total: 1,
+        counts: { backlog: 0, todo: 0, in_progress: 1, done: 0 },
+        overdue: 0,
+      });
+
+      // complete
+      await page.getByTestId(`kanban-open-${taskId}`).click();
+
+      const details = page.getByTestId("kanban-details");
+
+      await expect(details).toBeVisible();
+      await details.getByRole("button", { name: "Завершить" }).click();
+      await expectBoardSummary(page, {
+        total: 1,
+        counts: { backlog: 0, todo: 0, in_progress: 0, done: 1 },
+        overdue: 0,
+      });
+
+      await details.getByRole("button", { name: "Закрыть детали" }).click();
+      await expect(details).toHaveCount(0);
+
+      // delete
+      await page.getByTestId(`kanban-open-${taskId}`).click();
+      await expect(details).toBeVisible();
+      await details.getByTestId("task-delete").click();
+      await expect(page.getByTestId("task-delete-confirm-panel")).toBeVisible();
+      await page.getByTestId("task-delete-confirm").click();
+
+      await expectBoardSummary(page, {
+        total: 0,
+        counts: { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+        overdue: 0,
+      });
+
+      // Сетка использует ту же сводку и не отстаёт от доски.
+      await openProjectsMode(page);
+      await revealProjectCard(page, projectId);
+      await expectProjectCounts(
+        page,
+        projectId,
+        { backlog: 0, todo: 0, in_progress: 0, done: 0 },
+        0,
+      );
+    });
+
+    test("показывает агрегат «Все проекты» и не теряет проекты при пагинации", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект агрегата");
+      const todoTitle = uniqueTitle("Задача агрегата");
+      const doneTitle = uniqueTitle("Готовая задача агрегата");
+
+      await openBoard(page);
+      const before = await readBoardSummary(page);
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await createTask(page, { projectTitle, title: todoTitle, status: "todo" });
+      await createTask(page, { projectTitle, title: doneTitle, status: "done" });
+
+      await openBoard(page);
+      const after = await readBoardSummary(page);
+
+      expect(after.total).toBe(before.total + 2);
+      expect(after.counts.todo).toBe(before.counts.todo + 1);
+      expect(after.counts.done).toBe(before.counts.done + 1);
+      expect(after.counts.backlog).toBe(before.counts.backlog);
+      expect(after.counts.in_progress).toBe(before.counts.in_progress);
+
+      await openProjectsMode(page);
+
+      await expect(page.getByTestId("kanban-projects-total")).toHaveText(String(after.total));
+      await expect(page.getByTestId("kanban-projects-overdue")).toHaveText(String(after.overdue));
+
+      // Догружаем все страницы проектов: сумма карточек должна совпасть с
+      // агрегатом, который считается по полным данным.
+      const cardTotals = page.locator('[data-testid^="kanban-project-total-"]');
+      let guard = 0;
+
+      while ((await page.getByTestId("kanban-projects-load-more").count()) > 0 && guard < 20) {
+        const count = await cardTotals.count();
+
+        await page.getByTestId("kanban-projects-load-more").click();
+        await expect.poll(async () => cardTotals.count()).toBeGreaterThan(count);
+        guard += 1;
+      }
+
+      const values = (await cardTotals.allTextContents()).map((value) => Number(value.trim()));
+
+      expect(values.length).toBeGreaterThan(0);
+      expect(values.reduce((sum, value) => sum + value, 0)).toBe(after.total);
     });
   });
 
