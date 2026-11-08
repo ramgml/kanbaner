@@ -1,14 +1,13 @@
 ---
 id: KAN-018
 title: Проекты как доски и сводки
-status: ready
+status: in_progress
 stage: 3
 priority: medium
-owner: unassigned
-blocked_by:
-  - KAN-017
-branch: null
-worktree: null
+owner: worker-kan-018
+blocked_by: []
+branch: feat/kan-018-project-boards
+worktree: .worktrees/kan-018-project-boards
 created: 2026-11-08
 updated: 2026-11-08
 specs:
