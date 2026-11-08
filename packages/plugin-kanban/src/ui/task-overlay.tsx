@@ -26,7 +26,9 @@ import {
   ModalDialog,
   createTaskFormValues,
   dateInputToDueAt,
+  dueAtToDateInput,
   parseTagsInput,
+  tagsToInput,
   taskToFormValues,
   useMediaQuery,
   type TaskFormValues,
@@ -46,7 +48,7 @@ import {
   updateKanbanQuery,
   useKanbanQuery,
 } from "./query-state.ts";
-import { TaskModal, type SubtaskDraft } from "./task-modal.tsx";
+import { TaskModal, type SubtaskDraft, type SubtaskFormDraft } from "./task-modal.tsx";
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
 
@@ -55,6 +57,9 @@ const MAX_LIST_LIMIT = 200;
 
 const MOBILE_DIALOG_CLASS =
   "m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-background p-0 backdrop:bg-black/40";
+
+const DESKTOP_DIALOG_CLASS =
+  "m-auto w-[calc(100vw-2rem)] max-w-[860px] max-h-[calc(100dvh-2rem)] overflow-hidden rounded-xl border border-border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/45";
 
 interface SubtasksState {
   readonly taskId: string | null;
@@ -69,6 +74,94 @@ const EMPTY_SUBTASKS: SubtasksState = Object.freeze({
   loading: false,
   error: null,
 });
+
+/** Серверные значения, от которых отсчитывается черновик быстрых действий. */
+interface QuickBaseline {
+  readonly taskId: string;
+  readonly status: TaskStatus;
+  readonly dueAt: string | null;
+  readonly tagsKey: string;
+}
+
+/** Несохранённые значения быстрых действий, живущие вне breakpoint-модала. */
+interface QuickDraft {
+  readonly taskId: string;
+  readonly nextStatus: TaskStatus;
+  readonly dueValue: string;
+  readonly tagsValue: string;
+  readonly subtaskOpen: boolean;
+  readonly subtaskTitle: string;
+  readonly subtaskStatus: TaskStatus;
+}
+
+/** Сессия редактирования: версия фиксируется в момент открытия формы. */
+interface EditSession {
+  readonly taskId: string;
+  readonly expectedVersion: number;
+}
+
+function baselineOf(task: Task): QuickBaseline {
+  return {
+    taskId: task.id,
+    status: task.status,
+    dueAt: task.dueAt,
+    tagsKey: tagsToInput(task.tags),
+  };
+}
+
+function createQuickDraft(task: Task): QuickDraft {
+  return {
+    taskId: task.id,
+    nextStatus: task.status,
+    dueValue: dueAtToDateInput(task.dueAt),
+    tagsValue: tagsToInput(task.tags),
+    subtaskOpen: false,
+    subtaskTitle: "",
+    subtaskStatus: "todo",
+  };
+}
+
+/**
+ * Переносит черновик на новую серверную версию без молчаливой потери
+ * несохранённых полей.
+ *
+ * Поле синхронизируется только если изменилось его серверное значение
+ * относительно baseline. Поэтому успешная команда по приоритету не стирает
+ * введённый, но ещё не сохранённый срок или теги.
+ */
+function syncQuickDraft(
+  current: QuickDraft | null,
+  task: Task,
+  baseline: QuickBaseline | null,
+): QuickDraft {
+  if (current === null || current.taskId !== task.id || baseline?.taskId !== task.id) {
+    return createQuickDraft(task);
+  }
+
+  const next: {
+    taskId: string;
+    nextStatus: TaskStatus;
+    dueValue: string;
+    tagsValue: string;
+    subtaskOpen: boolean;
+    subtaskTitle: string;
+    subtaskStatus: TaskStatus;
+  } = { ...current };
+
+  if (baseline.status !== task.status) {
+    next.nextStatus = task.status;
+  }
+
+  if (baseline.dueAt !== task.dueAt) {
+    next.dueValue = dueAtToDateInput(task.dueAt);
+  }
+
+  if (baseline.tagsKey !== tagsToInput(task.tags)) {
+    next.tagsValue = tagsToInput(task.tags);
+  }
+
+  return next;
+}
 
 function sameValues(left: TaskFormValues | null, right: TaskFormValues | null): boolean {
   if (left === null || right === null) {
@@ -87,6 +180,37 @@ function sameValues(left: TaskFormValues | null, right: TaskFormValues | null): 
   );
 }
 
+/**
+ * Читает все подзадачи задачи.
+ *
+ * `task.list` ограничивает `limit` значением 200, поэтому после первой
+ * страницы запрос продолжается по `nextOffset`, пока сервер не сообщит конец.
+ * Созданная append-подзадача поэтому видна и после границы страницы.
+ */
+async function fetchSubtasks(invoke: UiOperationInvoker, taskId: string): Promise<readonly Task[]> {
+  const items: Task[] = [];
+  let offset = 0;
+
+  for (;;) {
+    const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
+      parentTaskId: taskId,
+      limit: MAX_LIST_LIMIT,
+      offset,
+      sort: { field: "position", direction: "asc" },
+    } as unknown as JsonValue);
+
+    items.push(...data.items);
+
+    if (data.nextOffset === null || data.items.length === 0 || data.nextOffset <= offset) {
+      break;
+    }
+
+    offset = data.nextOffset;
+  }
+
+  return items;
+}
+
 export interface TaskOverlayProps {
   readonly invoke: UiOperationInvoker;
   readonly pathname?: string | undefined;
@@ -97,14 +221,10 @@ export interface TaskOverlayProps {
 /**
  * Overlay выбранной карточки канбана в стиле Trello.
  *
- * На desktop — центрированный modal поверх доски: слева описание и подзадачи,
- * справа действия. На mobile — полноэкранный нативный `ModalDialog` с focus
- * trap, Escape и возвратом фокуса. Детали и формы берутся из `@kanbaner/task-ui`,
- * поэтому плагин не зависит от внутренностей `kanbaner.task-list`.
- *
- * Все команды выполняются только над `currentTask`, у которого
- * `task.id === taskId`: при переходе A → B устаревшая задача не показывается и
- * не принимает действий.
+ * Desktop и mobile используют общий `ModalDialog`: native `<dialog>` даёт
+ * inert-фон, focus trap и возврат фокуса. Desktop-вариант центрируется и
+ * ограничен 860 px. Все команды выполняются только над `currentTask`, у
+ * которого `task.id === taskId`.
  */
 export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOverlayProps) {
   const query = useKanbanQuery(search);
@@ -128,8 +248,10 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [editSession, setEditSession] = useState<EditSession | null>(null);
   const [editValues, setEditValues] = useState<TaskFormValues | null>(null);
   const [editInitial, setEditInitial] = useState<TaskFormValues | null>(null);
+  const [quickDraft, setQuickDraft] = useState<QuickDraft | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [conflictState, setConflictState] = useState<{
     readonly taskId: string;
@@ -137,6 +259,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const quickBaselineRef = useRef<QuickBaseline | null>(null);
 
   // Данные от предыдущей задачи (A) не должны показываться или выполнять
   // команды, пока не загрузилась выбранная задача (B).
@@ -146,11 +269,31 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     editingTaskId === taskId &&
     currentTask !== null &&
     editValues !== null;
-  const dirty = editing && !sameValues(editValues, editInitial);
+  const editDirty = editing && !sameValues(editValues, editInitial);
+  const editOutdated =
+    editing &&
+    currentTask !== null &&
+    editSession !== null &&
+    editSession.taskId === currentTask.id &&
+    editSession.expectedVersion !== currentTask.version;
   const conflict =
     conflictState !== null && conflictState.taskId === taskId ? conflictState.message : null;
   const visibleSubtasks =
     currentTask !== null && subtasks.taskId === currentTask.id ? subtasks : EMPTY_SUBTASKS;
+  const activeQuickDraft =
+    currentTask === null
+      ? null
+      : quickDraft !== null && quickDraft.taskId === currentTask.id
+        ? quickDraft
+        : createQuickDraft(currentTask);
+  const quickDirty =
+    currentTask !== null &&
+    activeQuickDraft !== null &&
+    (activeQuickDraft.nextStatus !== currentTask.status ||
+      activeQuickDraft.dueValue !== dueAtToDateInput(currentTask.dueAt) ||
+      activeQuickDraft.tagsValue !== tagsToInput(currentTask.tags) ||
+      (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
+  const draftDirty = editDirty || quickDirty;
 
   useEffect(() => {
     if (taskId === null || !onKanbanRoute) {
@@ -191,18 +334,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
         if (loadedTask.parentTaskId === null) {
           try {
-            const subtaskOutput = await invokeJson<TaskListOutput>(
-              invoke,
-              TASKS_QUERY_IDS.taskList,
-              {
-                parentTaskId: loadedTask.id,
-                limit: MAX_LIST_LIMIT,
-                offset: 0,
-                sort: { field: "position", direction: "asc" },
-              } as unknown as JsonValue,
-            );
-
-            subtaskItems = subtaskOutput.items;
+            subtaskItems = await fetchSubtasks(invoke, loadedTask.id);
           } catch (subtaskLoadError) {
             // Ошибка списка подзадач не должна скрывать саму карточку.
             subtaskError = errorMessage(subtaskLoadError);
@@ -210,6 +342,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         }
 
         if (!cancelled) {
+          const previousBaseline = quickBaselineRef.current;
+
           setTask(loadedTask);
           setProject(projectOutput.project);
           setParentTask(parentOutput?.task ?? null);
@@ -219,6 +353,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             loading: false,
             error: subtaskError,
           });
+          setQuickDraft((current) => syncQuickDraft(current, loadedTask, previousBaseline));
+          quickBaselineRef.current = baselineOf(loadedTask);
           setError(null);
         }
       } catch (loadError) {
@@ -239,11 +375,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     };
   }, [invoke, taskId, query.revision, onKanbanRoute]);
 
-  // Смена выбранной карточки всегда начинает новую сессию: черновик и
+  // Смена выбранной карточки всегда начинает новую сессию: черновики и
   // подтверждение закрытия от предыдущей задачи не переносятся.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setEditingTaskId(null);
+    setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
     setCloseConfirm(false);
@@ -285,40 +422,24 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const closeNow = useCallback((): void => {
     setCloseConfirm(false);
     setEditingTaskId(null);
+    setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
+    setQuickDraft(null);
+    quickBaselineRef.current = null;
     setError(null);
     setConflictState(null);
     updateKanbanQuery({ taskId: null });
   }, []);
 
   const requestClose = useCallback((): void => {
-    if (dirty) {
+    if (draftDirty) {
       setCloseConfirm(true);
       return;
     }
 
     closeNow();
-  }, [dirty, closeNow]);
-
-  useEffect(() => {
-    if (!onKanbanRoute || taskId === null || !isDesktopViewport) {
-      return;
-    }
-
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        requestClose();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [onKanbanRoute, taskId, isDesktopViewport, requestClose]);
+  }, [draftDirty, closeNow]);
 
   if (taskId === null || !onKanbanRoute) {
     return null;
@@ -346,6 +467,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         }
 
         setEditingTaskId(null);
+        setEditSession(null);
         setEditValues(null);
         setEditInitial(null);
         bumpKanbanRevision();
@@ -358,6 +480,14 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       busyRef.current = false;
       setBusy(false);
     }
+  };
+
+  const changeQuickDraft = (patch: Partial<Omit<QuickDraft, "taskId">>): void => {
+    setQuickDraft((current) => {
+      const base = current ?? (currentTask === null ? null : createQuickDraft(currentTask));
+
+      return base === null ? current : { ...base, ...patch };
+    });
   };
 
   const startEdit = (): void => {
@@ -373,6 +503,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setError(null);
     setConflictState(null);
     setCloseConfirm(false);
+    setEditSession({ taskId: currentTask.id, expectedVersion: currentTask.version });
     setEditInitial(initial);
     setEditValues(initial);
     setEditingTaskId(currentTask.id);
@@ -380,6 +511,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
   const cancelEdit = (): void => {
     setEditingTaskId(null);
+    setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
     setCloseConfirm(false);
@@ -387,13 +519,16 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   };
 
   const save = async (values: TaskFormValues): Promise<void> => {
-    if (currentTask === null) {
+    if (currentTask === null || editSession === null || editSession.taskId !== currentTask.id) {
       return;
     }
 
+    // expectedVersion фиксируется при открытии формы: даже если карточка
+    // успела перечитаться, сохранение устаревшего черновика обязано получить
+    // VERSION_CONFLICT, а не тихо перезаписать чужую правку.
     const input: TaskUpdateInput = {
-      id: currentTask.id,
-      expectedVersion: currentTask.version,
+      id: editSession.taskId,
+      expectedVersion: editSession.expectedVersion,
       title: values.title,
       descriptionMarkdown: values.descriptionMarkdown,
       priority: values.priority,
@@ -404,6 +539,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     const saved = await runCommand(async () => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
       setEditingTaskId(null);
+      setEditSession(null);
       setEditValues(null);
       setEditInitial(null);
     });
@@ -493,8 +629,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const openTask = (nextTaskId: string): void => {
     setCloseConfirm(false);
     setEditingTaskId(null);
+    setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
+    setQuickDraft(null);
+    quickBaselineRef.current = null;
     updateKanbanQuery({ taskId: nextTaskId });
   };
 
@@ -531,6 +670,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         TASKS_COMMAND_IDS.taskCreate,
         input as unknown as JsonValue,
       );
+      setQuickDraft((current) =>
+        current !== null && current.taskId === currentTask.id
+          ? { ...current, subtaskOpen: false, subtaskTitle: "", subtaskStatus: "todo" }
+          : current,
+      );
       bumpKanbanRevision();
 
       return true;
@@ -555,7 +699,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       </div>
     ) : (
       <TaskModal
-        key={`${currentTask.id}-${String(currentTask.version)}`}
+        key={currentTask.id}
         variant={isDesktopViewport ? "desktop" : "mobile"}
         task={currentTask}
         project={project}
@@ -566,12 +710,24 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         busy={busy || loading}
         error={error ?? conflict}
         editing={editing}
+        editOutdated={editOutdated}
         editValues={editValues}
         editRootTasks={rootTasks}
         closeConfirm={closeConfirm}
+        nextStatus={activeQuickDraft?.nextStatus ?? currentTask.status}
+        dueValue={activeQuickDraft?.dueValue ?? dueAtToDateInput(currentTask.dueAt)}
+        tagsValue={activeQuickDraft?.tagsValue ?? tagsToInput(currentTask.tags)}
+        subtaskDraft={
+          {
+            open: activeQuickDraft?.subtaskOpen ?? false,
+            title: activeQuickDraft?.subtaskTitle ?? "",
+            status: activeQuickDraft?.subtaskStatus ?? "todo",
+          } satisfies SubtaskFormDraft
+        }
         onChangeEditValues={setEditValues}
         onStartEdit={startEdit}
         onCancelEdit={cancelEdit}
+        onCancelStaleEdit={cancelEdit}
         onSubmitEdit={(values) => {
           void save(values);
         }}
@@ -580,9 +736,25 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         onCreateSubtask={createSubtask}
         onComplete={complete}
         onMove={move}
+        onNextStatusChange={(status) => {
+          changeQuickDraft({ nextStatus: status });
+        }}
         onPriority={changePriority}
         onDue={changeDue}
+        onDueValueChange={(value) => {
+          changeQuickDraft({ dueValue: value });
+        }}
         onTags={changeTags}
+        onTagsValueChange={(value) => {
+          changeQuickDraft({ tagsValue: value });
+        }}
+        onSubtaskDraftChange={(patch) => {
+          changeQuickDraft({
+            ...(patch.open === undefined ? {} : { subtaskOpen: patch.open }),
+            ...(patch.title === undefined ? {} : { subtaskTitle: patch.title }),
+            ...(patch.status === undefined ? {} : { subtaskStatus: patch.status }),
+          });
+        }}
         onDelete={remove}
         onDiscardDraft={closeNow}
         onKeepEditing={() => {
@@ -591,41 +763,18 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       />
     );
 
-  if (!isDesktopViewport) {
-    return (
-      <ModalDialog
-        open
-        label="Детали задачи"
-        testId="kanban-details"
-        onClose={requestClose}
-        restoreFocusSelector={`[data-testid="kanban-open-${taskId}"]`}
-        className={MOBILE_DIALOG_CLASS}
-      >
-        {body}
-      </ModalDialog>
-    );
-  }
-
   return (
-    <div
-      data-testid="kanban-details-backdrop"
-      className="pointer-events-auto fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          requestClose();
-        }
-      }}
+    <ModalDialog
+      open
+      label="Детали задачи"
+      testId="kanban-details"
+      dataVariant={isDesktopViewport ? "desktop" : "mobile"}
+      onClose={requestClose}
+      closeOnBackdrop
+      restoreFocusSelector={`[data-testid="kanban-open-${taskId}"]`}
+      className={isDesktopViewport ? DESKTOP_DIALOG_CLASS : MOBILE_DIALOG_CLASS}
     >
-      <div
-        data-testid="kanban-details"
-        data-variant="desktop"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Детали задачи"
-        className="max-h-[calc(100dvh-2rem)] w-full max-w-[860px] min-w-0 overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
-      >
-        {body}
-      </div>
-    </div>
+      {body}
+    </ModalDialog>
   );
 }

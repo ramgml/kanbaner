@@ -62,6 +62,15 @@ export interface ModalDialogProps {
    * Например, карточка мобильной раскладки скрыта после перехода на desktop.
    */
   readonly restoreFocusSelector?: string;
+  /** Маркер варианта раскладки; попадает в `data-variant`. */
+  readonly dataVariant?: string;
+  /**
+   * Закрывать по клику на backdrop. Клик по содержимому не закрывает.
+   *
+   * Нативные `dialog` не делают этого сами; для карточек канбана поведение
+   * включается явно, чтобы черновик проходил через общий `onClose`.
+   */
+  readonly closeOnBackdrop?: boolean;
 }
 
 /**
@@ -80,6 +89,8 @@ export function ModalDialog({
   testId,
   className,
   restoreFocusSelector,
+  dataVariant,
+  closeOnBackdrop = false,
 }: ModalDialogProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -232,11 +243,17 @@ export function ModalDialog({
     <dialog
       ref={dialogRef}
       data-testid={testId}
+      data-variant={dataVariant}
       aria-label={label}
       tabIndex={-1}
       onCancel={(event) => {
         event.preventDefault();
         onClose();
+      }}
+      onClick={(event) => {
+        if (closeOnBackdrop && event.target === event.currentTarget) {
+          onClose();
+        }
       }}
       className={className}
     >

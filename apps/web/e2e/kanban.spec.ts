@@ -943,14 +943,14 @@ test.describe("канбан в production shell", () => {
 
       // Клик по настоящей Next Link-навигации на тот же /view/kanban убирает
       // только query string: overlay закрывается без полной перезагрузки.
-      // Модал перекрывает sidebar, поэтому Link активируется с клавиатуры —
-      // это тот же client navigation, а не полный переход.
+      // Нативный modal делает фон inert, поэтому указатель и Tab до sidebar не
+      // доходят; gating проверяем тем же Link, активируя его программно —
+      // это эквивалент client navigation из другого компонента.
       const kanbanLink = page
         .getByTestId("desktop-sidebar")
         .getByRole("link", { name: "Канбан", exact: true });
 
-      await kanbanLink.focus();
-      await page.keyboard.press("Enter");
+      await kanbanLink.evaluate((element) => (element as HTMLElement).click());
 
       await expect(page).toHaveURL(/\/view\/kanban$/u);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
@@ -963,8 +963,7 @@ test.describe("канбан в production shell", () => {
         .getByTestId("desktop-sidebar")
         .getByRole("link", { name: "Плагины", exact: true });
 
-      await pluginsLink.focus();
-      await page.keyboard.press("Enter");
+      await pluginsLink.evaluate((element) => (element as HTMLElement).click());
 
       await expect(page).toHaveURL(/\/plugins$/u);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
@@ -1548,8 +1547,13 @@ test.describe("канбан в production shell", () => {
       const modal = await openCardModal(page, taskId, taskTitle);
 
       await expect(modal).toHaveAttribute("data-variant", "desktop");
-      await expect(modal).toHaveAttribute("role", "dialog");
-      await expect(modal).toHaveAttribute("aria-modal", "true");
+      expect(await modal.evaluate((element) => element.tagName)).toBe("DIALOG");
+      expect(
+        await modal.evaluate(
+          (element) => (element as HTMLDialogElement).open && element.matches(":modal"),
+        ),
+      ).toBe(true);
+      await expect(modal).toHaveAttribute("aria-label", "Детали задачи");
       await expect(page.getByTestId("kanban-modal-project")).toHaveText(projectTitle);
       await expect(page.getByTestId("kanban-modal-status")).toHaveText(STATUS_LABELS.todo);
       await expect(page.getByTestId("kanban-modal-move-field")).toBeVisible();
@@ -1682,6 +1686,158 @@ test.describe("канбан в production shell", () => {
 
       await openCardModal(page, taskId, taskTitle);
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
+    });
+
+    test("удерживает фокус в desktop-модале, подтверждении и возвращает на карточку", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект фокуса модала");
+      const taskTitle = uniqueTitle("Задача фокуса модала");
+      const draftTitle = uniqueTitle("Черновик фокуса модала");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      const opener = page.getByTestId(`kanban-open-${taskId}`);
+
+      await opener.focus();
+      const modal = await openCardModal(page, taskId, taskTitle);
+
+      // Нативный dialog сразу переводит фокус внутрь.
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement?.closest("dialog") !== null))
+        .toBe(true);
+
+      // Tab и Shift+Tab не выходят за границы модала.
+      for (let index = 0; index < 12; index += 1) {
+        await page.keyboard.press("Tab");
+        expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(
+          true,
+        );
+      }
+
+      for (let index = 0; index < 12; index += 1) {
+        await page.keyboard.press("Shift+Tab");
+        expect(await page.evaluate(() => document.activeElement?.closest("dialog") !== null)).toBe(
+          true,
+        );
+      }
+
+      // Черновик: фокус уходит в alertdialog и не покидает его.
+      await page.getByTestId("kanban-modal-edit").click();
+
+      const form = page.getByTestId("task-form-edit");
+      const titleInput = form.getByLabel("Название", { exact: true });
+
+      await titleInput.fill(draftTitle);
+      await page.keyboard.press("Escape");
+
+      const confirm = page.getByTestId("kanban-draft-confirm");
+
+      await expect(confirm).toBeVisible();
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            () => document.activeElement?.closest('[data-testid="kanban-draft-confirm"]') !== null,
+          ),
+        )
+        .toBe(true);
+
+      for (let index = 0; index < 4; index += 1) {
+        await page.keyboard.press("Tab");
+        expect(
+          await page.evaluate(
+            () => document.activeElement?.closest('[data-testid="kanban-draft-confirm"]') !== null,
+          ),
+        ).toBe(true);
+      }
+
+      for (let index = 0; index < 4; index += 1) {
+        await page.keyboard.press("Shift+Tab");
+        expect(
+          await page.evaluate(
+            () => document.activeElement?.closest('[data-testid="kanban-draft-confirm"]') !== null,
+          ),
+        ).toBe(true);
+      }
+
+      // «Продолжить редактирование» возвращает фокус в форму и сохраняет draft.
+      await confirm.getByTestId("kanban-draft-keep").click();
+      await expect(confirm).toHaveCount(0);
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement?.getAttribute("name") ?? null))
+        .toBe("title");
+      await expect(titleInput).toHaveValue(draftTitle);
+
+      // Закрытие с черновиком снова требует подтверждения.
+      await page.getByTestId("kanban-details-close").click();
+      await expect(confirm).toBeVisible();
+      await expect(modal).toBeVisible();
+
+      await page.getByTestId("kanban-draft-discard").click();
+      await expect(modal).toHaveCount(0);
+
+      // Фокус возвращается на карточку, открывшую модал.
+      await expect
+        .poll(async () =>
+          page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? null),
+        )
+        .toBe(`Открыть карточку задачи ${taskTitle}`);
+    });
+
+    test("сохраняет быстрые черновики при чужой команде и смене breakpoint", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект черновиков модала");
+      const taskTitle = uniqueTitle("Задача черновиков модала");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+      await openCardModal(page, taskId, taskTitle);
+
+      const due = page.getByTestId("kanban-modal-due");
+      const tags = page.getByTestId("kanban-modal-tags");
+      const priority = page.getByTestId("kanban-modal-priority");
+      const nextStatus = page.getByTestId("kanban-modal-move-field");
+
+      await due.fill("2030-09-09");
+      await priority.selectOption("high");
+
+      // Успешная команда по приоритету не стирает несохранённый срок.
+      await expect(priority).toHaveValue("high");
+      await expect(due).toHaveValue("2030-09-09");
+
+      await tags.fill("alpha, beta");
+      await nextStatus.selectOption("in_progress");
+
+      // Breakpoint не стирает быстрые черновики.
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await expect(page.getByTestId("kanban-details")).toHaveAttribute("data-variant", "mobile");
+      await expect(due).toHaveValue("2030-09-09");
+      await expect(tags).toHaveValue("alpha, beta");
+      await expect(nextStatus).toHaveValue("in_progress");
+
+      await page.setViewportSize(DESKTOP_VIEWPORT);
+      await expect(page.getByTestId("kanban-details")).toHaveAttribute("data-variant", "desktop");
+      await expect(due).toHaveValue("2030-09-09");
+      await expect(tags).toHaveValue("alpha, beta");
+      await expect(nextStatus).toHaveValue("in_progress");
+
+      // Закрытие с любым быстрым черновиком требует подтверждения.
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-draft-confirm")).toBeVisible();
+      await expect(due).toHaveValue("2030-09-09");
+
+      await page.getByTestId("kanban-draft-keep").click();
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
+
+      await page.getByTestId("kanban-details-close").click();
+      await page.getByTestId("kanban-draft-discard").click();
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
 
     test("при VERSION_CONFLICT показывает серверную версию и не перезаписывает чужую правку", async ({
@@ -1846,14 +2002,18 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-details")).toBeVisible();
 
       await page.setViewportSize(DESKTOP_VIEWPORT);
-      await expect.poll(async () => page.locator("dialog").count()).toBe(0);
       const desktopOverlay = page.getByTestId("kanban-details");
 
       await expect(desktopOverlay).toBeVisible();
       await expect(desktopOverlay).toHaveAttribute("data-variant", "desktop");
-      expect(
-        await page.evaluate(() => document.querySelector("dialog")?.matches(":modal") ?? false),
-      ).toBe(false);
+      await expect
+        .poll(async () =>
+          desktopOverlay.evaluate(
+            (element) => (element as HTMLDialogElement).open && element.matches(":modal"),
+          ),
+        )
+        .toBe(true);
+      await expect.poll(async () => page.locator("dialog").count()).toBe(1);
 
       await page.setViewportSize(MOBILE_VIEWPORT);
       await expect
@@ -1865,6 +2025,7 @@ test.describe("канбан в production shell", () => {
             ),
         )
         .toBe(true);
+      await expect(page.getByTestId("kanban-details")).toHaveAttribute("data-variant", "mobile");
       await expect
         .poll(async () => page.evaluate(() => document.activeElement?.closest("dialog") !== null))
         .toBe(true);
@@ -2144,16 +2305,23 @@ test.describe("канбан в production shell", () => {
         )
         .toBe(`Открыть карточку задачи ${taskTitle}`);
 
-      // mobile → desktop: нативный dialog исчезает, открывается Trello-модал.
+      // mobile → desktop: тот же нативный dialog остаётся модальным,
+      // меняется только раскладка.
       await page.getByTestId(`kanban-open-${taskId}`).click();
       await expect(dialog).toBeVisible();
       await page.setViewportSize(DESKTOP_VIEWPORT);
-      await expect.poll(async () => page.locator("dialog").count()).toBe(0);
 
       const desktopModal = page.getByTestId("kanban-details");
 
       await expect(desktopModal).toBeVisible();
       await expect(desktopModal).toHaveAttribute("data-variant", "desktop");
+      await expect
+        .poll(async () =>
+          desktopModal.evaluate(
+            (element) => (element as HTMLDialogElement).open && element.matches(":modal"),
+          ),
+        )
+        .toBe(true);
       await closeCardModal(page);
 
       // desktop → mobile: снова полноэкранный нативный dialog.

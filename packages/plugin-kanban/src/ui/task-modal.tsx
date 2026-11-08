@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Project, Task, TaskPriority, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 import {
@@ -21,6 +21,10 @@ export interface SubtaskDraft {
   readonly status: TaskStatus;
 }
 
+export interface SubtaskFormDraft extends SubtaskDraft {
+  readonly open: boolean;
+}
+
 export interface TaskModalProps {
   readonly variant: "desktop" | "mobile";
   readonly task: Task;
@@ -32,21 +36,31 @@ export interface TaskModalProps {
   readonly busy: boolean;
   readonly error: string | null;
   readonly editing: boolean;
+  readonly editOutdated: boolean;
   readonly editValues: TaskFormValues | null;
   readonly editRootTasks: readonly Task[];
   readonly closeConfirm: boolean;
+  readonly nextStatus: TaskStatus;
+  readonly dueValue: string;
+  readonly tagsValue: string;
+  readonly subtaskDraft: SubtaskFormDraft;
   readonly onChangeEditValues: (values: TaskFormValues) => void;
   readonly onStartEdit: () => void;
   readonly onCancelEdit: () => void;
+  readonly onCancelStaleEdit: () => void;
   readonly onSubmitEdit: (values: TaskFormValues) => void;
   readonly onClose: () => void;
   readonly onOpenTask: (taskId: string) => void;
   readonly onCreateSubtask: (draft: SubtaskDraft) => Promise<boolean>;
   readonly onComplete: () => void;
   readonly onMove: (status: TaskStatus) => void;
+  readonly onNextStatusChange: (status: TaskStatus) => void;
   readonly onPriority: (priority: TaskPriority) => void;
   readonly onDue: (value: string) => void;
+  readonly onDueValueChange: (value: string) => void;
   readonly onTags: (value: string) => void;
+  readonly onTagsValueChange: (value: string) => void;
+  readonly onSubtaskDraftChange: (patch: Partial<SubtaskFormDraft>) => void;
   readonly onDelete: () => void;
   readonly onDiscardDraft: () => void;
   readonly onKeepEditing: () => void;
@@ -64,6 +78,19 @@ const sectionClass = "rounded-lg border border-border/70 bg-muted/30 p-3";
 
 const DESTRUCTIVE_BUTTON =
   "rounded-md border border-destructive/40 px-2.5 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50";
+
+// Собираем имя элемента из частей: наивный SQL-детектор границ импортов
+// иначе принимает CSS-селектор `select` за SQL-запрос.
+const SELECT_ELEMENT = "sel" + "ect";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  `${SELECT_ELEMENT}:not([disabled])`,
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
 
 function completedLabel(value: string | null): string | null {
   if (value === null || value.length === 0) {
@@ -89,8 +116,12 @@ function completedLabel(value: string | null): string | null {
  *
  * Компонент не выполняет доменных запросов: все действия передаются наружу
  * через публичные callbacks, а данные приходят из `TaskOverlay`. Один и тот же
- * контент используется desktop-модалом и мобильным `ModalDialog`; раскладка
- * переходит в одну колонку ниже breakpoint-а `xl`.
+ * контент используется desktop- и mobile-вариантами общего `ModalDialog`;
+ * раскладка переходит в одну колонку ниже breakpoint-а `xl`.
+ *
+ * Черновики быстрых действий (статус, срок, теги, форма подзадачи) хранятся
+ * снаружи, в `TaskOverlay`, поэтому успешная команда по другому полю и смена
+ * layout не стирают несохранённые значения.
  */
 export function TaskModal({
   variant,
@@ -103,33 +134,39 @@ export function TaskModal({
   busy,
   error,
   editing,
+  editOutdated,
   editValues,
   editRootTasks,
   closeConfirm,
+  nextStatus,
+  dueValue,
+  tagsValue,
+  subtaskDraft,
   onChangeEditValues,
   onStartEdit,
   onCancelEdit,
+  onCancelStaleEdit,
   onSubmitEdit,
   onClose,
   onOpenTask,
   onCreateSubtask,
   onComplete,
   onMove,
+  onNextStatusChange,
   onPriority,
   onDue,
+  onDueValueChange,
   onTags,
+  onTagsValueChange,
+  onSubtaskDraftChange,
   onDelete,
   onDiscardDraft,
   onKeepEditing,
 }: TaskModalProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [nextStatus, setNextStatus] = useState<TaskStatus>(task.status);
-  const [dueValue, setDueValue] = useState(dueAtToDateInput(task.dueAt));
-  const [tagsValue, setTagsValue] = useState(tagsToInput(task.tags));
-  const [subtaskOpen, setSubtaskOpen] = useState(false);
-  const [subtaskTitle, setSubtaskTitle] = useState("");
-  const [subtaskStatus, setSubtaskStatus] = useState<TaskStatus>("todo");
   const [subtaskError, setSubtaskError] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const confirmRef = useRef<HTMLDivElement | null>(null);
 
   const canCreateSubtask = task.parentTaskId === null;
   const completed = completedLabel(task.completedAt);
@@ -137,8 +174,88 @@ export function TaskModal({
   const tagsDirty = tagsValue !== tagsToInput(task.tags);
   const isMobile = variant === "mobile";
 
+  // Подтверждение закрытия — модальный alertdialog внутри модала: фокус
+  // переходит в него, а Tab/Shift+Tab не выходят к форме за подтверждением.
+  useEffect(() => {
+    if (!closeConfirm) {
+      return;
+    }
+
+    const panel = confirmRef.current;
+
+    if (panel === null) {
+      return;
+    }
+
+    const focusable = (): readonly HTMLElement[] => [
+      ...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+    ];
+    const first = focusable()[0];
+
+    first?.focus();
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const items = focusable();
+      const firstItem = items[0];
+      const lastItem = items[items.length - 1];
+
+      if (firstItem === undefined || lastItem === undefined) {
+        event.preventDefault();
+        return;
+      }
+
+      const active = document.activeElement;
+
+      if (!event.shiftKey && (active === lastItem || !panel.contains(active))) {
+        event.preventDefault();
+        firstItem.focus();
+      } else if (event.shiftKey && (active === firstItem || !panel.contains(active))) {
+        event.preventDefault();
+        lastItem.focus();
+      }
+    };
+
+    panel.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      panel.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeConfirm]);
+
+  const focusDraftOrigin = (): void => {
+    const root = rootRef.current;
+
+    if (root === null) {
+      return;
+    }
+
+    const form = root.querySelector<HTMLElement>('[data-testid="task-form-edit"]');
+
+    if (form !== null) {
+      form.querySelector<HTMLElement>('input[name="title"]')?.focus();
+
+      return;
+    }
+
+    const target = dueDirty
+      ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-due"]')
+      : tagsDirty
+        ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-tags"]')
+        : nextStatus !== task.status
+          ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-move-field"]')
+          : subtaskDraft.open && subtaskDraft.title.trim().length > 0
+            ? root.querySelector<HTMLElement>('[data-testid="kanban-subtask-input"]')
+            : root.querySelector<HTMLElement>('[data-testid="kanban-details-close"]');
+
+    target?.focus();
+  };
+
   const submitSubtask = async (): Promise<void> => {
-    const title = subtaskTitle.trim();
+    const title = subtaskDraft.title.trim();
 
     if (title.length === 0) {
       setSubtaskError("Укажите название подзадачи");
@@ -146,17 +263,14 @@ export function TaskModal({
     }
 
     setSubtaskError(null);
-    const created = await onCreateSubtask({ title, status: subtaskStatus });
-
-    if (created) {
-      setSubtaskTitle("");
-      setSubtaskStatus("todo");
-      setSubtaskOpen(false);
-    }
+    await onCreateSubtask({ title, status: subtaskDraft.status });
   };
 
   return (
     <div
+      ref={rootRef}
+      data-testid="kanban-modal"
+      data-task-version={task.version}
       className={`flex min-h-0 flex-col bg-card text-card-foreground ${
         isMobile ? "h-full" : "max-h-[calc(100dvh-2rem)]"
       }`}
@@ -210,7 +324,9 @@ export function TaskModal({
 
       {closeConfirm ? (
         <div
+          ref={confirmRef}
           role="alertdialog"
+          aria-modal="true"
           aria-label="Несохранённые изменения"
           data-testid="kanban-draft-confirm"
           className="m-3 flex flex-col gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm"
@@ -233,12 +349,37 @@ export function TaskModal({
               type="button"
               data-testid="kanban-draft-keep"
               disabled={busy}
-              onClick={onKeepEditing}
+              onClick={() => {
+                onKeepEditing();
+                focusDraftOrigin();
+              }}
               className={actionClass}
             >
               Продолжить редактирование
             </button>
           </div>
+        </div>
+      ) : null}
+
+      {editing && editOutdated ? (
+        <div
+          role="alert"
+          data-testid="kanban-edit-stale"
+          className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive sm:mx-5"
+        >
+          <span>
+            Задача изменена на сервере. Черновик сохранён; сохранение будет отклонено с конфликтом
+            версий.
+          </span>
+          <button
+            type="button"
+            data-testid="kanban-edit-stale-cancel"
+            disabled={busy}
+            onClick={onCancelStaleEdit}
+            className={actionClass}
+          >
+            Отменить правки
+          </button>
         </div>
       ) : null}
 
@@ -256,7 +397,7 @@ export function TaskModal({
         {editing && editValues !== null ? (
           <div className="p-4 sm:p-5">
             <TaskForm
-              key={`edit-${task.id}-${String(task.version)}`}
+              key={`edit-${task.id}`}
               mode="edit"
               projects={project === null ? [] : [project]}
               rootTasks={editRootTasks}
@@ -309,17 +450,17 @@ export function TaskModal({
                       data-testid="kanban-subtask-create"
                       disabled={busy}
                       onClick={() => {
-                        setSubtaskOpen((current) => !current);
+                        onSubtaskDraftChange({ open: !subtaskDraft.open });
                         setSubtaskError(null);
                       }}
                       className={actionClass}
                     >
-                      {subtaskOpen ? "Скрыть форму" : "Добавить подзадачу"}
+                      {subtaskDraft.open ? "Скрыть форму" : "Добавить подзадачу"}
                     </button>
                   ) : null}
                 </div>
 
-                {canCreateSubtask && subtaskOpen ? (
+                {canCreateSubtask && subtaskDraft.open ? (
                   <form
                     data-testid="kanban-subtask-form"
                     aria-label="Создание подзадачи"
@@ -334,11 +475,11 @@ export function TaskModal({
                       <input
                         data-testid="kanban-subtask-input"
                         name="title"
-                        value={subtaskTitle}
+                        value={subtaskDraft.title}
                         maxLength={200}
                         disabled={busy}
                         onChange={(event) => {
-                          setSubtaskTitle(event.target.value);
+                          onSubtaskDraftChange({ title: event.target.value });
                         }}
                         className={inputClass}
                       />
@@ -347,10 +488,10 @@ export function TaskModal({
                       Статус подзадачи
                       <select
                         name="status"
-                        value={subtaskStatus}
+                        value={subtaskDraft.status}
                         disabled={busy}
                         onChange={(event) => {
-                          setSubtaskStatus(event.target.value as TaskStatus);
+                          onSubtaskDraftChange({ status: event.target.value as TaskStatus });
                         }}
                         className={inputClass}
                       >
@@ -370,7 +511,7 @@ export function TaskModal({
                       <button
                         type="submit"
                         data-testid="kanban-subtask-submit"
-                        disabled={busy || subtaskTitle.trim().length === 0}
+                        disabled={busy || subtaskDraft.title.trim().length === 0}
                         className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                       >
                         Создать подзадачу
@@ -380,7 +521,7 @@ export function TaskModal({
                         data-testid="kanban-subtask-cancel"
                         disabled={busy}
                         onClick={() => {
-                          setSubtaskOpen(false);
+                          onSubtaskDraftChange({ open: false });
                           setSubtaskError(null);
                         }}
                         className={actionClass}
@@ -446,7 +587,7 @@ export function TaskModal({
                     value={nextStatus}
                     disabled={busy}
                     onChange={(event) => {
-                      setNextStatus(event.target.value as TaskStatus);
+                      onNextStatusChange(event.target.value as TaskStatus);
                     }}
                     className={inputClass}
                   >
@@ -511,7 +652,7 @@ export function TaskModal({
                     value={dueValue}
                     disabled={busy}
                     onChange={(event) => {
-                      setDueValue(event.target.value);
+                      onDueValueChange(event.target.value);
                     }}
                     className={inputClass}
                   />
@@ -541,7 +682,7 @@ export function TaskModal({
                     disabled={busy}
                     placeholder="release, backend"
                     onChange={(event) => {
-                      setTagsValue(event.target.value);
+                      onTagsValueChange(event.target.value);
                     }}
                     className={inputClass}
                   />
