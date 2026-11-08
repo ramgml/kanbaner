@@ -6,6 +6,7 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  normalizeTags,
   type Project,
   type ProjectGetOutput,
   type Task,
@@ -48,7 +49,12 @@ import {
   updateKanbanQuery,
   useKanbanQuery,
 } from "./query-state.ts";
-import { TaskModal, type SubtaskDraft, type SubtaskFormDraft } from "./task-modal.tsx";
+import {
+  TaskModal,
+  type QuickDraftField,
+  type SubtaskDraft,
+  type SubtaskFormDraft,
+} from "./task-modal.tsx";
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
 
@@ -80,7 +86,7 @@ interface QuickBaseline {
   readonly taskId: string;
   readonly status: TaskStatus;
   readonly dueAt: string | null;
-  readonly tagsKey: string;
+  readonly tags: readonly string[];
 }
 
 /** Несохранённые значения быстрых действий, живущие вне breakpoint-модала. */
@@ -94,6 +100,12 @@ interface QuickDraft {
   readonly subtaskStatus: TaskStatus;
 }
 
+/** Черновик и поля, по которым сервер и локальное значение разошлись. */
+interface QuickState {
+  readonly draft: QuickDraft;
+  readonly conflicts: readonly QuickDraftField[];
+}
+
 /** Сессия редактирования: версия фиксируется в момент открытия формы. */
 interface EditSession {
   readonly taskId: string;
@@ -105,7 +117,7 @@ function baselineOf(task: Task): QuickBaseline {
     taskId: task.id,
     status: task.status,
     dueAt: task.dueAt,
-    tagsKey: tagsToInput(task.tags),
+    tags: [...task.tags],
   };
 }
 
@@ -121,21 +133,69 @@ function createQuickDraft(task: Task): QuickDraft {
   };
 }
 
+function tagsEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((tag, index) => tag === right[index]);
+}
+
 /**
- * Переносит черновик на новую серверную версию без молчаливой потери
- * несохранённых полей.
+ * Канонизирует значение поля тегов тем же способом, что и домен:
+ * trim, нижний регистр, дедупликация.
  *
- * Поле синхронизируется только если изменилось его серверное значение
- * относительно baseline. Поэтому успешная команда по приоритету не стирает
- * введённый, но ещё не сохранённый срок или теги.
+ * Возвращает `null`, если значение нельзя нормализовать (слишком много или
+ * слишком длинные теги); тогда поле считается изменённым.
  */
-function syncQuickDraft(
-  current: QuickDraft | null,
+function canonicalTags(value: string): readonly string[] | null {
+  try {
+    return normalizeTags(parseTagsInput(value));
+  } catch {
+    return null;
+  }
+}
+
+function sameTagsValue(value: string, serverTags: readonly string[]): boolean {
+  const canonical = canonicalTags(value);
+
+  return canonical !== null && tagsEqual(canonical, serverTags);
+}
+
+function sameDueValue(value: string, dueAt: string | null): boolean {
+  return dueAtToDateInput(dueAt) === value;
+}
+
+/** Поле всё ещё отличается от серверного значения. */
+function fieldConflicted(field: QuickDraftField, draft: QuickDraft, task: Task): boolean {
+  if (field === "status") {
+    return draft.nextStatus !== task.status;
+  }
+
+  if (field === "due") {
+    return !sameDueValue(draft.dueValue, task.dueAt);
+  }
+
+  return !sameTagsValue(draft.tagsValue, task.tags);
+}
+
+/**
+ * Трёхстороннее слияние быстрых черновиков с новой серверной версией.
+ *
+ * Для status/due/tags:
+ * - локальное значение совпадает с новым серверным → канонизируем локальное
+ *   (включая регистр/trim/дубликаты тегов) и снимаем конфликт;
+ * - локальное значение равно старому baseline → принимаем новое серверное;
+ * - серверное значение не изменилось → сохраняем локальный черновик;
+ * - изменились и локальное, и серверное → сохраняем локальное и фиксируем
+ *   конфликт, который требует явного «Взять серверные» или «Оставить мои».
+ *
+ * Поэтому успешная команда по другому полю или перечитывание после сохранения
+ * не затирают несохранённое поле молча.
+ */
+function syncQuickState(
+  current: QuickState | null,
   task: Task,
   baseline: QuickBaseline | null,
-): QuickDraft {
-  if (current === null || current.taskId !== task.id || baseline?.taskId !== task.id) {
-    return createQuickDraft(task);
+): QuickState {
+  if (current === null || current.draft.taskId !== task.id || baseline?.taskId !== task.id) {
+    return { draft: createQuickDraft(task), conflicts: [] };
   }
 
   const next: {
@@ -146,21 +206,40 @@ function syncQuickDraft(
     subtaskOpen: boolean;
     subtaskTitle: string;
     subtaskStatus: TaskStatus;
-  } = { ...current };
+  } = { ...current.draft };
+  const conflicts = new Set(current.conflicts);
 
-  if (baseline.status !== task.status) {
+  if (next.nextStatus === task.status) {
     next.nextStatus = task.status;
+    conflicts.delete("status");
+  } else if (baseline.status === next.nextStatus) {
+    next.nextStatus = task.status;
+    conflicts.delete("status");
+  } else if (baseline.status !== task.status) {
+    conflicts.add("status");
   }
 
-  if (baseline.dueAt !== task.dueAt) {
+  if (sameDueValue(next.dueValue, task.dueAt)) {
     next.dueValue = dueAtToDateInput(task.dueAt);
+    conflicts.delete("due");
+  } else if (sameDueValue(next.dueValue, baseline.dueAt)) {
+    next.dueValue = dueAtToDateInput(task.dueAt);
+    conflicts.delete("due");
+  } else if (baseline.dueAt !== task.dueAt) {
+    conflicts.add("due");
   }
 
-  if (baseline.tagsKey !== tagsToInput(task.tags)) {
+  if (sameTagsValue(next.tagsValue, task.tags)) {
     next.tagsValue = tagsToInput(task.tags);
+    conflicts.delete("tags");
+  } else if (sameTagsValue(next.tagsValue, baseline.tags)) {
+    next.tagsValue = tagsToInput(task.tags);
+    conflicts.delete("tags");
+  } else if (!tagsEqual(baseline.tags, task.tags)) {
+    conflicts.add("tags");
   }
 
-  return next;
+  return { draft: next, conflicts: [...conflicts] };
 }
 
 function sameValues(left: TaskFormValues | null, right: TaskFormValues | null): boolean {
@@ -251,7 +330,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const [editSession, setEditSession] = useState<EditSession | null>(null);
   const [editValues, setEditValues] = useState<TaskFormValues | null>(null);
   const [editInitial, setEditInitial] = useState<TaskFormValues | null>(null);
-  const [quickDraft, setQuickDraft] = useState<QuickDraft | null>(null);
+  const [quickState, setQuickState] = useState<QuickState | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [conflictState, setConflictState] = useState<{
     readonly taskId: string;
@@ -280,18 +359,21 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     conflictState !== null && conflictState.taskId === taskId ? conflictState.message : null;
   const visibleSubtasks =
     currentTask !== null && subtasks.taskId === currentTask.id ? subtasks : EMPTY_SUBTASKS;
-  const activeQuickDraft =
+  const activeQuickState =
     currentTask === null
       ? null
-      : quickDraft !== null && quickDraft.taskId === currentTask.id
-        ? quickDraft
-        : createQuickDraft(currentTask);
+      : quickState !== null && quickState.draft.taskId === currentTask.id
+        ? quickState
+        : null;
+  const activeQuickDraft =
+    activeQuickState?.draft ?? (currentTask === null ? null : createQuickDraft(currentTask));
+  const quickConflicts = activeQuickState?.conflicts ?? [];
   const quickDirty =
     currentTask !== null &&
     activeQuickDraft !== null &&
     (activeQuickDraft.nextStatus !== currentTask.status ||
-      activeQuickDraft.dueValue !== dueAtToDateInput(currentTask.dueAt) ||
-      activeQuickDraft.tagsValue !== tagsToInput(currentTask.tags) ||
+      !sameDueValue(activeQuickDraft.dueValue, currentTask.dueAt) ||
+      !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags) ||
       (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
   const draftDirty = editDirty || quickDirty;
 
@@ -353,7 +435,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             loading: false,
             error: subtaskError,
           });
-          setQuickDraft((current) => syncQuickDraft(current, loadedTask, previousBaseline));
+          setQuickState((current) => syncQuickState(current, loadedTask, previousBaseline));
           quickBaselineRef.current = baselineOf(loadedTask);
           setError(null);
         }
@@ -425,7 +507,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
-    setQuickDraft(null);
+    setQuickState(null);
     quickBaselineRef.current = null;
     setError(null);
     setConflictState(null);
@@ -483,11 +565,51 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   };
 
   const changeQuickDraft = (patch: Partial<Omit<QuickDraft, "taskId">>): void => {
-    setQuickDraft((current) => {
-      const base = current ?? (currentTask === null ? null : createQuickDraft(currentTask));
+    setQuickState((current) => {
+      const base = current?.draft ?? (currentTask === null ? null : createQuickDraft(currentTask));
 
-      return base === null ? current : { ...base, ...patch };
+      if (base === null) {
+        return current;
+      }
+
+      const draft = { ...base, ...patch };
+
+      return {
+        draft,
+        conflicts:
+          currentTask === null
+            ? []
+            : (current?.conflicts ?? []).filter((field) =>
+                fieldConflicted(field, draft, currentTask),
+              ),
+      };
     });
+  };
+
+  const acceptServerDrafts = (): void => {
+    if (currentTask === null) {
+      return;
+    }
+
+    const server = createQuickDraft(currentTask);
+
+    setQuickState((current) => {
+      const base = current?.draft ?? server;
+
+      return {
+        draft: {
+          ...base,
+          nextStatus: server.nextStatus,
+          dueValue: server.dueValue,
+          tagsValue: server.tagsValue,
+        },
+        conflicts: [],
+      };
+    });
+  };
+
+  const keepLocalDrafts = (): void => {
+    setQuickState((current) => (current === null ? current : { ...current, conflicts: [] }));
   };
 
   const startEdit = (): void => {
@@ -632,7 +754,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setEditSession(null);
     setEditValues(null);
     setEditInitial(null);
-    setQuickDraft(null);
+    setQuickState(null);
     quickBaselineRef.current = null;
     updateKanbanQuery({ taskId: nextTaskId });
   };
@@ -670,9 +792,17 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         TASKS_COMMAND_IDS.taskCreate,
         input as unknown as JsonValue,
       );
-      setQuickDraft((current) =>
-        current !== null && current.taskId === currentTask.id
-          ? { ...current, subtaskOpen: false, subtaskTitle: "", subtaskStatus: "todo" }
+      setQuickState((current) =>
+        current !== null && current.draft.taskId === currentTask.id
+          ? {
+              draft: {
+                ...current.draft,
+                subtaskOpen: false,
+                subtaskTitle: "",
+                subtaskStatus: "todo",
+              },
+              conflicts: current.conflicts,
+            }
           : current,
       );
       bumpKanbanRevision();
@@ -714,6 +844,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         editValues={editValues}
         editRootTasks={rootTasks}
         closeConfirm={closeConfirm}
+        quickConflicts={quickConflicts}
         nextStatus={activeQuickDraft?.nextStatus ?? currentTask.status}
         dueValue={activeQuickDraft?.dueValue ?? dueAtToDateInput(currentTask.dueAt)}
         tagsValue={activeQuickDraft?.tagsValue ?? tagsToInput(currentTask.tags)}
@@ -755,6 +886,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             ...(patch.status === undefined ? {} : { subtaskStatus: patch.status }),
           });
         }}
+        onAcceptServerDrafts={acceptServerDrafts}
+        onKeepLocalDrafts={keepLocalDrafts}
         onDelete={remove}
         onDiscardDraft={closeNow}
         onKeepEditing={() => {

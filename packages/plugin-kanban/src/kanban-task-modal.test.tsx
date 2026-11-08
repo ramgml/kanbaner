@@ -4,7 +4,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import {
+  normalizeTags,
+  type Project,
+  type Task,
+  type TaskStatus,
+} from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
@@ -176,7 +181,9 @@ function createOperations(
           ? { priority: values.priority as Task["priority"] }
           : {}),
         ...("dueAt" in values ? { dueAt: values.dueAt as string | null } : {}),
-        ...(Array.isArray(values.tags) ? { tags: values.tags as string[] } : {}),
+        ...(Array.isArray(values.tags)
+          ? { tags: [...normalizeTags(values.tags as readonly string[])] }
+          : {}),
         version: task.version + 1,
         updatedAt: TIMESTAMP,
       } as Task;
@@ -1045,4 +1052,152 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
     expect(screen.queryByText("Ответ команды")).toBeNull();
   });
+
+  it("сохраняет dirty due/tags при внешнем изменении тех же полей и даёт взять серверные", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+    fireEvent.change(screen.getByTestId("kanban-modal-tags"), {
+      target: { value: "Alpha, beta" },
+    });
+
+    // Другая вкладка изменила те же поля, а карточка пока об этом не знает.
+    board.tasks = board.tasks.map((task) =>
+      task.id === "a" ? { ...task, dueAt: "2031-01-01T00:00:00.000Z", tags: ["server-tag"] } : task,
+    );
+
+    // Безопасная команда по другому полю перечитывает задачу.
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+
+    const conflictBanner = await screen.findByTestId("kanban-quick-conflict");
+
+    expect(conflictBanner).toHaveTextContent("срок");
+    expect(conflictBanner).toHaveTextContent("теги");
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+    expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("Alpha, beta");
+
+    fireEvent.click(screen.getByTestId("kanban-quick-conflict-rebase"));
+
+    expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2031-01-01");
+    expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("server-tag");
+
+    // После явного rebase черновик чистый: закрытие без подтверждения.
+    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+  });
+
+  it("при конфликте quick draft позволяет оставить локальные значения", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+
+    board.tasks = board.tasks.map((task) =>
+      task.id === "a" ? { ...task, dueAt: "2031-01-01T00:00:00.000Z" } : task,
+    );
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+    expect(await screen.findByTestId("kanban-quick-conflict")).toHaveTextContent("срок");
+
+    fireEvent.click(screen.getByTestId("kanban-quick-conflict-keep"));
+
+    expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+
+    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-draft-discard"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+  });
+
+  it.each(["Release", " release ", "release, release"])(
+    "канонизирует теги %j после сохранения и не считает их dirty",
+    async (input) => {
+      setDesktopViewport(true);
+      const board: FakeBoard = {
+        projects: [project],
+        tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+      };
+      const operations = createOperations(board);
+
+      renderOverlay(operations);
+      await openTask("a");
+
+      const tags = screen.getByTestId("kanban-modal-tags");
+      const saveTags = screen.getByTestId("kanban-modal-tags-save");
+
+      fireEvent.change(tags, { target: { value: input } });
+      fireEvent.click(saveTags);
+
+      await waitFor(() => {
+        expect(board.tasks.find((task) => task.id === "a")?.tags).toEqual(["release"]);
+      });
+      await waitFor(() => {
+        expect(tags).toHaveValue("release");
+      });
+
+      expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
+      expect(saveTags).toBeDisabled();
+
+      const version = board.tasks.find((task) => task.id === "a")?.version;
+      const updateCount = operations.calls.filter(
+        (call) => call.operationId === "kanbaner.tasks.task.update",
+      ).length;
+
+      fireEvent.click(saveTags);
+
+      expect(
+        operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update"),
+      ).toHaveLength(updateCount);
+      expect(board.tasks.find((task) => task.id === "a")?.version).toBe(version);
+
+      // quickDirty=false: закрытие не требует подтверждения.
+      fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("kanban-details")).toBeNull();
+      });
+      expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+    },
+  );
 });

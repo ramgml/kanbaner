@@ -25,6 +25,9 @@ export interface SubtaskFormDraft extends SubtaskDraft {
   readonly open: boolean;
 }
 
+/** Быстрые поля, для которых возможен конфликт локального и серверного значения. */
+export type QuickDraftField = "status" | "due" | "tags";
+
 export interface TaskModalProps {
   readonly variant: "desktop" | "mobile";
   readonly task: Task;
@@ -40,6 +43,7 @@ export interface TaskModalProps {
   readonly editValues: TaskFormValues | null;
   readonly editRootTasks: readonly Task[];
   readonly closeConfirm: boolean;
+  readonly quickConflicts: readonly QuickDraftField[];
   readonly nextStatus: TaskStatus;
   readonly dueValue: string;
   readonly tagsValue: string;
@@ -61,6 +65,8 @@ export interface TaskModalProps {
   readonly onTags: (value: string) => void;
   readonly onTagsValueChange: (value: string) => void;
   readonly onSubtaskDraftChange: (patch: Partial<SubtaskFormDraft>) => void;
+  readonly onAcceptServerDrafts: () => void;
+  readonly onKeepLocalDrafts: () => void;
   readonly onDelete: () => void;
   readonly onDiscardDraft: () => void;
   readonly onKeepEditing: () => void;
@@ -78,6 +84,12 @@ const sectionClass = "rounded-lg border border-border/70 bg-muted/30 p-3";
 
 const DESTRUCTIVE_BUTTON =
   "rounded-md border border-destructive/40 px-2.5 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50";
+
+const QUICK_CONFLICT_LABELS: Record<QuickDraftField, string> = {
+  status: "статус",
+  due: "срок",
+  tags: "теги",
+};
 
 // Собираем имя элемента из частей: наивный SQL-детектор границ импортов
 // иначе принимает CSS-селектор `select` за SQL-запрос.
@@ -138,6 +150,7 @@ export function TaskModal({
   editValues,
   editRootTasks,
   closeConfirm,
+  quickConflicts,
   nextStatus,
   dueValue,
   tagsValue,
@@ -159,6 +172,8 @@ export function TaskModal({
   onTags,
   onTagsValueChange,
   onSubtaskDraftChange,
+  onAcceptServerDrafts,
+  onKeepLocalDrafts,
   onDelete,
   onDiscardDraft,
   onKeepEditing,
@@ -382,6 +397,40 @@ export function TaskModal({
           </button>
         </div>
       ) : null}
+
+      {quickConflicts.length === 0 ? null : (
+        <div
+          role="alert"
+          data-testid="kanban-quick-conflict"
+          className="mx-4 mt-3 flex flex-col gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-900 dark:text-amber-200 sm:mx-5"
+        >
+          <span>
+            Изменены на сервере, пока вы редактировали:{" "}
+            {quickConflicts.map((field) => QUICK_CONFLICT_LABELS[field]).join(", ")}. Локальные
+            значения сохранены.
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-testid="kanban-quick-conflict-rebase"
+              disabled={busy}
+              onClick={onAcceptServerDrafts}
+              className={actionClass}
+            >
+              Взять серверные
+            </button>
+            <button
+              type="button"
+              data-testid="kanban-quick-conflict-keep"
+              disabled={busy}
+              onClick={onKeepLocalDrafts}
+              className={actionClass}
+            >
+              Оставить мои
+            </button>
+          </div>
+        </div>
+      )}
 
       {error === null ? null : (
         <p
