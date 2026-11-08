@@ -307,7 +307,10 @@ describe("создание на канбане", () => {
       ["done", "Готово"],
     ] as const) {
       expect(screen.getByTestId(`kanban-create-task-${status}`)).toHaveAccessibleName(
-        `Новая задача в колонке «${label}»`,
+        `Добавить задачу с деталями в колонке «${label}»`,
+      );
+      expect(screen.getByTestId(`kanban-quick-add-${status}`)).toHaveAccessibleName(
+        `Добавить карточку в колонку «${label}»`,
       );
     }
 
@@ -847,6 +850,117 @@ describe("создание на канбане", () => {
         within(screen.getByTestId("kanban-column-todo")).getByText("Без чужого тега"),
       ).toBeVisible();
     });
+  });
+
+  it("передаёт quick draft в полную форму, сохраняет при отмене и очищает после создания", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-quick-add-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+
+    const quickInput = screen.getByTestId("kanban-quick-add-input-todo");
+
+    fireEvent.change(quickInput, { target: { value: "Быстрый черновик" } });
+
+    // При открытом composer остаётся один путь в полную форму.
+    expect(screen.queryByTestId("kanban-create-task-todo")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-details-todo")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("kanban-quick-details-todo"));
+
+    let form = taskForm();
+
+    expect(within(form).getByLabelText("Название", { exact: true })).toHaveValue(
+      "Быстрый черновик",
+    );
+    expect(within(form).getByLabelText("Проект")).toHaveValue("project-1");
+
+    // Cancel полной формы сохраняет originating quick draft.
+    fireEvent.click(within(form).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByTestId("task-form-create")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+    expect(quickInput).toHaveValue("Быстрый черновик");
+
+    fireEvent.click(screen.getByTestId("kanban-quick-details-todo"));
+
+    form = taskForm();
+    fireEvent.click(within(form).getByRole("button", { name: "Создать задачу" }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-form-create")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(quickInput).toHaveValue("");
+    });
+
+    expect(
+      within(screen.getByTestId("kanban-column-todo")).getByText("Быстрый черновик"),
+    ).toBeVisible();
+    expect(operations.counts.get("kanbaner.tasks.task.create")).toBe(1);
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+  });
+
+  it("держит отдельное состояние открытых composer для каждой колонки", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-quick-add-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+    fireEvent.change(screen.getByTestId("kanban-quick-add-input-todo"), {
+      target: { value: "Черновик todo" },
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-backlog"));
+    fireEvent.change(screen.getByTestId("kanban-quick-add-input-backlog"), {
+      target: { value: "Черновик backlog" },
+    });
+
+    // Оба composer открыты: дублирующие details-кнопки скрыты у обеих колонок.
+    expect(screen.queryByTestId("kanban-create-task-todo")).toBeNull();
+    expect(screen.queryByTestId("kanban-create-task-backlog")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-quick-add-form-backlog")).toBeInTheDocument();
+
+    const todoForm = screen.getByTestId("kanban-quick-add-form-todo");
+
+    fireEvent.click(within(todoForm).getByRole("button", { name: "Закрыть добавление карточки" }));
+
+    // Закрытие todo не открывает дублирующий путь у backlog и не теряет его draft.
+    expect(screen.queryByTestId("kanban-quick-add-form-todo")).toBeNull();
+    expect(screen.getByTestId("kanban-create-task-todo")).toBeInTheDocument();
+    expect(screen.queryByTestId("kanban-create-task-backlog")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-input-backlog")).toHaveValue("Черновик backlog");
+    expect(screen.getByTestId("kanban-quick-add-form-backlog")).toBeInTheDocument();
   });
 
   it("не отправляет project.create дважды", async () => {
