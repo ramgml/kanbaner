@@ -55,6 +55,7 @@ export const kanbanUiPlugin = defineUiPlugin({
       render: (props) => (
         <KanbanView
           invoke={props.invoke}
+          pathname={props.pathname}
           search={props.search}
           replaceSearch={props.replaceSearch}
         />

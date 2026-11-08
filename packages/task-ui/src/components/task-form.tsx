@@ -28,6 +28,13 @@ export interface TaskFormProps {
   /** Только корневые задачи; форма дополнительно фильтрует по проекту. */
   readonly rootTasks: readonly Task[];
   readonly initial?: Partial<TaskFormValues>;
+  /**
+   * Controlled-значения формы. Если заданы, состояние хранится у вызывающей
+   * стороны и переживает размонтирование формы (например, смену layout).
+   * Без этого prop форма работает как раньше — с внутренним state.
+   */
+  readonly values?: TaskFormValues;
+  readonly onValuesChange?: (values: TaskFormValues) => void;
   readonly excludeTaskId?: string | null;
   /**
    * Публичная команда `task.update` не меняет родителя. В режиме edit форма
@@ -49,9 +56,10 @@ const labelClass = "flex flex-col gap-1 text-xs font-medium text-muted-foregroun
 const textareaClass =
   "min-h-24 w-full rounded-md border bg-background px-2 py-1.5 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50";
 
-function initialValues(
+/** Полные начальные значения формы; additive helper для controlled-режима. */
+export function createTaskFormValues(
   projects: readonly Project[],
-  initial: Partial<TaskFormValues> | undefined,
+  initial?: Partial<TaskFormValues>,
 ): TaskFormValues {
   return {
     projectId: initial?.projectId ?? projects[0]?.id ?? "",
@@ -71,6 +79,8 @@ export function TaskForm({
   projects,
   rootTasks,
   initial,
+  values: controlledValues,
+  onValuesChange,
   excludeTaskId = null,
   lockParent = false,
   submitting = false,
@@ -79,15 +89,24 @@ export function TaskForm({
   onCancel,
 }: TaskFormProps) {
   const uid = useId();
-  const [values, setValues] = useState<TaskFormValues>(() => initialValues(projects, initial));
+  const [internalValues, setInternalValues] = useState<TaskFormValues>(() =>
+    createTaskFormValues(projects, initial),
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
+  const values = controlledValues ?? internalValues;
 
   const parentOptions = rootTasks.filter(
     (task) => task.projectId === values.projectId && task.id !== excludeTaskId,
   );
 
   const update = (patch: Partial<TaskFormValues>): void => {
-    setValues((current) => ({ ...current, ...patch }));
+    const next = { ...values, ...patch };
+
+    if (controlledValues === undefined) {
+      setInternalValues(next);
+    }
+
+    onValuesChange?.(next);
   };
 
   const submit = (): void => {
@@ -314,22 +333,42 @@ export interface ProjectFormValues {
 export interface ProjectFormProps {
   readonly submitting?: boolean;
   readonly error?: string | null;
+  /** Controlled-значения; без prop используется внутреннее состояние. */
+  readonly values?: ProjectFormValues;
+  readonly onValuesChange?: (values: ProjectFormValues) => void;
   readonly onSubmit: (values: ProjectFormValues) => void;
   readonly onCancel: () => void;
+}
+
+/** Пустые значения формы проекта; additive helper для controlled-режима. */
+export function createProjectFormValues(): ProjectFormValues {
+  return { title: "", descriptionMarkdown: "" };
 }
 
 /** Форма создания проекта. */
 export function ProjectForm({
   submitting = false,
   error = null,
+  values: controlledValues,
+  onValuesChange,
   onSubmit,
   onCancel,
 }: ProjectFormProps) {
   const uid = useId();
-  const [title, setTitle] = useState("");
-  const [descriptionMarkdown, setDescriptionMarkdown] = useState("");
+  const [internalValues, setInternalValues] = useState<ProjectFormValues>(createProjectFormValues);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const values = controlledValues ?? internalValues;
   const shownError = validationError ?? error;
+
+  const update = (patch: Partial<ProjectFormValues>): void => {
+    const next = { ...values, ...patch };
+
+    if (controlledValues === undefined) {
+      setInternalValues(next);
+    }
+
+    onValuesChange?.(next);
+  };
 
   return (
     <form
@@ -339,13 +378,13 @@ export function ProjectForm({
       onSubmit={(event) => {
         event.preventDefault();
 
-        if (title.trim().length === 0) {
+        if (values.title.trim().length === 0) {
           setValidationError("Укажите название проекта");
           return;
         }
 
         setValidationError(null);
-        onSubmit({ title: title.trim(), descriptionMarkdown });
+        onSubmit({ title: values.title.trim(), descriptionMarkdown: values.descriptionMarkdown });
       }}
     >
       <label className={labelClass} htmlFor={`${uid}-project-title`}>
@@ -353,12 +392,12 @@ export function ProjectForm({
         <input
           id={`${uid}-project-title`}
           name="title"
-          value={title}
+          value={values.title}
           maxLength={200}
           required
           disabled={submitting}
           onChange={(event) => {
-            setTitle(event.target.value);
+            update({ title: event.target.value });
           }}
           className={inputClass}
         />
@@ -369,10 +408,10 @@ export function ProjectForm({
         <textarea
           id={`${uid}-project-description`}
           name="descriptionMarkdown"
-          value={descriptionMarkdown}
+          value={values.descriptionMarkdown}
           disabled={submitting}
           onChange={(event) => {
-            setDescriptionMarkdown(event.target.value);
+            update({ descriptionMarkdown: event.target.value });
           }}
           className={textareaClass}
         />

@@ -7,17 +7,31 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  normalizeTag,
   type Project,
   type ProjectListOutput,
+  type ProjectMutationOutput,
   type Task,
+  type TaskCreateInput,
   type TaskListInput,
   type TaskListOutput,
+  type TaskMutationOutput,
   type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
-import type { UiOperationInvoker } from "@kanbaner/task-ui";
+import {
+  createProjectFormValues,
+  createTaskFormValues,
+  dateInputToDueAt,
+  parseTagsInput,
+  type ProjectFormValues,
+  type TaskFormValues,
+  type UiOperationInvoker,
+} from "@kanbaner/task-ui";
 
+import { KANBAN_ROUTE } from "../metadata.ts";
 import { KanbanCard, type KanbanReorderKind } from "./kanban-card.tsx";
 import { KanbanColumn } from "./kanban-column.tsx";
+import { KanbanCreatePanel, type KanbanCreateMode } from "./kanban-create.tsx";
 import {
   KANBAN_PAGE_SIZE,
   KANBAN_STATUSES,
@@ -38,6 +52,7 @@ import {
   isVersionConflict,
 } from "./operations.ts";
 import {
+  bumpKanbanRevision,
   registerKanbanSearchWriter,
   resetKanbanFilters,
   updateKanbanQuery,
@@ -74,6 +89,26 @@ interface DropTarget {
 
 function emptyCounts(value: number): Record<TaskStatus, number> {
   return { backlog: value, todo: value, in_progress: value, done: value };
+}
+
+/**
+ * Нормализует активный фильтр тега через публичный `normalizeTag`.
+ *
+ * Домен хранит теги в нижнем регистре без пробелов, поэтому сравнение
+ * `Release` с `release` должно учитывать нормализацию. Для пустого значения
+ * возвращается пустая строка; невалидный фильтр (слишком длинный) не роняет
+ * доску, а сравнивается в безопасном нижнем регистре.
+ */
+function normalizeFilterTag(value: string): string {
+  if (value.trim().length === 0) {
+    return "";
+  }
+
+  try {
+    return normalizeTag(value);
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 function listInput(
@@ -198,14 +233,17 @@ function columnContaining(columns: KanbanColumns, taskId: string): TaskStatus | 
 /** Основное представление `/view/kanban`. */
 export function KanbanView({
   invoke,
+  pathname,
   search,
   replaceSearch,
 }: {
   readonly invoke: UiOperationInvoker;
+  readonly pathname?: string | undefined;
   readonly search?: string | undefined;
   readonly replaceSearch?: ((search: string) => void) | undefined;
 }) {
   const query = useKanbanQuery(search);
+  const onKanbanRoute = pathname === undefined || pathname === KANBAN_ROUTE;
 
   useEffect(() => {
     if (replaceSearch === undefined) {
@@ -216,6 +254,14 @@ export function KanbanView({
   }, [replaceSearch]);
   const [projects, setProjects] = useState<readonly Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [formMode, setFormMode] = useState<KanbanCreateMode | null>(null);
+  const [formSession, setFormSession] = useState(0);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [formSubmitting, setFormSubmitting] = useState(false);
+  const [taskDraft, setTaskDraft] = useState<TaskFormValues | null>(null);
+  const [projectDraft, setProjectDraft] = useState<ProjectFormValues>(createProjectFormValues);
+  const [formOpenerSelector, setFormOpenerSelector] = useState<string | undefined>(undefined);
+  const [rootTasks, setRootTasks] = useState<readonly Task[]>([]);
   const [columns, setColumns] = useState<KanbanColumns>(createEmptyColumns);
   const [placements, setPlacements] = useState<ReadonlyMap<string, Placement>>(() => new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
@@ -233,32 +279,34 @@ export function KanbanView({
   const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
+  const submitGuardRef = useRef(false);
+  const projectsSequenceRef = useRef(0);
+
+  const loadProjects = useCallback(async (): Promise<void> => {
+    const sequence = projectsSequenceRef.current + 1;
+
+    projectsSequenceRef.current = sequence;
+
+    try {
+      const data = await invokeJson<ProjectListOutput>(invoke, TASKS_QUERY_IDS.projectList, {
+        limit: 200,
+        offset: 0,
+      });
+
+      if (projectsSequenceRef.current === sequence) {
+        setProjects(data.items);
+        setProjectsError(null);
+      }
+    } catch (loadError) {
+      if (projectsSequenceRef.current === sequence) {
+        setProjectsError(errorMessage(loadError));
+      }
+    }
+  }, [invoke]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const data = await invokeJson<ProjectListOutput>(invoke, TASKS_QUERY_IDS.projectList, {
-          limit: 200,
-          offset: 0,
-        });
-
-        if (!cancelled) {
-          setProjects(data.items);
-          setProjectsError(null);
-        }
-      } catch (loadError) {
-        if (!cancelled) {
-          setProjectsError(errorMessage(loadError));
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [invoke]);
+    void loadProjects();
+  }, [loadProjects]);
 
   const reloadBoard = useCallback(async (): Promise<void> => {
     const sequence = reloadSequenceRef.current + 1;
@@ -390,6 +438,180 @@ export function KanbanView({
       return next;
     });
   }, [invoke]);
+
+  const closeCreateForm = (): void => {
+    setFormMode(null);
+    setFormError(null);
+  };
+
+  const openProjectForm = (): void => {
+    setFormError(null);
+    setProjectDraft(createProjectFormValues());
+    setFormOpenerSelector('[data-testid="kanban-create-project"]');
+    setFormSession((current) => current + 1);
+    setFormMode("project");
+  };
+
+  const openTaskForm = (status: TaskStatus = "todo", opener?: string): void => {
+    if (projects.length === 0) {
+      return;
+    }
+
+    setFormError(null);
+    setTaskDraft(createTaskFormValues(projects, { projectId: query.projectId, status }));
+    setFormOpenerSelector(opener ?? '[data-testid="kanban-create-task"]');
+    setFormSession((current) => current + 1);
+    setFormMode("task");
+  };
+
+  const beginSubmit = (): boolean => {
+    if (submitGuardRef.current) {
+      return false;
+    }
+
+    submitGuardRef.current = true;
+    setFormSubmitting(true);
+    setFormError(null);
+
+    return true;
+  };
+
+  const endSubmit = (): void => {
+    submitGuardRef.current = false;
+    setFormSubmitting(false);
+  };
+
+  const createProject = async (values: ProjectFormValues): Promise<void> => {
+    if (!beginSubmit()) {
+      return;
+    }
+
+    try {
+      await invokeJson<ProjectMutationOutput>(invoke, TASKS_COMMAND_IDS.projectCreate, {
+        title: values.title,
+        descriptionMarkdown: values.descriptionMarkdown,
+      });
+
+      // Повторный project.list: созданный проект должен сразу появиться в
+      // фильтрах и форме. Текущий фильтр не меняется.
+      await loadProjects();
+      setFormMode(null);
+      setFormError(null);
+    } catch (commandError) {
+      setFormError(errorMessage(commandError));
+    } finally {
+      endSubmit();
+    }
+  };
+
+  /**
+   * Показывает созданную задачу в её колонке, даже если она оказалась за
+   * границей уже догруженной страницы.
+   *
+   * Позицию в scope вычисляет домен (`task.create` без `position` делает
+   * атомарный append); доска не пересчитывает её вручную. Требование
+   * видимости использует тот же механизм, что и move: reload читает страницы
+   * target-колонки, пока не встретит созданный ID.
+   */
+  const revealCreatedTask = async (task: Task): Promise<void> => {
+    const nextProjectId =
+      query.projectId.length === 0 || query.projectId === task.projectId
+        ? query.projectId
+        : task.projectId;
+    const normalizedTag = normalizeFilterTag(query.tag);
+    const nextTag = query.tag.length === 0 || task.tags.includes(normalizedTag) ? query.tag : "";
+    const filterKey = `${nextProjectId}\u0000${nextTag}`;
+
+    loadedCountsRef.current[task.status] = Math.max(
+      loadedCountsRef.current[task.status] ?? KANBAN_PAGE_SIZE,
+      task.position + 1,
+    );
+    visibilityRef.current.set(task.id, {
+      taskId: task.id,
+      status: task.status,
+      position: task.position,
+      filterKey,
+    });
+
+    if (nextProjectId !== query.projectId || nextTag !== query.tag) {
+      // Созданная задача не попадает в текущий фильтр: переключаем только то,
+      // что мешает её показать. Ревизия перечитывает доску с новым ключом.
+      updateKanbanQuery({ projectId: nextProjectId, tag: nextTag, taskId: null });
+      bumpKanbanRevision();
+
+      return;
+    }
+
+    // Ревизия перечитывает доску (включая target-колонку до required ID) и
+    // обновляет число подзадач у видимых корневых карточек.
+    bumpKanbanRevision();
+  };
+
+  const createTask = async (values: TaskFormValues): Promise<void> => {
+    if (!beginSubmit()) {
+      return;
+    }
+
+    const input: TaskCreateInput = {
+      projectId: values.projectId,
+      title: values.title,
+      descriptionMarkdown: values.descriptionMarkdown,
+      status: values.status,
+      priority: values.priority,
+      dueAt: dateInputToDueAt(values.dueAt, "start"),
+      tags: parseTagsInput(values.tags),
+      ...(values.parentTaskId.length === 0 ? {} : { parentTaskId: values.parentTaskId }),
+    };
+
+    try {
+      const data = await invokeJson<TaskMutationOutput>(
+        invoke,
+        TASKS_COMMAND_IDS.taskCreate,
+        input as unknown as JsonValue,
+      );
+
+      await revealCreatedTask(data.task);
+      setFormMode(null);
+      setFormError(null);
+    } catch (commandError) {
+      // Форма остаётся открытой и сохраняет введённые значения.
+      setFormError(errorMessage(commandError));
+    } finally {
+      endSubmit();
+    }
+  };
+
+  useEffect(() => {
+    if (formMode !== "task" || !onKanbanRoute) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
+          parentTaskId: null,
+          limit: MAX_LIST_LIMIT,
+          offset: 0,
+          sort: { field: "title", direction: "asc" },
+        } as unknown as JsonValue);
+
+        if (!cancelled) {
+          setRootTasks(data.items);
+        }
+      } catch {
+        // Родитель необязателен: задача создаётся и корневой.
+        if (!cancelled) {
+          setRootTasks([]);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [invoke, formMode, formSession, query.revision, onKanbanRoute]);
 
   useEffect(() => {
     const filterKey = `${query.projectId}\u0000${query.tag}`;
@@ -829,6 +1051,51 @@ export function KanbanView({
             данные задачи остаются в домене задач.
           </p>
         </div>
+
+        {onKanbanRoute ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            <button
+              type="button"
+              data-testid="kanban-create-project"
+              onClick={openProjectForm}
+              style={{
+                height: "32px",
+                borderRadius: "6px",
+                border: "1px solid var(--border)",
+                background: "var(--background)",
+                color: "var(--foreground)",
+                padding: "0 12px",
+                fontSize: "13px",
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+            >
+              Новый проект
+            </button>
+            <button
+              type="button"
+              data-testid="kanban-create-task"
+              disabled={projects.length === 0}
+              onClick={() => {
+                openTaskForm();
+              }}
+              style={{
+                height: "32px",
+                borderRadius: "6px",
+                border: "1px solid transparent",
+                background: "var(--primary)",
+                color: "var(--primary-foreground)",
+                padding: "0 12px",
+                fontSize: "13px",
+                fontWeight: 500,
+                cursor: projects.length === 0 ? "not-allowed" : "pointer",
+                opacity: projects.length === 0 ? 0.5 : 1,
+              }}
+            >
+              Новая задача
+            </button>
+          </div>
+        ) : null}
       </header>
 
       <form
@@ -927,6 +1194,28 @@ export function KanbanView({
         </button>
       </form>
 
+      <KanbanCreatePanel
+        pathname={pathname}
+        mode={formMode}
+        session={formSession}
+        projects={projects}
+        rootTasks={rootTasks}
+        taskValues={taskDraft}
+        projectValues={projectDraft}
+        onTaskValuesChange={setTaskDraft}
+        onProjectValuesChange={setProjectDraft}
+        openerSelector={formOpenerSelector}
+        submitting={formSubmitting}
+        error={formError}
+        onCancel={closeCreateForm}
+        onSubmitProject={(values) => {
+          void createProject(values);
+        }}
+        onSubmitTask={(values) => {
+          void createTask(values);
+        }}
+      />
+
       {projectsError === null ? null : (
         <p role="alert" style={{ margin: 0, fontSize: "12px", color: "var(--destructive)" }}>
           Проекты: {projectsError}
@@ -975,6 +1264,11 @@ export function KanbanView({
               error={column.error}
               hasMore={column.nextOffset !== null}
               dragOver={dragOver === status}
+              onCreateTask={() => {
+                openTaskForm(status, `[data-testid="kanban-create-task-${status}"]`);
+              }}
+              createVisible={onKanbanRoute}
+              createDisabled={projects.length === 0}
               onLoadMore={() => {
                 loadMore(status);
               }}
