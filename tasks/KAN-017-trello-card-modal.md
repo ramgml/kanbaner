@@ -1,7 +1,7 @@
 ---
 id: KAN-017
 title: Карточка задачи как Trello-модал
-status: in_progress
+status: done
 stage: 3
 priority: high
 owner: worker-kan-017
@@ -35,23 +35,23 @@ specs:
 
 ## Объём работ
 
-- [ ] Создать Trello-like модал на базе общего `ModalDialog`/`task-ui`, не
+- [x] Создать Trello-like модал на базе общего `ModalDialog`/`task-ui`, не
   дублируя внутренние модули task-list.
-- [ ] Разделить содержимое и действия на две колонки с адаптивным переходом в
+- [x] Разделить содержимое и действия на две колонки с адаптивным переходом в
   одну.
-- [ ] Реализовать редактирование заголовка и Markdown-описания через текущие
+- [x] Реализовать редактирование заголовка и Markdown-описания через текущие
   формы и `expectedVersion`.
-- [ ] Показывать подзадачи, их статусы и создание подзадачи; переход между
+- [x] Показывать подзадачи, их статусы и создание подзадачи; переход между
   родителем и подзадачей не должен показывать устаревшие данные.
-- [ ] Сохранить `VERSION_CONFLICT`, подтверждение удаления, blocked loading и
+- [x] Сохранить `VERSION_CONFLICT`, подтверждение удаления, blocked loading и
   повторное чтение после команд.
-- [ ] Закрытие по `Escape`/кнопке/фону не должно молча терять несохранённый
+- [x] Закрытие по `Escape`/кнопке/фону не должно молча терять несохранённый
   черновик.
-- [ ] Сохранить gating `/view/kanban`, selection и router-aware search.
-- [ ] Добавить component/E2E: desktop modal, mobile fullscreen, focus,
+- [x] Сохранить gating `/view/kanban`, selection и router-aware search.
+- [x] Добавить component/E2E: desktop modal, mobile fullscreen, focus,
   редактирование, конфликт, подзадача, навигация parent/child, закрытие с
   черновиком.
-- [ ] Обновить README и отчёт `tasks/reports/KAN-017.md`.
+- [x] Обновить README и отчёт `tasks/reports/KAN-017.md`.
 
 ## Владение файлами
 
@@ -75,17 +75,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Десктопная карточка открывается центрированным Trello-like модалом.
-- [ ] Мобильная версия полноэкранная и доступна с клавиатуры.
-- [ ] Подзадачи и действия работают через публичные операции.
-- [ ] Черновик и конфликты не теряются.
-- [ ] Все проверки и прежние E2E зелёные.
+- [x] Десктопная карточка открывается центрированным Trello-like модалом.
+- [x] Мобильная версия полноэкранная и доступна с клавиатуры.
+- [x] Подзадачи и действия работают через публичные операции.
+- [x] Черновик и конфликты не теряются.
+- [x] Все проверки и прежние E2E зелёные.
 
 ## Проверки
 
-- [ ] Typecheck, линтер, component/integration tests.
-- [ ] `pnpm check:imports`, полный `pnpm check`.
-- [ ] Все Playwright E2E, deferred SIGTERM.
+- [x] Typecheck, линтер, component/integration tests.
+- [x] `pnpm check:imports`, полный `pnpm check`.
+- [x] Все Playwright E2E, deferred SIGTERM.
 
 ## Риски
 
@@ -96,13 +96,21 @@ specs:
 
 ## Журнал
 
+- 2026-11-08 — KAN-017 влита в `dev` финальным merge-коммитом
+  `90ae5d63e56c7ad6e7544eb9a60a468c589ee6b2`; strict install, check:imports,
+  полный check, 54 E2E и deferred SIGTERM зелёные на ветке и `dev`, финальное
+  ревью разрешило интеграцию. Feature-ветка и worktree удалены, задача done.
 - 2026-11-08 — Задача создана вслед за Trello-обновлением доски.
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: финальный merge `90ae5d63e56c7ad6e7544eb9a60a468c589ee6b2`;
+  feature-коммиты `8a124c9`, `f4c0af1`, `4ba5c5b`, `ebf5022`, `ba93c70`.
+- Ветка: `feat/kan-017-trello-card-modal` влита в `dev`; ветка и worktree удалены.
+- Проверки: strict frozen install, `check:imports`, полный `pnpm check`,
+  Playwright и deferred SIGTERM на ветке и `dev`; 11 focused files / 114 tests,
+  85 workspace files / 1131 tests, 54 production E2E.
+- Остаточные риски: Markdown показан как исходный текст; большие списки
+  подзадач загружаются полностью; pixel-diff отсутствует; Chromium-only E2E и
+  Windows не проверен. Первая попытка merge была откачена из-за flaky test,
+  после `waitFor`-фикса и повторного rebase интеграция прошла.
