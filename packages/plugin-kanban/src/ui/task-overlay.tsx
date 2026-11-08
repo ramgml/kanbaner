@@ -594,17 +594,26 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     const server = createQuickDraft(currentTask);
 
     setQuickState((current) => {
-      const base = current?.draft ?? server;
+      if (current === null || current.draft.taskId !== currentTask.id) {
+        return current;
+      }
 
-      return {
-        draft: {
-          ...base,
-          nextStatus: server.nextStatus,
-          dueValue: server.dueValue,
-          tagsValue: server.tagsValue,
-        },
-        conflicts: [],
-      };
+      const draft = { ...current.draft };
+
+      // «Взять серверные» относится только к полям, по которым показан
+      // конфликт. Неконфликтные dirty-черновики (в том числе subtask-форма)
+      // остаются локальными и продолжают удерживать общий dirty guard.
+      for (const field of current.conflicts) {
+        if (field === "status") {
+          draft.nextStatus = server.nextStatus;
+        } else if (field === "due") {
+          draft.dueValue = server.dueValue;
+        } else {
+          draft.tagsValue = server.tagsValue;
+        }
+      }
+
+      return { draft, conflicts: [] };
     });
   };
 

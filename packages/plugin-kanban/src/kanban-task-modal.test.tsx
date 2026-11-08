@@ -1150,6 +1150,67 @@ describe("TaskOverlay Trello-модал", () => {
     });
   });
 
+  it("при rebase применяет серверные значения только к конфликтным полям", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+    fireEvent.change(screen.getByTestId("kanban-modal-tags"), {
+      target: { value: "Alpha, beta" },
+    });
+    fireEvent.change(screen.getByTestId("kanban-modal-move-field"), {
+      target: { value: "in_progress" },
+    });
+
+    // Внешне изменился только срок; статус и теги на сервере не менялись.
+    board.tasks = board.tasks.map((task) =>
+      task.id === "a" ? { ...task, dueAt: "2031-01-01T00:00:00.000Z" } : task,
+    );
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+
+    const conflictBanner = await screen.findByTestId("kanban-quick-conflict");
+
+    expect(conflictBanner).toHaveTextContent("срок");
+    expect(conflictBanner).not.toHaveTextContent("теги");
+    expect(conflictBanner).not.toHaveTextContent("статус");
+
+    fireEvent.click(screen.getByTestId("kanban-quick-conflict-rebase"));
+
+    expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2031-01-01");
+    expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("Alpha, beta");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue("in_progress");
+
+    // Неконфликтные dirty-поля остались, поэтому закрытие требует confirm.
+    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("Alpha, beta");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue("in_progress");
+
+    fireEvent.click(screen.getByTestId("kanban-draft-discard"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+  });
+
   it.each(["Release", " release ", "release, release"])(
     "канонизирует теги %j после сохранения и не считает их dirty",
     async (input) => {
