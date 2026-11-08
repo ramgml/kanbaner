@@ -447,7 +447,7 @@ export function KanbanView({
   const openProjectForm = (): void => {
     setFormError(null);
     setProjectDraft(createProjectFormValues());
-    setFormOpenerSelector("kanban-create-project");
+    setFormOpenerSelector('[data-testid="kanban-create-project"]');
     setFormSession((current) => current + 1);
     setFormMode("project");
   };
@@ -459,7 +459,7 @@ export function KanbanView({
 
     setFormError(null);
     setTaskDraft(createTaskFormValues(projects, { projectId: query.projectId, status }));
-    setFormOpenerSelector(opener ?? "kanban-create-task");
+    setFormOpenerSelector(opener ?? '[data-testid="kanban-create-task"]');
     setFormSession((current) => current + 1);
     setFormMode("task");
   };
@@ -1265,7 +1265,7 @@ export function KanbanView({
               hasMore={column.nextOffset !== null}
               dragOver={dragOver === status}
               onCreateTask={() => {
-                openTaskForm(status, `kanban-create-task-${status}`);
+                openTaskForm(status, `[data-testid="kanban-create-task-${status}"]`);
               }}
               createVisible={onKanbanRoute}
               createDisabled={projects.length === 0}

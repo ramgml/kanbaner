@@ -1351,6 +1351,13 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-create-panel")).toBeVisible();
       await expectDraft();
 
+      // Перед desktop → mobile фокус явно находится в inline-форме; после
+      // Escape ModalDialog обязан вернуть его на кнопку открытия.
+      await form.getByLabel("Название", { exact: true }).focus();
+      await expect
+        .poll(async () => page.evaluate(() => document.activeElement?.getAttribute("name")))
+        .toBe("title");
+
       // desktop → mobile: все значения и фокус на opener.
       await page.setViewportSize(MOBILE_VIEWPORT);
       await expect(page.getByTestId("kanban-create-dialog")).toBeVisible();

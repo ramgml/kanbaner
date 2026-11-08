@@ -738,6 +738,12 @@ describe("создание на канбане", () => {
     expect(screen.getByTestId("kanban-create-panel")).toBeInTheDocument();
     assertDraft();
 
+    // Перед возвратом на mobile фокус явно находится в desktop-форме.
+    const desktopTitle = within(taskForm()).getByLabelText("Название", { exact: true });
+
+    desktopTitle.focus();
+    expect(document.activeElement).toBe(desktopTitle);
+
     act(() => {
       toggleLayout(false);
     });
