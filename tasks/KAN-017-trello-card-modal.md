@@ -1,14 +1,13 @@
 ---
 id: KAN-017
 title: Карточка задачи как Trello-модал
-status: ready
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-016
-branch: null
-worktree: null
+owner: worker-kan-017
+blocked_by: []
+branch: feat/kan-017-trello-card-modal
+worktree: .worktrees/kan-017-trello-card-modal
 created: 2026-11-08
 updated: 2026-11-08
 specs:
