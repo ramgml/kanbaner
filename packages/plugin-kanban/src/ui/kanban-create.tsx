@@ -28,7 +28,15 @@ export interface KanbanCreatePanelProps {
   readonly session: number;
   readonly projects: readonly Project[];
   readonly rootTasks: readonly Task[];
-  readonly initialTask: Partial<TaskFormValues>;
+  /**
+   * Draft хранится у вызывающей стороны и переживает размонтирование формы
+   * при смене layout mobile ↔ desktop.
+   */
+  readonly taskValues: TaskFormValues | null;
+  readonly projectValues: ProjectFormValues;
+  readonly onTaskValuesChange: (values: TaskFormValues) => void;
+  readonly onProjectValuesChange: (values: ProjectFormValues) => void;
+  readonly openerSelector?: string | undefined;
   readonly submitting: boolean;
   readonly error: string | null;
   readonly onCancel: () => void;
@@ -51,7 +59,11 @@ export function KanbanCreatePanel({
   session,
   projects,
   rootTasks,
-  initialTask,
+  taskValues,
+  projectValues,
+  onTaskValuesChange,
+  onProjectValuesChange,
+  openerSelector,
   submitting,
   error,
   onCancel,
@@ -88,24 +100,27 @@ export function KanbanCreatePanel({
     mode === "project" ? (
       <ProjectForm
         key={`project-${String(session)}`}
+        values={projectValues}
+        onValuesChange={onProjectValuesChange}
         submitting={submitting}
         error={error}
         onSubmit={onSubmitProject}
         onCancel={onCancel}
       />
-    ) : (
+    ) : taskValues !== null ? (
       <TaskForm
         key={`task-${String(session)}`}
         mode="create"
         projects={projects}
         rootTasks={rootTasks}
-        initial={initialTask}
+        values={taskValues}
+        onValuesChange={onTaskValuesChange}
         submitting={submitting}
         error={error}
         onSubmit={onSubmitTask}
         onCancel={onCancel}
       />
-    );
+    ) : null;
 
   if (!isDesktopViewport) {
     return (
@@ -114,6 +129,7 @@ export function KanbanCreatePanel({
         label={mode === "project" ? "Новый проект" : "Новая задача"}
         testId="kanban-create-dialog"
         onClose={onCancel}
+        {...(openerSelector === undefined ? {} : { restoreFocusSelector: openerSelector })}
         className={MOBILE_DIALOG_CLASS}
       >
         {content}

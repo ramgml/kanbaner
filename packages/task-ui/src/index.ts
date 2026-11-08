@@ -45,6 +45,8 @@ export {
 export {
   ProjectForm,
   TaskForm,
+  createProjectFormValues,
+  createTaskFormValues,
   taskToFormValues,
   type ProjectFormProps,
   type ProjectFormValues,

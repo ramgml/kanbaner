@@ -258,20 +258,39 @@ async function openBoard(page: Page): Promise<void> {
   await expect(page.getByTestId("kanban-view")).toBeVisible();
 }
 
-async function createProjectOnBoard(page: Page, title: string): Promise<void> {
+async function createProjectOnBoard(
+  page: Page,
+  title: string,
+  options: { readonly doubleSubmit?: boolean } = {},
+): Promise<void> {
   await page.getByTestId("kanban-create-project").click();
 
   const form = page.getByTestId("project-form");
 
   await expect(form).toBeVisible();
   await form.getByLabel("Название проекта", { exact: true }).fill(title);
-  await form.getByRole("button", { name: "Создать проект" }).click();
+
+  const submit = form.getByRole("button", { name: "Создать проект" });
+
+  if (options.doubleSubmit === true) {
+    await submit.evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      (button as HTMLButtonElement).click();
+    });
+  } else {
+    await submit.click();
+  }
+
   await expect(form).toHaveCount(0);
 
-  // Повторный project.list: проект сразу доступен в фильтре без reload.
-  await expect(
-    page.getByTestId("kanban-filters").getByRole("combobox", { name: "Проект", exact: true }),
-  ).toContainText(title);
+  // Повторный project.list: проект сразу доступен в фильтре без reload,
+  // ровно один раз даже после двойного клика.
+  const projectSelect = page
+    .getByTestId("kanban-filters")
+    .getByRole("combobox", { name: "Проект", exact: true });
+
+  await expect(projectSelect).toContainText(title);
+  await expect(projectSelect.locator("option").filter({ hasText: title })).toHaveCount(1);
 }
 
 interface BoardTaskSeed {
@@ -934,7 +953,7 @@ test.describe("канбан в production shell", () => {
       const taskTitle = uniqueTitle("Задача создания на доске");
 
       await openBoard(page);
-      await createProjectOnBoard(page, projectTitle);
+      await createProjectOnBoard(page, projectTitle, { doubleSubmit: true });
       await filterByProject(page, projectTitle);
       await expect(page).toHaveURL(/[?&]project=/u);
 
@@ -977,8 +996,9 @@ test.describe("канбан в production shell", () => {
       await expectCardInColumn(page, parentId, "backlog");
 
       // Активный фильтр тега не мешает созданию: новая задача получает тег.
-      await page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }).fill("release");
-      await expect(page).toHaveURL(/[?&]tag=release/u);
+      // Фильтр нормализуется через normalizeTag, поэтому Release == release.
+      await page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }).fill("Release");
+      await expect(page).toHaveURL(/[?&]tag=Release/u);
 
       const childId = await createTaskOnBoard(page, {
         projectTitle,
@@ -992,7 +1012,7 @@ test.describe("канбан в production shell", () => {
       await expectCardInColumn(page, childId, "in_progress");
       await expect(page.getByTestId(`kanban-card-${childId}`)).toContainText("release");
       await expect(page).toHaveURL(/[?&]project=/u);
-      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expect(page).toHaveURL(/[?&]tag=Release/u);
       await expect(page.getByTestId(`kanban-subtasks-${parentId}`)).toHaveText("Подзадачи: 1");
 
       await page.reload();
@@ -1000,8 +1020,27 @@ test.describe("канбан в production shell", () => {
       await filterByProject(page, projectTitle);
       await expect(
         page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }),
-      ).toHaveValue("release");
+      ).toHaveValue("Release");
       await expectCardInColumn(page, childId, "in_progress");
+
+      // Реально несовпадающий тег сбрасывается, чтобы созданная карточка была
+      // видна; фильтр проекта при этом сохраняется.
+      const otherTag = `other-${String(Date.now())}`;
+      const visibleTitle = uniqueTitle("Видна после сброса тега");
+
+      await page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }).fill(otherTag);
+      await expect(page).toHaveURL(new RegExp(`[?&]tag=${otherTag}`, "u"));
+
+      const visibleId = await createTaskOnBoard(page, {
+        projectTitle,
+        title: visibleTitle,
+        status: "todo",
+        tags: "release",
+      });
+
+      await expect(page).not.toHaveURL(/[?&]tag=/u);
+      await expect(page).toHaveURL(/[?&]project=/u);
+      await expectCardInColumn(page, visibleId, "todo");
     });
 
     test("создаёт задачи кнопками всех четырёх колонок", async ({ page }) => {
@@ -1027,24 +1066,40 @@ test.describe("канбан в production shell", () => {
         });
       }
 
-      for (const [index, item] of created.entries()) {
+      for (const item of created) {
         const card = column(page, item.status).locator("[data-card-id]").filter({
           hasText: item.title,
         });
 
         await expect(card).toHaveCount(1);
         await expect(page.getByTestId(`kanban-count-${item.status}`)).toHaveText("1");
-        expect(index).toBeGreaterThanOrEqual(0);
       }
 
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
 
+      const ids = new Map<string, string>();
+
       for (const item of created) {
         const id = await cardIdByTitle(page, item.title);
 
+        ids.set(item.title, id);
         await expectCardInColumn(page, id, item.status);
+      }
+
+      // Список показывает все четыре статуса, включая in_progress и done.
+      await openTaskList(page);
+      await page
+        .getByTestId("task-filters")
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .selectOption({ label: projectTitle });
+
+      for (const item of created) {
+        const row = page.getByTestId(`task-row-${ids.get(item.title) ?? ""}`);
+
+        await expect(row).toContainText(item.title);
+        await expect(row).toContainText(STATUS_LABELS[item.status]);
       }
     });
 
@@ -1214,15 +1269,29 @@ test.describe("канбан в production shell", () => {
         .toBe(true);
     });
 
-    test("создаёт задачу с клавиатуры на 360 px и возвращает фокус", async ({ page }) => {
+    test("сохраняет черновик при mobile → desktop → mobile и возвращает фокус", async ({
+      page,
+    }) => {
       const projectTitle = uniqueTitle("Проект мобильного создания");
+      const parentTitle = uniqueTitle("Родитель мобильного черновика");
+      const draftTitle = uniqueTitle("Черновик мобильного layout");
       const taskTitle = uniqueTitle("Мобильная созданная задача");
 
       await openTaskList(page);
       await createProject(page, projectTitle);
+      const parentId = await createTask(page, {
+        projectTitle,
+        title: parentTitle,
+        status: "backlog",
+      });
+
       await openKanban(page, projectTitle);
       await expectNoHorizontalOverflow(page);
 
+      const filters = page.getByTestId("kanban-filters");
+      const projectId = await filters
+        .getByRole("combobox", { name: "Проект", exact: true })
+        .inputValue();
       const opener = page.getByTestId("kanban-create-task-todo");
 
       await opener.focus();
@@ -1242,33 +1311,67 @@ test.describe("канбан в production shell", () => {
         .toBe(true);
       await expectNoHorizontalOverflow(page);
 
+      // Заполняем все поля ДО смены layout.
+      let form = page.getByTestId("task-form-create");
+      const parentSelect = form.getByRole("combobox", {
+        name: "Родительская задача",
+        exact: true,
+      });
+
+      await expect(parentSelect).toContainText(parentTitle);
+      await form.getByLabel("Название", { exact: true }).fill(draftTitle);
+      await form.locator('textarea[name="descriptionMarkdown"]').fill("Описание черновика");
+      await form.getByLabel("Теги через запятую", { exact: true }).fill("release, draft");
+      await form.getByRole("combobox", { name: "Статус", exact: true }).selectOption("in_progress");
+      await parentSelect.selectOption({ label: parentTitle });
+
+      const expectDraft = async (): Promise<void> => {
+        form = page.getByTestId("task-form-create");
+        await expect(form.getByRole("combobox", { name: "Проект", exact: true })).toHaveValue(
+          projectId,
+        );
+        await expect(form.getByLabel("Название", { exact: true })).toHaveValue(draftTitle);
+        await expect(form.locator('textarea[name="descriptionMarkdown"]')).toHaveValue(
+          "Описание черновика",
+        );
+        await expect(form.getByLabel("Теги через запятую", { exact: true })).toHaveValue(
+          "release, draft",
+        );
+        await expect(form.getByRole("combobox", { name: "Статус", exact: true })).toHaveValue(
+          "in_progress",
+        );
+        await expect(
+          form.getByRole("combobox", { name: "Родительская задача", exact: true }),
+        ).toHaveValue(parentId);
+      };
+
+      // mobile → desktop: форма размонтирована, draft сохранён.
+      await page.setViewportSize(DESKTOP_VIEWPORT);
+      await expect(page.getByTestId("kanban-create-dialog")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-create-panel")).toBeVisible();
+      await expectDraft();
+
+      // desktop → mobile: все значения и фокус на opener.
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await expect(page.getByTestId("kanban-create-dialog")).toBeVisible();
+      await expectDraft();
+
       await page.keyboard.press("Escape");
       await expect(dialog).toHaveCount(0);
       await expect
         .poll(async () => page.evaluate(() => document.activeElement?.getAttribute("data-testid")))
         .toBe("kanban-create-task-todo");
 
-      // Ввод и Enter отправляют форму; после успеха фокус возвращается на кнопку.
+      // Новая session: чистый draft с предустановкой колонки.
       await page.keyboard.press("Enter");
       await expect(dialog).toBeVisible();
-
-      // Breakpoint: на desktop тот же режим показывает inline-панель, на
-      // mobile снова нативный modal.
-      await page.setViewportSize(DESKTOP_VIEWPORT);
-      await expect(page.getByTestId("kanban-create-dialog")).toHaveCount(0);
-      await expect(page.getByTestId("kanban-create-panel")).toBeVisible();
-
-      await page.setViewportSize(MOBILE_VIEWPORT);
-      await expect(page.getByTestId("kanban-create-dialog")).toBeVisible();
-
-      const form = page.getByTestId("task-form-create");
-
+      form = page.getByTestId("task-form-create");
+      await expect(form.getByLabel("Название", { exact: true })).toHaveValue("");
+      await expect(form.getByRole("combobox", { name: "Статус", exact: true })).toHaveValue("todo");
       await expect(form.getByRole("combobox", { name: "Проект", exact: true })).toHaveValue(
-        await page
-          .getByTestId("kanban-filters")
-          .getByRole("combobox", { name: "Проект", exact: true })
-          .inputValue(),
+        projectId,
       );
+
       await form.getByLabel("Название", { exact: true }).fill(taskTitle);
       await form.getByLabel("Название", { exact: true }).press("Enter");
 

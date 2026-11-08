@@ -7,6 +7,7 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  normalizeTag,
   type Project,
   type ProjectListOutput,
   type ProjectMutationOutput,
@@ -18,6 +19,8 @@ import {
   type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
 import {
+  createProjectFormValues,
+  createTaskFormValues,
   dateInputToDueAt,
   parseTagsInput,
   type ProjectFormValues,
@@ -86,6 +89,26 @@ interface DropTarget {
 
 function emptyCounts(value: number): Record<TaskStatus, number> {
   return { backlog: value, todo: value, in_progress: value, done: value };
+}
+
+/**
+ * Нормализует активный фильтр тега через публичный `normalizeTag`.
+ *
+ * Домен хранит теги в нижнем регистре без пробелов, поэтому сравнение
+ * `Release` с `release` должно учитывать нормализацию. Для пустого значения
+ * возвращается пустая строка; невалидный фильтр (слишком длинный) не роняет
+ * доску, а сравнивается в безопасном нижнем регистре.
+ */
+function normalizeFilterTag(value: string): string {
+  if (value.trim().length === 0) {
+    return "";
+  }
+
+  try {
+    return normalizeTag(value);
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }
 
 function listInput(
@@ -235,7 +258,9 @@ export function KanbanView({
   const [formSession, setFormSession] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSubmitting, setFormSubmitting] = useState(false);
-  const [taskInitial, setTaskInitial] = useState<Partial<TaskFormValues>>({});
+  const [taskDraft, setTaskDraft] = useState<TaskFormValues | null>(null);
+  const [projectDraft, setProjectDraft] = useState<ProjectFormValues>(createProjectFormValues);
+  const [formOpenerSelector, setFormOpenerSelector] = useState<string | undefined>(undefined);
   const [rootTasks, setRootTasks] = useState<readonly Task[]>([]);
   const [columns, setColumns] = useState<KanbanColumns>(createEmptyColumns);
   const [placements, setPlacements] = useState<ReadonlyMap<string, Placement>>(() => new Map());
@@ -421,17 +446,20 @@ export function KanbanView({
 
   const openProjectForm = (): void => {
     setFormError(null);
+    setProjectDraft(createProjectFormValues());
+    setFormOpenerSelector("kanban-create-project");
     setFormSession((current) => current + 1);
     setFormMode("project");
   };
 
-  const openTaskForm = (status: TaskStatus = "todo"): void => {
+  const openTaskForm = (status: TaskStatus = "todo", opener?: string): void => {
     if (projects.length === 0) {
       return;
     }
 
     setFormError(null);
-    setTaskInitial({ projectId: query.projectId, status });
+    setTaskDraft(createTaskFormValues(projects, { projectId: query.projectId, status }));
+    setFormOpenerSelector(opener ?? "kanban-create-task");
     setFormSession((current) => current + 1);
     setFormMode("task");
   };
@@ -490,7 +518,8 @@ export function KanbanView({
       query.projectId.length === 0 || query.projectId === task.projectId
         ? query.projectId
         : task.projectId;
-    const nextTag = query.tag.length === 0 || task.tags.includes(query.tag) ? query.tag : "";
+    const normalizedTag = normalizeFilterTag(query.tag);
+    const nextTag = query.tag.length === 0 || task.tags.includes(normalizedTag) ? query.tag : "";
     const filterKey = `${nextProjectId}\u0000${nextTag}`;
 
     loadedCountsRef.current[task.status] = Math.max(
@@ -1171,7 +1200,11 @@ export function KanbanView({
         session={formSession}
         projects={projects}
         rootTasks={rootTasks}
-        initialTask={taskInitial}
+        taskValues={taskDraft}
+        projectValues={projectDraft}
+        onTaskValuesChange={setTaskDraft}
+        onProjectValuesChange={setProjectDraft}
+        openerSelector={formOpenerSelector}
         submitting={formSubmitting}
         error={formError}
         onCancel={closeCreateForm}
@@ -1232,7 +1265,7 @@ export function KanbanView({
               hasMore={column.nextOffset !== null}
               dragOver={dragOver === status}
               onCreateTask={() => {
-                openTaskForm(status);
+                openTaskForm(status, `kanban-create-task-${status}`);
               }}
               createVisible={onKanbanRoute}
               createDisabled={projects.length === 0}

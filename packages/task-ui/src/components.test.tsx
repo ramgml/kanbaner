@@ -8,7 +8,12 @@ import type { Project, Task } from "@kanbaner/plugin-tasks/contract";
 import { TaskCard } from "./components/task-card.tsx";
 import { TaskDetails } from "./components/task-details.tsx";
 import { TaskFilters, EMPTY_TASK_FILTERS } from "./components/task-filters.tsx";
-import { ProjectForm, TaskForm } from "./components/task-form.tsx";
+import {
+  ProjectForm,
+  TaskForm,
+  createProjectFormValues,
+  createTaskFormValues,
+} from "./components/task-form.tsx";
 import { TaskTable } from "./components/task-table.tsx";
 import { EmptyState, ErrorState, LoadingState } from "./components/states.tsx";
 
@@ -222,6 +227,52 @@ describe("TaskForm", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("работает controlled: значения приходят снаружи и не теряются", () => {
+    const onValuesChange = vi.fn();
+    const values = createTaskFormValues([project], {
+      projectId: "project-1",
+      title: "Черновик",
+      tags: "release",
+    });
+
+    const view = render(
+      <TaskForm
+        mode="create"
+        projects={[project]}
+        rootTasks={[]}
+        values={values}
+        onValuesChange={onValuesChange}
+        onSubmit={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("Название")).toHaveValue("Черновик");
+    expect(screen.getByLabelText("Теги через запятую")).toHaveValue("release");
+
+    fireEvent.change(screen.getByLabelText("Название"), {
+      target: { value: "Изменено" },
+    });
+
+    expect(onValuesChange).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "project-1", title: "Изменено", tags: "release" }),
+    );
+
+    view.rerender(
+      <TaskForm
+        mode="create"
+        projects={[project]}
+        rootTasks={[]}
+        values={{ ...values, title: "Изменено" }}
+        onValuesChange={onValuesChange}
+        onSubmit={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("Название")).toHaveValue("Изменено");
+  });
+
   it("в режиме edit показывает родителя только для чтения", () => {
     render(
       <TaskForm
@@ -241,6 +292,29 @@ describe("TaskForm", () => {
 });
 
 describe("ProjectForm", () => {
+  it("работает controlled и сообщает изменения", () => {
+    const onValuesChange = vi.fn();
+    const values = createProjectFormValues();
+
+    render(
+      <ProjectForm
+        values={values}
+        onValuesChange={onValuesChange}
+        onSubmit={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Название проекта"), {
+      target: { value: "Проект" },
+    });
+
+    expect(onValuesChange).toHaveBeenCalledWith({
+      title: "Проект",
+      descriptionMarkdown: "",
+    });
+  });
+
   it("валидирует название проекта", () => {
     const onSubmit = vi.fn();
 

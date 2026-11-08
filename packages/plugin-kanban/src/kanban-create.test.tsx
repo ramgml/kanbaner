@@ -8,7 +8,11 @@ import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract"
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
-import { resetKanbanQueryForTests, updateKanbanQuery } from "./ui/query-state.ts";
+import {
+  getKanbanQuerySnapshot,
+  resetKanbanQueryForTests,
+  updateKanbanQuery,
+} from "./ui/query-state.ts";
 
 const TIMESTAMP = "2026-02-01T00:00:00.000Z";
 
@@ -113,7 +117,9 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
   }
 
   if (typeof filters.tag === "string") {
-    items = items.filter((task) => task.tags.includes(filters.tag as string));
+    const tag = filters.tag.trim().toLowerCase();
+
+    items = items.filter((task) => task.tags.includes(tag));
   }
 
   if ("parentTaskId" in filters) {
@@ -221,6 +227,45 @@ function setMatchMedia(matches: boolean): void {
         dispatchEvent: () => false,
       }) as unknown as MediaQueryList,
   });
+}
+
+function installMatchMedia(initial: boolean): (matches: boolean) => void {
+  let current = initial;
+  const listeners = new Set<() => void>();
+  const mediaQuery = {
+    get matches() {
+      return current;
+    },
+    media: "",
+    onchange: null,
+    addEventListener: (_event: string, listener: () => void) => {
+      listeners.add(listener);
+    },
+    removeEventListener: (_event: string, listener: () => void) => {
+      listeners.delete(listener);
+    },
+    addListener: (listener: () => void) => {
+      listeners.add(listener);
+    },
+    removeListener: (listener: () => void) => {
+      listeners.delete(listener);
+    },
+    dispatchEvent: () => false,
+  } as unknown as MediaQueryList;
+
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: () => mediaQuery,
+  });
+
+  return (matches) => {
+    current = matches;
+
+    for (const listener of listeners) {
+      listener();
+    }
+  };
 }
 
 function taskForm(): HTMLElement {
@@ -621,5 +666,227 @@ describe("создание на канбане", () => {
     await waitFor(() => {
       expect(document.activeElement).toBe(opener);
     });
+  });
+
+  it("сохраняет черновик и фокус при mobile → desktop → mobile", async () => {
+    const toggleLayout = installMatchMedia(false);
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [makeTask("root-1", { projectId: "project-1", title: "Корень" })],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    const opener = await screen.findByTestId("kanban-create-task-todo");
+
+    await waitFor(() => {
+      expect(opener).toBeEnabled();
+    });
+    opener.focus();
+    fireEvent.click(opener);
+
+    let form = taskForm();
+
+    fireEvent.change(within(form).getByLabelText("Проект"), {
+      target: { value: "project-1" },
+    });
+
+    const parent = within(form).getByLabelText("Родительская задача");
+
+    await waitFor(() => {
+      expect(within(parent).getByRole("option", { name: "Корень" })).toBeInTheDocument();
+    });
+    fireEvent.change(within(form).getByLabelText("Название", { exact: true }), {
+      target: { value: "Черновик переживает layout" },
+    });
+    fireEvent.change(within(form).getByLabelText("Описание (Markdown)"), {
+      target: { value: "Описание черновика" },
+    });
+    fireEvent.change(within(form).getByLabelText("Теги через запятую"), {
+      target: { value: "release, draft" },
+    });
+    fireEvent.change(within(form).getByLabelText("Статус"), {
+      target: { value: "in_progress" },
+    });
+    fireEvent.change(parent, { target: { value: "root-1" } });
+
+    const assertDraft = (): void => {
+      const current = taskForm();
+
+      expect(within(current).getByLabelText("Проект")).toHaveValue("project-1");
+      expect(within(current).getByLabelText("Название", { exact: true })).toHaveValue(
+        "Черновик переживает layout",
+      );
+      expect(within(current).getByLabelText("Описание (Markdown)")).toHaveValue(
+        "Описание черновика",
+      );
+      expect(within(current).getByLabelText("Теги через запятую")).toHaveValue("release, draft");
+      expect(within(current).getByLabelText("Статус")).toHaveValue("in_progress");
+      expect(within(current).getByLabelText("Родительская задача")).toHaveValue("root-1");
+    };
+
+    act(() => {
+      toggleLayout(true);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-create-dialog")).toBeNull();
+    });
+    expect(screen.getByTestId("kanban-create-panel")).toBeInTheDocument();
+    assertDraft();
+
+    act(() => {
+      toggleLayout(false);
+    });
+
+    const dialog = await screen.findByTestId("kanban-create-dialog");
+
+    expect(dialog.tagName).toBe("DIALOG");
+    assertDraft();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByTestId("kanban-create-dialog")).toBeNull();
+    await waitFor(() => {
+      expect(document.activeElement).toBe(opener);
+    });
+
+    // Новая session создаёт чистый draft с предустановкой колонки.
+    fireEvent.click(opener);
+
+    form = taskForm();
+    expect(within(form).getByLabelText("Проект")).toHaveValue("");
+    expect(within(form).getByLabelText("Название", { exact: true })).toHaveValue("");
+    expect(within(form).getByLabelText("Статус")).toHaveValue("todo");
+  });
+
+  it("сохраняет фильтр Release, если тег созданной задачи release", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-create-task-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1", tag: "Release" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-create-task-todo"));
+
+    const form = taskForm();
+
+    fireEvent.change(within(form).getByLabelText("Название", { exact: true }), {
+      target: { value: "Релиз с заглавной" },
+    });
+    fireEvent.change(within(form).getByLabelText("Теги через запятую"), {
+      target: { value: "release" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Создать задачу" }));
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("kanban-column-todo")).getByText("Релиз с заглавной"),
+      ).toBeVisible();
+    });
+    expect(getKanbanQuerySnapshot().tag).toBe("Release");
+  });
+
+  it("сбрасывает реально несовпадающий тег и показывает созданную карточку", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-create-task-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1", tag: "Other" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-create-task-todo"));
+
+    const form = taskForm();
+
+    fireEvent.change(within(form).getByLabelText("Название", { exact: true }), {
+      target: { value: "Без чужого тега" },
+    });
+    fireEvent.change(within(form).getByLabelText("Теги через запятую"), {
+      target: { value: "release" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Создать задачу" }));
+
+    await waitFor(() => {
+      expect(getKanbanQuerySnapshot().tag).toBe("");
+    });
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("kanban-column-todo")).getByText("Без чужого тега"),
+      ).toBeVisible();
+    });
+  });
+
+  it("не отправляет project.create дважды", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const pending = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.project.create": () => pending.promise,
+    });
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-create-task")).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-create-project"));
+
+    const form = screen.getByTestId("project-form");
+    const submit = within(form).getByRole("button", { name: "Создать проект" });
+
+    fireEvent.change(within(form).getByLabelText("Название проекта"), {
+      target: { value: "Один проект" },
+    });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    fireEvent.submit(form);
+
+    expect(submit).toBeDisabled();
+    expect(operations.counts.get("kanbaner.tasks.project.create")).toBe(1);
+
+    const project = makeProject("project-2", "Один проект");
+
+    await act(async () => {
+      board.projects = [...board.projects, project];
+      pending.resolve(ok({ project }));
+      await pending.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-form")).toBeNull();
+    });
+    expect(board.projects.filter((item) => item.title === "Один проект")).toHaveLength(1);
   });
 });
