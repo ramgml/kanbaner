@@ -38,7 +38,7 @@ function DetailsSlot({
   readonly search: string;
   readonly replaceSearch: (search: string) => void;
 }) {
-  const contributions = useUiContributions("app.details");
+  const contributions = useUiContributions("app.details", pathname);
 
   if (contributions.length === 0) {
     return null;

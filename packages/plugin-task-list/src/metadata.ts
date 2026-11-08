@@ -41,6 +41,7 @@ export const taskListUiContributions: readonly UiContribution[] = Object.freeze(
     priority: 20,
     title: "Детали задачи",
     description: "Панель выбранной задачи на десктопе",
+    route: TASK_LIST_ROUTE,
   },
   {
     id: "kanbaner.task-list.details-mobile",

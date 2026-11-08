@@ -88,14 +88,22 @@ function useRegistryVersion(registry: UiContributionRegistry): number {
   return useSyncExternalStore(subscribe, getVersion, getVersion);
 }
 
-export function useUiContributions(slot: UiSlotId): readonly RegisteredUiContribution[] {
+export function useUiContributions(
+  slot: UiSlotId,
+  pathname?: string,
+): readonly RegisteredUiContribution[] {
   const registry = useUiRegistry();
   const availability = useUiAvailability();
   useRegistryVersion(registry);
 
   return registry
     .list(slot)
-    .filter((contribution) => isContributionAvailable(contribution, availability));
+    .filter((contribution) => isContributionAvailable(contribution, availability))
+    .filter((contribution) => {
+      const route = contribution.contribution.route;
+
+      return pathname === undefined || route === undefined || route === pathname;
+    });
 }
 
 export function useUiRoute(pathname: string): RegisteredUiContribution | null {

@@ -104,6 +104,39 @@ describe("адаптивный app shell", () => {
     expect(screen.getByTestId("test-ui-overlay")).toBeInTheDocument();
   });
 
+  it("показывает details aside только на маршруте вклада", () => {
+    const registerRoutedDetails = (
+      registry: ReturnType<typeof createUiContributionRegistry>,
+    ): void => {
+      registerUiPlugin(registry, {
+        id: "example.routed-details",
+        contributions: [
+          {
+            metadata: {
+              id: "example.routed-details.panel",
+              slot: "app.details",
+              kind: "panel",
+              priority: 1,
+              route: "/view/tasks",
+            },
+            render: () => <div>Детали по маршруту</div>,
+          },
+        ],
+      });
+    };
+
+    renderShell(undefined, registerRoutedDetails);
+
+    expect(screen.queryByTestId("details-slot")).not.toBeInTheDocument();
+
+    cleanup();
+    navigation.pathname = "/view/tasks";
+    renderShell(undefined, registerRoutedDetails);
+
+    expect(screen.getByTestId("details-slot")).toBeInTheDocument();
+    expect(screen.getByText("Детали по маршруту")).toBeInTheDocument();
+  });
+
   it("держит main и details соседями горизонтального flex, колонка только у main", () => {
     renderShell();
 
