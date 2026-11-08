@@ -909,9 +909,11 @@ describe("создание на канбане", () => {
       expect(quickInput).toHaveValue("");
     });
 
-    expect(
-      within(screen.getByTestId("kanban-column-todo")).getByText("Быстрый черновик"),
-    ).toBeVisible();
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("kanban-column-todo")).getByText("Быстрый черновик"),
+      ).toBeVisible();
+    });
     expect(operations.counts.get("kanbaner.tasks.task.create")).toBe(1);
     expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
   });
