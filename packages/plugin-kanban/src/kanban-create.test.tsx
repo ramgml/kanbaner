@@ -916,6 +916,53 @@ describe("создание на канбане", () => {
     expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
   });
 
+  it("держит отдельное состояние открытых composer для каждой колонки", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-quick-add-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+    fireEvent.change(screen.getByTestId("kanban-quick-add-input-todo"), {
+      target: { value: "Черновик todo" },
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-backlog"));
+    fireEvent.change(screen.getByTestId("kanban-quick-add-input-backlog"), {
+      target: { value: "Черновик backlog" },
+    });
+
+    // Оба composer открыты: дублирующие details-кнопки скрыты у обеих колонок.
+    expect(screen.queryByTestId("kanban-create-task-todo")).toBeNull();
+    expect(screen.queryByTestId("kanban-create-task-backlog")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-quick-add-form-backlog")).toBeInTheDocument();
+
+    const todoForm = screen.getByTestId("kanban-quick-add-form-todo");
+
+    fireEvent.click(within(todoForm).getByRole("button", { name: "Закрыть добавление карточки" }));
+
+    // Закрытие todo не открывает дублирующий путь у backlog и не теряет его draft.
+    expect(screen.queryByTestId("kanban-quick-add-form-todo")).toBeNull();
+    expect(screen.getByTestId("kanban-create-task-todo")).toBeInTheDocument();
+    expect(screen.queryByTestId("kanban-create-task-backlog")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-input-backlog")).toHaveValue("Черновик backlog");
+    expect(screen.getByTestId("kanban-quick-add-form-backlog")).toBeInTheDocument();
+  });
+
   it("не отправляет project.create дважды", async () => {
     const board: FakeBoard = {
       projects: [makeProject("project-1")],

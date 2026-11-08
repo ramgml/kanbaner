@@ -1421,6 +1421,42 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-count-todo")).toHaveText("1");
     });
 
+    test("открытые composer в разных колонках не показывают дублирующий details-путь", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект двух composer");
+      const todoDraft = uniqueTitle("Черновик todo");
+      const backlogDraft = uniqueTitle("Черновик backlog");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      await page.getByTestId("kanban-quick-add-todo").click();
+      await expect(page.getByTestId("kanban-quick-add-input-todo")).toBeFocused();
+      await page.keyboard.type(todoDraft);
+
+      await page.getByTestId("kanban-quick-add-backlog").click();
+      await expect(page.getByTestId("kanban-quick-add-input-backlog")).toBeFocused();
+      await page.keyboard.type(backlogDraft);
+
+      // У обеих открытых колонок отдельная details-кнопка скрыта.
+      await expect(page.getByTestId("kanban-create-task-todo")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-create-task-backlog")).toHaveCount(0);
+
+      await page
+        .getByTestId("kanban-quick-add-form-todo")
+        .getByRole("button", { name: "Закрыть добавление карточки" })
+        .click();
+
+      // Закрытие todo не возвращает дублирующий путь backlog и не теряет его draft.
+      await expect(page.getByTestId("kanban-quick-add-form-todo")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-create-task-todo")).toBeVisible();
+      await expect(page.getByTestId("kanban-create-task-backlog")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-quick-add-input-backlog")).toHaveValue(backlogDraft);
+      await expect(page.getByTestId("kanban-quick-add-form-backlog")).toBeVisible();
+    });
+
     test("показывает место вставки между карточками при drag-and-drop", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект placeholder");
       const firstTitle = uniqueTitle("Первая placeholder");

@@ -280,7 +280,9 @@ export function KanbanView({
   const [dragOver, setDragOver] = useState<DropTarget | null>(null);
   const [activeStatus, setActiveStatus] = useState<TaskStatus>("backlog");
   const [scrollHints, setScrollHints] = useState({ left: false, right: false });
-  const [quickOpenStatus, setQuickOpenStatus] = useState<TaskStatus | null>(null);
+  const [quickOpenStatuses, setQuickOpenStatuses] = useState<ReadonlySet<TaskStatus>>(
+    () => new Set(),
+  );
   const [quickResetTokens, setQuickResetTokens] = useState<Partial<Record<TaskStatus, number>>>({});
   const columnsRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<TaskStatus, HTMLButtonElement | null>>>({});
@@ -1610,7 +1612,7 @@ export function KanbanView({
                 }}
                 createVisible={onKanbanRoute}
                 createDisabled={projects.length === 0}
-                quickComposerOpen={quickOpenStatus === status}
+                quickComposerOpen={quickOpenStatuses.has(status)}
                 onLoadMore={() => {
                   loadMore(status);
                 }}
@@ -1626,12 +1628,28 @@ export function KanbanView({
                       disabled={projects.length === 0}
                       resetToken={quickResetTokens[status] ?? 0}
                       onOpenChange={(open) => {
-                        setQuickOpenStatus((current) => {
+                        setQuickOpenStatuses((current) => {
                           if (open) {
-                            return status;
+                            if (current.has(status)) {
+                              return current;
+                            }
+
+                            const next = new Set(current);
+
+                            next.add(status);
+
+                            return next;
                           }
 
-                          return current === status ? null : current;
+                          if (!current.has(status)) {
+                            return current;
+                          }
+
+                          const next = new Set(current);
+
+                          next.delete(status);
+
+                          return next;
                         });
                       }}
                       onCreate={(input) => createQuickTask(status, input)}
