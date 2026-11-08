@@ -12,6 +12,9 @@ export interface KanbanColumnProps {
   readonly error: string | null;
   readonly hasMore: boolean;
   readonly dragOver: boolean;
+  readonly onCreateTask: () => void;
+  readonly createVisible: boolean;
+  readonly createDisabled: boolean;
   readonly onLoadMore: () => void;
   readonly onRetry: () => void;
   readonly children: ReactNode;
@@ -25,6 +28,9 @@ export function KanbanColumn({
   error,
   hasMore,
   dragOver,
+  onCreateTask,
+  createVisible,
+  createDisabled,
   onLoadMore,
   onRetry,
   children,
@@ -76,6 +82,31 @@ export function KanbanColumn({
           {total}
         </span>
       </header>
+
+      {createVisible ? (
+        <button
+          type="button"
+          data-testid={`kanban-create-task-${status}`}
+          aria-label={`Новая задача в колонке «${taskStatusLabel(status)}»`}
+          title={`Новая задача в колонке «${taskStatusLabel(status)}»`}
+          disabled={createDisabled}
+          onClick={onCreateTask}
+          style={{
+            border: "1px dashed var(--border)",
+            background: "var(--background)",
+            color: "var(--foreground)",
+            borderRadius: "8px",
+            padding: "6px 8px",
+            fontSize: "12px",
+            fontWeight: 500,
+            cursor: createDisabled ? "not-allowed" : "pointer",
+            opacity: createDisabled ? 0.5 : 1,
+            textAlign: "left",
+          }}
+        >
+          <span aria-hidden="true">+</span> Новая задача
+        </button>
+      ) : null}
 
       {error === null ? null : (
         <div
