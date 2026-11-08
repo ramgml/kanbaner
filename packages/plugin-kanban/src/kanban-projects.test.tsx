@@ -65,6 +65,25 @@ function inputOf(input: JsonValue): Record<string, unknown> {
   return (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
 }
 
+interface Deferred<Value> {
+  readonly promise: Promise<Value>;
+  readonly resolve: (value: Value) => void;
+}
+
+function deferred<Value>(): Deferred<Value> {
+  let resolve: ((value: Value) => void) | null = null;
+  const promise = new Promise<Value>((settle) => {
+    resolve = settle;
+  });
+
+  return {
+    promise,
+    resolve: (value) => {
+      resolve?.(value);
+    },
+  };
+}
+
 function numberField(input: JsonValue, key: string): number | null {
   const value = inputOf(input)[key];
 
@@ -169,7 +188,15 @@ function createOperations(board: Board): FakeOperations {
     calls.push({ operationId, input });
 
     if (operationId === "kanbaner.tasks.project.list") {
-      return ok({ items: board.projects, total: board.projects.length, nextOffset: null });
+      const offset = numberField(input, "offset") ?? 0;
+      const limit = numberField(input, "limit") ?? 50;
+      const page = board.projects.slice(offset, offset + limit);
+
+      return ok({
+        items: page,
+        total: board.projects.length,
+        nextOffset: offset + page.length < board.projects.length ? offset + page.length : null,
+      });
     }
 
     if (operationId === "kanbaner.tasks.project.summary") {
@@ -486,5 +513,116 @@ describe("Проекты как доски", () => {
 
     // Колонка показывает только первую страницу, но сводка остаётся полной.
     expect(screen.getByTestId("kanban-cards-todo").children).toHaveLength(10);
+  });
+
+  it("игнорирует запоздавший ответ сводки прежнего проекта", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1", "Первый"), makeProject("project-2", "Второй")],
+      tasks: [
+        makeTask("a1", { projectId: "project-1", status: "backlog", position: 0 }),
+        makeTask("a2", { projectId: "project-1", status: "backlog", position: 1 }),
+        makeTask("a3", { projectId: "project-1", status: "backlog", position: 2 }),
+        makeTask("b1", { projectId: "project-2", status: "todo" }),
+      ],
+    };
+    const operations = createOperations(board);
+    const pending = new Map<string, Deferred<UiOperationResult>>();
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      const projectId = inputOf(input).projectId;
+
+      if (operationId === "kanbaner.tasks.project.summary" && typeof projectId === "string") {
+        const request = deferred<UiOperationResult>();
+
+        pending.set(projectId, request);
+
+        return request.promise;
+      }
+
+      return operations.invoke(operationId, input);
+    };
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-1");
+    resetKanbanQueryForTests("?project=project-1");
+    render(<KanbanView invoke={invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(pending.has("project-1")).toBe(true);
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-2", taskId: null });
+    });
+    await waitFor(() => {
+      expect(pending.has("project-2")).toBe(true);
+    });
+
+    // Ответы приходят в обратном порядке: сначала B, затем устаревший A.
+    act(() => {
+      pending
+        .get("project-2")
+        ?.resolve(summarize(board, { projectId: "project-2", limit: 1, offset: 0 }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-summary-total")).toHaveTextContent("1");
+    });
+    expect(screen.getByTestId("kanban-summary-todo")).toHaveTextContent("1");
+
+    act(() => {
+      pending
+        .get("project-1")
+        ?.resolve(summarize(board, { projectId: "project-1", limit: 1, offset: 0 }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-summary-total")).toHaveTextContent("1");
+    });
+    expect(screen.getByTestId("kanban-summary-backlog")).toHaveTextContent("0");
+    expect(screen.getByTestId("kanban-summary-todo")).toHaveTextContent("1");
+    expect(screen.getByTestId("kanban-board-title")).toHaveTextContent("Второй");
+  });
+
+  it("берёт выбранный проект за пределами первых 200 из сводки", async () => {
+    const projects = Array.from({ length: 205 }, (_, index) =>
+      makeProject(`project-${String(index + 1)}`, `Проект ${String(index + 1)}`),
+    );
+
+    projects[204] = makeProject("project-205", "Проект 205", "Описание 205");
+
+    const board: Board = {
+      projects,
+      tasks: [
+        makeTask("task-205-a", { projectId: "project-205", status: "todo", position: 0 }),
+        makeTask("task-205-b", { projectId: "project-205", status: "done", position: 0 }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-205");
+    resetKanbanQueryForTests("?project=project-205");
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-board-title")).toHaveTextContent("Проект 205");
+    });
+    expect(screen.getByTestId("kanban-board-description")).toHaveTextContent("Описание 205");
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-summary-total")).toHaveTextContent("2");
+    });
+    expect(screen.getByTestId("kanban-summary-todo")).toHaveTextContent("1");
+    expect(screen.getByTestId("kanban-summary-done")).toHaveTextContent("1");
+
+    const select = screen
+      .getByTestId("kanban-filters")
+      .querySelector<HTMLSelectElement>('select[name="projectId"]');
+
+    expect(select).not.toBeNull();
+    expect(select).toHaveValue("project-205");
+    expect([...(select as HTMLSelectElement).options].map((option) => option.value)).toContain(
+      "project-205",
+    );
+
+    // project.list вернул только первые 200, но выбранный проект остаётся в
+    // опциях и заголовке благодаря project.summary: 1 «Все проекты» + 200 + 1.
+    expect((select as HTMLSelectElement).options).toHaveLength(202);
   });
 });

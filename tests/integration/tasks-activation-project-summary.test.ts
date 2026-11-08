@@ -251,5 +251,58 @@ for (const kind of KINDS) {
         overdueCount: 0,
       });
     });
+
+    it("видит данные текущей транзакции через scoped summarizeProjects", async () => {
+      const store = await createFixtureStore(kind);
+
+      const summary = await store.withTransaction(async (scoped) => {
+        await seedProject(scoped, "tx-project");
+        await seedTask(scoped, {
+          id: "tx-task-1",
+          projectId: "tx-project",
+          status: "todo",
+          dueAt: "2020-01-01T00:00:00.000Z",
+        });
+        await seedTask(scoped, {
+          id: "tx-task-2",
+          projectId: "tx-project",
+          status: "done",
+          dueAt: "2020-01-01T00:00:00.000Z",
+        });
+
+        return scoped.summarizeProjects({ projectId: "tx-project", limit: 10, offset: 0 });
+      });
+
+      expect(summary.total).toBe(1);
+      expect(summary.items[0]?.project.id).toBe("tx-project");
+      expect(summary.items[0]?.total).toBe(2);
+      expect(summary.items[0]?.counts).toEqual({
+        backlog: 0,
+        todo: 1,
+        in_progress: 0,
+        done: 1,
+      });
+      expect(summary.items[0]?.overdueCount).toBe(1);
+      expect(summary.totals).toEqual({
+        total: 2,
+        counts: { backlog: 0, todo: 1, in_progress: 0, done: 1 },
+        overdueCount: 1,
+      });
+
+      await expect(
+        store.withTransaction(async (scoped) =>
+          scoped.summarizeProjects({ projectId: "missing-in-tx", limit: 1, offset: 0 }),
+        ),
+      ).rejects.toMatchObject({ code: "NOT_FOUND", entity: "project", id: "missing-in-tx" });
+
+      // Данные транзакции закоммичены и видны корневому Store.
+      const committed = await store.summarizeProjects({
+        projectId: "tx-project",
+        limit: 1,
+        offset: 0,
+      });
+
+      expect(committed.items[0]?.total).toBe(2);
+    });
   });
 }

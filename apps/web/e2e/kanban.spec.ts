@@ -2081,6 +2081,8 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
       await expect(card(page, taskId)).toHaveCount(0);
+    });
+
     test("показывает проекты карточками и открывает доску и список с проектом", async ({
       page,
     }) => {
@@ -2225,6 +2227,65 @@ test.describe("канбан в production shell", () => {
         { backlog: 0, todo: 0, in_progress: 0, done: 0 },
         0,
       );
+    });
+
+    test("обновляет overdue после правки срока future → past → future", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект срока");
+      const taskTitle = uniqueTitle("Задача срока");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        status: "todo",
+        dueAt: "2030-01-10",
+      });
+
+      await openKanban(page, projectTitle);
+
+      const projectId = await projectIdByOption(page, projectTitle);
+      const expectedCounts = { backlog: 0, todo: 1, in_progress: 0, done: 0 } as const;
+
+      await expectBoardSummary(page, { total: 1, counts: expectedCounts, overdue: 0 });
+
+      const setDue = async (value: string): Promise<void> => {
+        await page.getByTestId(`kanban-open-${taskId}`).click();
+
+        const details = page.getByTestId("kanban-details");
+
+        await expect(details).toBeVisible();
+        await details.getByRole("button", { name: "Редактировать" }).click();
+
+        const form = page.getByTestId("task-form-edit");
+
+        await expect(form).toBeVisible();
+        await form.getByLabel("Срок", { exact: true }).fill(value);
+        await form.getByRole("button", { name: "Сохранить задачу" }).click();
+        await expect(form).toHaveCount(0);
+
+        await details.getByRole("button", { name: "Закрыть детали" }).click();
+        await expect(details).toHaveCount(0);
+      };
+
+      // future → past: задача становится просроченной.
+      await setDue("2020-01-05");
+      await expectBoardSummary(page, { total: 1, counts: expectedCounts, overdue: 1 });
+
+      await openProjectsMode(page);
+      await revealProjectCard(page, projectId);
+      await expectProjectCounts(page, projectId, expectedCounts, 1);
+
+      await page.getByTestId("kanban-mode-board").click();
+      await expect(page.getByTestId("kanban-columns")).toBeVisible();
+
+      // past → future: просрочка снимается.
+      await setDue("2030-01-10");
+      await expectBoardSummary(page, { total: 1, counts: expectedCounts, overdue: 0 });
+
+      await openProjectsMode(page);
+      await revealProjectCard(page, projectId);
+      await expectProjectCounts(page, projectId, expectedCounts, 0);
     });
 
     test("показывает агрегат «Все проекты» и не теряет проекты при пагинации", async ({ page }) => {

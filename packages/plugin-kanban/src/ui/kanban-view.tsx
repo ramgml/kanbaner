@@ -330,6 +330,11 @@ export function KanbanView({
   const summariesRef = useRef<readonly ProjectSummary[]>([]);
   const summarySequenceRef = useRef(0);
   const selectedSummarySequenceRef = useRef(0);
+  const selectedProjectIdRef = useRef(query.projectId);
+
+  // Актуальный фильтр на момент запуска запроса: запоздавший ответ для
+  // прежнего проекта не должен применяться после выбора другого.
+  selectedProjectIdRef.current = query.projectId;
 
   const loadProjects = useCallback(async (): Promise<void> => {
     const sequence = projectsSequenceRef.current + 1;
@@ -414,7 +419,7 @@ export function KanbanView({
   );
 
   const loadSelectedSummary = useCallback(async (): Promise<void> => {
-    const projectId = query.projectId;
+    const projectId = selectedProjectIdRef.current;
     const sequence = selectedSummarySequenceRef.current + 1;
 
     selectedSummarySequenceRef.current = sequence;
@@ -431,21 +436,33 @@ export function KanbanView({
         limit: 1,
         offset: 0,
       });
+      const summary = data.items.find((item) => item.project.id === projectId) ?? null;
 
-      if (selectedSummarySequenceRef.current === sequence) {
-        setSelectedSummary(data.items.find((summary) => summary.project.id === projectId) ?? null);
+      if (
+        selectedSummarySequenceRef.current === sequence &&
+        selectedProjectIdRef.current === projectId
+      ) {
+        setSelectedSummary(summary);
       }
     } catch {
       // Сводка вторична: ошибка не должна скрывать саму доску.
-      if (selectedSummarySequenceRef.current === sequence) {
+      if (
+        selectedSummarySequenceRef.current === sequence &&
+        selectedProjectIdRef.current === projectId
+      ) {
         setSelectedSummary(null);
       }
     }
-  }, [invoke, query.projectId]);
+  }, [invoke]);
 
   const refreshSummaries = useCallback(async (): Promise<void> => {
     await Promise.all([loadProjectSummaries(true), loadSelectedSummary()]);
   }, [loadProjectSummaries, loadSelectedSummary]);
+
+  useEffect(() => {
+    // Смена проекта инвалидирует ответы, запущенные для прежнего ID.
+    selectedSummarySequenceRef.current += 1;
+  }, [query.projectId]);
 
   useEffect(() => {
     void loadProjectSummaries(true);
@@ -453,7 +470,7 @@ export function KanbanView({
 
   useEffect(() => {
     void loadSelectedSummary();
-  }, [loadSelectedSummary, query.revision]);
+  }, [loadSelectedSummary, query.projectId, query.revision]);
 
   const reloadBoard = useCallback(async (): Promise<void> => {
     const sequence = reloadSequenceRef.current + 1;
@@ -869,18 +886,38 @@ export function KanbanView({
     [columns, placements],
   );
 
-  const selectedProject = useMemo(
-    () => projects.find((project) => project.id === query.projectId) ?? null,
-    [projects, query.projectId],
-  );
+  // Сводка принимается только для текущего проекта: запоздавший ответ
+  // прежнего проекта не должен попасть в заголовок.
+  const activeSelectedSummary =
+    selectedSummary !== null && selectedSummary.project.id === query.projectId
+      ? selectedSummary
+      : null;
+  const selectedProject = useMemo(() => {
+    const fromList = projects.find((project) => project.id === query.projectId) ?? null;
+
+    return fromList ?? activeSelectedSummary?.project ?? null;
+  }, [projects, query.projectId, activeSelectedSummary]);
+  const projectOptions = useMemo(() => {
+    if (
+      query.projectId.length === 0 ||
+      activeSelectedSummary === null ||
+      projects.some((project) => project.id === query.projectId)
+    ) {
+      return projects;
+    }
+
+    // Выбранный проект мог оказаться за пределами первых 200 project.list:
+    // селект всё равно должен позволять его видеть и сохранять выбор.
+    return [...projects, activeSelectedSummary.project];
+  }, [projects, query.projectId, activeSelectedSummary]);
   const projectTitles = useMemo(
-    () => new Map(projects.map((project) => [project.id, project.title] as const)),
-    [projects],
+    () => new Map(projectOptions.map((project) => [project.id, project.title] as const)),
+    [projectOptions],
   );
   const allProjectsMode = query.projectId.length === 0;
   const hasFilters = query.projectId.length > 0 || query.tag.length > 0;
   const showingProjects = viewMode === "projects";
-  const headerSummary = showingProjects || allProjectsMode ? summaryTotals : selectedSummary;
+  const headerSummary = showingProjects || allProjectsMode ? summaryTotals : activeSelectedSummary;
   const boardSettled = KANBAN_STATUSES.every((status) => !getColumn(columns, status).loading);
   const visibleTotal = KANBAN_STATUSES.reduce(
     (sum, status) => sum + getColumn(renderedColumns, status).total,
@@ -1627,7 +1664,7 @@ export function KanbanView({
                 className="h-10 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
               >
                 <option value="">Все проекты</option>
-                {projects.map((project) => (
+                {projectOptions.map((project) => (
                   <option key={project.id} value={project.id}>
                     {project.title}
                   </option>
@@ -1707,7 +1744,7 @@ export function KanbanView({
         pathname={pathname}
         mode={formMode}
         session={formSession}
-        projects={projects}
+        projects={projectOptions}
         rootTasks={rootTasks}
         taskValues={taskDraft}
         projectValues={projectDraft}
@@ -1875,7 +1912,7 @@ export function KanbanView({
                       onKanbanRoute ? (
                         <KanbanQuickComposer
                           status={status}
-                          projects={projects}
+                          projects={projectOptions}
                           activeProjectId={query.projectId}
                           disabled={projects.length === 0}
                           resetToken={quickResetTokens[status] ?? 0}
