@@ -21,6 +21,8 @@ export interface KanbanColumnProps {
   readonly onRetry: () => void;
   /** Быстрый composer внизу колонки. */
   readonly quickComposer: ReactNode;
+  /** Composer открыт: отдельный путь в полную форму скрыт. */
+  readonly quickComposerOpen?: boolean;
   readonly children: ReactNode;
 }
 
@@ -42,6 +44,7 @@ export function KanbanColumn({
   onLoadMore,
   onRetry,
   quickComposer,
+  quickComposerOpen = false,
   children,
 }: KanbanColumnProps) {
   return (
@@ -132,7 +135,7 @@ export function KanbanColumn({
 
       <div className="mt-auto flex shrink-0 flex-col gap-1">
         {quickComposer}
-        {createVisible ? (
+        {createVisible && !quickComposerOpen ? (
           <button
             type="button"
             data-testid={`kanban-create-task-${status}`}

@@ -26,6 +26,13 @@ export interface KanbanQuickComposerProps {
   readonly disabled: boolean;
   readonly onCreate: (input: QuickCreateInput) => Promise<QuickCreateResult>;
   readonly onOpenDetails: (draft: QuickComposerDraft) => void;
+  /** Открытие/закрытие composer: колонка скрывает дублирующий путь в форму. */
+  readonly onOpenChange?: ((open: boolean) => void) | undefined;
+  /**
+   * Увеличивается после создания задачи из полной формы, открытой этим
+   * composer-ом. Сбрасывает originating quick draft, чтобы не создать дубль.
+   */
+  readonly resetToken?: number | undefined;
 }
 
 const actionButtonClass =
@@ -47,6 +54,8 @@ export function KanbanQuickComposer({
   disabled,
   onCreate,
   onOpenDetails,
+  onOpenChange,
+  resetToken = 0,
 }: KanbanQuickComposerProps) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -54,12 +63,41 @@ export function KanbanQuickComposer({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
   const guardRef = useRef(false);
 
+  // После создания из полной формы очищаем originating quick draft. Это
+  // корректировка state по изменившемуся prop во время render — React
+  // поддерживает такой паттерн и не требует setState в effect.
+  const [seenResetToken, setSeenResetToken] = useState(resetToken);
+
+  if (seenResetToken !== resetToken) {
+    setSeenResetToken(resetToken);
+    setTitle("");
+    setError(null);
+  }
+
+  // Autofocus при открытии и возврат фокуса в textarea после успешной
+  // отправки (включая submit мышью). Пока `submitting` true, textarea
+  // disabled, поэтому фокус ставится только после его снятия.
   useEffect(() => {
-    if (open) {
-      textareaRef.current?.focus();
+    if (!open || submitting) {
+      return;
     }
+
+    textareaRef.current?.focus();
+  }, [open, submitting]);
+
+  // Escape и кнопка закрытия возвращают фокус на кнопку открытия: сама
+  // кнопка появляется только после `open = false`, поэтому ждём commit.
+  useEffect(() => {
+    if (open || !restoreFocusRef.current) {
+      return;
+    }
+
+    restoreFocusRef.current = false;
+    openerRef.current?.focus();
   }, [open]);
 
   const selectedProjectId = activeProjectId.length > 0 ? activeProjectId : projectId;
@@ -77,12 +115,15 @@ export function KanbanQuickComposer({
     setProjectId(activeProjectId.length > 0 ? activeProjectId : "");
     setOpen(true);
     setError(null);
+    onOpenChange?.(true);
   };
 
   const closeComposer = (): void => {
+    restoreFocusRef.current = true;
     setOpen(false);
     setTitle("");
     setError(null);
+    onOpenChange?.(false);
   };
 
   const submit = async (): Promise<void> => {
@@ -108,8 +149,9 @@ export function KanbanQuickComposer({
       const result = await onCreate({ title: title.trim(), projectId: selectedProjectId });
 
       if (result.ok) {
+        // Фокус вернёт effect после снятия `submitting`: пока textarea
+        // disabled, синхронный focus() игнорируется.
         setTitle("");
-        textareaRef.current?.focus();
       } else {
         setError(result.message);
       }
@@ -124,6 +166,7 @@ export function KanbanQuickComposer({
   if (!open) {
     return (
       <button
+        ref={openerRef}
         type="button"
         data-testid={`kanban-quick-add-${status}`}
         aria-label={`Добавить карточку в колонку «${label}»`}

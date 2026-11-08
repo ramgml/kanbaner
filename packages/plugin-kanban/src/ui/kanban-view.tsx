@@ -280,8 +280,11 @@ export function KanbanView({
   const [dragOver, setDragOver] = useState<DropTarget | null>(null);
   const [activeStatus, setActiveStatus] = useState<TaskStatus>("backlog");
   const [scrollHints, setScrollHints] = useState({ left: false, right: false });
+  const [quickOpenStatus, setQuickOpenStatus] = useState<TaskStatus | null>(null);
+  const [quickResetTokens, setQuickResetTokens] = useState<Partial<Record<TaskStatus, number>>>({});
   const columnsRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<TaskStatus, HTMLButtonElement | null>>>({});
+  const quickOriginRef = useRef<TaskStatus | null>(null);
 
   const loadedCountsRef = useRef<Record<TaskStatus, number>>(emptyCounts(KANBAN_PAGE_SIZE));
   const filterKeyRef = useRef<string>("\u0000");
@@ -454,11 +457,15 @@ export function KanbanView({
   }, [invoke]);
 
   const closeCreateForm = (): void => {
+    // Cancel из полной формы сохраняет quick draft; связь с origin снимаем,
+    // чтобы последующее создание быстрым путём не очищало чужой черновик.
+    quickOriginRef.current = null;
     setFormMode(null);
     setFormError(null);
   };
 
   const openProjectForm = (): void => {
+    quickOriginRef.current = null;
     setFormError(null);
     setProjectDraft(createProjectFormValues());
     setFormOpenerSelector('[data-testid="kanban-create-project"]');
@@ -475,6 +482,7 @@ export function KanbanView({
       return;
     }
 
+    quickOriginRef.current = null;
     setFormError(null);
     setTaskDraft(
       createTaskFormValues(projects, {
@@ -486,6 +494,20 @@ export function KanbanView({
     setFormOpenerSelector(opener ?? '[data-testid="kanban-create-task"]');
     setFormSession((current) => current + 1);
     setFormMode("task");
+  };
+
+  const openTaskFormFromQuick = (status: TaskStatus, draft: QuickComposerDraft): void => {
+    if (projects.length === 0) {
+      return;
+    }
+
+    openTaskForm(status, `[data-testid="kanban-quick-details-${status}"]`, {
+      title: draft.title,
+      projectId: draft.projectId,
+    });
+    // openTaskForm сбрасывает origin для обычных путей; здесь помечаем, что
+    // успешное создание должно очистить originating quick draft.
+    quickOriginRef.current = status;
   };
 
   const beginSubmit = (): boolean => {
@@ -597,6 +619,19 @@ export function KanbanView({
       await revealCreatedTask(data.task);
       setFormMode(null);
       setFormError(null);
+
+      const quickOrigin = quickOriginRef.current;
+
+      quickOriginRef.current = null;
+
+      if (quickOrigin !== null) {
+        // Полная форма была открыта из quick composer: источник больше не
+        // должен хранить отправленный заголовок.
+        setQuickResetTokens((current) => ({
+          ...current,
+          [quickOrigin]: (current[quickOrigin] ?? 0) + 1,
+        }));
+      }
     } catch (commandError) {
       // Форма остаётся открытой и сохраняет введённые значения.
       setFormError(errorMessage(commandError));
@@ -1575,6 +1610,7 @@ export function KanbanView({
                 }}
                 createVisible={onKanbanRoute}
                 createDisabled={projects.length === 0}
+                quickComposerOpen={quickOpenStatus === status}
                 onLoadMore={() => {
                   loadMore(status);
                 }}
@@ -1588,12 +1624,19 @@ export function KanbanView({
                       projects={projects}
                       activeProjectId={query.projectId}
                       disabled={projects.length === 0}
+                      resetToken={quickResetTokens[status] ?? 0}
+                      onOpenChange={(open) => {
+                        setQuickOpenStatus((current) => {
+                          if (open) {
+                            return status;
+                          }
+
+                          return current === status ? null : current;
+                        });
+                      }}
                       onCreate={(input) => createQuickTask(status, input)}
                       onOpenDetails={(draft: QuickComposerDraft) => {
-                        openTaskForm(status, `[data-testid="kanban-quick-details-${status}"]`, {
-                          title: draft.title,
-                          projectId: draft.projectId,
-                        });
+                        openTaskFormFromQuick(status, draft);
                       }}
                     />
                   ) : null

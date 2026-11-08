@@ -852,6 +852,70 @@ describe("создание на канбане", () => {
     });
   });
 
+  it("передаёт quick draft в полную форму, сохраняет при отмене и очищает после создания", async () => {
+    const board: FakeBoard = {
+      projects: [makeProject("project-1")],
+      tasks: [],
+      nextProject: 2,
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-quick-add-todo")).toBeEnabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-1" });
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+
+    const quickInput = screen.getByTestId("kanban-quick-add-input-todo");
+
+    fireEvent.change(quickInput, { target: { value: "Быстрый черновик" } });
+
+    // При открытом composer остаётся один путь в полную форму.
+    expect(screen.queryByTestId("kanban-create-task-todo")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-details-todo")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("kanban-quick-details-todo"));
+
+    let form = taskForm();
+
+    expect(within(form).getByLabelText("Название", { exact: true })).toHaveValue(
+      "Быстрый черновик",
+    );
+    expect(within(form).getByLabelText("Проект")).toHaveValue("project-1");
+
+    // Cancel полной формы сохраняет originating quick draft.
+    fireEvent.click(within(form).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByTestId("task-form-create")).toBeNull();
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+    expect(quickInput).toHaveValue("Быстрый черновик");
+
+    fireEvent.click(screen.getByTestId("kanban-quick-details-todo"));
+
+    form = taskForm();
+    fireEvent.click(within(form).getByRole("button", { name: "Создать задачу" }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-form-create")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(quickInput).toHaveValue("");
+    });
+
+    expect(
+      within(screen.getByTestId("kanban-column-todo")).getByText("Быстрый черновик"),
+    ).toBeVisible();
+    expect(operations.counts.get("kanbaner.tasks.task.create")).toBe(1);
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+  });
+
   it("не отправляет project.create дважды", async () => {
     const board: FakeBoard = {
       projects: [makeProject("project-1")],

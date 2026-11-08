@@ -118,7 +118,7 @@ export function KanbanCard({
           onClick={() => {
             onOpen(task);
           }}
-          className="min-w-0 flex-1 rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="flex min-h-10 min-w-0 flex-1 items-center rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-7"
         >
           {task.title}
         </button>

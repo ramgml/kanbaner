@@ -117,7 +117,94 @@ describe("KanbanQuickComposer", () => {
     fireEvent.keyDown(input, { key: "Escape" });
 
     expect(screen.queryByTestId("kanban-quick-add-form-todo")).toBeNull();
-    expect(screen.getByTestId("kanban-quick-add-todo")).toBeInTheDocument();
+    const opener = screen.getByTestId("kanban-quick-add-todo");
+
+    expect(opener).toBeInTheDocument();
+    await waitFor(() => {
+      expect(opener).toHaveFocus();
+    });
+  });
+
+  it("возвращает фокус в textarea после submit мышью только при submitting=false", async () => {
+    const pending = deferred<QuickCreateResult>();
+    const onCreate = vi.fn(() => pending.promise);
+
+    render(
+      <KanbanQuickComposer
+        status="todo"
+        projects={[makeProject("project-1")]}
+        activeProjectId="project-1"
+        disabled={false}
+        onCreate={onCreate}
+        onOpenDetails={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+
+    const input = screen.getByTestId("kanban-quick-add-input-todo");
+
+    fireEvent.change(input, { target: { value: "Фокус после мыши" } });
+
+    const submit = screen.getByTestId("kanban-quick-add-submit-todo");
+
+    input.blur();
+    expect(input).not.toHaveFocus();
+
+    fireEvent.click(submit);
+
+    // Пока команда не завершилась, textarea disabled и фокус не ставится.
+    expect(input).toBeDisabled();
+    expect(input).not.toHaveFocus();
+
+    await act(async () => {
+      pending.resolve({ ok: true });
+      await pending.promise;
+    });
+
+    await waitFor(() => {
+      expect(input).toBeEnabled();
+      expect(input).toHaveValue("");
+      expect(input).toHaveFocus();
+    });
+  });
+
+  it("очищает originating draft по resetToken, оставаясь открытым", async () => {
+    const onCreate = vi.fn(async (): Promise<QuickCreateResult> => ({ ok: true }));
+
+    const { rerender } = render(
+      <KanbanQuickComposer
+        status="todo"
+        projects={[makeProject("project-1")]}
+        activeProjectId="project-1"
+        disabled={false}
+        resetToken={0}
+        onCreate={onCreate}
+        onOpenDetails={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
+
+    const input = screen.getByTestId("kanban-quick-add-input-todo");
+
+    fireEvent.change(input, { target: { value: "Черновик из формы" } });
+    expect(input).toHaveValue("Черновик из формы");
+
+    rerender(
+      <KanbanQuickComposer
+        status="todo"
+        projects={[makeProject("project-1")]}
+        activeProjectId="project-1"
+        disabled={false}
+        resetToken={1}
+        onCreate={onCreate}
+        onOpenDetails={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("kanban-quick-add-form-todo")).toBeInTheDocument();
+    expect(input).toHaveValue("");
   });
 
   it("в режиме «Все проекты» просит проект, не теряя заголовок", async () => {

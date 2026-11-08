@@ -531,6 +531,86 @@ describe("Trello-доска", () => {
     });
   });
 
+  it("показывает и скрывает scroll affordance по geometry и scroll/resize", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [makeTask("a")],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    const container = await screen.findByTestId("kanban-columns");
+
+    const scrollWidth = 1200;
+    let clientWidth = 800;
+    let scrollLeft = 0;
+
+    Object.defineProperty(container, "scrollWidth", {
+      configurable: true,
+      get: () => scrollWidth,
+    });
+    Object.defineProperty(container, "clientWidth", {
+      configurable: true,
+      get: () => clientWidth,
+    });
+    Object.defineProperty(container, "scrollLeft", {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value;
+      },
+    });
+
+    // Overflow есть: hint и fade видны.
+    act(() => {
+      fireEvent.scroll(container);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-scroll-hint")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("kanban-scroll-fade")).toBeInTheDocument();
+
+    // Правый край: подсказка и fade исчезают.
+    scrollLeft = scrollWidth - clientWidth;
+
+    act(() => {
+      fireEvent.scroll(container);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-scroll-hint")).toBeNull();
+    });
+    expect(screen.queryByTestId("kanban-scroll-fade")).toBeNull();
+
+    // Resize до отсутствия overflow: элементы остаются скрытыми.
+    scrollLeft = 0;
+    clientWidth = 1200;
+
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-scroll-hint")).toBeNull();
+    });
+
+    // Новый overflow после resize снова показывает affordance.
+    clientWidth = 700;
+
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-scroll-hint")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("kanban-scroll-fade")).toBeInTheDocument();
+    expect(scrollWidth).toBe(1200);
+  });
+
   it("сбрасывает фильтр кнопкой в пустом результате", async () => {
     const board: Board = {
       projects: [makeProject("project-1")],
