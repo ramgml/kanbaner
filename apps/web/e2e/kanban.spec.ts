@@ -1360,13 +1360,12 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
       // Уход на другой маршрут тоже скрывает уже открытый overlay.
-      const pluginsLink = page
-        .getByTestId("desktop-sidebar")
-        .getByRole("link", { name: "Плагины", exact: true });
+      const settingsLink = page.getByTestId("desktop-sidebar").getByTestId("settings-link-desktop");
 
-      await pluginsLink.click();
+      await settingsLink.click();
 
-      await expect(page).toHaveURL(/\/plugins$/u);
+      await expect(page).toHaveURL(/\/settings$/u);
+      await expect(page.getByRole("heading", { name: "Настройки", level: 1 })).toBeVisible();
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
 
@@ -2739,7 +2738,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("task-list-view")).toBeVisible();
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
 
-      await page.goto(`/plugins?task=${taskId}`);
+      await page.goto(`/settings/plugins?task=${taskId}`);
       await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
 
@@ -3096,7 +3095,7 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await expectCardInColumn(page, taskId, "todo");
 
-      await page.goto("/plugins");
+      await page.goto("/settings/plugins");
 
       const toggle = page.getByRole("switch", {
         name: "Включить плагин Kanbaner Projects",
@@ -3115,7 +3114,7 @@ test.describe("канбан в production shell", () => {
       await page.goto("/view/tasks");
       await expect(page.getByTestId("plugin-view-empty")).toBeVisible();
 
-      await page.goto("/plugins");
+      await page.goto("/settings/plugins");
       const restoredToggle = page.getByRole("switch", {
         name: "Включить плагин Kanbaner Projects",
       });

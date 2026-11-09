@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 import { UiSlot } from "../../components/shell/ui-slot";
+import { SETTINGS_PLUGINS_HREF } from "../../components/shell/nav-items";
 
 export default function SettingsPage() {
   return (
@@ -38,7 +39,7 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           <Button asChild variant="outline" className="w-full sm:w-auto">
-            <Link href="/plugins">Открыть plugin manager</Link>
+            <Link href={SETTINGS_PLUGINS_HREF}>Открыть plugin manager</Link>
           </Button>
         </CardContent>
       </Card>

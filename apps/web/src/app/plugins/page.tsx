@@ -1,10 +1,11 @@
-import { PluginManager } from "../../components/plugins/plugin-manager";
-import { getPluginManagerState } from "../../server/plugin-service";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
+import { SETTINGS_PLUGINS_HREF } from "../../components/shell/nav-items";
 
-export default async function PluginsPage() {
-  const state = await getPluginManagerState();
-
-  return <PluginManager initialState={state} />;
+/**
+ * Старый адрес plugin manager. Управление плагинами перенесено в настройки,
+ * поэтому `/plugins` остаётся совместимым входом через redirect.
+ */
+export default function PluginsPage() {
+  redirect(SETTINGS_PLUGINS_HREF);
 }
