@@ -621,12 +621,24 @@ test.describe("список задач в production shell", () => {
       await expect(page.getByTestId("project-board-title")).toHaveText(projectTitle);
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
-      await page.getByTestId("project-rename-button").click();
+      const renameOpener = page.getByTestId("project-rename-button");
+
+      await renameOpener.click();
 
       const dialog = page.getByTestId("project-rename-dialog");
 
       await expect(dialog).toBeVisible();
       await expect(page.getByTestId("project-rename-input")).toHaveValue(projectTitle);
+
+      // Escape закрывает только rename: выбранная задача и task= остаются.
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+      expect(new URL(page.url()).searchParams.get("task")).toBe(taskId);
+      await expect(renameOpener).toBeFocused();
+
+      await renameOpener.click();
+      await expect(dialog).toBeVisible();
       await page.getByTestId("project-rename-input").fill(renamedTitle);
       await page.getByTestId("project-rename-submit").click();
 

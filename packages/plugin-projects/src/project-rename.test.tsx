@@ -235,11 +235,22 @@ describe("Переименование проекта", () => {
     expect(window.location.search).toBe("?project=project-1");
   });
 
-  it("показывает конфликт версии, сохраняет ввод и повторяет с новой версией", async () => {
+  it("показывает конфликт версии, читает снапшот и повторяет с новой версией", async () => {
     let conflict = true;
     const project = makeProject("project-1", "Релиз");
     const expectedVersions: number[] = [];
+    let listCalls = 0;
     const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        listCalls += 1;
+
+        return ok({
+          items: [{ ...project, title: "Чужое название", version: 2 }],
+          total: 1,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
       if (operationId !== "kanbaner.tasks.project.update") {
         return ok(null);
       }
@@ -266,7 +277,7 @@ describe("Переименование проекта", () => {
       );
     };
 
-    const { rerender } = render(<ProjectRenameButton invoke={invoke} project={project} />);
+    render(<ProjectRenameButton invoke={invoke} project={project} />);
 
     fireEvent.click(screen.getByTestId("project-rename-button"));
     fireEvent.change(screen.getByTestId("project-rename-input"), {
@@ -276,14 +287,105 @@ describe("Переименование проекта", () => {
 
     await screen.findByTestId("project-rename-error");
 
+    expect(listCalls).toBe(1);
     expect(screen.getByTestId("project-rename-error")).toHaveTextContent(
       "Проект уже изменён в другом месте",
     );
     expect(screen.getByTestId("project-rename-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("project-rename-input")).toHaveValue("Новое название");
 
-    // Проекты перечитаны: повторная попытка обязана взять новую версию.
-    rerender(<ProjectRenameButton invoke={invoke} project={{ ...project, version: 2 }} />);
+    // Повторная попытка использует версию из project.list, а не старый prop.
+    fireEvent.submit(screen.getByTestId("project-rename-form"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-rename-dialog")).toBeNull();
+    });
+    expect(expectedVersions).toEqual([1, 2]);
+  });
+
+  it("не отправляет команду до завершения refresh project.list и сохраняет фокус", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const expectedVersions: number[] = [];
+    let listCalls = 0;
+    let updateCalls = 0;
+    let resolveList!: (value: UiOperationResult) => void;
+    const listResult = new Promise<UiOperationResult>((resolve) => {
+      resolveList = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        listCalls += 1;
+
+        return listResult;
+      }
+
+      if (operationId !== "kanbaner.tasks.project.update") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+
+      updateCalls += 1;
+      expectedVersions.push(Number(values.expectedVersion));
+
+      if (updateCalls === 1) {
+        return {
+          ok: false,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "Версия проекта устарела",
+            retryable: false,
+          },
+        };
+      }
+
+      return ok(
+        mutation({ ...project, title: String(values.title), version: 3 }) as unknown as JsonValue,
+      );
+    };
+
+    render(<ProjectRenameButton invoke={invoke} project={project} />);
+
+    fireEvent.click(screen.getByTestId("project-rename-button"));
+
+    const input = screen.getByTestId("project-rename-input");
+
+    fireEvent.change(input, { target: { value: "Новое название" } });
+    fireEvent.submit(screen.getByTestId("project-rename-form"));
+
+    await waitFor(() => {
+      expect(listCalls).toBe(1);
+    });
+
+    // Refresh ещё идёт: нет преждевременного сообщения, команда не уходит.
+    expect(updateCalls).toBe(1);
+    expect(screen.queryByTestId("project-rename-error")).toBeNull();
+    expect(screen.getByTestId("project-rename-submit")).toBeDisabled();
+
+    fireEvent.submit(screen.getByTestId("project-rename-form"));
+    expect(updateCalls).toBe(1);
+
+    await act(async () => {
+      resolveList(
+        ok({
+          items: [{ ...project, title: "Чужое название", version: 2 }],
+          total: 1,
+          nextOffset: null,
+        } as unknown as JsonValue),
+      );
+      await listResult;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-rename-error")).toHaveTextContent(
+        "Проект уже изменён в другом месте",
+      );
+    });
+    expect(input).toHaveValue("Новое название");
+    expect(screen.getByTestId("project-rename-submit")).toBeEnabled();
+    await waitFor(() => {
+      expect(input).toHaveFocus();
+    });
 
     fireEvent.submit(screen.getByTestId("project-rename-form"));
 
@@ -291,6 +393,53 @@ describe("Переименование проекта", () => {
       expect(screen.queryByTestId("project-rename-dialog")).toBeNull();
     });
     expect(expectedVersions).toEqual([1, 2]);
+  });
+
+  it("отдельно сообщает об ошибке refresh и не выдаёт её за успешное чтение", async () => {
+    let updateCalls = 0;
+    const project = makeProject("project-1", "Релиз");
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return {
+          ok: false,
+          error: { code: "INTERNAL", message: "Список недоступен", retryable: true },
+        };
+      }
+
+      if (operationId === "kanbaner.tasks.project.update") {
+        updateCalls += 1;
+
+        return {
+          ok: false,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "Версия проекта устарела",
+            retryable: false,
+          },
+        };
+      }
+
+      return ok(null);
+    };
+
+    render(<ProjectRenameButton invoke={invoke} project={project} />);
+
+    fireEvent.click(screen.getByTestId("project-rename-button"));
+    fireEvent.change(screen.getByTestId("project-rename-input"), {
+      target: { value: "Новое название" },
+    });
+    fireEvent.submit(screen.getByTestId("project-rename-form"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-rename-error")).toHaveTextContent(
+        "Не удалось обновить версию проекта",
+      );
+    });
+    expect(screen.getByTestId("project-rename-error")).not.toHaveTextContent("Проект уже изменён");
+    expect(screen.getByTestId("project-rename-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("project-rename-input")).toHaveValue("Новое название");
+    expect(screen.getByTestId("project-rename-submit")).toBeEnabled();
+    expect(updateCalls).toBe(1);
   });
 
   it("защищает от двойной отправки одним запросом", async () => {

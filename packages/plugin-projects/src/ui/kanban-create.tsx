@@ -69,9 +69,13 @@ export function KanbanCreatePanel({
     }
 
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        onCancel();
+      // Вложенный modal уже закрыл себя по Escape и вызвал preventDefault.
+      // Иначе Escape поверх переименования сбрасывал бы черновик создания.
+      if (event.defaultPrevented || event.key !== "Escape") {
+        return;
       }
+
+      onCancel();
     };
 
     window.addEventListener("keydown", onKeyDown);

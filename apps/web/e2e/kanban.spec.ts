@@ -1046,6 +1046,48 @@ test.describe("канбан в production shell", () => {
       );
     });
 
+    test("Escape в переименовании не закрывает inline-создание с черновиком", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект переименования с черновиком");
+      const draftTitle = uniqueTitle("Черновик задачи при переименовании");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId("kanban-create-task").click();
+
+      const createPanel = page.getByTestId("kanban-create-panel");
+      const draftInput = page.getByTestId("kanban-create-input");
+
+      await expect(createPanel).toBeVisible();
+      await draftInput.fill(draftTitle);
+
+      const before = new URL(page.url());
+
+      await page.getByTestId("project-rename-button").click();
+
+      const renameDialog = page.getByTestId("project-rename-dialog");
+
+      await expect(renameDialog).toBeVisible();
+      await page.keyboard.press("Escape");
+
+      // Закрылся только rename; inline create и черновик не тронуты.
+      await expect(renameDialog).toHaveCount(0);
+      await expect(createPanel).toBeVisible();
+      await expect(draftInput).toHaveValue(draftTitle);
+      expect(new URL(page.url()).search).toBe(before.search);
+      await expect(page.getByTestId("project-rename-button")).toBeFocused();
+
+      // Повторный Escape уже закрывает inline create как раньше.
+      await page.keyboard.press("Escape");
+      await expect(createPanel).toHaveCount(0);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+    });
+
     test("не перезаписывает переименование из второй вкладки и сохраняет ввод", async ({
       page,
       context,

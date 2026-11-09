@@ -6,18 +6,64 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   MAX_TITLE_LENGTH,
   TASKS_COMMAND_IDS,
+  TASKS_QUERY_IDS,
   type Project,
+  type ProjectListOutput,
   type ProjectMutationOutput,
 } from "@kanbaner/plugin-tasks/contract";
 import { ModalDialog, type UiOperationInvoker } from "@kanbaner/task-ui";
 
 import {
   PROJECT_VERSION_CONFLICT_MESSAGE,
+  PROJECT_VERSION_REFRESH_FAILED_MESSAGE,
   errorMessage,
   invokeJson,
   isVersionConflict,
 } from "./operations.ts";
 import { bumpProjectsRevision } from "./workspace.ts";
+
+/** Те же границы страниц, что и у `useProjectsData`. */
+const PROJECT_PAGE_SIZE = 200;
+const MAX_PROJECT_PAGES = 100;
+
+/**
+ * Читает актуальный снапшот проекта через публичный `project.list`.
+ *
+ * После `VERSION_CONFLICT` нельзя показывать «данные перечитаны» и разрешать
+ * повторную отправку, пока не получена свежая версия. Отдельный `project.get`
+ * здесь не нужен: list уже используется остальными project selectors.
+ */
+async function loadCurrentProject(
+  invoke: UiOperationInvoker,
+  projectId: string,
+): Promise<Project | null> {
+  let offset = 0;
+
+  for (let page = 0; page < MAX_PROJECT_PAGES; page += 1) {
+    const data = await invokeJson<ProjectListOutput>(invoke, TASKS_QUERY_IDS.projectList, {
+      limit: PROJECT_PAGE_SIZE,
+      offset,
+    } as unknown as JsonValue);
+    const found = data.items.find((candidate) => candidate.id === projectId);
+
+    if (found !== undefined) {
+      return found;
+    }
+
+    if (
+      data.nextOffset === null ||
+      data.items.length === 0 ||
+      data.nextOffset <= offset ||
+      data.nextOffset >= data.total
+    ) {
+      break;
+    }
+
+    offset = data.nextOffset;
+  }
+
+  return null;
+}
 
 export interface ProjectRenameButtonProps {
   readonly invoke: UiOperationInvoker;
@@ -43,9 +89,17 @@ export function ProjectRenameButton({ invoke, project, onRenamed }: ProjectRenam
   const [error, setError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(0);
   const guardRef = useRef(false);
+  const versionRef = useRef(project.version);
+
+  useEffect(() => {
+    versionRef.current = project.version;
+  }, [project.id, project.version]);
 
   const openDialog = (): void => {
+    versionRef.current = project.version;
     setTitle(project.title);
     setError(null);
     setValidationError(null);
@@ -89,7 +143,7 @@ export function ProjectRenameButton({ invoke, project, onRenamed }: ProjectRenam
     try {
       await invokeJson<ProjectMutationOutput>(invoke, TASKS_COMMAND_IDS.projectUpdate, {
         id: project.id,
-        expectedVersion: project.version,
+        expectedVersion: versionRef.current,
         title: value,
       } as unknown as JsonValue);
 
@@ -98,12 +152,31 @@ export function ProjectRenameButton({ invoke, project, onRenamed }: ProjectRenam
       setOpen(false);
     } catch (commandError) {
       if (isVersionConflict(commandError)) {
-        // Перечитываем проекты, чтобы следующая попытка использовала
-        // актуальную версию, но введённое пользователем название сохраняем.
-        bumpProjectsRevision();
-        setError(PROJECT_VERSION_CONFLICT_MESSAGE);
+        // Отправка остаётся заблокированной guard-ом, пока refresh не вернёт
+        // свежую версию. Иначе повторный submit снова получил бы конфликт.
+        setSubmitting(false);
+        setRefreshing(true);
+
+        try {
+          const fresh = await loadCurrentProject(invoke, project.id);
+
+          if (fresh === null) {
+            setError(PROJECT_VERSION_REFRESH_FAILED_MESSAGE);
+          } else {
+            versionRef.current = fresh.version;
+            bumpProjectsRevision();
+            setError(PROJECT_VERSION_CONFLICT_MESSAGE);
+          }
+        } catch {
+          // Ошибка refresh не должна выглядеть как успешное перечитывание.
+          setError(PROJECT_VERSION_REFRESH_FAILED_MESSAGE);
+        } finally {
+          setRefreshing(false);
+          setFocusRequest((current) => current + 1);
+        }
       } else {
         setError(errorMessage(commandError));
+        setFocusRequest((current) => current + 1);
       }
     } finally {
       guardRef.current = false;
@@ -133,6 +206,8 @@ export function ProjectRenameButton({ invoke, project, onRenamed }: ProjectRenam
           title={title}
           error={validationError ?? error}
           submitting={submitting}
+          refreshing={refreshing}
+          focusRequest={focusRequest}
           onTitleChange={(next) => {
             setTitle(next);
             setValidationError(null);
@@ -151,6 +226,9 @@ interface ProjectRenameFormProps {
   readonly title: string;
   readonly error: string | null;
   readonly submitting: boolean;
+  /** Команда уже завершилась, но ожидается свежая версия проекта. */
+  readonly refreshing: boolean;
+  readonly focusRequest: number;
   readonly onTitleChange: (title: string) => void;
   readonly onSubmit: () => void;
   readonly onCancel: () => void;
@@ -160,11 +238,14 @@ function ProjectRenameForm({
   title,
   error,
   submitting,
+  refreshing,
+  focusRequest,
   onTitleChange,
   onSubmit,
   onCancel,
 }: ProjectRenameFormProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const busy = submitting || refreshing;
 
   useEffect(() => {
     const input = inputRef.current;
@@ -176,6 +257,16 @@ function ProjectRenameForm({
     input.focus();
     input.select();
   }, []);
+
+  useEffect(() => {
+    if (focusRequest === 0) {
+      return;
+    }
+
+    // Ввод не теряется при ошибке: возвращаем фокус без повторного select,
+    // чтобы пользователь мог продолжить редактирование с того же места.
+    inputRef.current?.focus();
+  }, [focusRequest]);
 
   return (
     <form
@@ -228,7 +319,7 @@ function ProjectRenameForm({
           type="button"
           data-testid="project-rename-cancel"
           onClick={onCancel}
-          disabled={submitting}
+          disabled={busy}
           className="rounded-md border bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
         >
           Отмена
@@ -236,11 +327,11 @@ function ProjectRenameForm({
         <button
           type="submit"
           data-testid="project-rename-submit"
-          disabled={submitting}
-          aria-busy={submitting}
+          disabled={busy}
+          aria-busy={busy}
           className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
         >
-          {submitting ? "Сохранение…" : "Сохранить"}
+          {submitting ? "Сохранение…" : refreshing ? "Обновление…" : "Сохранить"}
         </button>
       </div>
     </form>
