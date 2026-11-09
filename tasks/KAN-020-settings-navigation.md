@@ -1,14 +1,13 @@
 ---
 id: KAN-020
 title: Настройки вне рабочей навигации
-status: ready
+status: in_progress
 stage: 3
 priority: medium
-owner: unassigned
-blocked_by:
-  - KAN-019
-branch: null
-worktree: null
+owner: worker-kan-020
+blocked_by: []
+branch: feat/kan-020-settings-navigation
+worktree: .worktrees/kan-020-settings-navigation
 created: 2026-11-09
 updated: 2026-11-09
 specs:
