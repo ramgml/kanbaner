@@ -1,7 +1,7 @@
 ---
 id: KAN-020
 title: Настройки вне рабочей навигации
-status: in_progress
+status: done
 stage: 3
 priority: medium
 owner: worker-kan-020
@@ -34,15 +34,15 @@ plugin manager в настройки, убрать редко используе
 
 ## Объём работ
 
-- [ ] Убрать «Плагины» и «Настройки» из основной sidebar.
-- [ ] Добавить компактную кнопку настроек внизу sidebar и в мобильную
+- [x] Убрать «Плагины» и «Настройки» из основной sidebar.
+- [x] Добавить компактную кнопку настроек внизу sidebar и в мобильную
   навигацию.
-- [ ] Добавить `/settings/plugins` с текущим plugin manager без изменения его
+- [x] Добавить `/settings/plugins` с текущим plugin manager без изменения его
   поведения.
-- [ ] Сделать redirect `/plugins` → `/settings/plugins`.
-- [ ] Обновить safe mode links и связанные тесты.
-- [ ] Проверить клавиатуру, 360 px, enable/disable плагинов и прежние E2E.
-- [ ] Обновить документацию и отчёт `tasks/reports/KAN-020.md`.
+- [x] Сделать redirect `/plugins` → `/settings/plugins`.
+- [x] Обновить safe mode links и связанные тесты.
+- [x] Проверить клавиатуру, 360 px, enable/disable плагинов и прежние E2E.
+- [x] Обновить документацию и отчёт `tasks/reports/KAN-020.md`.
 
 ## Владение файлами
 
@@ -64,17 +64,17 @@ plugin manager в настройки, убрать редко используе
 
 ## Критерии приёмки
 
-- [ ] Sidebar не содержит редкие пункты администрирования.
-- [ ] Настройки доступны одной компактной кнопкой на всех viewport.
-- [ ] `/settings/plugins` работает, `/plugins` перенаправляет.
-- [ ] Safe mode ведёт на `/settings/plugins`.
-- [ ] Все проверки зелёные.
+- [x] Sidebar не содержит редкие пункты администрирования.
+- [x] Настройки доступны одной компактной кнопкой на всех viewport.
+- [x] `/settings/plugins` работает, `/plugins` перенаправляет.
+- [x] Safe mode ведёт на `/settings/plugins`.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Typecheck, линтер, component/integration tests.
-- [ ] `pnpm check:imports`, полный `pnpm check`.
-- [ ] Все Playwright E2E, deferred SIGTERM.
+- [x] Typecheck, линтер, component/integration tests.
+- [x] `pnpm check:imports`, полный `pnpm check`.
+- [x] Все Playwright E2E, deferred SIGTERM.
 
 ## Риски
 
@@ -83,13 +83,20 @@ plugin manager в настройки, убрать редко используе
 
 ## Журнал
 
+- 2026-11-09 — KAN-020 влита в `dev` merge-коммитом
+  `0e7a040d0c9ae84a33f24be234b5043841219bb2`; strict install, check:imports,
+  полный check, 64 E2E и deferred SIGTERM зелёные на ветке и `dev`, ревью
+  разрешило интеграцию. Feature-ветка и worktree удалены, задача done.
 - 2026-11-09 — Задача создана по предложению пользователя упростить sidebar.
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `0e7a040d0c9ae84a33f24be234b5043841219bb2`; feature-коммит
+  `9cc1a48`.
+- Ветка: `feat/kan-020-settings-navigation` влита в `dev`; ветка и worktree
+  удалены.
+- Проверки: strict frozen install, `check:imports`, полный `pnpm check`,
+  Playwright и deferred SIGTERM на ветке и `dev`; 91 workspace files / 1181
+  tests, 64 production E2E.
+- Остаточные риски: `/plugins` использует временный redirect 307; Windows и
+  другие браузеры не проверялись.
