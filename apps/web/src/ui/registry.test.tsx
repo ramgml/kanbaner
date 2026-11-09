@@ -120,6 +120,45 @@ describe("клиентский реестр UI-вкладов", () => {
     expect(registry.resolveRoute("/view/other")).toBeNull();
   });
 
+  it("не теряет query навигационного route, хотя ключ маршрута нормализован", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.register(
+      "example.test-ui",
+      contribution({
+        id: "navigation",
+        kind: "navigation",
+        slot: "app.sidebar",
+        title: "Проекты",
+        route: "/view/projects?entry=1",
+      }),
+      render,
+    );
+
+    // Shell строит href из contribution.route: служебный query обязан дойти.
+    expect(registry.list("app.sidebar")[0]?.contribution.route).toBe("/view/projects?entry=1");
+    // Навигация не занимает маршрут, поэтому resolveRoute остаётся пустым.
+    expect(registry.resolveRoute("/view/projects")).toBeNull();
+  });
+
+  it("сохраняет query view-route вклада, а resolveRoute ищет по нормализованному пути", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.register(
+      "example.test-ui",
+      contribution({
+        id: "view-a",
+        kind: "view",
+        route: "/view/example/?tab=1#section",
+      }),
+      render,
+    );
+
+    expect(registry.list("app.main")[0]?.contribution.route).toBe("/view/example/?tab=1#section");
+    expect(registry.resolveRoute("/view/example/")?.contribution.id).toBe("view-a");
+    expect(registry.resolveRoute("/view/example?tab=2")?.contribution.id).toBe("view-a");
+  });
+
   it("валидирует Plugin ID, слот, вид, приоритет и навигацию", () => {
     const registry = createUiContributionRegistry();
 
@@ -356,6 +395,23 @@ describe("синхронизация серверных metadata и привяз
     expect(registry.size()).toBe(1);
     expect(registry.list("app.main")).toHaveLength(1);
     expect(registry.resolveRoute("/view/tasks")?.contribution.id).toBe("kanbaner.task-list.view");
+  });
+
+  it("не теряет query route вклада при повторном syncPlugin", () => {
+    const registry = createUiContributionRegistry();
+    const metadata = contribution({
+      id: "view-query",
+      kind: "view",
+      route: "/view/example?tab=1",
+    });
+    const registration = { metadata, render: genericRender };
+
+    registry.syncPlugin("kanbaner.task-list", [registration], genericRender);
+    registry.syncPlugin("kanbaner.task-list", [registration], genericRender);
+
+    expect(registry.list("app.main")[0]?.contribution.route).toBe("/view/example?tab=1");
+    expect(registry.resolveRoute("/view/example/")?.contribution.id).toBe("view-query");
+    expect(registry.size()).toBe(1);
   });
 
   it("привязывает реальный рендерер после metadata и заменяет его повтором", () => {

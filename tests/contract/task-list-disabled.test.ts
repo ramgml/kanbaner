@@ -14,9 +14,9 @@ import { startFixtureHarness, type FixtureHarness } from "./fixture-harness.ts";
 /**
  * В MVP ещё нет HTTP-транспорта, поэтому «публичные operations/API» здесь —
  * это те же команды и запросы, которые выполняет UI через composition root.
- * Отключение `kanbaner.task-list` не должно затрагивать домен `kanbaner.tasks`.
+ * Отключение `kanbaner.projects` не должно затрагивать домен `kanbaner.tasks`.
  */
-const TASK_LIST_PLUGIN_ID = "kanbaner.task-list";
+const TASK_LIST_PLUGIN_ID = "kanbaner.projects";
 const TASKS_PLUGIN_ID = "kanbaner.tasks";
 
 const harnesses: FixtureHarness[] = [];
@@ -45,7 +45,7 @@ async function execute<T>(
   return unwrap<T>(await harness.composition.executeUiOperation(operationId, input as never));
 }
 
-describe("kanbaner.task-list отключён", () => {
+describe("kanbaner.projects отключён", () => {
   it("не активируется и не публикует UI-вклады", async () => {
     const harness = await startFixtureHarness({ disabledPlugins: [TASK_LIST_PLUGIN_ID] });
 
@@ -74,11 +74,11 @@ describe("kanbaner.task-list отключён", () => {
     harnesses.push(harness);
 
     const project = await execute<ProjectMutationOutput>(harness, TASKS_COMMAND_IDS.projectCreate, {
-      title: "Проект без списка",
+      title: "Проект без UI",
     });
     const created = await execute<TaskMutationOutput>(harness, TASKS_COMMAND_IDS.taskCreate, {
       projectId: project.project.id,
-      title: "Задача без списка",
+      title: "Задача без UI",
       status: "todo",
       priority: "high",
       dueAt: "2030-01-10T00:00:00.000Z",

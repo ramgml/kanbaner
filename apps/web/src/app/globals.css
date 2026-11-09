@@ -6,8 +6,7 @@
    раскладки (`md:block`, `xl:hidden` и т. д.) остаются в prebuilt dist, но
    не попадают в CSS. */
 @source "../../../../packages/task-ui/src";
-@source "../../../../packages/plugin-task-list/src";
-@source "../../../../packages/plugin-kanban/src";
+@source "../../../../packages/plugin-projects/src";
 
 @custom-variant dark (&:is(.dark *));
 

@@ -14,9 +14,13 @@ export const CORE_NAV_ITEMS: readonly ShellNavItem[] = [
 ];
 
 export function isActivePath(pathname: string, href: string): boolean {
-  if (href === "/") {
+  // Навигационный вклад может вести на тот же маршрут с query
+  // (`/view/projects?entry=1`): активность определяется только pathname.
+  const path = href.split("#")[0]?.split("?")[0] ?? href;
+
+  if (path === "/") {
     return pathname === "/";
   }
 
-  return pathname === href || pathname.startsWith(`${href}/`);
+  return pathname === path || pathname.startsWith(`${path}/`);
 }

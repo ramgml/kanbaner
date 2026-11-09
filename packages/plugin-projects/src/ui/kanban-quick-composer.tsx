@@ -1,0 +1,100 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+import type { TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import { taskStatusLabel } from "@kanbaner/task-ui";
+
+import { TitleComposer, type TitleCreateResult } from "./title-composer.tsx";
+
+export type QuickCreateResult = TitleCreateResult;
+
+export interface KanbanQuickComposerProps {
+  readonly status: TaskStatus;
+  readonly projectId: string;
+  readonly disabled: boolean;
+  readonly onCreate: (title: string) => Promise<QuickCreateResult>;
+  /** Открытие/закрытие composer: колонка скрывает дублирующий путь в форму. */
+  readonly onOpenChange?: ((open: boolean) => void) | undefined;
+  /** Увеличивается после создания из другой формы: очищает заголовок. */
+  readonly resetToken?: number | undefined;
+}
+
+/**
+ * Trello-like быстрый composer внизу колонки.
+ *
+ * Создание требует только название. Проект берётся из текущей доски, статус —
+ * из колонки, позицию определяет доменный append. Полная форма доступна
+ * только для редактирования уже открытой карточки.
+ */
+export function KanbanQuickComposer({
+  status,
+  projectId,
+  disabled,
+  onCreate,
+  onOpenChange,
+  resetToken = 0,
+}: KanbanQuickComposerProps) {
+  const [open, setOpen] = useState(false);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
+
+  useEffect(() => {
+    if (open || !restoreFocusRef.current) {
+      return;
+    }
+
+    restoreFocusRef.current = false;
+    openerRef.current?.focus();
+  }, [open]);
+
+  const openComposer = (): void => {
+    if (disabled) {
+      return;
+    }
+
+    setOpen(true);
+    onOpenChange?.(true);
+  };
+
+  const closeComposer = (): void => {
+    restoreFocusRef.current = true;
+    setOpen(false);
+    onOpenChange?.(false);
+  };
+
+  const label = taskStatusLabel(status);
+
+  if (!open) {
+    return (
+      <button
+        ref={openerRef}
+        type="button"
+        data-testid={`kanban-quick-add-${status}`}
+        aria-label={`Добавить карточку в колонку «${label}»`}
+        title={disabled ? "Сначала создайте проект" : `Добавить карточку в колонку «${label}»`}
+        disabled={disabled}
+        onClick={openComposer}
+        className={`inline-flex min-h-10 items-center justify-start rounded-md border border-transparent bg-transparent px-3 text-left text-sm font-medium text-muted-foreground hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8`}
+      >
+        <span aria-hidden="true" className="mr-1 text-base leading-none">
+          +
+        </span>
+        Добавить карточку
+      </button>
+    );
+  }
+
+  return (
+    <TitleComposer
+      status={status}
+      projectId={projectId}
+      disabled={disabled}
+      onCreate={onCreate}
+      onCancel={closeComposer}
+      keepOpen
+      testIdPrefix={`kanban-quick-add-${status}`}
+      resetToken={resetToken}
+    />
+  );
+}

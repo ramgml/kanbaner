@@ -37,13 +37,23 @@ describe("composition встроенных UI-плагинов", () => {
     });
 
     const route = registry.resolveRoute("/view/tasks");
+    const tasksContribution = plugin.contributions.find(
+      (entry) => entry.metadata.id === "kanbaner.projects.view.tasks",
+    );
 
-    expect(route?.contribution.id).toBe("kanbaner.task-list.view");
-    expect(route?.render).toBe(plugin.contributions[0]?.render);
+    expect(route?.contribution.id).toBe("kanbaner.projects.view.tasks");
+    expect(route?.render).toBe(tasksContribution?.render);
+    expect(registry.resolveRoute("/view/kanban")?.contribution.id).toBe(
+      "kanbaner.projects.view.kanban",
+    );
+    expect(registry.resolveRoute("/view/projects")?.contribution.id).toBe(
+      "kanbaner.projects.view.overview",
+    );
 
     expect(registry.size()).toBe(plugin.contributions.length);
-    expect(registry.list("app.main")).toHaveLength(1);
+    expect(registry.list("app.main")).toHaveLength(3);
+    expect(registry.list("app.sidebar")).toHaveLength(2);
     expect(registry.list("app.details")).toHaveLength(1);
-    expect(registry.list("app.overlays")).toHaveLength(1);
+    expect(registry.list("app.overlays")).toHaveLength(3);
   });
 });
