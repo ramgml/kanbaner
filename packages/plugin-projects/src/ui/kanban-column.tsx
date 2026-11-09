@@ -53,7 +53,10 @@ export function KanbanColumn({
         boxShadow: dragOver ? "0 0 0 2px var(--ring)" : "none",
       }}
     >
-      <header className="flex shrink-0 items-center justify-between gap-2 px-0.5">
+      <header
+        data-kanban-drop-zone="top"
+        className="flex shrink-0 items-center justify-between gap-2 px-0.5"
+      >
         <h2
           id={`kanban-column-title-${status}`}
           className="truncate text-sm font-semibold tracking-tight"
@@ -73,7 +76,11 @@ export function KanbanColumn({
         Composer идёт сразу под заголовком и вне прокручиваемого списка:
         кнопка создания остаётся на месте при любой длине колонки.
       */}
-      <div data-testid={`kanban-quick-composer-${status}`} className="flex shrink-0 flex-col gap-1">
+      <div
+        data-testid={`kanban-quick-composer-${status}`}
+        data-kanban-drop-zone="top"
+        className="flex shrink-0 flex-col gap-1"
+      >
         {quickComposer}
       </div>
 

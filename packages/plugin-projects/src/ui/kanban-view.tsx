@@ -730,10 +730,18 @@ export function KanbanView({
     update();
     window.addEventListener("resize", update);
 
+    let observer: ResizeObserver | null = null;
+
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(container.parentElement ?? container);
+    }
+
     return () => {
       window.removeEventListener("resize", update);
+      observer?.disconnect();
     };
-  }, [effectiveProjectId, projectsLoading, renderedColumns, summary, summaryLoading]);
+  }, [effectiveProjectId, formMode, projectsLoading, renderedColumns, summary, summaryLoading]);
 
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, status: TaskStatus): void => {
     const index = KANBAN_STATUSES.indexOf(status);
@@ -1060,21 +1068,25 @@ export function KanbanView({
     const card = element.closest<HTMLElement>("[data-card-id]");
     const cardId = card?.getAttribute("data-card-id") ?? null;
     const columnElement = element.closest<HTMLElement>("[data-kanban-column]");
+    const inTopZone = element.closest<HTMLElement>('[data-kanban-drop-zone="top"]') !== null;
 
-    if (card === null || cardId === null) {
-      // Composer и пустая зона над первой карточкой должны вставлять задачу
-      // перед ней, а не в конец колонки. Append остаётся только ниже карточек.
+    if (inTopZone) {
+      // Верхняя зона задана явным атрибутом composer/заголовка, а не
+      // координатой первой карточки: при scrollTop>0 её top может быть
+      // отрицательным, но drop всё равно должен вставлять перед первой.
       const firstCard = columnElement?.querySelector<HTMLElement>("[data-card-id]") ?? null;
       const firstId = firstCard?.getAttribute("data-card-id") ?? null;
 
-      if (firstCard !== null && firstId !== null) {
-        const firstRect = firstCard.getBoundingClientRect();
-
-        if (clientY < firstRect.top) {
-          return { status, beforeId: firstId };
-        }
+      if (firstId === null) {
+        return { status, beforeId: null };
       }
 
+      // Первую карточку нельзя вставить перед ней же: это no-op, не append.
+      return firstId === draggedId ? null : { status, beforeId: firstId };
+    }
+
+    if (card === null || cardId === null) {
+      // Ниже карточек сохраняем append.
       return { status, beforeId: null };
     }
 
@@ -1092,7 +1104,9 @@ export function KanbanView({
     const cards = [...(columnElement?.querySelectorAll<HTMLElement>("[data-card-id]") ?? [])];
     const next = cards[cards.indexOf(card) + 1]?.getAttribute("data-card-id") ?? null;
 
-    return { status, beforeId: next };
+    // Следующая карточка может быть самой перемещаемой: вставка перед собой
+    // бессмысленна и не должна превращаться в append.
+    return next === draggedId ? null : { status, beforeId: next };
   };
 
   const startDrag = (task: Task, event: ReactPointerEvent<HTMLElement>): void => {
@@ -1128,7 +1142,7 @@ export function KanbanView({
 
       cleanup();
 
-      if (active && drop !== null) {
+      if (active && drop !== null && drop.beforeId !== task.id) {
         const intent: MoveIntent =
           drop.beforeId === null ? { kind: "append" } : { kind: "before", beforeId: drop.beforeId };
 
