@@ -1,7 +1,7 @@
 ---
 id: KAN-021
 title: Канбан по умолчанию и composer под заголовком
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-021
