@@ -68,11 +68,14 @@ export function ProjectsOverview({
   invoke,
   search,
   replaceSearch,
+  redirectLocation,
 }: {
   readonly invoke: UiOperationInvoker;
   readonly pathname?: string | undefined;
   readonly search?: string | undefined;
   readonly replaceSearch?: ((search: string) => void) | undefined;
+  /** Тестовый/встраиваемый переход на восстановленное представление. */
+  readonly redirectLocation?: ((url: string) => void) | undefined;
 }) {
   const revision = useProjectsRevision();
   const { projects, loading: projectsLoading } = useProjectsData(invoke);
@@ -91,6 +94,13 @@ export function ProjectsOverview({
     initialSearch.startsWith("?") ? initialSearch.slice(1) : initialSearch,
   ).has("entry");
   const entryHandledRef = useRef(false);
+  // Пока вход обрабатывается, показываем нейтральную заглушку и не читаем
+  // сводки обзора: пользователь всё равно уйдёт в список или канбан.
+  const [entryPending, setEntryPending] = useState(entryRequested);
+
+  if (entryPending !== entryRequested) {
+    setEntryPending(entryRequested);
+  }
 
   if (lastSearch !== initialSearch) {
     setLastSearch(initialSearch);
@@ -119,9 +129,10 @@ export function ProjectsOverview({
   );
 
   // Единственный nav-пункт ведёт в workspace с `entry=1`. После загрузки
-  // списка возвращаем последнее представление проекта либо остаёмся в обзоре
-  // без служебного параметра. Это делает readLastProjectView рабочим входом,
-  // а не мёртвым кодом.
+  // списка переходим в последнее сохранённое представление (список или
+  // канбан), а без него — в канбан по умолчанию. Проект из query сохраняется,
+  // если он принадлежит загруженному списку; иначе подставляется последний
+  // валидный проект. Служебный `entry` в целевой URL не переносится.
   useEffect(() => {
     if (!entryRequested || entryHandledRef.current || projectsLoading) {
       return;
@@ -135,35 +146,28 @@ export function ProjectsOverview({
 
     params.delete("entry");
 
+    const requestedId = params.get("project")?.trim() ?? "";
+    const storedId = readLastProjectId();
+
+    if (requestedId.length > 0 && projects.some((project) => project.id === requestedId)) {
+      params.set("project", requestedId);
+    } else if (storedId !== null && projects.some((project) => project.id === storedId)) {
+      params.set("project", storedId);
+    } else {
+      params.delete("project");
+    }
+
     const lastView = readLastProjectView();
-
-    if (lastView !== null && lastView !== PROJECTS_OVERVIEW_ROUTE) {
-      const stored = readLastProjectId();
-
-      if (stored !== null && projects.some((project) => project.id === stored)) {
-        params.set("project", stored);
-      }
-
-      const next = params.toString();
-
-      window.location.replace(`${lastView}${next.length === 0 ? "" : `?${next}`}`);
-
-      return;
-    }
-
     const next = params.toString();
-    const nextSearch = next.length === 0 ? "" : `?${next}`;
+    const target = `${lastView}${next.length === 0 ? "" : `?${next}`}`;
+    const navigateTo =
+      redirectLocation ??
+      ((url: string) => {
+        window.location.replace(url);
+      });
 
-    if (replaceSearch !== undefined) {
-      replaceSearch(nextSearch);
-
-      return;
-    }
-
-    if (typeof window !== "undefined") {
-      window.history.replaceState(null, "", `${window.location.pathname}${nextSearch}`);
-    }
-  }, [entryRequested, localSearch, projects, projectsLoading, replaceSearch]);
+    navigateTo(target);
+  }, [entryRequested, localSearch, projects, projectsLoading, redirectLocation]);
 
   // Повторный вход без remount: после снятия `entry` сбрасываем guard, чтобы
   // следующий клик по «Проекты» снова восстановил сохранённое представление.
@@ -194,10 +198,19 @@ export function ProjectsOverview({
   );
 
   useEffect(() => {
-    if (effectiveProjectId.length > 0) {
-      rememberProject(effectiveProjectId);
+    if (projectsLoading || effectiveProjectId.length === 0) {
+      return;
     }
-  }, [effectiveProjectId]);
+
+    // Запоминаем только реально загруженный проект: во время loading
+    // effectiveProjectId может быть сырым `?project=` и не должен затирать
+    // сохранённый lastProjectId.
+    if (!projects.some((project) => project.id === effectiveProjectId)) {
+      return;
+    }
+
+    rememberProject(effectiveProjectId);
+  }, [effectiveProjectId, projects, projectsLoading]);
 
   const load = useCallback(
     async (offset: number): Promise<void> => {
@@ -242,11 +255,26 @@ export function ProjectsOverview({
   );
 
   useEffect(() => {
+    if (entryPending) {
+      return;
+    }
+
     // Загрузка первой страницы обзора: setLoading внутри load синхронный,
     // поэтому правило отключено осознанно.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(0);
-  }, [load, revision]);
+  }, [entryPending, load, revision]);
+
+  if (entryPending) {
+    return (
+      <div
+        data-testid="projects-entry-loading"
+        className="mx-auto flex w-full max-w-6xl flex-col gap-4"
+      >
+        <LoadingState label="Открываем рабочее пространство…" />
+      </div>
+    );
+  }
 
   return (
     <div data-testid="projects-overview" className="mx-auto flex w-full max-w-6xl flex-col gap-4">

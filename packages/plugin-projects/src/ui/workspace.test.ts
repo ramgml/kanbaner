@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { readLastProjectView } from "./workspace.ts";
+import { KANBAN_ROUTE, TASK_LIST_ROUTE } from "../metadata.ts";
+import { readLastProjectView, rememberProjectView } from "./workspace.ts";
 
 const LAST_VIEW_KEY = "kanbaner.projects.lastView";
 
@@ -13,24 +14,40 @@ afterEach(() => {
 });
 
 describe("readLastProjectView", () => {
-  it("возвращает сохранённое представление", () => {
-    window.localStorage.setItem(LAST_VIEW_KEY, "/view/tasks");
+  it("возвращает сохранённый список", () => {
+    rememberProjectView(TASK_LIST_ROUTE);
 
-    expect(readLastProjectView()).toBe("/view/tasks");
+    expect(readLastProjectView()).toBe(TASK_LIST_ROUTE);
   });
 
-  it("игнорирует неизвестное значение", () => {
+  it("возвращает сохранённый канбан", () => {
+    rememberProjectView(KANBAN_ROUTE);
+
+    expect(readLastProjectView()).toBe(KANBAN_ROUTE);
+  });
+
+  it("без сохранённого значения открывает канбан", () => {
+    expect(readLastProjectView()).toBe(KANBAN_ROUTE);
+  });
+
+  it("неизвестное значение трактуется как канбан", () => {
     window.localStorage.setItem(LAST_VIEW_KEY, "/view/unknown");
 
-    expect(readLastProjectView()).toBeNull();
+    expect(readLastProjectView()).toBe(KANBAN_ROUTE);
   });
 
-  it("возвращает null, если storage бросает SecurityError", () => {
+  it("служебный обзор не сохраняется как последний вид и трактуется как канбан", () => {
+    window.localStorage.setItem(LAST_VIEW_KEY, "/view/projects");
+
+    expect(readLastProjectView()).toBe(KANBAN_ROUTE);
+  });
+
+  it("возвращает канбан, если storage бросает SecurityError", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("Доступ запрещён", "SecurityError");
     });
 
-    // Вход должен остаться в обзоре, а не падать на чтении localStorage.
-    expect(readLastProjectView()).toBeNull();
+    // Чтение storage не должно ронять вход: fallback — канбан.
+    expect(readLastProjectView()).toBe(KANBAN_ROUTE);
   });
 });

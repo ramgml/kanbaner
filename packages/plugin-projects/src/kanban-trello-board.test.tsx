@@ -370,6 +370,116 @@ describe("Trello-доска", () => {
     );
   });
 
+  it("drop на composer в прокрученной колонке ставит задачу перед первой независимо от top", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [
+        makeTask("a", { title: "A", status: "todo", position: 0 }),
+        makeTask("b", { title: "B", status: "todo", position: 1 }),
+        makeTask("mover", { title: "Mover", status: "backlog", position: 0 }),
+      ],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await screen.findByTestId("kanban-card-mover");
+
+    const first = screen.getByTestId("kanban-card-a");
+
+    // Колонка прокручена: первая карточка ушла выше viewport-а.
+    vi.spyOn(first, "getBoundingClientRect").mockReturnValue({
+      top: -500,
+      bottom: -400,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 100,
+      x: 0,
+      y: -500,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    const composer = screen.getByTestId("kanban-quick-composer-todo");
+
+    expect(composer).toHaveAttribute("data-kanban-drop-zone", "top");
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => composer,
+    });
+
+    const handle = screen.getByTestId("kanban-drag-mover");
+
+    fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 20, clientY: 50 });
+
+    const placeholder = await screen.findByTestId("kanban-drop-placeholder");
+
+    // Placeholder стоит перед первой карточкой, а не в конце списка.
+    expect(screen.getByTestId("kanban-cards-todo").firstElementChild).toBe(placeholder);
+
+    fireEvent.pointerUp(window);
+
+    await waitFor(() => {
+      const move = operations.calls.find((call) => call.operationId === "kanbaner.tasks.task.move");
+
+      expect(inputOf(move?.input ?? {})).toMatchObject({
+        id: "mover",
+        status: "todo",
+        position: 0,
+      });
+    });
+  });
+
+  it("drop первой карточки на composer остаётся no-op и не делает append", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [
+        makeTask("a", { title: "A", status: "todo", position: 0 }),
+        makeTask("b", { title: "B", status: "todo", position: 1 }),
+      ],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await screen.findByTestId("kanban-card-a");
+
+    const composer = screen.getByTestId("kanban-quick-composer-todo");
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => composer,
+    });
+
+    const handle = screen.getByTestId("kanban-drag-a");
+
+    fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 20, clientY: 50 });
+
+    // Верхняя зона указывает на первую карточку, но это она сама: drop
+    // не должен превращаться в append.
+    expect(screen.queryByTestId("kanban-drop-placeholder")).toBeNull();
+
+    fireEvent.pointerUp(window);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.move")).toBe(
+      false,
+    );
+    expect(
+      [...screen.getByTestId("kanban-cards-todo").querySelectorAll("[data-card-id]")].map(
+        (element) => element.getAttribute("data-card-id"),
+      ),
+    ).toEqual(["a", "b"]);
+  });
+
   it("показывает placeholder между карточками и подсвечивает целевую колонку", async () => {
     const board: Board = {
       projects: [makeProject("project-1")],
