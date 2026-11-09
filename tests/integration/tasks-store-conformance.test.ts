@@ -115,6 +115,11 @@ function fallbackIdFactory() {
 
       return `fallback-task-${String(fallbackSequence)}`;
     },
+    nextColumnId(): string {
+      fallbackSequence += 1;
+
+      return `fallback-column-${String(fallbackSequence)}`;
+    },
   };
 }
 
@@ -137,7 +142,7 @@ afterEach(async () => {
   }
 });
 
-const SUITE_SIZE = 28;
+const SUITE_SIZE = 36;
 
 for (const variant of variants) {
   describe(`TasksStore Conformance: ${variant.name}`, () => {

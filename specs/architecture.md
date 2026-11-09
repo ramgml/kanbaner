@@ -304,11 +304,30 @@ created_at
 
 ```text
 projects
+task-columns
 tasks
 ```
 
 Теги входят в документ задачи. Конкретные имена `tasks_*` и физическая схема
 остаются деталью Storage Provider и не входят в публичный контракт.
+
+Логические поля колонки:
+
+```text
+id
+projectId
+title
+status
+position
+version
+createdAt
+updatedAt
+```
+
+`status` колонки — совместимое зеркало legacy-статуса: тип `done` сохраняется
+как `done`, открытая колонка — как `in_progress`. Допускается несколько
+открытых и несколько Done-колонок с одинаковым `status`; различает их `id` и
+`position`.
 
 Логические поля задачи:
 
@@ -316,6 +335,7 @@ tasks
 id
 projectId
 parentTaskId
+columnId?
 title
 descriptionMarkdown
 status
@@ -331,10 +351,16 @@ completedAt
 
 Правила:
 
-- `status` ограничен четырьмя фиксированными значениями;
+- `status` задачи ограничен четырьмя совместимыми значениями; `columnId`
+  необязателен для legacy-документов;
+- если `columnId` задан, `status` обязан совпадать со статусом колонки;
+  отсутствие `columnId` означает legacy-задачу, которая читается по первой
+  колонке проекта с тем же `status`;
 - `parentTaskId` допускает только один уровень вложенности;
-- `position` уникальна и определяет порядок в области `(projectId, status)`;
-  `parentTaskId` на область не влияет, непрерывность `0…N-1` не требуется;
+- `position` задачи уникальна и определяет порядок в области
+  `(projectId, columnId)`; `parentTaskId` на область не влияет, непрерывность
+  `0…N-1` не требуется;
+- `position` колонки уникальна и определяет порядок в области `projectId`;
 - теги нормализуются и ограничены по количеству и длине; входные команды
   принимают сырые теги, а сохранённая задача содержит уникальные
   нормализованные теги без внешних пробелов;
@@ -353,6 +379,34 @@ completedAt
   и каждой задачи каскада;
 - сортировка и границы UTC сравнивают секунды и дробную часть с выравниванием
   справа нулями, не полагаясь на `Date.parse`.
+
+Колонки:
+
+- `project.create` в одной транзакции создаёт проект и три default-колонки
+  `ToDo`, `In Progress`, `Done` с детерминированными ID
+  `column-<projectId>-todo|in-progress|done`;
+- проект без документов колонок считается legacy: при активации и перед
+  мутацией материализуются `Backlog`, `To do`, `In progress`, `Done`;
+- технический backfill проставляет `task.columnId` без изменения публичных
+  `task.version` и `task.updatedAt`; ревизия документа при этом может вырасти.
+  Инвариант `document.version === task.version` ослаблен до
+  `document.version >= task.version` **только** для этого backfill: обычные
+  команды и Store-мутации обязаны сохранять версии синхронными, а обратное
+  расхождение отвергается как `VALIDATION_ERROR`;
+- команды `column.create`, `column.update`, `column.move`, `column.delete`
+  требуют `expectedVersion` (создание — `0`) и выполняются в транзакции
+  плагина; reorder повышает версии и `updatedAt` фактически сдвинутых соседей;
+- `column.delete` разрушительная: требует `confirm: true` и `targetColumnId`;
+  запрещены удаление последней колонки, target, совпадающий с удаляемой, и
+  target другого проекта; задачи переносятся в target атомарно с обновлением
+  `columnId`, `status`, `position`, `completedAt` и версий;
+- `task.complete` переводит задачу в первую Done-колонку проекта; отсутствие
+  Done-колонки — доменная ошибка;
+- `project.delete` каскадно удаляет задачи и колонки и возвращает дескрипторы
+  `deletedColumns` вместе с `deletedTasks`; delete-событие проекта включает
+  `deletedColumns` в payload;
+- activation публикует `column.created|updated|moved|deleted` после коммита и
+  `task.updated` для сдвинутых или перенесённых задач; доставка best-effort.
 
 ### 8.6. Плагин заметок
 
@@ -404,6 +458,7 @@ SQLite-провайдер реализует индекс на FTS5; имена 
 ```text
 kanbaner.tasks:task:01J...
 kanbaner.tasks:project:01J...
+kanbaner.tasks:task-column:01J...
 kanbaner.notes:note:01J...
 ```
 

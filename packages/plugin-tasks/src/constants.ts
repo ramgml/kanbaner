@@ -15,11 +15,32 @@ export const PROJECT_RESOURCE_TYPE = "project" as const;
 /** Тип ресурса задачи в формате ResourceRef. */
 export const TASK_RESOURCE_TYPE = "task" as const;
 
+/** Тип ресурса колонки в формате ResourceRef. */
+export const COLUMN_RESOURCE_TYPE = "task-column" as const;
+
 /** Коллекция документов проектов в namespace плагина. */
 export const PROJECT_COLLECTION = "projects" as const;
 
 /** Коллекция документов задач в namespace плагина. */
 export const TASK_COLLECTION = "tasks" as const;
+
+/** Коллекция документов пользовательских колонок в namespace плагина. */
+export const COLUMN_COLLECTION = "task-columns" as const;
+
+/** Заголовки default-колонок нового проекта. */
+export const DEFAULT_COLUMN_TITLES = Object.freeze({
+  todo: "ToDo",
+  inProgress: "In Progress",
+  done: "Done",
+} as const);
+
+/** Заголовки исходных колонок legacy-проекта. */
+export const LEGACY_COLUMN_TITLES = Object.freeze({
+  backlog: "Backlog",
+  todo: "To do",
+  inProgress: "In progress",
+  done: "Done",
+} as const);
 
 /** Контракт команд задач. */
 export const TASKS_COMMANDS_CONTRACT = "kanbaner.tasks.commands.v1" as const;
@@ -41,6 +62,10 @@ export const TASKS_COMMAND_IDS = Object.freeze({
   projectCreate: "kanbaner.tasks.project.create",
   projectUpdate: "kanbaner.tasks.project.update",
   projectDelete: "kanbaner.tasks.project.delete",
+  columnCreate: "kanbaner.tasks.column.create",
+  columnUpdate: "kanbaner.tasks.column.update",
+  columnMove: "kanbaner.tasks.column.move",
+  columnDelete: "kanbaner.tasks.column.delete",
   taskCreate: "kanbaner.tasks.task.create",
   taskUpdate: "kanbaner.tasks.task.update",
   taskMove: "kanbaner.tasks.task.move",
@@ -55,6 +80,7 @@ export const TASKS_QUERY_IDS = Object.freeze({
   projectList: "kanbaner.tasks.project.list",
   projectGet: "kanbaner.tasks.project.get",
   projectSummary: "kanbaner.tasks.project.summary",
+  columnList: "kanbaner.tasks.column.list",
   taskGet: "kanbaner.tasks.task.get",
   taskList: "kanbaner.tasks.task.list",
 } as const);
@@ -77,9 +103,18 @@ export const TASK_EVENT_TYPES = Object.freeze({
   deleted: "kanbaner.tasks.task.deleted",
 } as const);
 
+/** Типы событий пользовательских колонок. */
+export const COLUMN_EVENT_TYPES = Object.freeze({
+  created: "kanbaner.tasks.column.created",
+  updated: "kanbaner.tasks.column.updated",
+  moved: "kanbaner.tasks.column.moved",
+  deleted: "kanbaner.tasks.column.deleted",
+} as const);
+
 /** Все типы событий домена задач. */
 export const TASKS_EVENT_TYPES = Object.freeze([
   ...Object.values(PROJECT_EVENT_TYPES),
+  ...Object.values(COLUMN_EVENT_TYPES),
   ...Object.values(TASK_EVENT_TYPES),
 ] as const);
 

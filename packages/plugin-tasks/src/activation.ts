@@ -13,6 +13,8 @@ import {
 } from "@kanbaner/plugin-sdk";
 
 import {
+  COLUMN_EVENT_TYPES,
+  COLUMN_RESOURCE_TYPE,
   DEFAULT_LIST_LIMIT,
   PLUGIN_ID,
   PROJECT_EVENT_TYPES,
@@ -35,16 +37,39 @@ import {
   reindexAllTasks,
   upsertTaskSearchDocuments,
 } from "./activation/search-index.ts";
-import { shiftedNeighbors, snapshotProjectTasks } from "./activation/snapshots.ts";
-import type { DeletedTaskDescriptor, Project, Task } from "./model.ts";
+import {
+  shiftedColumns,
+  shiftedNeighbors,
+  snapshotProjectColumns,
+  snapshotProjectTasks,
+} from "./activation/snapshots.ts";
+import type {
+  DeletedColumnDescriptor,
+  DeletedTaskDescriptor,
+  Project,
+  Task,
+  TaskColumn,
+} from "./model.ts";
 import { TASKS_COMMAND_LIST, TASKS_QUERY_LIST } from "./operations.ts";
+import type {
+  ColumnCreateInput,
+  ColumnDeleteInput,
+  ColumnDeleteOutput,
+  ColumnMoveInput,
+  ColumnUpdateInput,
+} from "./schemas/column.ts";
 import type {
   ProjectCreateInput,
   ProjectDeleteInput,
   ProjectUpdateInput,
 } from "./schemas/project.ts";
 import type { DeleteOutput } from "./schemas/common.ts";
-import type { ProjectListInput, ProjectSummaryInput, TaskListInput } from "./schemas/queries.ts";
+import type {
+  ColumnListInput,
+  ProjectListInput,
+  ProjectSummaryInput,
+  TaskListInput,
+} from "./schemas/queries.ts";
 import type {
   TaskCompleteInput,
   TaskCreateInput,
@@ -52,7 +77,12 @@ import type {
   TaskMoveInput,
   TaskUpdateInput,
 } from "./schemas/task.ts";
-import { formatProjectRef, formatTaskRef, tryParseTasksResourceRef } from "./resources.ts";
+import {
+  formatColumnRef,
+  formatProjectRef,
+  formatTaskRef,
+  tryParseTasksResourceRef,
+} from "./resources.ts";
 import { TasksNotFoundError, createTasksStore } from "./store/index.ts";
 import type { TasksIdFactory, TasksStore, TasksStoreTransaction } from "./store.ts";
 import { normalizeTags } from "./validation.ts";
@@ -258,8 +288,79 @@ function neighborUpdatedEvent(task: Task) {
       taskId: task.id,
       projectId: task.projectId,
       version: task.version,
+      ...(task.columnId === undefined ? {} : { columnId: task.columnId }),
+      status: task.status,
       position: task.position,
       changed: ["position"],
+    }),
+  });
+}
+
+function columnCreatedEvent(column: TaskColumn, eventId: string) {
+  return domainEvent({
+    eventId,
+    type: COLUMN_EVENT_TYPES.created,
+    resource: formatColumnRef(column.id),
+    resourceVersion: column.version,
+    payload: eventPayload({
+      columnId: column.id,
+      projectId: column.projectId,
+      version: column.version,
+      title: column.title,
+      type: column.status === "done" ? "done" : "open",
+      status: column.status,
+      position: column.position,
+    }),
+  });
+}
+
+function columnUpdatedEvent(column: TaskColumn, changed: readonly string[]) {
+  return domainEvent({
+    type: COLUMN_EVENT_TYPES.updated,
+    resource: formatColumnRef(column.id),
+    resourceVersion: column.version,
+    payload: eventPayload({
+      columnId: column.id,
+      projectId: column.projectId,
+      version: column.version,
+      position: column.position,
+      changed,
+    }),
+  });
+}
+
+function columnMovedEvent(column: TaskColumn, fromPosition: number, eventId: string) {
+  return domainEvent({
+    eventId,
+    type: COLUMN_EVENT_TYPES.moved,
+    resource: formatColumnRef(column.id),
+    resourceVersion: column.version,
+    payload: eventPayload({
+      columnId: column.id,
+      projectId: column.projectId,
+      version: column.version,
+      fromPosition,
+      toPosition: column.position,
+    }),
+  });
+}
+
+function columnDeletedEvent(
+  descriptor: DeletedColumnDescriptor,
+  targetColumnId: string,
+  movedTasks: readonly Task[],
+) {
+  return domainEvent({
+    type: COLUMN_EVENT_TYPES.deleted,
+    resource: descriptor.resourceRef,
+    resourceVersion: descriptor.eventVersion,
+    payload: eventPayload({
+      columnId: descriptor.id,
+      projectId: descriptor.projectId,
+      version: descriptor.version,
+      eventVersion: descriptor.eventVersion,
+      targetColumnId,
+      movedTaskIds: movedTasks.map((task) => task.id),
     }),
   });
 }
@@ -275,13 +376,18 @@ function taskCreatedEvent(task: Task, eventId: string) {
       projectId: task.projectId,
       version: task.version,
       parentTaskId: task.parentTaskId,
+      ...(task.columnId === undefined ? {} : { columnId: task.columnId }),
       status: task.status,
       position: task.position,
     }),
   });
 }
 
-function taskMovedEvent(task: Task, fromStatus: Task["status"], eventId: string) {
+function taskMovedEvent(
+  task: Task,
+  from: { readonly status: Task["status"]; readonly columnId: string | undefined },
+  eventId: string,
+) {
   return domainEvent({
     eventId,
     type: TASK_EVENT_TYPES.moved,
@@ -291,7 +397,9 @@ function taskMovedEvent(task: Task, fromStatus: Task["status"], eventId: string)
       taskId: task.id,
       projectId: task.projectId,
       version: task.version,
-      fromStatus,
+      ...(from.columnId === undefined ? {} : { fromColumnId: from.columnId }),
+      ...(task.columnId === undefined ? {} : { toColumnId: task.columnId }),
+      fromStatus: from.status,
       toStatus: task.status,
       position: task.position,
     }),
@@ -308,6 +416,7 @@ function taskCompletedEvent(task: Task, completedAt: UtcTimestamp, eventId: stri
       taskId: task.id,
       projectId: task.projectId,
       version: task.version,
+      ...(task.columnId === undefined ? {} : { columnId: task.columnId }),
       completedAt,
     }),
   });
@@ -541,6 +650,7 @@ const projectDelete: CommandFn = async (input, executionContext, operationId, de
             version: deletion.version,
             eventVersion: deletion.eventVersion,
             deletedTasks: deletion.deletedTasks,
+            deletedColumns: deletion.deletedColumns,
           }),
         }),
         ...deletion.deletedTasks.map((descriptor) => taskDeletedEvent(descriptor, [descriptor])),
@@ -565,6 +675,195 @@ const projectDelete: CommandFn = async (input, executionContext, operationId, de
   );
 };
 
+const columnCreate: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as ColumnCreateInput;
+  const normalized = {
+    projectId: data.projectId,
+    title: data.title,
+    type: data.type,
+    expectedVersion: 0 as const,
+    ...(data.position === undefined ? {} : { position: data.position }),
+  };
+
+  return executeMutation(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction, now) => {
+      const before = await snapshotProjectColumns(transaction, normalized.projectId);
+      const column = await transaction.createColumn({
+        id: dependencies.idFactory.nextColumnId(),
+        projectId: normalized.projectId,
+        title: normalized.title,
+        type: normalized.type,
+        ...(normalized.position === undefined ? {} : { position: normalized.position }),
+        createdAt: now,
+        expectedVersion: normalized.expectedVersion,
+      });
+      const after = await snapshotProjectColumns(transaction, column.projectId);
+      const neighbors = shiftedColumns(before, after, column.id);
+      const eventId = newEventId();
+
+      return {
+        result: { column, resource: formatColumnRef(column.id), eventId },
+        effects: effects({
+          events: [
+            columnCreatedEvent(column, eventId),
+            ...neighbors.map((entry) => columnUpdatedEvent(entry, ["position"])),
+          ],
+        }),
+      };
+    },
+  );
+};
+
+const columnUpdate: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as ColumnUpdateInput;
+  const normalized = {
+    id: data.id,
+    expectedVersion: data.expectedVersion,
+    title: data.title,
+  };
+
+  return executeMutation(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction, now) => {
+      const before = await transaction.getColumn(normalized.id);
+
+      if (before === null) {
+        throw new TasksNotFoundError("column", normalized.id);
+      }
+
+      const column = await transaction.updateColumn({
+        id: normalized.id,
+        expectedVersion: normalized.expectedVersion,
+        title: normalized.title,
+        updatedAt: now,
+      });
+      const eventId = newEventId();
+
+      return {
+        result: { column, resource: formatColumnRef(column.id), eventId },
+        effects: effects({
+          events: [columnUpdatedEvent(column, before.title === column.title ? [] : ["title"])],
+        }),
+      };
+    },
+  );
+};
+
+const columnMove: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as ColumnMoveInput;
+  const normalized = {
+    id: data.id,
+    expectedVersion: data.expectedVersion,
+    position: data.position,
+  };
+
+  return executeMutation(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction, now) => {
+      const before = await transaction.getColumn(normalized.id);
+
+      if (before === null) {
+        throw new TasksNotFoundError("column", normalized.id);
+      }
+
+      const beforeColumns = await snapshotProjectColumns(transaction, before.projectId);
+      const column = await transaction.moveColumn({
+        id: normalized.id,
+        expectedVersion: normalized.expectedVersion,
+        position: normalized.position,
+        updatedAt: now,
+      });
+      const afterColumns = await snapshotProjectColumns(transaction, column.projectId);
+      const neighbors = shiftedColumns(beforeColumns, afterColumns, column.id);
+      const eventId = newEventId();
+
+      return {
+        result: { column, resource: formatColumnRef(column.id), eventId },
+        effects: effects({
+          events: [
+            columnMovedEvent(column, before.position, eventId),
+            ...neighbors.map((entry) => columnUpdatedEvent(entry, ["position"])),
+          ],
+        }),
+      };
+    },
+  );
+};
+
+const columnDelete: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as ColumnDeleteInput;
+  const normalized = {
+    id: data.id,
+    expectedVersion: data.expectedVersion,
+    targetColumnId: data.targetColumnId,
+    confirm: true as const,
+  };
+
+  return executeMutation<ColumnDeleteOutput>(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction, now) => {
+      const before = await transaction.getColumn(normalized.id);
+      const deletion = await transaction.deleteColumn({
+        id: normalized.id,
+        expectedVersion: normalized.expectedVersion,
+        targetColumnId: normalized.targetColumnId,
+        updatedAt: now,
+      });
+
+      if (!deletion.deleted) {
+        return { result: { deleted: false as const }, effects: noEffects() };
+      }
+
+      if (before === null) {
+        throw new TasksNotFoundError("column", normalized.id);
+      }
+
+      const descriptor: DeletedColumnDescriptor = {
+        id: before.id,
+        projectId: before.projectId,
+        resourceRef: formatColumnRef(before.id),
+        version: deletion.version,
+        eventVersion: deletion.eventVersion,
+      };
+      const eventId = newEventId();
+      const events = [
+        columnDeletedEvent(descriptor, deletion.targetColumnId, deletion.movedTasks),
+        ...deletion.updatedColumns.map((column) => columnUpdatedEvent(column, ["position"])),
+        ...deletion.movedTasks.map((task) => neighborUpdatedEvent(task)),
+      ];
+
+      return {
+        result: {
+          deleted: true as const,
+          resource: descriptor.resourceRef,
+          version: deletion.version,
+          eventVersion: deletion.eventVersion,
+          targetColumnId: deletion.targetColumnId,
+          movedTasks: [...deletion.movedTasks],
+          eventId,
+        },
+        effects: effects({
+          events,
+          searchUpserts: [...deletion.movedTasks],
+        }),
+      };
+    },
+  );
+};
+
 const taskCreate: CommandFn = async (input, executionContext, operationId, dependencies) => {
   const data = input as TaskCreateInput;
   const normalized = {
@@ -572,7 +871,12 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
     parentTaskId: data.parentTaskId ?? null,
     title: data.title,
     descriptionMarkdown: data.descriptionMarkdown ?? "",
-    status: data.status ?? "todo",
+    ...(data.columnId === undefined ? {} : { columnId: data.columnId }),
+    ...(data.status === undefined
+      ? data.columnId === undefined
+        ? { status: "todo" as const }
+        : {}
+      : { status: data.status }),
     priority: data.priority ?? "medium",
     dueAt: data.dueAt ?? null,
     tags: normalizeTags(data.tags ?? []),
@@ -591,9 +895,10 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
         id: dependencies.idFactory.nextTaskId(),
         projectId: normalized.projectId,
         parentTaskId: normalized.parentTaskId,
+        ...(normalized.columnId === undefined ? {} : { columnId: normalized.columnId }),
         title: normalized.title,
         descriptionMarkdown: normalized.descriptionMarkdown,
-        status: normalized.status,
+        ...(normalized.status === undefined ? {} : { status: normalized.status }),
         priority: normalized.priority,
         dueAt: normalized.dueAt,
         tags: normalized.tags,
@@ -681,7 +986,8 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
   const normalized = {
     id: data.id,
     expectedVersion: data.expectedVersion,
-    status: data.status,
+    ...(data.columnId === undefined ? {} : { columnId: data.columnId }),
+    ...(data.status === undefined ? {} : { status: data.status }),
     position: data.position,
   };
 
@@ -701,7 +1007,8 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
       const task = await transaction.moveTask({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
-        status: normalized.status,
+        ...(normalized.columnId === undefined ? {} : { columnId: normalized.columnId }),
+        ...(normalized.status === undefined ? {} : { status: normalized.status }),
         position: normalized.position,
         updatedAt: now,
       });
@@ -713,7 +1020,7 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
         result: { task, resource: formatTaskRef(task.id), eventId },
         effects: effects({
           events: [
-            taskMovedEvent(task, current.status, eventId),
+            taskMovedEvent(task, { status: current.status, columnId: current.columnId }, eventId),
             ...neighbors.map(neighborUpdatedEvent),
           ],
           searchUpserts: [task, ...neighbors],
@@ -865,6 +1172,16 @@ const projectSummary: QueryFn = async (input, dependencies) => {
   });
 };
 
+const columnList: QueryFn = async (input, dependencies) => {
+  const data = input as ColumnListInput;
+
+  return dependencies.store.listColumns({
+    projectId: data.projectId,
+    limit: data.limit ?? DEFAULT_LIST_LIMIT,
+    offset: data.offset ?? 0,
+  });
+};
+
 const taskGet: QueryFn = async (input, dependencies) => {
   const data = input as { readonly id: string };
   const task = await dependencies.store.getTask(data.id);
@@ -917,6 +1234,20 @@ function projectDescriptor(project: Project, ref: ResourceDescriptor["ref"]): Re
   };
 }
 
+function columnDescriptor(column: TaskColumn, ref: ResourceDescriptor["ref"]): ResourceDescriptor {
+  return {
+    ref,
+    resourceType: COLUMN_RESOURCE_TYPE,
+    title: column.title,
+    state: column.status === "done" ? "closed" : "open",
+    metadata: {
+      version: column.version,
+      projectId: column.projectId,
+      status: column.status,
+    },
+  };
+}
+
 function taskDescriptor(task: Task, ref: ResourceDescriptor["ref"]): ResourceDescriptor {
   return {
     ref,
@@ -935,6 +1266,10 @@ const COMMAND_HANDLERS: Readonly<Record<string, CommandFn>> = Object.freeze({
   [TASKS_COMMAND_IDS.projectCreate]: projectCreate,
   [TASKS_COMMAND_IDS.projectUpdate]: projectUpdate,
   [TASKS_COMMAND_IDS.projectDelete]: projectDelete,
+  [TASKS_COMMAND_IDS.columnCreate]: columnCreate,
+  [TASKS_COMMAND_IDS.columnUpdate]: columnUpdate,
+  [TASKS_COMMAND_IDS.columnMove]: columnMove,
+  [TASKS_COMMAND_IDS.columnDelete]: columnDelete,
   [TASKS_COMMAND_IDS.taskCreate]: taskCreate,
   [TASKS_COMMAND_IDS.taskUpdate]: taskUpdate,
   [TASKS_COMMAND_IDS.taskMove]: taskMove,
@@ -946,6 +1281,7 @@ const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({
   [TASKS_QUERY_IDS.projectList]: projectList,
   [TASKS_QUERY_IDS.projectGet]: projectGet,
   [TASKS_QUERY_IDS.projectSummary]: projectSummary,
+  [TASKS_QUERY_IDS.columnList]: columnList,
   [TASKS_QUERY_IDS.taskGet]: taskGet,
   [TASKS_QUERY_IDS.taskList]: taskList,
 });
@@ -968,6 +1304,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
   const idFactory: TasksIdFactory = {
     nextProjectId: () => `project-${globalThis.crypto.randomUUID()}`,
     nextTaskId: () => `task-${globalThis.crypto.randomUUID()}`,
+    nextColumnId: () => `column-${globalThis.crypto.randomUUID()}`,
   };
   const store = createTasksStore({ storage: context.storage, idFactory, now });
   const serialize = createSerialQueue();
@@ -1017,7 +1354,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
   }
 
   context.resourceTypes.register({
-    resourceTypes: [PROJECT_RESOURCE_TYPE, TASK_RESOURCE_TYPE],
+    resourceTypes: [PROJECT_RESOURCE_TYPE, TASK_RESOURCE_TYPE, COLUMN_RESOURCE_TYPE],
     adapter: {
       async resolve(ref): Promise<ResourceDescriptor | null> {
         const parsed = tryParseTasksResourceRef(ref);
@@ -1032,6 +1369,12 @@ export async function activate(context: TasksActivationContext): Promise<void> {
           return project === null ? null : projectDescriptor(project, ref);
         }
 
+        if (parsed.kind === COLUMN_RESOURCE_TYPE) {
+          const column = await store.getColumn(parsed.id);
+
+          return column === null ? null : columnDescriptor(column, ref);
+        }
+
         const task = await store.getTask(parsed.id);
 
         return task === null ? null : taskDescriptor(task, ref);
@@ -1039,10 +1382,13 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     },
   });
 
-  // Полная переиндексация best-effort: не блокирует активацию, идемпотентна и
-  // сериализуется с мутациями через очередь этой активации. Ошибка чтения не
-  // влияет на регистрацию операций.
-  void serialize(() => reindexAllTasks(store, context.search, logger)).catch((error: unknown) => {
+  // Материализация legacy-колонок и полная переиндексация best-effort: не
+  // блокируют активацию, идемпотентны и сериализуются с мутациями через
+  // очередь этой активации. Ошибка не влияет на регистрацию операций.
+  void serialize(async () => {
+    await store.backfillLegacyColumns();
+    await reindexAllTasks(store, context.search, logger);
+  }).catch((error: unknown) => {
     logger.warn("tasks.search_reindex_failed", {
       errorName: error instanceof Error ? error.name : "UnknownError",
     });

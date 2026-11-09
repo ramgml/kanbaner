@@ -8,7 +8,7 @@ import {
   MAX_TAGS,
   MAX_TITLE_LENGTH,
 } from "./constants.ts";
-import type { Task, TaskStatus } from "./model.ts";
+import type { Task, TaskColumn, TaskStatus } from "./model.ts";
 
 /** Коды доменных ошибок валидации. */
 export const TASKS_VALIDATION_CODES = [
@@ -28,6 +28,13 @@ export const TASKS_VALIDATION_CODES = [
   "PARENT_NOT_FOUND",
   "PARENT_IN_OTHER_PROJECT",
   "SUBTASK_DEPTH_EXCEEDED",
+  "COLUMN_REQUIRED",
+  "COLUMN_NOT_FOUND",
+  "COLUMN_STATUS_MISMATCH",
+  "COLUMN_TARGET_SELF",
+  "COLUMN_TARGET_OTHER_PROJECT",
+  "COLUMN_LAST",
+  "DONE_COLUMN_NOT_FOUND",
 ] as const;
 
 export type TasksValidationCode = (typeof TASKS_VALIDATION_CODES)[number];
@@ -248,6 +255,107 @@ export function validateSubtaskParent(
   return { ok: true, value: { parentTaskId: parent.id } };
 }
 
+/** Сравнивает колонки по контракту `column.list`: position asc, id asc. */
+export function compareTaskColumns(left: TaskColumn, right: TaskColumn): number {
+  if (left.position !== right.position) {
+    return left.position - right.position;
+  }
+
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+/** Возвращает колонки проекта в стабильном порядке. */
+export function sortTaskColumns(columns: readonly TaskColumn[]): readonly TaskColumn[] {
+  return [...columns].sort(compareTaskColumns);
+}
+
+/**
+ * Выбирает целевую колонку по optional `columnId`/`status`.
+ *
+ * - `columnId` имеет приоритет и определяет статус;
+ * - `status` без `columnId` выбирает первую колонку с этим legacy-статусом;
+ * - одновременное несоответствие даёт `COLUMN_STATUS_MISMATCH`;
+ * - отсутствие обоих полей использует `fallbackStatus`, если он задан.
+ */
+export function resolveTaskColumn(
+  columns: readonly TaskColumn[],
+  input: { readonly columnId?: string | undefined; readonly status?: TaskStatus | undefined },
+  options: { readonly fallbackStatus?: TaskStatus } = {},
+): TasksValidationResult<TaskColumn> {
+  const ordered = sortTaskColumns(columns);
+
+  if (input.columnId !== undefined) {
+    const column = ordered.find((candidate) => candidate.id === input.columnId);
+
+    if (column === undefined) {
+      return failure("COLUMN_NOT_FOUND", "Колонка проекта не найдена");
+    }
+
+    if (input.status !== undefined && input.status !== column.status) {
+      return failure(
+        "COLUMN_STATUS_MISMATCH",
+        "status задачи должен совпадать со статусом выбранной колонки",
+      );
+    }
+
+    return { ok: true, value: column };
+  }
+
+  const status = input.status ?? options.fallbackStatus;
+
+  if (status === undefined) {
+    return failure("COLUMN_REQUIRED", "Нужно указать columnId или status");
+  }
+
+  const column = ordered.find((candidate) => candidate.status === status);
+
+  if (column === undefined) {
+    return failure("COLUMN_NOT_FOUND", "В проекте нет колонки с указанным статусом");
+  }
+
+  return { ok: true, value: column };
+}
+
+/**
+ * Возвращает effective `columnId` сохранённой задачи.
+ *
+ * Для новых задач используется сохранённый `columnId`; для старых документов
+ * без него — первая колонка проекта с тем же legacy-статусом. Это сохраняет
+ * чтение и позиционирование legacy-данных до/после технического backfill.
+ */
+export function resolveTaskColumnId(
+  task: Pick<Task, "status" | "columnId">,
+  columns: readonly TaskColumn[],
+): string | null {
+  if (task.columnId !== undefined && columns.some((column) => column.id === task.columnId)) {
+    return task.columnId;
+  }
+
+  const column = sortTaskColumns(columns).find((candidate) => candidate.status === task.status);
+
+  return column?.id ?? null;
+}
+
+/** Проверяет, что задача и её колонка имеют согласованный legacy-статус. */
+export function validateTaskColumnConsistency(
+  task: Pick<Task, "status" | "columnId">,
+  columns: readonly TaskColumn[],
+): TasksValidationResult<true> {
+  const columnId = resolveTaskColumnId(task, columns);
+
+  if (columnId === null) {
+    return failure("COLUMN_NOT_FOUND", "Задача ссылается на отсутствующую колонку");
+  }
+
+  const column = columns.find((candidate) => candidate.id === columnId);
+
+  if (column === undefined || column.status !== task.status) {
+    return failure("COLUMN_STATUS_MISMATCH", "Статус задачи не совпадает со статусом её колонки");
+  }
+
+  return { ok: true, value: true };
+}
+
 /**
  * Вычисляет `completedAt` при смене статуса.
  *
@@ -307,21 +415,20 @@ export function validateCompletionInvariant(
 }
 
 /**
- * Возвращает ключ области уникальности позиции `(projectId, status)`.
+ * Возвращает ключ области уникальности позиции `(projectId, columnId)`.
  *
  * `parentTaskId` намеренно не входит в область: подзадачи и корневые задачи
- * одного проекта и статуса упорядочиваются вместе. Непрерывность `0…N-1` не
- * требуется.
+ * одной колонки упорядочиваются вместе. Непрерывность `0…N-1` не требуется.
  */
-export function taskPositionScopeKey(projectId: string, status: TaskStatus): string {
-  return `${projectId}:${status}`;
+export function taskPositionScopeKey(projectId: string, columnId: string): string {
+  return `${projectId}:${columnId}`;
 }
 
 /**
  * Проверяет позицию задачи.
  *
  * Проверяется только диапазон; уникальность и порядок обеспечиваются Store в
- * области `(projectId, status)`. Непрерывность позиций не требуется.
+ * области `(projectId, columnId)`. Непрерывность позиций не требуется.
  */
 export function validatePosition(value: unknown): TasksValidationResult<number> {
   if (typeof value !== "number" || !Number.isInteger(value)) {

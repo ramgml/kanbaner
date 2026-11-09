@@ -168,6 +168,7 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
         "src/listing.ts",
         "src/model.ts",
         "src/resources.ts",
+        "src/schemas/column.ts",
         "src/schemas/common.ts",
         "src/schemas/project.ts",
         "src/schemas/queries.ts",
@@ -217,13 +218,27 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     expect(contract.PLUGIN_ID).toBe("kanbaner.tasks");
     expect(contract.TASKS_COMMAND_IDS).toMatchObject({
       taskComplete: "kanbaner.tasks.task.complete",
+      columnCreate: "kanbaner.tasks.column.create",
+      columnUpdate: "kanbaner.tasks.column.update",
+      columnMove: "kanbaner.tasks.column.move",
+      columnDelete: "kanbaner.tasks.column.delete",
     });
     expect(contract.TASKS_QUERY_IDS).toMatchObject({
       taskList: "kanbaner.tasks.task.list",
       projectSummary: "kanbaner.tasks.project.summary",
+      columnList: "kanbaner.tasks.column.list",
     });
     expect(contract.ProjectSummaryInputSchema).toBeTypeOf("object");
     expect(contract.ProjectSummaryOutputSchema).toBeTypeOf("object");
+    expect(contract.ColumnCreateInputSchema).toBeTypeOf("object");
+    expect(contract.ColumnListOutputSchema).toBeTypeOf("object");
+    expect(contract.COLUMN_EVENT_TYPES).toMatchObject({
+      created: "kanbaner.tasks.column.created",
+      updated: "kanbaner.tasks.column.updated",
+      moved: "kanbaner.tasks.column.moved",
+      deleted: "kanbaner.tasks.column.deleted",
+    });
+    expect(contract.formatColumnRef).toBeTypeOf("function");
     expect(contract.formatTaskRef).toBeTypeOf("function");
     expect(contract.toTaskSearchDocument).toBeTypeOf("function");
     expect(contract.validateSubtaskParent).toBeTypeOf("function");

@@ -8,6 +8,14 @@ import {
   TASKS_QUERY_IDS,
 } from "./constants.ts";
 import {
+  ColumnCreateInputSchema,
+  ColumnDeleteInputSchema,
+  ColumnDeleteOutputSchema,
+  ColumnMoveInputSchema,
+  ColumnMutationOutputSchema,
+  ColumnUpdateInputSchema,
+} from "./schemas/column.ts";
+import {
   ProjectCreateInputSchema,
   ProjectDeleteInputSchema,
   ProjectDeleteOutputSchema,
@@ -15,6 +23,8 @@ import {
   ProjectUpdateInputSchema,
 } from "./schemas/project.ts";
 import {
+  ColumnListInputSchema,
+  ColumnListOutputSchema,
   ProjectGetInputSchema,
   ProjectGetOutputSchema,
   ProjectListInputSchema,
@@ -113,6 +123,34 @@ export const TASKS_COMMANDS = Object.freeze({
     ProjectDeleteOutputSchema,
     "Удаляет проект и его задачи после явного подтверждения",
   ),
+  columnCreate: commandMetadata(
+    TASKS_COMMAND_IDS.columnCreate,
+    "write",
+    ColumnCreateInputSchema,
+    ColumnMutationOutputSchema,
+    "Создаёт колонку проекта и упорядочивает соседей",
+  ),
+  columnUpdate: commandMetadata(
+    TASKS_COMMAND_IDS.columnUpdate,
+    "write",
+    ColumnUpdateInputSchema,
+    ColumnMutationOutputSchema,
+    "Переименовывает колонку с проверкой expectedVersion",
+  ),
+  columnMove: commandMetadata(
+    TASKS_COMMAND_IDS.columnMove,
+    "write",
+    ColumnMoveInputSchema,
+    ColumnMutationOutputSchema,
+    "Переставляет колонку и обновляет позиции соседей",
+  ),
+  columnDelete: commandMetadata(
+    TASKS_COMMAND_IDS.columnDelete,
+    "destructive",
+    ColumnDeleteInputSchema,
+    ColumnDeleteOutputSchema,
+    "Удаляет колонку и атомарно переносит её задачи в targetColumnId",
+  ),
   taskCreate: commandMetadata(
     TASKS_COMMAND_IDS.taskCreate,
     "write",
@@ -169,6 +207,12 @@ export const TASKS_QUERIES = Object.freeze({
     ProjectSummaryInputSchema,
     ProjectSummaryOutputSchema,
     "Возвращает точные счётчики и просроченные задачи по проектам",
+  ),
+  columnList: queryMetadata(
+    TASKS_QUERY_IDS.columnList,
+    ColumnListInputSchema,
+    ColumnListOutputSchema,
+    "Возвращает колонки проекта по position и id",
   ),
   taskGet: queryMetadata(
     TASKS_QUERY_IDS.taskGet,

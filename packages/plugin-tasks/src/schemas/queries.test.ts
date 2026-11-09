@@ -4,6 +4,8 @@ import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
 import { MAX_LIST_LIMIT, MAX_RAW_TAG_LENGTH } from "../constants.ts";
 import {
+  ColumnListInputSchema,
+  ColumnListOutputSchema,
   ProjectGetInputSchema,
   ProjectGetOutputSchema,
   ProjectListInputSchema,
@@ -250,6 +252,46 @@ describe("query schemas", () => {
         nextOffset: null,
         totals,
         extra: true,
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("проверяет column.list input и output", () => {
+    const column = {
+      id: "column-1",
+      projectId: "project-1",
+      title: "Review",
+      status: "in_progress",
+      position: 1,
+      version: 1,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    expect(
+      validateWithSchema(ColumnListInputSchema, {
+        projectId: "project-1",
+        limit: MAX_LIST_LIMIT,
+        offset: 0,
+      }).ok,
+    ).toBe(true);
+    expect(validateWithSchema(ColumnListInputSchema, { projectId: "project-1", limit: 0 }).ok).toBe(
+      false,
+    );
+    expect(validateWithSchema(ColumnListInputSchema, {}).ok).toBe(false);
+
+    expect(
+      validateWithSchema(ColumnListOutputSchema, {
+        items: [column],
+        total: 1,
+        nextOffset: null,
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ColumnListOutputSchema, {
+        items: [{ ...column, position: -1 }],
+        total: 1,
+        nextOffset: null,
       }).ok,
     ).toBe(false);
   });

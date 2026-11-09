@@ -130,7 +130,7 @@ for (const kind of KINDS) {
       }
 
       await seedTask(store, { id: "task-p2-1", projectId: "project-2", status: "done" });
-      await seedTask(store, { id: "task-p2-2", projectId: "project-2", status: "backlog" });
+      await seedTask(store, { id: "task-p2-2", projectId: "project-2", status: "in_progress" });
 
       const first = await store.summarizeProjects({ limit: 2, offset: 0 });
 
@@ -142,7 +142,7 @@ for (const kind of KINDS) {
       expect(first.nextOffset).toBe(2);
       expect(first.totals).toEqual({
         total: 62,
-        counts: { backlog: 1, todo: 60, in_progress: 0, done: 1 },
+        counts: { backlog: 0, todo: 60, in_progress: 1, done: 1 },
         overdueCount: 0,
       });
 
@@ -185,7 +185,7 @@ for (const kind of KINDS) {
         status: "in_progress",
         dueAt: "2025-12-31T23:59:59.999Z",
       });
-      await seedTask(store, { id: "no-due", projectId: "project-1", status: "backlog" });
+      await seedTask(store, { id: "no-due", projectId: "project-1", status: "in_progress" });
 
       expect(now).toBe(FIXED_NOW);
 
@@ -198,7 +198,7 @@ for (const kind of KINDS) {
 
       expect(item).toBeDefined();
       expect(item?.total).toBe(6);
-      expect(item?.counts).toEqual({ backlog: 1, todo: 3, in_progress: 1, done: 1 });
+      expect(item?.counts).toEqual({ backlog: 0, todo: 3, in_progress: 2, done: 1 });
       expect(item?.overdueCount).toBe(2);
       expect(summary.totals.overdueCount).toBe(2);
     });
@@ -227,7 +227,7 @@ for (const kind of KINDS) {
 
       await seedProject(store, "project-1");
       await seedProject(store, "project-2", "2025-12-02T00:00:00.000Z");
-      await seedTask(store, { id: "task-1", projectId: "project-1", status: "backlog" });
+      await seedTask(store, { id: "task-1", projectId: "project-1", status: "in_progress" });
       await seedTask(store, { id: "task-2", projectId: "project-2", status: "done" });
       await seedTask(store, { id: "task-3", projectId: "project-2", status: "todo" });
 

@@ -74,12 +74,62 @@ export const ProjectSchema = Type.Object(
 
 export type Project = Static<typeof ProjectSchema>;
 
+/**
+ * Тип пользовательской колонки.
+ *
+ * `done` соответствует legacy-статусу `done`; любая открытая колонка хранит
+ * один из открытых legacy-статусов. Новые пользовательские open-колонки
+ * используют `in_progress`.
+ */
+export const TASK_COLUMN_TYPES = ["open", "done"] as const;
+
+export type TaskColumnType = (typeof TASK_COLUMN_TYPES)[number];
+
+export const TaskColumnTypeSchema = Type.Union(
+  TASK_COLUMN_TYPES.map((columnType) => Type.Literal(columnType)),
+);
+
+/** Статус, с которым сохраняется пользовательская колонка указанного типа. */
+export function columnStatusForType(columnType: TaskColumnType): TaskStatus {
+  return columnType === "done" ? "done" : "in_progress";
+}
+
+/** Тип колонки по её legacy-статусу. */
+export function columnTypeForStatus(status: TaskStatus): TaskColumnType {
+  return status === "done" ? "done" : "open";
+}
+
+/**
+ * Пользовательская колонка проекта.
+ *
+ * `position` уникальна и задаёт порядок в области `projectId`. `status` —
+ * совместимое зеркало legacy-статуса: `done` соответствует типу Done,
+ * остальные значения — open. Несколько колонок могут иметь одинаковый
+ * open-статус (например, несколько `in_progress`).
+ */
+export const TaskColumnSchema = Type.Object(
+  {
+    id: EntityIdSchema,
+    projectId: EntityIdSchema,
+    title: TitleSchema,
+    status: TaskStatusSchema,
+    position: PositionSchema,
+    version: Type.Integer({ minimum: 1 }),
+    createdAt: UtcTimestampSchema,
+    updatedAt: UtcTimestampSchema,
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type TaskColumn = Static<typeof TaskColumnSchema>;
+
 const TASK_OBJECT_OPTIONS = { additionalProperties: false } as const;
 
 const TaskBaseProperties = {
   id: EntityIdSchema,
   projectId: EntityIdSchema,
   parentTaskId: Type.Union([EntityIdSchema, Type.Null()]),
+  columnId: Type.Optional(EntityIdSchema),
   title: TitleSchema,
   descriptionMarkdown: DescriptionMarkdownSchema,
   priority: TaskPrioritySchema,
@@ -113,12 +163,14 @@ const OpenTaskSchema = Type.Object(
  * Задача.
  *
  * `parentTaskId` ссылается только на корневую задачу того же проекта.
- * `position` уникальна и задаёт порядок в области `(projectId, status)`;
- * `parentTaskId` на эту область не влияет, а непрерывность `0…N-1` не
- * требуется.
+ * `columnId` задаёт пользовательскую колонку и область уникальности позиции
+ * `(projectId, columnId)`. Для старых документов без `columnId` действует
+ * legacy fallback: Store определяет колонку по `status`. `parentTaskId` на
+ * область не влияет, а непрерывность `0…N-1` не требуется.
  *
- * Схема выражает доменный инвариант `done ⇔ completedAt !== null`: задача в
- * `done` обязана иметь timestamp, остальные статусы — `null`.
+ * `status` остаётся совместимым зеркалом статуса колонки. Схема выражает
+ * доменный инвариант `done ⇔ completedAt !== null`: задача в `done` обязана
+ * иметь timestamp, остальные статусы — `null`.
  */
 export const TaskSchema = Type.Union([DoneTaskSchema, OpenTaskSchema], DRAFT_2020_12);
 
@@ -148,6 +200,20 @@ export function deleteEventVersion(lastSavedVersion: number): number {
  * (`deleteEventVersion(version)`). Store не создаёт tombstone-версию.
  */
 export interface DeletedTaskDescriptor {
+  readonly id: string;
+  readonly projectId: string;
+  readonly resourceRef: ResourceRef;
+  readonly version: number;
+  readonly eventVersion: number;
+}
+
+/**
+ * Дескриптор удалённой колонки.
+ *
+ * `version` — последняя сохранённая версия, `eventVersion` — значение
+ * `resourceVersion` delete-события (`version + 1`). Tombstone не создаётся.
+ */
+export interface DeletedColumnDescriptor {
   readonly id: string;
   readonly projectId: string;
   readonly resourceRef: ResourceRef;
