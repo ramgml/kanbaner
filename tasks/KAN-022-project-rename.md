@@ -1,7 +1,7 @@
 ---
 id: KAN-022
 title: Переименование проекта
-status: in_progress
+status: done
 stage: 3
 priority: high
 owner: worker-kan-022
@@ -32,13 +32,13 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить доступную кнопку и диалог переименования в project workspace.
-- [ ] Использовать `project.update` с актуальным `expectedVersion`; не создавать
+- [x] Добавить доступную кнопку и диалог переименования в project workspace.
+- [x] Использовать `project.update` с актуальным `expectedVersion`; не создавать
   отдельной доменной операции.
-- [ ] Обновить snapshots проектов через существующий revision/refresh механизм.
-- [ ] Сохранить keyboard/focus/Escape, double-submit guard и ошибки формы.
-- [ ] Добавить component и E2E для канбана, списка и мобильного viewport.
-- [ ] Обновить README плагина и отчёт `tasks/reports/KAN-022.md`.
+- [x] Обновить snapshots проектов через существующий revision/refresh механизм.
+- [x] Сохранить keyboard/focus/Escape, double-submit guard и ошибки формы.
+- [x] Добавить component и E2E для канбана, списка и мобильного viewport.
+- [x] Обновить README плагина и отчёт `tasks/reports/KAN-022.md`.
 
 ## Владение файлами
 
@@ -61,15 +61,15 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Проект можно переименовать из канбана и списка.
-- [ ] Название обновляется во всех project selectors после reload.
-- [ ] Невалидный ввод и ошибка сохранения не теряют ввод.
-- [ ] Все проверки зелёные.
+- [x] Проект можно переименовать из канбана и списка.
+- [x] Название обновляется во всех project selectors после reload.
+- [x] Невалидный ввод и ошибка сохранения не теряют ввод.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Strict install, check:imports, полный `pnpm check`.
-- [ ] Все Playwright и deferred SIGTERM.
+- [x] Strict install, check:imports, полный `pnpm check`.
+- [x] Все Playwright и deferred SIGTERM.
 
 ## Риски
 
@@ -78,8 +78,15 @@ specs:
 
 ## Журнал
 
+- 2026-11-09 — Влита в `dev` merge-коммитом
+  `980df343a579ce18d0df4c1ca0139a427804ddf8`; повторное ревью разрешило
+  интеграцию, все проверки зелёные на `dev`.
 - 2026-11-09 — Задача создана по требованию пользователя.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммит: merge `980df343a579ce18d0df4c1ca0139a427804ddf8`.
+- Ветка: `feat/kan-022-project-rename` влита, ветка и worktree удалены.
+- Проверки: 93 файла / 1206 тестов, 78 E2E, strict install, check:imports и
+  deferred SIGTERM зелёные.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.
