@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { isActivePath } from "./nav-items";
+import { CORE_NAV_ITEMS, isActivePath } from "./nav-items";
+
+describe("core navigation", () => {
+  it("не содержит администрирование в рабочей навигации", () => {
+    expect(CORE_NAV_ITEMS.map((item) => item.href)).not.toContain("/plugins");
+    expect(CORE_NAV_ITEMS.map((item) => item.href)).not.toContain("/settings");
+  });
+});
 
 describe("isActivePath", () => {
   it("игнорирует query и hash навигационного вклада", () => {

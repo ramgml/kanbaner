@@ -77,7 +77,7 @@ test.describe("fixture plugin в production shell", () => {
   });
 
   test("fixture активен в manager и не включает safe mode", async ({ page }) => {
-    await page.goto("/plugins");
+    await page.goto("/settings/plugins");
 
     const card = page.locator('[data-plugin-id="kanbaner.fixture"]');
 

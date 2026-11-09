@@ -704,7 +704,7 @@ test.describe("список задач в production shell", () => {
       await closeDetails(page, "desktop");
 
       // Прямой адрес чужого раздела с task= не должен открывать детали.
-      await page.goto(`/plugins?task=${taskId}`);
+      await page.goto(`/settings/plugins?task=${taskId}`);
       await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
       await expect(page.getByTestId("task-details-desktop")).toHaveCount(0);
       await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
@@ -713,8 +713,8 @@ test.describe("список задач в production shell", () => {
       await page.goto(`/view/tasks?task=${taskId}`);
       await expect(page.getByTestId("task-details-desktop")).toBeVisible();
 
-      await page.getByRole("link", { name: "Плагины", exact: true }).click();
-      await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
+      await page.getByTestId("settings-link-desktop").click();
+      await expect(page.getByRole("heading", { name: "Настройки", level: 1 })).toBeVisible();
       await expect(page.getByTestId("task-details-desktop")).toHaveCount(0);
       await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
     });
@@ -929,7 +929,7 @@ test.describe("список задач в production shell", () => {
 
       await closeDetails(page, "desktop");
 
-      await page.goto("/plugins");
+      await page.goto("/settings/plugins");
 
       const toggle = page.getByRole("switch", {
         name: "Включить плагин Kanbaner Projects",
@@ -950,7 +950,7 @@ test.describe("список задач в production shell", () => {
       await page.goto("/view/kanban");
       await expect(page.getByTestId("plugin-view-empty")).toBeVisible();
 
-      await page.goto("/plugins");
+      await page.goto("/settings/plugins");
 
       const restoredToggle = page.getByRole("switch", {
         name: "Включить плагин Kanbaner Projects",

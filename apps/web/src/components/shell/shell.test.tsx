@@ -61,8 +61,16 @@ describe("адаптивный app shell", () => {
     expect(desktop).toHaveAttribute("aria-label", "Боковая панель");
     expect(mobile).toHaveAttribute("aria-label", "Мобильная навигация");
     expect(screen.getAllByRole("link", { name: "Обзор" })).toHaveLength(2);
-    expect(screen.getAllByRole("link", { name: "Плагины" })).toHaveLength(2);
+    expect(screen.queryByRole("link", { name: "Плагины" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Настройки" })).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: "Настройки" })[0]).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+    expect(screen.getAllByRole("link", { name: "Настройки" })[1]).toHaveAttribute(
+      "href",
+      "/settings",
+    );
     expect(screen.getAllByRole("link", { name: "Тест UI" })).toHaveLength(2);
   });
 
@@ -71,15 +79,18 @@ describe("адаптивный app shell", () => {
     renderShell();
 
     expect(screen.getByTestId("mobile-navigation")).toBeVisible();
-    expect(screen.getAllByRole("link", { name: "Плагины" })[1]).toHaveAttribute("href", "/plugins");
+    expect(screen.getAllByRole("link", { name: "Обзор" })[1]).toHaveAttribute("href", "/");
+    expect(screen.getByTestId("settings-link-mobile")).toHaveAttribute("href", "/settings");
+    expect(screen.getByTestId("settings-link-mobile")).toHaveAccessibleName("Настройки");
+    expect(screen.queryAllByRole("link", { name: "Плагины" })).toHaveLength(0);
 
     for (const link of screen.getAllByRole("link")) {
       expect(link).toHaveAttribute("href");
     }
   });
 
-  it("поддерживает skip link, main landmark и активный пункт навигации", () => {
-    navigation.pathname = "/plugins";
+  it("поддерживает skip link, main landmark и активный пункт настройки", () => {
+    navigation.pathname = "/settings/plugins";
     renderShell();
 
     expect(screen.getByRole("link", { name: "К содержимому" })).toHaveAttribute(
@@ -88,11 +99,41 @@ describe("адаптивный app shell", () => {
     );
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
     expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
-    expect(screen.getAllByRole("link", { name: "Плагины" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Настройки" })[0]).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getAllByRole("link", { name: "Настройки" })[1]).toHaveAttribute(
       "aria-current",
       "page",
     );
     expect(screen.getAllByRole("link", { name: "Обзор" })[0]).not.toHaveAttribute("aria-current");
+  });
+
+  it("ведёт safe mode ссылки в настройки плагинов", () => {
+    navigation.pathname = "/settings/plugins";
+
+    const registry = createUiContributionRegistry();
+    registerUiPlugin(registry, testUiPlugin);
+
+    render(
+      <UiRegistryProvider registry={registry}>
+        <AppShell safeMode problemCount={2}>
+          <div>Контент страницы</div>
+        </AppShell>
+      </UiRegistryProvider>,
+    );
+
+    expect(screen.getByTestId("safe-mode-notice")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-link-desktop")).toHaveAttribute("href", "/settings");
+    expect(screen.getByTestId("settings-link-mobile")).toHaveAttribute("href", "/settings");
+
+    const pluginManagerLinks = screen
+      .getAllByRole("link")
+      .filter((link) => link.getAttribute("href") === "/settings/plugins");
+
+    // safe mode notice, desktop sidebar и mobile navigation.
+    expect(pluginManagerLinks).toHaveLength(3);
   });
 
   it("рендерит слоты app.details и app.overlays", () => {

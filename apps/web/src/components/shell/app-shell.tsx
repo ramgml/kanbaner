@@ -8,6 +8,7 @@ import { ShieldAlert } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { useUiContributions } from "../../ui/provider";
+import { SETTINGS_PLUGINS_HREF } from "./nav-items";
 import { DesktopSidebar, MobileNavigation } from "./shell-nav";
 import { UiSlot } from "./ui-slot";
 
@@ -21,7 +22,7 @@ function SafeModeNotice({ problemCount }: { readonly problemCount: number }) {
           Ядро запущено в safe mode. Проблемные плагины не активированы
           {problemCount > 0 ? `: ${String(problemCount)}` : ""}. Остальные разделы доступны.
         </p>
-        <Link href="/plugins" className="underline underline-offset-4">
+        <Link href={SETTINGS_PLUGINS_HREF} className="underline underline-offset-4">
           Открыть plugin manager
         </Link>
       </AlertDescription>

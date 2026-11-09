@@ -1,4 +1,4 @@
-import { Blocks, LayoutDashboard, Settings, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, type LucideIcon } from "lucide-react";
 
 export interface ShellNavItem {
   readonly href: string;
@@ -6,12 +6,20 @@ export interface ShellNavItem {
   readonly icon: LucideIcon;
 }
 
-/** Навигация shell-а. Доменных разделов здесь нет. */
+/**
+ * Пункты рабочей навигации shell-а. Администрирование (плагины и настройки)
+ * сюда не входит: plugin manager живёт в `/settings/plugins`, а вход в
+ * настройки — отдельная компактная иконка внизу навигации.
+ */
 export const CORE_NAV_ITEMS: readonly ShellNavItem[] = [
   { href: "/", label: "Обзор", icon: LayoutDashboard },
-  { href: "/plugins", label: "Плагины", icon: Blocks },
-  { href: "/settings", label: "Настройки", icon: Settings },
 ];
+
+/** Единый адрес раздела настроек для shell-навигации. */
+export const SETTINGS_HREF = "/settings";
+
+/** Единственный адрес plugin manager после переноса в настройки. */
+export const SETTINGS_PLUGINS_HREF = "/settings/plugins";
 
 export function isActivePath(pathname: string, href: string): boolean {
   // Навигационный вклад может вести на тот же маршрут с query

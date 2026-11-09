@@ -2,12 +2,18 @@
 
 import Link from "next/link";
 
-import { Blocks, Flag, ShieldAlert } from "lucide-react";
+import { Blocks, Flag, Settings, ShieldAlert } from "lucide-react";
 
 import { Badge } from "../ui/badge";
 import { Separator } from "../ui/separator";
 import { useUiContributions } from "../../ui/provider";
-import { CORE_NAV_ITEMS, isActivePath, type ShellNavItem } from "./nav-items";
+import {
+  CORE_NAV_ITEMS,
+  SETTINGS_HREF,
+  SETTINGS_PLUGINS_HREF,
+  isActivePath,
+  type ShellNavItem,
+} from "./nav-items";
 import { UiSlot } from "./ui-slot";
 
 interface ShellNavProps {
@@ -58,9 +64,26 @@ function navLinkClass(active: boolean, mobile: boolean): string {
   }`;
 }
 
+/**
+ * Компактная иконка настройки: одна и та же доступная ссылка на desktop и
+ * mobile, без текстового пункта в рабочей навигации.
+ */
+function navIconLinkClass(active: boolean, mobile: boolean): string {
+  const base = mobile
+    ? "flex min-h-12 w-12 flex-col items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    : "flex size-9 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+
+  return `${base} ${
+    active
+      ? "bg-secondary text-secondary-foreground"
+      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+  }`;
+}
+
 export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }: ShellNavProps) {
   const sidebarContributions = useUiContributions("app.sidebar");
   const items = mergeNavItems(pluginNavItems(sidebarContributions));
+  const settingsActive = isActivePath(pathname, SETTINGS_HREF);
 
   return (
     <aside
@@ -105,7 +128,7 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
           <Separator />
           {safeMode ? (
             <Link
-              href="/plugins"
+              href={SETTINGS_PLUGINS_HREF}
               className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <ShieldAlert aria-hidden="true" className="size-4 shrink-0" />
@@ -117,9 +140,21 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
           ) : (
             <p className="px-3 text-xs text-muted-foreground">Локальный режим</p>
           )}
-          <Badge variant="outline" className="mx-3 w-fit">
-            Plugin Contract v1
-          </Badge>
+          <div className="flex items-center justify-between gap-2 px-1">
+            <Badge variant="outline" className="mx-2 w-fit">
+              Plugin Contract v1
+            </Badge>
+            <Link
+              href={SETTINGS_HREF}
+              aria-label="Настройки"
+              aria-current={settingsActive ? "page" : undefined}
+              data-testid="settings-link-desktop"
+              title="Настройки"
+              className={navIconLinkClass(settingsActive, false)}
+            >
+              <Settings aria-hidden="true" className="size-4 shrink-0" />
+            </Link>
+          </div>
         </div>
       </nav>
     </aside>
@@ -129,6 +164,7 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
 export function MobileNavigation({ pathname, safeMode = false }: ShellNavProps) {
   const sidebarContributions = useUiContributions("app.sidebar");
   const items = mergeNavItems(pluginNavItems(sidebarContributions));
+  const settingsActive = isActivePath(pathname, SETTINGS_HREF);
 
   return (
     <nav
@@ -154,10 +190,22 @@ export function MobileNavigation({ pathname, safeMode = false }: ShellNavProps) 
             </li>
           );
         })}
+        <li className="flex shrink-0">
+          <Link
+            href={SETTINGS_HREF}
+            aria-label="Настройки"
+            aria-current={settingsActive ? "page" : undefined}
+            data-testid="settings-link-mobile"
+            title="Настройки"
+            className={navIconLinkClass(settingsActive, true)}
+          >
+            <Settings aria-hidden="true" className="size-5 shrink-0" />
+          </Link>
+        </li>
         {safeMode ? (
           <li className="flex min-w-16 flex-1">
             <Link
-              href="/plugins"
+              href={SETTINGS_PLUGINS_HREF}
               className={navLinkClass(false, true)}
               aria-label="Открыть plugin manager: safe mode"
             >
