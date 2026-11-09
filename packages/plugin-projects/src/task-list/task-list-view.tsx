@@ -225,6 +225,8 @@ export function TaskListView({
         summary={query.projectId.length === 0 ? null : summary}
         search={workspaceSearch}
         fallbackTitle="Задачи"
+        invoke={invoke}
+        onProjectRenamed={bumpTaskListRevision}
         actions={
           <>
             <button

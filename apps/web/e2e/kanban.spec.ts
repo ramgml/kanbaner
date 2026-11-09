@@ -91,6 +91,17 @@ async function createProject(page: Page, title: string): Promise<void> {
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }
 
+async function renameProject(page: Page, title: string): Promise<void> {
+  await page.getByTestId("project-rename-button").click();
+
+  const dialog = page.getByTestId("project-rename-dialog");
+
+  await expect(dialog).toBeVisible();
+  await page.getByTestId("project-rename-input").fill(title);
+  await page.getByTestId("project-rename-submit").click();
+  await expect(dialog).toHaveCount(0);
+}
+
 interface TaskEditSeed {
   readonly priority?: string;
   readonly status?: string;
@@ -520,6 +531,11 @@ async function openProjectsFromNav(page: Page): Promise<void> {
  */
 async function revealProjectCard(page: Page, projectId: string): Promise<void> {
   const card = page.getByTestId(`projects-overview-card-${projectId}`);
+
+  // До первой страницы обзора нет ни карточек, ни кнопки «Показать ещё».
+  // Без ожидания цикл ниже мог сразу завершиться и не догрузить проект.
+  await expect(page.getByTestId("projects-overview-grid")).toBeVisible();
+
   let guard = 0;
 
   while (
@@ -938,6 +954,194 @@ test.describe("канбан в production shell", () => {
 
       await page.reload();
       await expect(page.getByTestId("kanban-board-title")).toHaveText(secondTitle);
+    });
+
+    test("переименовывает проект из канбана с валидацией, Escape и сохранением query", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект переименования канбана");
+      const renamedTitle = uniqueTitle("Канбан переименован");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await page.goto(`/view/kanban?project=${projectId}&tag=release`);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+
+      const opener = page.getByTestId("project-rename-button");
+      const dialog = page.getByTestId("project-rename-dialog");
+      const input = page.getByTestId("project-rename-input");
+
+      // Кнопка доступна с клавиатуры и открывает modal-диалог.
+      await opener.focus();
+      await page.keyboard.press("Enter");
+      await expect(dialog).toBeVisible();
+      await expect(input).toHaveValue(projectTitle);
+
+      const selection = await input.evaluate((element) => {
+        const field = element as HTMLInputElement;
+
+        return { start: field.selectionStart, end: field.selectionEnd };
+      });
+
+      expect(selection.start).toBe(0);
+      expect(selection.end).toBe(projectTitle.length);
+
+      // Пустое название не отправляется и не теряет введённое значение.
+      await input.fill("   ");
+      await page.getByTestId("project-rename-submit").click();
+      await expect(page.getByTestId("project-rename-error")).toContainText(
+        "Укажите название проекта",
+      );
+      await expect(dialog).toBeVisible();
+      await expect(input).toHaveValue("   ");
+
+      // Escape закрывает без сохранения и возвращает фокус на кнопку.
+      await input.fill(renamedTitle);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect(opener).toBeFocused();
+
+      await opener.click();
+      await expect(dialog).toBeVisible();
+      await input.fill(renamedTitle);
+      await input.press("Enter");
+
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
+      await expect(
+        page.getByTestId("projects-sidebar-list").getByRole("button", {
+          name: renamedTitle,
+          exact: true,
+        }),
+      ).toHaveCount(1);
+      await expect(
+        page.getByTestId("projects-sidebar-list").getByRole("button", {
+          name: projectTitle,
+          exact: true,
+        }),
+      ).toHaveCount(0);
+      // ID проекта, маршрут и фильтр не меняются.
+      await expect(page).toHaveURL(
+        new RegExp(`/view/kanban\\?[^#]*project=${projectId}[^#]*tag=release`, "u"),
+      );
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
+      await expect(
+        page.getByTestId("kanban-filters").getByRole("searchbox", { name: "Тег" }),
+      ).toHaveValue("release");
+
+      // Обзор после reload показывает новое название из хранилища.
+      await page.goto(`/view/projects?project=${projectId}`);
+      await expect(page.getByTestId("projects-overview")).toBeVisible();
+      await revealProjectCard(page, projectId);
+      await expect(page.getByTestId(`projects-overview-card-${projectId}`)).toContainText(
+        renamedTitle,
+      );
+    });
+
+    test("Escape в переименовании не закрывает inline-создание с черновиком", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект переименования с черновиком");
+      const draftTitle = uniqueTitle("Черновик задачи при переименовании");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId("kanban-create-task").click();
+
+      const createPanel = page.getByTestId("kanban-create-panel");
+      const draftInput = page.getByTestId("kanban-create-input");
+
+      await expect(createPanel).toBeVisible();
+      await draftInput.fill(draftTitle);
+
+      const before = new URL(page.url());
+
+      await page.getByTestId("project-rename-button").click();
+
+      const renameDialog = page.getByTestId("project-rename-dialog");
+
+      await expect(renameDialog).toBeVisible();
+      await page.keyboard.press("Escape");
+
+      // Закрылся только rename; inline create и черновик не тронуты.
+      await expect(renameDialog).toHaveCount(0);
+      await expect(createPanel).toBeVisible();
+      await expect(draftInput).toHaveValue(draftTitle);
+      expect(new URL(page.url()).search).toBe(before.search);
+      await expect(page.getByTestId("project-rename-button")).toBeFocused();
+
+      // Повторный Escape уже закрывает inline create как раньше.
+      await page.keyboard.press("Escape");
+      await expect(createPanel).toHaveCount(0);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+    });
+
+    test("не перезаписывает переименование из второй вкладки и сохраняет ввод", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект конфликта переименования");
+      const firstTitle = uniqueTitle("Переименование вкладки A");
+      const staleTitle = uniqueTitle("Переименование вкладки B");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectUrl = page.url();
+      const projectId = new URL(projectUrl).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await page.goto(`/view/kanban?project=${projectId}`);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+
+      const stalePage = await context.newPage();
+
+      await stalePage.goto(`/view/kanban?project=${projectId}`);
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+
+      // Вкладка A сохраняет первую версию.
+      await renameProject(page, firstTitle);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(firstTitle);
+
+      // Вкладка B держит устаревшую версию.
+      await stalePage.getByTestId("project-rename-button").click();
+
+      const staleDialog = stalePage.getByTestId("project-rename-dialog");
+      const staleInput = stalePage.getByTestId("project-rename-input");
+
+      await expect(staleDialog).toBeVisible();
+      await staleInput.fill(staleTitle);
+      await stalePage.getByTestId("project-rename-submit").click();
+
+      await expect(stalePage.getByTestId("project-rename-error")).toContainText(
+        "Проект уже изменён в другом месте",
+      );
+      await expect(staleDialog).toBeVisible();
+      await expect(staleInput).toHaveValue(staleTitle);
+      // Данные перечитаны: за заголовком уже правка вкладки A.
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(firstTitle);
+
+      // Повторная попытка использует актуальную версию и сохраняет ввод.
+      await stalePage.getByTestId("project-rename-submit").click();
+      await expect(staleDialog).toHaveCount(0);
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(staleTitle);
+
+      await stalePage.reload();
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(staleTitle);
+      await stalePage.close();
     });
 
     test("невалидный project из entry не затирает сохранённый проект", async ({ page }) => {
@@ -3257,6 +3461,55 @@ test.describe("канбан в production shell", () => {
       await expect
         .poll(async () => page.evaluate(() => document.activeElement?.closest("dialog") !== null))
         .toBe(true);
+    });
+
+    test("переименовывает проект на мобильном и обновляет mobile sheet", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект мобильного переименования");
+      const renamedTitle = uniqueTitle("Мобильный проект переименован");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await openKanban(page, projectTitle);
+      await expectNoHorizontalOverflow(page);
+
+      const opener = page.getByTestId("project-rename-button");
+
+      await expect(opener).toBeVisible();
+      await opener.click();
+
+      const dialog = page.getByTestId("project-rename-dialog");
+
+      await expect(dialog).toBeVisible();
+      expect(await dialog.evaluate((element) => element.tagName)).toBe("DIALOG");
+      await page.getByTestId("project-rename-input").fill(renamedTitle);
+      await page.getByTestId("project-rename-submit").click();
+
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
+      await expect(page).toHaveURL(new RegExp(`/view/kanban\\?[^#]*project=${projectId}`, "u"));
+      await expectNoHorizontalOverflow(page);
+
+      // Mobile sheet перечитывает проекты по той же revision.
+      await page.getByTestId("projects-mobile-trigger").click();
+
+      const sheet = page.getByTestId("projects-mobile-sheet");
+
+      await expect(sheet).toBeVisible();
+      await expect(page.getByTestId(`projects-mobile-item-${projectId}`)).toContainText(
+        renamedTitle,
+      );
+
+      await page.keyboard.press("Escape");
+      await expect(sheet).toHaveCount(0);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
+      await expectNoHorizontalOverflow(page);
     });
 
     test("на 360 px длинная колонка прокручивается внутри и переживает resize", async ({

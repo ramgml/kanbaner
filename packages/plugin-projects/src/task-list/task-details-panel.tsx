@@ -230,9 +230,13 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
     }
 
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        updateTaskListQuery({ taskId: null });
+      // Вложенный modal (например, переименование проекта) уже обработал
+      // Escape и закрыл только себя. Не сбрасываем выбранную задачу.
+      if (event.defaultPrevented || event.key !== "Escape") {
+        return;
       }
+
+      updateTaskListQuery({ taskId: null });
     };
 
     window.addEventListener("keydown", onKeyDown);
