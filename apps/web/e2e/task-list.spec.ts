@@ -37,15 +37,32 @@ async function openTaskList(page: Page): Promise<void> {
   await expect(page.getByTestId("task-list-projects-loading")).toHaveText("Проекты загружены");
 }
 
-async function createProject(page: Page, title: string): Promise<void> {
-  await page.getByTestId("create-project-button").click();
+function viewportIsMobile(page: Page): boolean {
+  return (page.viewportSize()?.width ?? DESKTOP_VIEWPORT.width) < 768;
+}
+
+async function openProjectCreator(page: Page): Promise<import("@playwright/test").Locator> {
+  if (viewportIsMobile(page)) {
+    await page.getByTestId("projects-mobile-trigger").click();
+    await page.getByTestId("projects-mobile-create").click();
+  } else {
+    await page.getByTestId("projects-create-button").click();
+  }
 
   const form = page.getByTestId("project-form");
 
   await expect(form).toBeVisible();
+
+  return form;
+}
+
+async function createProject(page: Page, title: string): Promise<void> {
+  const form = await openProjectCreator(page);
+
   await form.getByLabel("Название проекта", { exact: true }).fill(title);
   await form.getByRole("button", { name: "Создать проект" }).click();
   await expect(form).toHaveCount(0);
+  await expect(page).toHaveURL(/[?&]project=/u);
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }
 
@@ -59,27 +76,39 @@ interface TaskSeed {
   readonly parentTitle?: string;
 }
 
-async function createTask(page: Page, seed: TaskSeed): Promise<string> {
-  await page.getByTestId("create-task-button").click();
+function hasTaskExtras(seed: TaskSeed): boolean {
+  return (
+    seed.priority !== undefined ||
+    (seed.status !== undefined && seed.status !== "todo") ||
+    seed.dueAt !== undefined ||
+    seed.tags !== undefined
+  );
+}
 
-  const form = page.getByTestId("task-form-create");
+async function openTaskDetails(page: Page): Promise<import("@playwright/test").Locator> {
+  const desktop = page.getByTestId("task-details-desktop");
+
+  if ((await desktop.count()) > 0 && (await desktop.isVisible())) {
+    return desktop;
+  }
+
+  return page.getByTestId("task-details-mobile");
+}
+
+async function editTaskDetails(page: Page, seed: TaskSeed): Promise<void> {
+  const panel = await openTaskDetails(page);
+
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "Редактировать", exact: true }).click();
+
+  const form = page.getByTestId("task-form-edit");
 
   await expect(form).toBeVisible();
-  // <select> вложен в <label>, поэтому label.textContent включает тексты
-  // option; надёжнее адресоваться по доступному имени combobox.
-  await form.getByRole("combobox", { name: "Проект", exact: true }).selectOption({
-    label: seed.projectTitle,
-  });
-  await form.getByLabel("Название", { exact: true }).fill(seed.title);
 
   if (seed.priority !== undefined) {
     await form
       .getByRole("combobox", { name: "Приоритет", exact: true })
       .selectOption(seed.priority);
-  }
-
-  if (seed.status !== undefined) {
-    await form.getByRole("combobox", { name: "Статус", exact: true }).selectOption(seed.status);
   }
 
   if (seed.dueAt !== undefined) {
@@ -90,15 +119,132 @@ async function createTask(page: Page, seed: TaskSeed): Promise<string> {
     await form.getByLabel("Теги через запятую", { exact: true }).fill(seed.tags);
   }
 
-  if (seed.parentTitle !== undefined) {
-    const parentSelect = form.getByRole("combobox", { name: "Родительская задача", exact: true });
+  await form.getByRole("button", { name: "Сохранить задачу" }).click();
+  await expect(form).toHaveCount(0);
 
-    await expect(parentSelect).toContainText(seed.parentTitle);
-    await parentSelect.selectOption({ label: seed.parentTitle });
+  if (seed.status !== undefined && seed.status !== "todo") {
+    const next = await openTaskDetails(page);
+    const move = next.getByRole("button", { name: "Переместить", exact: true });
+
+    await next
+      .getByRole("combobox", { name: "Переместить в", exact: true })
+      .selectOption(seed.status);
+    await move.click();
+    await expect(move).toBeDisabled();
+  }
+}
+
+async function closeDetails(page: Page, variant: "mobile" | "desktop"): Promise<void> {
+  if (!new URL(page.url()).searchParams.has("task")) {
+    return;
   }
 
-  await form.getByRole("button", { name: "Создать задачу" }).click();
-  await expect(form).toHaveCount(0);
+  const panel =
+    variant === "mobile"
+      ? page.getByTestId("task-details-mobile")
+      : page.getByTestId("task-details-desktop");
+
+  await panel.getByRole("button", { name: "Закрыть детали" }).click();
+  await expect(page).not.toHaveURL(/[?&]task=/u);
+}
+
+/**
+ * Создаёт подзадачу публичным путём: через форму подзадачи в Trello-модале.
+ * `task.update` не меняет родителя, поэтому иного UI-способа нет.
+ */
+async function createSubtask(page: Page, seed: TaskSeed): Promise<string> {
+  const projectId = new URL(page.url()).searchParams.get("project");
+
+  expect(projectId).not.toBeNull();
+  await page.goto(`/view/kanban?project=${projectId}`);
+  await expect(page.getByTestId("kanban-columns")).toBeVisible();
+
+  const parent = page
+    .getByTestId("kanban-view")
+    .locator("[data-card-id]")
+    .filter({ hasText: seed.parentTitle ?? "" });
+
+  await expect(parent).toHaveCount(1);
+
+  const parentId = await parent.getAttribute("data-card-id");
+
+  expect(parentId).not.toBeNull();
+  await page.getByTestId(`kanban-open-${parentId}`).click();
+  await expect(page.getByTestId("kanban-details")).toBeVisible();
+  await page.getByTestId("kanban-subtask-create").click();
+  await page.getByTestId("kanban-subtask-input").fill(seed.title);
+
+  if (seed.status !== undefined) {
+    await page
+      .getByRole("combobox", { name: "Статус подзадачи", exact: true })
+      .selectOption(seed.status);
+  }
+
+  await page.getByTestId("kanban-subtask-submit").click();
+
+  const item = page.locator('[data-testid^="kanban-subtask-"]').filter({ hasText: seed.title });
+
+  await expect(item).toHaveCount(1);
+
+  const testId = await item.getAttribute("data-testid");
+  const taskId = (testId ?? "").replace("kanban-subtask-", "");
+
+  expect(taskId.length).toBeGreaterThan(0);
+
+  if (seed.tags !== undefined || seed.dueAt !== undefined || seed.priority !== undefined) {
+    await page.getByTestId(`kanban-subtask-${taskId}`).click();
+    await page.getByTestId("kanban-modal-edit").click();
+
+    const form = page.getByTestId("task-form-edit");
+
+    await expect(form).toBeVisible();
+
+    if (seed.priority !== undefined) {
+      await form
+        .getByRole("combobox", { name: "Приоритет", exact: true })
+        .selectOption(seed.priority);
+    }
+
+    if (seed.dueAt !== undefined) {
+      await form.getByLabel("Срок", { exact: true }).fill(seed.dueAt);
+    }
+
+    if (seed.tags !== undefined) {
+      await form.getByLabel("Теги через запятую", { exact: true }).fill(seed.tags);
+    }
+
+    await form.getByRole("button", { name: "Сохранить задачу" }).click();
+    await expect(form).toHaveCount(0);
+  }
+
+  if ((await page.getByTestId("kanban-details").count()) > 0) {
+    await page.getByTestId("kanban-details-close").click();
+    await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+  }
+
+  await page.goto(`/view/tasks?project=${projectId}`);
+  await expect(page.getByTestId("task-list-view")).toBeVisible();
+
+  return taskId;
+}
+
+async function createTask(page: Page, seed: TaskSeed): Promise<string> {
+  if (new URL(page.url()).searchParams.has("task")) {
+    await closeDetails(page, viewportIsMobile(page) ? "mobile" : "desktop");
+  }
+
+  if (seed.parentTitle !== undefined) {
+    return createSubtask(page, seed);
+  }
+
+  await page.getByTestId("create-task-button").click();
+
+  const input = page.getByTestId("task-list-create-input");
+
+  await expect(input).toBeVisible();
+  await input.fill(seed.title);
+  await page.getByTestId("task-list-create-submit").click();
+  await expect(page.getByTestId("task-list-create-panel")).toHaveCount(0);
 
   // После создания список открывает детали через query string.
   await expect(page).toHaveURL(/[?&]task=/u);
@@ -107,17 +253,11 @@ async function createTask(page: Page, seed: TaskSeed): Promise<string> {
 
   expect(taskId).not.toBeNull();
 
+  if (hasTaskExtras(seed)) {
+    await editTaskDetails(page, seed);
+  }
+
   return taskId as string;
-}
-
-async function closeDetails(page: Page, variant: "mobile" | "desktop"): Promise<void> {
-  const panel =
-    variant === "mobile"
-      ? page.getByTestId("task-details-mobile")
-      : page.getByTestId("task-details-desktop");
-
-  await panel.getByRole("button", { name: "Закрыть детали" }).click();
-  await expect(page).not.toHaveURL(/[?&]task=/u);
 }
 
 /**
@@ -232,12 +372,14 @@ test.describe("список задач в production shell", () => {
       await expect(mobileCard(page, alphaTitle)).toBeVisible();
       await expect(mobileCard(page, betaTitle)).toHaveCount(0);
 
-      // Сброс фильтров очищает query string. Проверять Beta в общем списке
-      // нельзя: база E2E общая, и вторая задача проекта может оказаться за
-      // первой страницей. Сначала снова ограничиваем список проектом.
+      // Сброс фильтров очищает приоритет, но сохраняет проект: проект задаётся
+      // рабочим пространством, а не фильтром списка.
       await page.getByRole("button", { name: "Сбросить фильтры" }).click();
-      await expect(page).not.toHaveURL(/[?&](project|priority)=/u);
-      await expect(filters.getByRole("combobox", { name: "Проект", exact: true })).toHaveValue("");
+      await expect(page).toHaveURL(/[?&]project=/u);
+      await expect(page).not.toHaveURL(/[?&]priority=/u);
+      await expect(filters.getByRole("combobox", { name: "Проект", exact: true })).not.toHaveValue(
+        "",
+      );
 
       await filterTaskListByProject(page, projectTitle);
       await expect(mobileCard(page, alphaTitle)).toBeVisible();
@@ -310,7 +452,8 @@ test.describe("список задач в production shell", () => {
       await filterTaskListByProject(page, projectTitle);
 
       // Снимаем фокус с исчезнувшей кнопки и проходим Tab-порядок shell.
-      await page.locator("h1", { hasText: "Задачи" }).click();
+      // Заголовок списка — название выбранного проекта.
+      await page.getByTestId("project-board-title").click();
 
       let reachedCard = false;
 
@@ -656,7 +799,7 @@ test.describe("список задач в production shell", () => {
       await expect(page.locator('[data-testid^="task-row-"]').first()).toContainText(lastTitle);
     });
 
-    test("переживает отключение и включение kanbaner.task-list без потери задач", async ({
+    test("переживает отключение и включение kanbaner.projects без потери задач", async ({
       page,
     }) => {
       test.setTimeout(180_000);
@@ -673,24 +816,28 @@ test.describe("список задач в production shell", () => {
       await page.goto("/plugins");
 
       const toggle = page.getByRole("switch", {
-        name: "Включить плагин Kanbaner Task List",
+        name: "Включить плагин Kanbaner Projects",
       });
 
       await expect(toggle).toBeVisible();
       await expect(toggle).toHaveAttribute("aria-checked", "true");
       await toggle.click();
       await expect(toggle).toHaveAttribute("aria-checked", "false");
-      await expect(page.getByRole("heading", { name: "Kanbaner Task List" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Kanbaner Projects" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
 
-      // Без UI-плагина маршрут списка больше не зарегистрирован, но shell жив.
+      // Без UI-плагина не зарегистрированы оба маршрута рабочего пространства,
+      // но shell жив.
       await page.goto("/view/tasks");
+      await expect(page.getByTestId("plugin-view-empty")).toBeVisible();
+
+      await page.goto("/view/kanban");
       await expect(page.getByTestId("plugin-view-empty")).toBeVisible();
 
       await page.goto("/plugins");
 
       const restoredToggle = page.getByRole("switch", {
-        name: "Включить плагин Kanbaner Task List",
+        name: "Включить плагин Kanbaner Projects",
       });
 
       await restoredToggle.click();

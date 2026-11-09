@@ -125,8 +125,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 |---|---|---|---|
 | `kanbaner.storage-sqlite` | SQLite WAL Storage Provider | Нет | Storage Provider contract |
 | `kanbaner.tasks` | Проекты, задачи, подзадачи, теги | Нет | `kanbaner.tasks.commands.v1`, `kanbaner.tasks.queries.v1`, `kanbaner.tasks.events.v1` |
-| `kanbaner.task-list` | Табличное представление задач | `kanbaner.tasks` | UI-вклад |
-| `kanbaner.kanban` | Доска и порядок карточек | `kanbaner.tasks` | UI-вклад, команда перемещения |
+| `kanbaner.projects` | Рабочее пространство проектов: sidebar, доска, список, переключатель представлений | `kanbaner.tasks` | `kanbaner.projects.ui.v1` |
 | `kanbaner.notes` | Заметки и Markdown-редактор | Нет | `kanbaner.notes.commands.v1`, `kanbaner.notes.queries.v1`, `kanbaner.notes.events.v1` |
 | `kanbaner.search` | Полнотекстовый поиск и агрегация провайдеров | Нет | `kanbaner.search.queries.v1`, UI-вклад |
 | `kanbaner.mcp` | Необязательный stdio-адаптер MCP | HTTP API | Не загружается в ядро |
@@ -145,8 +144,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 @kanbaner/storage-sqlite
 @kanbaner/task-ui
 @kanbaner/plugin-tasks
-@kanbaner/plugin-task-list
-@kanbaner/plugin-kanban
+@kanbaner/plugin-projects
 @kanbaner/plugin-notes
 @kanbaner/plugin-search
 @kanbaner/mcp
