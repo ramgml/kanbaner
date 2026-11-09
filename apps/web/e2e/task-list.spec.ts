@@ -57,11 +57,15 @@ async function openProjectCreator(page: Page): Promise<import("@playwright/test"
 }
 
 async function createProject(page: Page, title: string): Promise<void> {
+  const beforeProjectId = new URL(page.url()).searchParams.get("project");
   const form = await openProjectCreator(page);
 
   await form.getByLabel("Название проекта", { exact: true }).fill(title);
   await form.getByRole("button", { name: "Создать проект" }).click();
   await expect(form).toHaveCount(0);
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("project"))
+    .not.toBe(beforeProjectId);
   await expect(page).toHaveURL(/[?&]project=/u);
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }

@@ -76,11 +76,17 @@ async function openProjectCreator(page: Page): Promise<Locator> {
 }
 
 async function createProject(page: Page, title: string): Promise<void> {
+  const beforeProjectId = new URL(page.url()).searchParams.get("project");
   const form = await openProjectCreator(page);
 
   await form.getByLabel("Название проекта", { exact: true }).fill(title);
   await form.getByRole("button", { name: "Создать проект" }).click();
   await expect(form).toHaveCount(0);
+  // URL с любым project= может совпасть со старым проектом: дожидаемся
+  // именно нового id, иначе последующее чтение project из URL возьмёт чужой.
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("project"))
+    .not.toBe(beforeProjectId);
   await expect(page).toHaveURL(/[?&]project=/u);
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }
@@ -1107,24 +1113,45 @@ test.describe("канбан в production shell", () => {
         await input.press("Enter");
       }
 
-      await page.keyboard.press("Escape");
       await expect(page.getByTestId("kanban-count-todo")).toHaveText("15");
 
-      const loadAllTodo = async (): Promise<void> => {
+      // Последний submit мог ещё держать input disabled: Escape в этот момент
+      // теряется и composer остаётся открытым. Сначала ждём возврат фокуса.
+      await expect(input).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
+
+      const loadAllTodo = async (expectedTotal: number): Promise<void> => {
+        const loadMore = page.getByTestId("kanban-load-more-todo");
+
+        // После reload доска сначала рендерит только первую страницу.
+        // Проверка count() без ожидания данных видит 0 кнопок и завершает
+        // цикл раньше времени, оставляя 10 карточек из 15.
+        await expect
+          .poll(async () => {
+            const rendered = (await cardTitles(page, "todo")).length;
+
+            return rendered >= expectedTotal || (await loadMore.count()) > 0;
+          })
+          .toBe(true);
+
         let guard = 0;
 
-        while ((await page.getByTestId("kanban-load-more-todo").count()) > 0 && guard < 10) {
+        while ((await loadMore.count()) > 0 && guard < 10) {
           const before = (await cardTitles(page, "todo")).length;
 
-          await page.getByTestId("kanban-load-more-todo").click();
+          await loadMore.click();
           await expect
             .poll(async () => (await cardTitles(page, "todo")).length)
             .toBeGreaterThan(before);
           guard += 1;
         }
+
+        // Регрессия: догрузка обязана довести колонку до полного состава.
+        await expect.poll(async () => (await cardTitles(page, "todo")).length).toBe(expectedTotal);
       };
 
-      await loadAllTodo();
+      await loadAllTodo(15);
       await scroll.evaluate((element) => {
         element.scrollTop = element.scrollHeight;
       });
@@ -1145,7 +1172,7 @@ test.describe("канбан в production shell", () => {
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
-      await loadAllTodo();
+      await loadAllTodo(15);
       await expect
         .poll(() => cardTitles(page, "todo"))
         .toEqual([lastId, firstId, secondId, thirdId, ...ids.slice(3, -1)]);
@@ -1196,7 +1223,10 @@ test.describe("канбан в production shell", () => {
       }
 
       await expect(page.getByTestId("kanban-count-todo")).toHaveText("24");
+      // Escape после последнего submit теряется, пока input disabled.
+      await expect(input).toBeFocused();
       await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
       await expect(trigger).toBeVisible();
 
       // Длинный список получает собственный scroll: composer остаётся над ним
@@ -3250,8 +3280,13 @@ test.describe("канбан в production shell", () => {
         await input.press("Enter");
       }
 
-      await page.keyboard.press("Escape");
       await expect(page.getByTestId("kanban-count-todo")).toHaveText("18");
+      // Escape после последнего submit теряется, пока input disabled: composer
+      // остаётся открытым, а trigger «Добавить карточку» не рендерится.
+      await expect(input).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
+      await expect(trigger).toBeVisible();
 
       const expectLongColumn = async (): Promise<void> => {
         await expectNoHorizontalOverflow(page);
