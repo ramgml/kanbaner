@@ -16,7 +16,7 @@ export interface KanbanColumnProps {
   readonly dropActive: boolean;
   readonly onLoadMore: () => void;
   readonly onRetry: () => void;
-  /** Быстрый composer внизу колонки. */
+  /** Быстрый composer сразу под заголовком, вне прокручиваемого списка. */
   readonly quickComposer: ReactNode;
   readonly children: ReactNode;
 }
@@ -24,7 +24,7 @@ export interface KanbanColumnProps {
 const secondaryButtonClass =
   "inline-flex min-h-10 items-center justify-center rounded-md border border-border bg-background/70 px-2 text-xs font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
 
-/** Колонка доски: заголовок, счётчик, прокручиваемый список и composer. */
+/** Колонка доски: заголовок, счётчик, composer и прокручиваемый список. */
 export function KanbanColumn({
   status,
   total,
@@ -69,6 +69,14 @@ export function KanbanColumn({
         </span>
       </header>
 
+      {/*
+        Composer идёт сразу под заголовком и вне прокручиваемого списка:
+        кнопка создания остаётся на месте при любой длине колонки.
+      */}
+      <div data-testid={`kanban-quick-composer-${status}`} className="flex shrink-0 flex-col gap-1">
+        {quickComposer}
+      </div>
+
       {error === null ? null : (
         <div
           role="alert"
@@ -90,7 +98,10 @@ export function KanbanColumn({
         <LoadingState label={`Загрузка: ${taskStatusLabel(status)}`} />
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
+      <div
+        data-testid={`kanban-column-scroll-${status}`}
+        className="min-h-0 flex-1 overflow-y-auto pr-0.5"
+      >
         {!loading && total === 0 && error === null && !dropActive ? (
           <div
             data-testid={`kanban-column-empty-${status}`}
@@ -123,8 +134,6 @@ export function KanbanColumn({
           </button>
         ) : null}
       </div>
-
-      <div className="mt-auto flex shrink-0 flex-col gap-1">{quickComposer}</div>
     </section>
   );
 }

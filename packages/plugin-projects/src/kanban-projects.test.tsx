@@ -12,9 +12,11 @@ import type {
 } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
+import { KANBAN_ROUTE, TASK_LIST_ROUTE } from "./metadata.ts";
 import { KanbanView } from "./ui/kanban-view.tsx";
 import { ProjectsOverview } from "./ui/projects-overview.tsx";
 import { resetKanbanQueryForTests, updateKanbanQuery } from "./ui/query-state.ts";
+import { rememberProject, rememberProjectView } from "./ui/workspace.ts";
 
 const TIMESTAMP = "2026-02-01T00:00:00.000Z";
 const NOW = Date.now();
@@ -248,43 +250,158 @@ describe("Обзор проектов", () => {
     );
   });
 
-  it("снимает служебный entry, если сохранённого представления нет", async () => {
-    const replaceSearch = vi.fn();
+  it("без сохранённого вида ведёт в канбан и сохраняет валидный проект из query", async () => {
+    const redirectLocation = vi.fn();
 
     render(
       <ProjectsOverview
-        invoke={makeInvoke({ projects: [], tasks: [] })}
-        search="?entry=1"
-        replaceSearch={replaceSearch}
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1&project=project-2"
+        redirectLocation={redirectLocation}
       />,
     );
 
     await waitFor(() => {
-      expect(replaceSearch).toHaveBeenCalledWith("");
+      expect(redirectLocation).toHaveBeenCalledWith(`${KANBAN_ROUTE}?project=project-2`);
     });
-    expect(window.location.search).not.toContain("entry=1");
+    // Служебный entry не переносится в целевой URL.
+    expect(redirectLocation.mock.calls[0]?.[0]).not.toContain("entry");
   });
 
-  it("повторно обрабатывает entry после его снятия без remount", async () => {
-    const replaceSearch = vi.fn();
-    const invoke = makeInvoke({ projects: [], tasks: [] });
-    const { rerender } = render(
-      <ProjectsOverview invoke={invoke} search="?entry=1" replaceSearch={replaceSearch} />,
+  it("без project в query подставляет последний валидный проект", async () => {
+    const redirectLocation = vi.fn();
+
+    rememberProject("project-1");
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1"
+        redirectLocation={redirectLocation}
+      />,
     );
 
     await waitFor(() => {
-      expect(replaceSearch).toHaveBeenCalledTimes(1);
+      expect(redirectLocation).toHaveBeenCalledWith(`${KANBAN_ROUTE}?project=project-1`);
     });
-    expect(replaceSearch).toHaveBeenLastCalledWith("");
+  });
 
-    rerender(<ProjectsOverview invoke={invoke} search="" replaceSearch={replaceSearch} />);
-    rerender(<ProjectsOverview invoke={invoke} search="?entry=1" replaceSearch={replaceSearch} />);
+  it("выбрасывает невалидный project и открывает канбан", async () => {
+    const redirectLocation = vi.fn();
 
-    // Без сброса entryHandledRef второй вход молча оставлял бы entry=1 в URL.
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1&project=ghost"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
     await waitFor(() => {
-      expect(replaceSearch).toHaveBeenCalledTimes(2);
+      expect(redirectLocation).toHaveBeenCalledWith(KANBAN_ROUTE);
     });
-    expect(replaceSearch).toHaveBeenLastCalledWith("");
+  });
+
+  it("восстанавливает сохранённый список", async () => {
+    const redirectLocation = vi.fn();
+
+    rememberProjectView(TASK_LIST_ROUTE);
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledWith(TASK_LIST_ROUTE);
+    });
+  });
+
+  it("восстанавливает сохранённый канбан", async () => {
+    const redirectLocation = vi.fn();
+
+    rememberProjectView(KANBAN_ROUTE);
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledWith(KANBAN_ROUTE);
+    });
+  });
+
+  it("при неизвестном значении открывает канбан", async () => {
+    const redirectLocation = vi.fn();
+
+    window.localStorage.setItem("kanbaner.projects.lastView", "/view/unknown");
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledWith(KANBAN_ROUTE);
+    });
+  });
+
+  it("при ошибке чтения lastView открывает канбан без падения", async () => {
+    const redirectLocation = vi.fn();
+    const original = Storage.prototype.getItem;
+
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+    ): string | null {
+      if (key === "kanbaner.projects.lastView") {
+        throw new DOMException("Доступ запрещён", "SecurityError");
+      }
+
+      return original.call(this, key);
+    });
+
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledWith(KANBAN_ROUTE);
+    });
+  });
+
+  it("повторно обрабатывает entry без remount", async () => {
+    const redirectLocation = vi.fn();
+    const invoke = makeInvoke(boardWithProjects());
+    const { rerender } = render(
+      <ProjectsOverview invoke={invoke} search="?entry=1" redirectLocation={redirectLocation} />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledTimes(1);
+    });
+    expect(redirectLocation).toHaveBeenLastCalledWith(KANBAN_ROUTE);
+
+    rerender(<ProjectsOverview invoke={invoke} search="" redirectLocation={redirectLocation} />);
+    rerender(
+      <ProjectsOverview invoke={invoke} search="?entry=1" redirectLocation={redirectLocation} />,
+    );
+
+    // Без сброса entryHandledRef второй вход молча не восстановил бы вид.
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledTimes(2);
+    });
+    expect(redirectLocation).toHaveBeenLastCalledWith(KANBAN_ROUTE);
   });
 });
 

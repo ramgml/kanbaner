@@ -4,10 +4,18 @@ import { useSyncExternalStore } from "react";
 
 import type { Project } from "@kanbaner/plugin-tasks/contract";
 
-import type { ProjectRoute } from "../metadata.ts";
+import { KANBAN_ROUTE, TASK_LIST_ROUTE, type ProjectRoute } from "../metadata.ts";
 
 const LAST_PROJECT_KEY = "kanbaner.projects.lastProjectId";
 const LAST_VIEW_KEY = "kanbaner.projects.lastView";
+
+/**
+ * Представления, которые можно сохранить как последний выбор пользователя.
+ *
+ * Обзор `/view/projects` намеренно не входит: это служебный экран, а точка
+ * входа по умолчанию — канбан.
+ */
+export type PersistedProjectView = typeof KANBAN_ROUTE | typeof TASK_LIST_ROUTE;
 
 /** Breakpoint мобильного layout-а sidebar: 768 px и уже. */
 export const MOBILE_MEDIA_QUERY = "(max-width: 767px)" as const;
@@ -154,7 +162,7 @@ export function readLastProjectId(): string | null {
   }
 }
 
-export function rememberProjectView(route: ProjectRoute): void {
+export function rememberProjectView(route: PersistedProjectView): void {
   try {
     safeStorage()?.setItem(LAST_VIEW_KEY, route);
   } catch {
@@ -162,17 +170,21 @@ export function rememberProjectView(route: ProjectRoute): void {
   }
 }
 
-export function readLastProjectView(): ProjectRoute | null {
+/**
+ * Возвращает последнее выбранное представление.
+ *
+ * Отсутствие значения, неизвестный/повреждённый маршрут, старый обзор и
+ * недоступный storage одинаково означают канбан: это представление по
+ * умолчанию, а не повод оставить пользователя на служебном обзоре или упасть.
+ */
+export function readLastProjectView(): PersistedProjectView {
   try {
     const value = safeStorage()?.getItem(LAST_VIEW_KEY);
 
-    return value === "/view/kanban" || value === "/view/tasks" || value === "/view/projects"
-      ? value
-      : null;
+    return value === TASK_LIST_ROUTE ? TASK_LIST_ROUTE : KANBAN_ROUTE;
   } catch {
-    // SecurityError/приватный режим или испорченное значение: вход остаётся
-    // в обзоре, а не падает на чтении storage.
-    return null;
+    // SecurityError/приватный режим или запрет storage: вход в канбан.
+    return KANBAN_ROUTE;
   }
 }
 
