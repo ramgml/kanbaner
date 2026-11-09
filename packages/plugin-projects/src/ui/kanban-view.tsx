@@ -318,6 +318,7 @@ export function KanbanView({
   const [dragOver, setDragOver] = useState<DropTarget | null>(null);
   const [activeStatus, setActiveStatus] = useState<TaskStatus>("backlog");
   const [scrollHints, setScrollHints] = useState({ left: false, right: false });
+  const [columnsHeight, setColumnsHeight] = useState<number | null>(null);
   const [quickResetTokens] = useState<Partial<Record<TaskStatus, number>>>({});
   const columnsRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<TaskStatus, HTMLButtonElement | null>>>({});
@@ -708,6 +709,32 @@ export function KanbanView({
     };
   }, [renderedColumns, effectiveProjectId, updateScrollHints]);
 
+  // Колонки получают собственную высоту в пределах viewport, иначе длинная
+  // колонка растягивает страницу, а не прокручивается внутри себя. Нижний
+  // резерв учитывает mobile bottom navigation и desktop padding shell-а.
+  useEffect(() => {
+    const container = columnsRef.current;
+
+    if (container === null) {
+      return;
+    }
+
+    const update = (): void => {
+      const top = container.getBoundingClientRect().top;
+      const reserve = window.innerWidth < 768 ? 96 : 24;
+      const next = Math.max(240, Math.round(window.innerHeight - top - reserve));
+
+      setColumnsHeight((current) => (current === next ? current : next));
+    };
+
+    update();
+    window.addEventListener("resize", update);
+
+    return () => {
+      window.removeEventListener("resize", update);
+    };
+  }, [effectiveProjectId, projectsLoading, renderedColumns, summary, summaryLoading]);
+
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, status: TaskStatus): void => {
     const index = KANBAN_STATUSES.indexOf(status);
     let nextIndex = -1;
@@ -1032,8 +1059,22 @@ export function KanbanView({
 
     const card = element.closest<HTMLElement>("[data-card-id]");
     const cardId = card?.getAttribute("data-card-id") ?? null;
+    const columnElement = element.closest<HTMLElement>("[data-kanban-column]");
 
     if (card === null || cardId === null) {
+      // Composer и пустая зона над первой карточкой должны вставлять задачу
+      // перед ней, а не в конец колонки. Append остаётся только ниже карточек.
+      const firstCard = columnElement?.querySelector<HTMLElement>("[data-card-id]") ?? null;
+      const firstId = firstCard?.getAttribute("data-card-id") ?? null;
+
+      if (firstCard !== null && firstId !== null) {
+        const firstRect = firstCard.getBoundingClientRect();
+
+        if (clientY < firstRect.top) {
+          return { status, beforeId: firstId };
+        }
+      }
+
       return { status, beforeId: null };
     }
 
@@ -1048,11 +1089,7 @@ export function KanbanView({
       return { status, beforeId: cardId };
     }
 
-    const cards = [
-      ...(card
-        .closest<HTMLElement>("[data-kanban-column]")
-        ?.querySelectorAll<HTMLElement>("[data-card-id]") ?? []),
-    ];
+    const cards = [...(columnElement?.querySelectorAll<HTMLElement>("[data-card-id]") ?? [])];
     const next = cards[cards.indexOf(card) + 1]?.getAttribute("data-card-id") ?? null;
 
     return { status, beforeId: next };
@@ -1362,7 +1399,13 @@ export function KanbanView({
               aria-label="Колонки доски"
               tabIndex={0}
               className="flex min-h-0 w-full flex-1 snap-x snap-mandatory gap-3 overflow-x-auto overflow-y-hidden pr-4 pb-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:snap-none md:pr-6"
-              style={{ minWidth: 0, WebkitOverflowScrolling: "touch" }}
+              style={{
+                minWidth: 0,
+                WebkitOverflowScrolling: "touch",
+                ...(columnsHeight === null
+                  ? {}
+                  : { height: `${String(columnsHeight)}px`, flex: "0 0 auto" }),
+              }}
             >
               {KANBAN_STATUSES.map((status) => {
                 const columnData = getColumn(renderedColumns, status);

@@ -910,6 +910,78 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-board-title")).toHaveText(secondTitle);
     });
 
+    test("невалидный project из entry не затирает сохранённый проект", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект fallback входа");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      await openKanban(page, projectTitle);
+      await expect
+        .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.projects.lastProjectId")))
+        .toBe(projectId);
+
+      await page.goto("/view/projects?entry=1&project=ghost");
+
+      await expect(page).toHaveURL(new RegExp(`/view/kanban\\?project=${projectId}`, "u"));
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect
+        .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.projects.lastProjectId")))
+        .toBe(projectId);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+    });
+
+    test("вставка над первой карточкой ставит задачу первой и сохраняется после reload", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект верхней вставки");
+      const firstTitle = uniqueTitle("Верхняя первая");
+      const secondTitle = uniqueTitle("Верхняя вторая");
+      const moverTitle = uniqueTitle("Верхняя перемещаемая");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const firstId = await createTask(page, {
+        projectTitle,
+        title: firstTitle,
+        status: "todo",
+      });
+      const secondId = await createTask(page, {
+        projectTitle,
+        title: secondTitle,
+        status: "todo",
+      });
+      const moverId = await createTask(page, {
+        projectTitle,
+        title: moverTitle,
+        status: "backlog",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect.poll(() => cardTitles(page, "todo")).toEqual([firstId, secondId]);
+
+      // Целимся в composer под заголовком: раньше эта зона означала append.
+      await dragCard(page, moverId, "todo", "top");
+      await waitForCardSettled(page, moverId);
+
+      await expect.poll(() => cardTitles(page, "todo")).toEqual([moverId, firstId, secondId]);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await filterByProject(page, projectTitle);
+      await expect.poll(() => cardTitles(page, "todo")).toEqual([moverId, firstId, secondId]);
+
+      await expectCardInColumn(page, moverId, "todo");
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("3");
+    });
+
     test("кнопка добавления под заголовком видна при длинном списке и создаёт карточку", async ({
       page,
     }) => {
@@ -949,26 +1021,43 @@ test.describe("канбан в production shell", () => {
 
       await expect(input).toBeFocused();
 
-      for (let index = 1; index <= 12; index += 1) {
+      for (let index = 1; index <= 24; index += 1) {
         await input.fill(`Composer ${String(index).padStart(2, "0")} ${projectTitle}`);
         await input.press("Enter");
       }
 
-      await expect(page.getByTestId("kanban-count-todo")).toHaveText("12");
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("24");
       await page.keyboard.press("Escape");
       await expect(trigger).toBeVisible();
 
-      // Длинный список уходит вниз внутри собственной области и не сдвигает
-      // кнопку создания: composer остаётся сразу под заголовком.
+      // Длинный список получает собственный scroll: composer остаётся над ним
+      // и не двигается при прокрутке карточек.
+      const metrics = await scroll.evaluate((element) => ({
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+      }));
+
+      expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+
       const afterListBox = await trigger.boundingBox();
       const scrollAfterListBox = await scroll.boundingBox();
 
       expect(afterListBox).not.toBeNull();
       expect(afterListBox?.y).toBeCloseTo(triggerBox?.y ?? 0, 0);
       expect(scrollAfterListBox?.y ?? 0).toBeGreaterThan(afterListBox?.y ?? 0);
+
+      await scroll.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      await expect(trigger).toBeVisible();
+
+      const afterScrollBox = await trigger.boundingBox();
+
+      expect(afterScrollBox?.y).toBeCloseTo(triggerBox?.y ?? 0, 0);
       await expect(scroll.getByTestId("kanban-quick-add-todo")).toHaveCount(0);
       await expect(
-        column.locator("[data-card-id]").filter({ hasText: `Composer 12 ${projectTitle}` }),
+        column.locator("[data-card-id]").filter({ hasText: `Composer 24 ${projectTitle}` }),
       ).toHaveCount(1);
     });
 

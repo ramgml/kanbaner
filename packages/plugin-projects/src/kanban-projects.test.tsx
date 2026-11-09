@@ -380,6 +380,64 @@ describe("Обзор проектов", () => {
     });
   });
 
+  it("не затирает сохранённый проект невалидным project из entry", async () => {
+    const redirectLocation = vi.fn();
+
+    rememberProject("project-1");
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke(boardWithProjects())}
+        search="?entry=1&project=ghost"
+        redirectLocation={redirectLocation}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(redirectLocation).toHaveBeenCalledWith(`${KANBAN_ROUTE}?project=project-1`);
+    });
+    expect(window.localStorage.getItem("kanbaner.projects.lastProjectId")).toBe("project-1");
+  });
+
+  it("при entry не запрашивает сводку и показывает нейтральную загрузку", async () => {
+    const redirectLocation = vi.fn();
+    const calls: string[] = [];
+    const base = makeInvoke(boardWithProjects());
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      calls.push(operationId);
+
+      return base(operationId, input);
+    };
+
+    render(
+      <ProjectsOverview invoke={invoke} search="?entry=1" redirectLocation={redirectLocation} />,
+    );
+
+    expect(screen.getByTestId("projects-entry-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("projects-overview")).toBeNull();
+
+    await waitFor(() => {
+      expect(calls).toContain("kanbaner.tasks.project.list");
+    });
+    expect(calls).not.toContain("kanbaner.tasks.project.summary");
+    expect(screen.queryByTestId("projects-overview")).toBeNull();
+    expect(screen.queryByTestId("projects-create-button")).toBeNull();
+  });
+
+  it("после снятия entry загружает сводку обычного обзора", async () => {
+    const redirectLocation = vi.fn();
+    const invoke = makeInvoke(boardWithProjects());
+    const { rerender } = render(
+      <ProjectsOverview invoke={invoke} search="?entry=1" redirectLocation={redirectLocation} />,
+    );
+
+    expect(screen.getByTestId("projects-entry-loading")).toBeInTheDocument();
+
+    rerender(<ProjectsOverview invoke={invoke} search="" redirectLocation={redirectLocation} />);
+
+    expect(await screen.findByTestId("projects-overview-card-project-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("projects-entry-loading")).toBeNull();
+  });
+
   it("повторно обрабатывает entry без remount", async () => {
     const redirectLocation = vi.fn();
     const invoke = makeInvoke(boardWithProjects());

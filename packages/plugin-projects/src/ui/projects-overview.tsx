@@ -94,6 +94,13 @@ export function ProjectsOverview({
     initialSearch.startsWith("?") ? initialSearch.slice(1) : initialSearch,
   ).has("entry");
   const entryHandledRef = useRef(false);
+  // Пока вход обрабатывается, показываем нейтральную заглушку и не читаем
+  // сводки обзора: пользователь всё равно уйдёт в список или канбан.
+  const [entryPending, setEntryPending] = useState(entryRequested);
+
+  if (entryPending !== entryRequested) {
+    setEntryPending(entryRequested);
+  }
 
   if (lastSearch !== initialSearch) {
     setLastSearch(initialSearch);
@@ -191,10 +198,19 @@ export function ProjectsOverview({
   );
 
   useEffect(() => {
-    if (effectiveProjectId.length > 0) {
-      rememberProject(effectiveProjectId);
+    if (projectsLoading || effectiveProjectId.length === 0) {
+      return;
     }
-  }, [effectiveProjectId]);
+
+    // Запоминаем только реально загруженный проект: во время loading
+    // effectiveProjectId может быть сырым `?project=` и не должен затирать
+    // сохранённый lastProjectId.
+    if (!projects.some((project) => project.id === effectiveProjectId)) {
+      return;
+    }
+
+    rememberProject(effectiveProjectId);
+  }, [effectiveProjectId, projects, projectsLoading]);
 
   const load = useCallback(
     async (offset: number): Promise<void> => {
@@ -239,11 +255,26 @@ export function ProjectsOverview({
   );
 
   useEffect(() => {
+    if (entryPending) {
+      return;
+    }
+
     // Загрузка первой страницы обзора: setLoading внутри load синхронный,
     // поэтому правило отключено осознанно.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(0);
-  }, [load, revision]);
+  }, [entryPending, load, revision]);
+
+  if (entryPending) {
+    return (
+      <div
+        data-testid="projects-entry-loading"
+        className="mx-auto flex w-full max-w-6xl flex-col gap-4"
+      >
+        <LoadingState label="Открываем рабочее пространство…" />
+      </div>
+    );
+  }
 
   return (
     <div data-testid="projects-overview" className="mx-auto flex w-full max-w-6xl flex-col gap-4">

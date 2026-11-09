@@ -370,6 +370,66 @@ describe("Trello-доска", () => {
     );
   });
 
+  it("вставка на composer над первой карточкой ставит задачу перед ней, не в конец", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [
+        makeTask("a", { title: "A", status: "todo", position: 0 }),
+        makeTask("b", { title: "B", status: "todo", position: 1 }),
+        makeTask("mover", { title: "Mover", status: "backlog", position: 0 }),
+      ],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+
+    await screen.findByTestId("kanban-card-mover");
+
+    const first = screen.getByTestId("kanban-card-a");
+
+    vi.spyOn(first, "getBoundingClientRect").mockReturnValue({
+      top: 200,
+      bottom: 300,
+      left: 0,
+      right: 200,
+      width: 200,
+      height: 100,
+      x: 0,
+      y: 200,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    const composer = screen.getByTestId("kanban-quick-composer-todo");
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => composer,
+    });
+
+    const handle = screen.getByTestId("kanban-drag-mover");
+
+    fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 20, clientY: 50 });
+
+    const placeholder = await screen.findByTestId("kanban-drop-placeholder");
+
+    // Placeholder стоит перед первой карточкой, а не в конце списка.
+    expect(screen.getByTestId("kanban-cards-todo").firstElementChild).toBe(placeholder);
+
+    fireEvent.pointerUp(window);
+
+    await waitFor(() => {
+      const move = operations.calls.find((call) => call.operationId === "kanbaner.tasks.task.move");
+
+      expect(inputOf(move?.input ?? {})).toMatchObject({
+        id: "mover",
+        status: "todo",
+        position: 0,
+      });
+    });
+  });
+
   it("показывает placeholder между карточками и подсвечивает целевую колонку", async () => {
     const board: Board = {
       projects: [makeProject("project-1")],
