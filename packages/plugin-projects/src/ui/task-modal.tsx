@@ -43,6 +43,8 @@ export interface TaskModalProps {
   readonly editValues: TaskFormValues | null;
   readonly editRootTasks: readonly Task[];
   readonly closeConfirm: boolean;
+  /** Есть несохранённый ввод (полная форма или быстрые поля). */
+  readonly draftDirty: boolean;
   readonly quickConflicts: readonly QuickDraftField[];
   readonly nextStatus: TaskStatus;
   readonly dueValue: string;
@@ -152,6 +154,7 @@ export function TaskModal({
   editValues,
   editRootTasks,
   closeConfirm,
+  draftDirty,
   quickConflicts,
   nextStatus,
   dueValue,
@@ -329,7 +332,7 @@ export function TaskModal({
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-          {editing || closeConfirm ? null : viewSwitch}
+          {editing || closeConfirm || draftDirty ? null : viewSwitch}
           <button
             type="button"
             data-testid="kanban-details-close"

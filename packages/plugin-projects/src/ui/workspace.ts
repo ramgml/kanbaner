@@ -163,11 +163,17 @@ export function rememberProjectView(route: ProjectRoute): void {
 }
 
 export function readLastProjectView(): ProjectRoute | null {
-  const value = safeStorage()?.getItem(LAST_VIEW_KEY);
+  try {
+    const value = safeStorage()?.getItem(LAST_VIEW_KEY);
 
-  return value === "/view/kanban" || value === "/view/tasks" || value === "/view/projects"
-    ? value
-    : null;
+    return value === "/view/kanban" || value === "/view/tasks" || value === "/view/projects"
+      ? value
+      : null;
+  } catch {
+    // SecurityError/приватный режим или испорченное значение: вход остаётся
+    // в обзоре, а не падает на чтении storage.
+    return null;
+  }
 }
 
 /**

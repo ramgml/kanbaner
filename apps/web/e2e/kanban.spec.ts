@@ -780,6 +780,24 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
     });
 
+    test("повторный вход в «Проекты» снова снимает entry без remount", async ({ page }) => {
+      await page.goto("/view/projects");
+      await expect(page.getByTestId("projects-overview")).toBeVisible();
+
+      const nav = page
+        .getByTestId("desktop-sidebar")
+        .getByRole("link", { name: "Проекты", exact: true });
+
+      await nav.click();
+      await expect(page).toHaveURL(/\/view\/projects$/u);
+
+      // Тот же смонтированный обзор: без сброса entryHandledRef второй клик
+      // оставил бы ?entry=1 в URL и не обработал вход повторно.
+      await nav.click();
+      await expect(page).toHaveURL(/\/view\/projects$/u);
+      await expect(page.getByTestId("projects-overview")).toBeVisible();
+    });
+
     test("показывает проект и задачи в четырёх фиксированных колонках", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект доски");
       const backlogTitle = uniqueTitle("Бэклог задача");
@@ -2236,6 +2254,68 @@ test.describe("канбан в production shell", () => {
 
       await page.getByTestId("kanban-details-close").click();
       await page.getByTestId("kanban-draft-discard").click();
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+    });
+
+    test("скрывает переключатель при каждом быстром черновике и не теряет ввод", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект guard черновика");
+      const taskTitle = uniqueTitle("Задача guard черновика");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+      await openCardModal(page, taskId, taskTitle);
+
+      const viewToggle = page.getByTestId("project-view-modal-list");
+      const due = page.getByTestId("kanban-modal-due");
+      const tags = page.getByTestId("kanban-modal-tags");
+      const nextStatus = page.getByTestId("kanban-modal-move-field");
+
+      await expect(viewToggle).toBeVisible();
+
+      // Каждый быстрый черновик делает переключатель недоступным: обычный
+      // click или Enter по нему физически невозможен, ввод остаётся в поле.
+      await nextStatus.selectOption("in_progress");
+      await expect(viewToggle).toHaveCount(0);
+      await expect(nextStatus).toHaveValue("in_progress");
+      await nextStatus.selectOption("todo");
+      await expect(viewToggle).toBeVisible();
+
+      await due.fill("2030-09-09");
+      await expect(viewToggle).toHaveCount(0);
+      await expect(due).toHaveValue("2030-09-09");
+      await due.fill("");
+      await expect(viewToggle).toBeVisible();
+
+      await tags.fill("release");
+      await expect(viewToggle).toHaveCount(0);
+      await expect(tags).toHaveValue("release");
+      await tags.fill("");
+      await expect(viewToggle).toBeVisible();
+
+      await page.getByTestId("kanban-subtask-create").click();
+
+      const subtaskTitle = page.getByTestId("kanban-subtask-input");
+
+      await subtaskTitle.fill("Черновик подзадачи");
+      await expect(viewToggle).toHaveCount(0);
+      await expect(subtaskTitle).toHaveValue("Черновик подзадачи");
+
+      // Escape не теряет черновик, а показывает подтверждение.
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-draft-confirm")).toBeVisible();
+      await expect(subtaskTitle).toHaveValue("Черновик подзадачи");
+      await page.getByTestId("kanban-draft-keep").click();
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
+      await expect(viewToggle).toHaveCount(0);
+
+      await page.getByTestId("kanban-subtask-cancel").click();
+      await expect(viewToggle).toBeVisible();
+      await page.getByTestId("kanban-details-close").click();
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
 

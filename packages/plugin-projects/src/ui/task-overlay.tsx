@@ -855,6 +855,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         editValues={editValues}
         editRootTasks={rootTasks}
         closeConfirm={closeConfirm}
+        draftDirty={draftDirty}
         quickConflicts={quickConflicts}
         nextStatus={activeQuickDraft?.nextStatus ?? currentTask.status}
         dueValue={activeQuickDraft?.dueValue ?? dueAtToDateInput(currentTask.dueAt)}

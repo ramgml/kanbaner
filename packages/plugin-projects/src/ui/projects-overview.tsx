@@ -165,6 +165,14 @@ export function ProjectsOverview({
     }
   }, [entryRequested, localSearch, projects, projectsLoading, replaceSearch]);
 
+  // Повторный вход без remount: после снятия `entry` сбрасываем guard, чтобы
+  // следующий клик по «Проекты» снова восстановил сохранённое представление.
+  useEffect(() => {
+    if (!entryRequested) {
+      entryHandledRef.current = false;
+    }
+  }, [entryRequested]);
+
   const requestedProjectId = projectIdFromSearch(localSearch);
   const effectiveProjectId = useMemo(() => {
     if (projectsLoading) {

@@ -389,6 +389,87 @@ describe("TaskOverlay Trello-модал", () => {
     expect(list).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("скрывает переключатель при quick draft и полном редактировании, не теряя ввод", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+
+    // Быстрый статус: переключатель исчезает, выбранное значение остаётся.
+    const move = screen.getByTestId("kanban-modal-move-field");
+
+    fireEvent.change(move, { target: { value: "in_progress" } });
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(move).toHaveValue("in_progress");
+
+    fireEvent.change(move, { target: { value: "todo" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    });
+
+    // Быстрый срок.
+    const due = screen.getByTestId("kanban-modal-due");
+
+    fireEvent.change(due, { target: { value: "2030-05-05" } });
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(due).toHaveValue("2030-05-05");
+
+    fireEvent.change(due, { target: { value: "" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    });
+
+    // Быстрые теги.
+    const tags = screen.getByTestId("kanban-modal-tags");
+
+    fireEvent.change(tags, { target: { value: "release" } });
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(tags).toHaveValue("release");
+
+    fireEvent.change(tags, { target: { value: "" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    });
+
+    // Черновик подзадачи.
+    fireEvent.click(screen.getByTestId("kanban-subtask-create"));
+
+    const subtaskTitle = screen.getByTestId("kanban-subtask-input");
+
+    fireEvent.change(subtaskTitle, { target: { value: "Новая подзадача" } });
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(subtaskTitle).toHaveValue("Новая подзадача");
+
+    // Закрытие с этим черновиком требует подтверждения, а не теряет ввод.
+    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    expect(subtaskTitle).toHaveValue("Новая подзадача");
+    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
+
+    fireEvent.click(screen.getByTestId("kanban-subtask-cancel"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    });
+
+    // Полное редактирование: переключатель скрыт даже без изменений, отмена
+    // возвращает обычный режим без регрессии.
+    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    fireEvent.click(
+      within(screen.getByTestId("task-form-edit")).getByRole("button", { name: "Отмена" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    });
+  });
+
   it("при переходе A→B не показывает устаревшую задачу и не выполняет её команды", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {

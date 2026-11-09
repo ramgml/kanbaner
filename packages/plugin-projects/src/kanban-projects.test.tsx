@@ -264,6 +264,28 @@ describe("Обзор проектов", () => {
     });
     expect(window.location.search).not.toContain("entry=1");
   });
+
+  it("повторно обрабатывает entry после его снятия без remount", async () => {
+    const replaceSearch = vi.fn();
+    const invoke = makeInvoke({ projects: [], tasks: [] });
+    const { rerender } = render(
+      <ProjectsOverview invoke={invoke} search="?entry=1" replaceSearch={replaceSearch} />,
+    );
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenCalledTimes(1);
+    });
+    expect(replaceSearch).toHaveBeenLastCalledWith("");
+
+    rerender(<ProjectsOverview invoke={invoke} search="" replaceSearch={replaceSearch} />);
+    rerender(<ProjectsOverview invoke={invoke} search="?entry=1" replaceSearch={replaceSearch} />);
+
+    // Без сброса entryHandledRef второй вход молча оставлял бы entry=1 в URL.
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenCalledTimes(2);
+    });
+    expect(replaceSearch).toHaveBeenLastCalledWith("");
+  });
 });
 
 describe("Канбан одного проекта", () => {
