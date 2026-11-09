@@ -21,30 +21,46 @@
 
 ## UI-вклады
 
-| ID                                 | Слот           | Вид     | Назначение                                       |
-| ---------------------------------- | -------------- | ------- | ------------------------------------------------ |
-| `kanbaner.projects.view.kanban`    | `app.main`     | `view`  | Одна доска одного проекта (`/view/kanban`)       |
-| `kanbaner.projects.view.tasks`     | `app.main`     | `view`  | Адаптивный список задач (`/view/tasks`)          |
-| `kanbaner.projects.view.overview`  | `app.main`     | `view`  | Необязательный обзор проектов (`/view/projects`) |
-| `kanbaner.projects.sidebar`        | `app.sidebar`  | `panel` | Переключение, поиск и создание проектов          |
-| `kanbaner.projects.details`        | `app.details`  | `panel` | Детали выбранной задачи списка (desktop)         |
-| `kanbaner.projects.details-mobile` | `app.overlays` | `panel` | Детали выбранной задачи списка (mobile)          |
-| `kanbaner.projects.kanban-overlay` | `app.overlays` | `panel` | Детали и редактор карточки доски                 |
-| `kanbaner.projects.mobile-sheet`   | `app.overlays` | `panel` | Мобильный bottom sheet проектов и trigger        |
+| ID                                 | Слот           | Вид          | Назначение                                       |
+| ---------------------------------- | -------------- | ------------ | ------------------------------------------------ |
+| `kanbaner.projects.view.kanban`    | `app.main`     | `view`       | Одна доска одного проекта (`/view/kanban`)       |
+| `kanbaner.projects.view.tasks`     | `app.main`     | `view`       | Адаптивный список задач (`/view/tasks`)          |
+| `kanbaner.projects.view.overview`  | `app.main`     | `view`       | Необязательный обзор проектов (`/view/projects`) |
+| `kanbaner.projects.sidebar`        | `app.sidebar`  | `panel`      | Переключение, поиск и создание проектов          |
+| `kanbaner.projects.details`        | `app.details`  | `panel`      | Детали выбранной задачи списка (desktop)         |
+| `kanbaner.projects.details-mobile` | `app.overlays` | `panel`      | Детали выбранной задачи списка (mobile)          |
+| `kanbaner.projects.kanban-overlay` | `app.overlays` | `panel`      | Детали и редактор карточки доски                 |
+| `kanbaner.projects.mobile-sheet`   | `app.overlays` | `panel`      | Мобильный bottom sheet проектов и trigger        |
+| `kanbaner.projects.navigation`     | `app.sidebar`  | `navigation` | Единственный вход в workspace (`?entry=1`)       |
 
 ## Поведение
 
+- В shell есть один пункт «Проекты». Он ведёт на `/view/projects?entry=1`;
+  обзор восстанавливает последнее представление проекта из `localStorage`
+  (`readLastProjectView`) либо остаётся в обзоре без служебного параметра.
 - Секция «Проекты» видна только на `/view/kanban`, `/view/tasks` и
   `/view/projects`; в настройках и plugin manager её нет.
 - Выбор проекта меняет `?project=<id>` без промежуточного экрана и запоминает
   последний выбор в `localStorage`.
 - `/view/kanban` без проекта открывает последний или единственный проект; при
   неоднозначном выборе показывает подсказку выбрать проект в sidebar.
-- Переключатель `Список / Канбан` — настоящая навигация: проект, тег, фильтры
-  и выбранная задача сохраняются в query string.
+- `packages/plugin-projects/src/ui/view-toggle.tsx` рендерит переключатель
+  `Список / Канбан` настоящими `<a>` с `aria-pressed` в обоих состояниях.
+  Тот же компонент доступен внутри нативного modal-а карточки и мобильных
+  деталей: inert-фон не мешает обычному click и клавиатуре, а `task`
+  сохраняется в query string.
+- Task-list пишет query через router-aware `replaceSearch`, поэтому заголовок
+  строит ссылки из актуального `workspaceSearch`, а не из устаревшего
+  router-состояния. Внутри одного проекта toggle сохраняет `project`, `tag` и
+  `task`; смена проекта осознанно снимает `task` прежнего проекта.
 - Создание карточки требует только название. Проект берётся из доски, статус —
   из колонки, позицию вычисляет доменный append. Полная форма используется
   только для редактирования открытой карточки.
+- Кнопка «Новый проект» в заголовке списка публикует общий
+  `requestProjectCreate()`: на desktop открывается форма sidebar, на mobile —
+  bottom sheet. Клика по скрытой desktop-кнопке больше нет.
+- `project.list` догружается по `nextOffset` страницами по 200: созданный
+  201-й проект открывается и попадает в sidebar, а не считается удалённым.
 - На мобильном плагин публикует trigger «Проекты» в overlay-слое: shell
   навигация не содержит доменных пунктов. Выбор проекта закрывает sheet.
 

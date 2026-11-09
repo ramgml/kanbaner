@@ -75,6 +75,18 @@ describe("регистрация kanbaner.projects", () => {
       "app.overlays",
       "app.overlays",
       "app.overlays",
+      "app.sidebar",
     ]);
+
+    expect(
+      projectsUiContributions.find(
+        (contribution) => contribution.id === "kanbaner.projects.navigation",
+      ),
+    ).toMatchObject({
+      kind: "navigation",
+      slot: "app.sidebar",
+      title: "Проекты",
+      route: "/view/projects?entry=1",
+    });
   });
 });

@@ -46,6 +46,7 @@ import {
 import {
   bumpKanbanRevision,
   registerKanbanSearchWriter,
+  serializeKanbanQuery,
   updateKanbanQuery,
   useKanbanQuery,
 } from "./query-state.ts";
@@ -55,6 +56,7 @@ import {
   type SubtaskDraft,
   type SubtaskFormDraft,
 } from "./task-modal.tsx";
+import { ViewToggle } from "./view-toggle.tsx";
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
 
@@ -902,6 +904,14 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         onKeepEditing={() => {
           setCloseConfirm(false);
         }}
+        viewSwitch={
+          <ViewToggle
+            route={KANBAN_ROUTE}
+            search={serializeKanbanQuery(query)}
+            testIdPrefix="project-view-modal"
+            label="Представление проекта в карточке"
+          />
+        }
       />
     );
 

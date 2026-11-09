@@ -29,10 +29,11 @@ import { ProjectHeader } from "../ui/project-header.tsx";
 import { TitleComposer, type TitleCreateResult } from "../ui/title-composer.tsx";
 import { useProjectSummary } from "../ui/use-project-summary.ts";
 import { useProjectsData } from "../ui/use-projects.ts";
-import { registerWorkspaceView } from "../ui/workspace.ts";
+import { registerWorkspaceView, requestProjectCreate } from "../ui/workspace.ts";
 import {
   TASK_LIST_PAGE_SIZE,
   bumpTaskListRevision,
+  registerTaskListSearchWriter,
   resetTaskListFilters,
   serializeTaskListQuery,
   setTaskListSearch,
@@ -75,13 +76,14 @@ function buildTaskListInput(query: ReturnType<typeof useTaskListQuery>): TaskLis
 export function TaskListView({
   invoke,
   search,
+  replaceSearch,
 }: {
   readonly invoke: UiOperationInvoker;
   readonly pathname?: string | undefined;
   readonly search?: string | undefined;
   readonly replaceSearch?: ((search: string) => void) | undefined;
 }) {
-  const query = useTaskListQuery();
+  const query = useTaskListQuery(search);
   const { projects, loading: projectsLoading, error: projectError } = useProjectsData(invoke);
   const [taskPage, setTaskPage] = useState<TaskListOutput | null>(null);
   const [tasksLoading, setTasksLoading] = useState(true);
@@ -94,6 +96,14 @@ export function TaskListView({
   );
   const { summary } = useProjectSummary(invoke, query.projectId, query.revision);
   const workspaceSearch = useMemo(() => serializeTaskListQuery(query), [query]);
+
+  useEffect(() => {
+    if (replaceSearch === undefined) {
+      return;
+    }
+
+    return registerTaskListSearchWriter(replaceSearch);
+  }, [replaceSearch]);
 
   useEffect(
     () =>
@@ -213,7 +223,7 @@ export function TaskListView({
         route={TASK_LIST_ROUTE}
         project={selectedProject}
         summary={query.projectId.length === 0 ? null : summary}
-        search={search ?? workspaceSearch}
+        search={workspaceSearch}
         fallbackTitle="Задачи"
         actions={
           <>
@@ -238,11 +248,7 @@ export function TaskListView({
               className={secondaryButton}
               data-testid="create-project-button"
               onClick={() => {
-                const form = document.querySelector<HTMLElement>(
-                  '[data-testid="projects-create-button"]',
-                );
-
-                form?.click();
+                requestProjectCreate();
               }}
             >
               Новый проект

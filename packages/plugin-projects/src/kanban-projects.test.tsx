@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import type {
@@ -246,6 +246,23 @@ describe("Обзор проектов", () => {
     expect(screen.getByTestId("projects-overview-card-project-1")).not.toHaveAttribute(
       "aria-current",
     );
+  });
+
+  it("снимает служебный entry, если сохранённого представления нет", async () => {
+    const replaceSearch = vi.fn();
+
+    render(
+      <ProjectsOverview
+        invoke={makeInvoke({ projects: [], tasks: [] })}
+        search="?entry=1"
+        replaceSearch={replaceSearch}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenCalledWith("");
+    });
+    expect(window.location.search).not.toContain("entry=1");
   });
 });
 

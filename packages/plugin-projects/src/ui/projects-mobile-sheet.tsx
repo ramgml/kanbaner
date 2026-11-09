@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import { TASKS_COMMAND_IDS, type ProjectMutationOutput } from "@kanbaner/plugin-tasks/contract";
 import {
   ModalDialog,
   ProjectForm,
+  useMediaQuery,
   type ProjectFormValues,
   type UiOperationInvoker,
 } from "@kanbaner/task-ui";
@@ -15,9 +16,11 @@ import { errorMessage, invokeJson } from "./operations.ts";
 import { ProjectSwitcher } from "./project-switcher.tsx";
 import { useProjectsData } from "./use-projects.ts";
 import {
+  MOBILE_MEDIA_QUERY,
   bumpProjectsRevision,
   rememberProject,
   searchWithProject,
+  useProjectCreateRequest,
   useWorkspaceView,
 } from "./workspace.ts";
 
@@ -53,6 +56,28 @@ function MobileSheetContent({
   const [formError, setFormError] = useState<string | null>(null);
   const guardRef = useRef(false);
   const { projects, loading, error, reload } = useProjectsData(invoke);
+  const isMobileViewport = useMediaQuery(MOBILE_MEDIA_QUERY);
+  const createRequest = useProjectCreateRequest();
+  const lastCreateRequestRef = useRef(createRequest);
+
+  useEffect(() => {
+    if (createRequest === lastCreateRequestRef.current) {
+      return;
+    }
+
+    lastCreateRequestRef.current = createRequest;
+
+    // На desktop форму открывает sidebar; bottom sheet не должен появляться
+    // вторым модалом поверх страницы.
+    if (!isMobileViewport) {
+      return;
+    }
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOpen(true);
+    setFormError(null);
+    setCreating(true);
+  }, [createRequest, isMobileViewport]);
 
   const select = (projectId: string): void => {
     rememberProject(projectId);

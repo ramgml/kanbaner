@@ -70,6 +70,8 @@ export interface TaskModalProps {
   readonly onDelete: () => void;
   readonly onDiscardDraft: () => void;
   readonly onKeepEditing: () => void;
+  /** Доступный переключатель представления внутри inert-модала. */
+  readonly viewSwitch?: React.ReactNode;
 }
 
 const actionClass =
@@ -177,6 +179,7 @@ export function TaskModal({
   onDelete,
   onDiscardDraft,
   onKeepEditing,
+  viewSwitch,
 }: TaskModalProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [subtaskError, setSubtaskError] = useState<string | null>(null);
@@ -325,16 +328,19 @@ export function TaskModal({
           )}
         </div>
 
-        <button
-          type="button"
-          data-testid="kanban-details-close"
-          aria-label="Закрыть детали задачи"
-          autoFocus
-          onClick={onClose}
-          className="flex size-10 shrink-0 items-center justify-center rounded-md text-lg leading-none text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-        >
-          <span aria-hidden="true">×</span>
-        </button>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          {editing || closeConfirm ? null : viewSwitch}
+          <button
+            type="button"
+            data-testid="kanban-details-close"
+            aria-label="Закрыть детали задачи"
+            autoFocus
+            onClick={onClose}
+            className="flex size-10 shrink-0 items-center justify-center rounded-md text-lg leading-none text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
       </header>
 
       {closeConfirm ? (

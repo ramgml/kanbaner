@@ -52,7 +52,7 @@ describe("composition встроенных UI-плагинов", () => {
 
     expect(registry.size()).toBe(plugin.contributions.length);
     expect(registry.list("app.main")).toHaveLength(3);
-    expect(registry.list("app.sidebar")).toHaveLength(1);
+    expect(registry.list("app.sidebar")).toHaveLength(2);
     expect(registry.list("app.details")).toHaveLength(1);
     expect(registry.list("app.overlays")).toHaveLength(3);
   });

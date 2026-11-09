@@ -1,12 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import type { Project, Task } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
+import { ProjectSidebar } from "../ui/project-sidebar.tsx";
 import { TaskDetailsPanel } from "./task-details-panel.tsx";
 import { TaskListView } from "./task-list-view.tsx";
 import {
@@ -14,6 +15,7 @@ import {
   resetTaskListQueryForTests,
   updateTaskListQuery,
 } from "./query-state.ts";
+import { getProjectCreateRequest } from "../ui/workspace.ts";
 
 const project: Project = {
   id: "project-1",
@@ -157,32 +159,21 @@ describe("TaskListView", () => {
     expect(window.location.search).not.toContain("tag=");
   });
 
-  it("делегирует создание проекта sidebar и не держит старую форму в списке", async () => {
+  it("делегирует создание проекта общему command и не держит форму в списке", async () => {
     const operations = createOperations(baseHandlers());
 
     render(<TaskListView invoke={operations.invoke} />);
     await screen.findByTestId("task-row-task-1");
 
-    // Встроенный sidebar регистрирует `projects-create-button`; список лишь
-    // проксирует клик, а форму и команду выполняет плагин рабочего пространства.
-    const sidebarTrigger = document.createElement("button");
-    let clicks = 0;
+    const before = getProjectCreateRequest();
 
-    sidebarTrigger.dataset.testid = "projects-create-button";
-    sidebarTrigger.addEventListener("click", () => {
-      clicks += 1;
-    });
-    document.body.append(sidebarTrigger);
+    fireEvent.click(screen.getByTestId("create-project-button"));
 
-    try {
-      fireEvent.click(screen.getByTestId("create-project-button"));
-
-      expect(clicks).toBe(1);
-      expect(screen.queryByTestId("project-form")).toBeNull();
-      expect(operations.counts.get("kanbaner.tasks.project.create") ?? 0).toBe(0);
-    } finally {
-      sidebarTrigger.remove();
-    }
+    // Список не ищет скрытую desktop-кнопку в DOM: форму открывает тот
+    // контейнер (sidebar или mobile sheet), который виден на breakpoint-е.
+    expect(getProjectCreateRequest()).toBe(before + 1);
+    expect(screen.queryByTestId("project-form")).toBeNull();
+    expect(operations.counts.get("kanbaner.tasks.project.create") ?? 0).toBe(0);
   });
 
   it("создаёт задачу, открывает её детали и перечитывает список", async () => {
@@ -249,6 +240,65 @@ describe("TaskListView", () => {
       expect(getTaskListQuerySnapshot().taskId).toBe("task-1");
       expect(window.location.search).toContain("task=task-1");
     });
+  });
+
+  it("пишет query через router writer и переносит task/tag в переключатель", async () => {
+    const secondProject: Project = {
+      ...project,
+      id: "project-2",
+      title: "Проект два",
+    };
+    const handlers = baseHandlers();
+    handlers["kanbaner.tasks.project.list"] = () =>
+      ok({ items: [project, secondProject], total: 2, nextOffset: null });
+    const operations = createOperations(handlers);
+    const replaceSearch = vi.fn();
+
+    render(
+      <>
+        <TaskListView
+          invoke={operations.invoke}
+          search="?project=project-1&task=task-1"
+          replaceSearch={replaceSearch}
+        />
+        <ProjectSidebar invoke={operations.invoke} />
+      </>,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    // Выбранная задача входит в ссылку переключателя: уход на доску не
+    // требует закрывать модал и не теряет контекст.
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+        "href",
+        "/view/kanban?project=project-1&task=task-1",
+      );
+    });
+
+    fireEvent.change(screen.getByLabelText("Тег"), { target: { value: "release" } });
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&tag=release&task=task-1");
+    });
+
+    expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+      "href",
+      "/view/kanban?project=project-1&tag=release&task=task-1",
+    );
+
+    // Смена проекта в sidebar идёт через тот же query state: тег сохраняется,
+    // а task снимается осознанно — он принадлежит прежнему проекту.
+    fireEvent.click(await screen.findByTestId("projects-sidebar-item-project-2"));
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-2&tag=release");
+    });
+
+    expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+      "href",
+      "/view/kanban?project=project-2&tag=release",
+    );
   });
 });
 

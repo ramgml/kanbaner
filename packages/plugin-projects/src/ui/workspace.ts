@@ -9,6 +9,9 @@ import type { ProjectRoute } from "../metadata.ts";
 const LAST_PROJECT_KEY = "kanbaner.projects.lastProjectId";
 const LAST_VIEW_KEY = "kanbaner.projects.lastView";
 
+/** Breakpoint мобильного layout-а sidebar: 768 px и уже. */
+export const MOBILE_MEDIA_QUERY = "(max-width: 767px)" as const;
+
 export interface WorkspaceViewContext {
   readonly route: ProjectRoute;
   /** Активный проект представления; пустая строка — проект ещё не выбран. */
@@ -24,6 +27,9 @@ const contextListeners = new Set<() => void>();
 
 let projectsRevision = 0;
 const revisionListeners = new Set<() => void>();
+
+let projectCreateRequest = 0;
+const projectCreateListeners = new Set<() => void>();
 
 function emit(listeners: ReadonlySet<() => void>): void {
   for (const listener of listeners) {
@@ -84,6 +90,34 @@ export function subscribeProjectsRevision(listener: () => void): () => void {
 
 export function useProjectsRevision(): number {
   return useSyncExternalStore(subscribeProjectsRevision, getProjectsRevision, () => 0);
+}
+
+/**
+ * Запрашивает открытие формы создания проекта.
+ *
+ * Команда не привязана к конкретному DOM-узлу: desktop sidebar и мобильный
+ * bottom sheet сами решают, какой контейнер показать. Это убирает клик по
+ * скрытой кнопке другого layout-а.
+ */
+export function requestProjectCreate(): void {
+  projectCreateRequest += 1;
+  emit(projectCreateListeners);
+}
+
+export function getProjectCreateRequest(): number {
+  return projectCreateRequest;
+}
+
+export function subscribeProjectCreateRequest(listener: () => void): () => void {
+  projectCreateListeners.add(listener);
+
+  return () => {
+    projectCreateListeners.delete(listener);
+  };
+}
+
+export function useProjectCreateRequest(): number {
+  return useSyncExternalStore(subscribeProjectCreateRequest, getProjectCreateRequest, () => 0);
 }
 
 function safeStorage(): Storage | null {

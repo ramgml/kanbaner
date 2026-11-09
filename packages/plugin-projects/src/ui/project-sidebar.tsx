@@ -4,16 +4,23 @@ import { useEffect, useRef, useState } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import { TASKS_COMMAND_IDS, type ProjectMutationOutput } from "@kanbaner/plugin-tasks/contract";
-import { ProjectForm, type ProjectFormValues, type UiOperationInvoker } from "@kanbaner/task-ui";
+import {
+  ProjectForm,
+  useMediaQuery,
+  type ProjectFormValues,
+  type UiOperationInvoker,
+} from "@kanbaner/task-ui";
 
 import { errorMessage, invokeJson } from "./operations.ts";
 import { ProjectSwitcher } from "./project-switcher.tsx";
 import { useProjectsData } from "./use-projects.ts";
 import {
+  MOBILE_MEDIA_QUERY,
   bumpProjectsRevision,
   rememberProject,
   resolveProjectId,
   searchWithProject,
+  useProjectCreateRequest,
   useWorkspaceView,
 } from "./workspace.ts";
 
@@ -50,6 +57,28 @@ function ProjectSidebarContent({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const guardRef = useRef(false);
+  const isMobileViewport = useMediaQuery(MOBILE_MEDIA_QUERY);
+  const createRequest = useProjectCreateRequest();
+  const lastCreateRequestRef = useRef(createRequest);
+
+  useEffect(() => {
+    if (createRequest === lastCreateRequestRef.current) {
+      return;
+    }
+
+    lastCreateRequestRef.current = createRequest;
+
+    // На мобильном форму открывает bottom sheet, иначе в скрытом sidebar
+    // появился бы второй невидимый project-form.
+    if (isMobileViewport) {
+      return;
+    }
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormError(null);
+    setCreating(true);
+  }, [createRequest, isMobileViewport]);
+
   useEffect(() => {
     if (loading || projects.length === 0 || view.projectId.length > 0) {
       return;

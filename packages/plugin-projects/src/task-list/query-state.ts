@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { SortDirection, TaskSortField } from "@kanbaner/plugin-tasks/contract";
 
@@ -44,6 +44,14 @@ export const DEFAULT_TASK_LIST_QUERY: TaskListQueryState = Object.freeze({
 });
 
 const listeners = new Set<() => void>();
+/**
+ * Router-aware writer-ы из shell.
+ *
+ * `history.replaceState` не обновляет `useSearchParams` Next App Router, из-за
+ * чего header-toggler строил ссылку из устаревшей query string. `router.replace`
+ * держит URL, router и локальное состояние синхронными.
+ */
+const searchWriters = new Set<(search: string) => void>();
 let current: TaskListQueryState = DEFAULT_TASK_LIST_QUERY;
 
 function isSortField(value: string | null): value is TaskListSortField {
@@ -163,13 +171,35 @@ function writeUrl(state: TaskListQueryState, mode: "replace" | "push"): void {
   }
 
   const search = toSearchParams(state).toString();
-  const url = `${window.location.pathname}${search.length === 0 ? "" : `?${search}`}`;
+  const nextSearch = search.length === 0 ? "" : `?${search}`;
+  const writer = searchWriters.values().next().value;
+
+  if (writer !== undefined) {
+    writer(nextSearch);
+
+    return;
+  }
+
+  const url = `${window.location.pathname}${nextSearch}`;
 
   if (mode === "push") {
     window.history.pushState(null, "", url);
   } else {
     window.history.replaceState(null, "", url);
   }
+}
+
+/**
+ * Регистрирует writer App Router из shell.
+ *
+ * Возвращает cleanup; несколько смонтированных вкладов используют один writer.
+ */
+export function registerTaskListSearchWriter(writer: (search: string) => void): () => void {
+  searchWriters.add(writer);
+
+  return () => {
+    searchWriters.delete(writer);
+  };
 }
 
 /** Обновляет query string и уведомляет все смонтированные панели. */
@@ -235,9 +265,13 @@ export function subscribeTaskListQuery(listener: () => void): () => void {
  * Начальное значение всегда безопасно для SSR; фактический URL читается в
  * effect после монтирования. Так серверный и клиентский первый рендер
  * совпадают даже при открытии ссылки с фильтрами.
+ *
+ * `search` — актуальная query string из router-aware shell (`useSearchParams`).
+ * Она синхронизирует модульное состояние после настоящих Link-переходов.
  */
-export function useTaskListQuery(): TaskListQueryState {
+export function useTaskListQuery(search?: string): TaskListQueryState {
   const [state, setState] = useState<TaskListQueryState>(current);
+  const lastSearchRef = useRef<string | null>(null);
 
   useEffect(() => {
     const sync = (): void => {
@@ -258,6 +292,16 @@ export function useTaskListQuery(): TaskListQueryState {
       window.removeEventListener("popstate", updateFromUrl);
     };
   }, []);
+
+  useEffect(() => {
+    if (search === undefined || lastSearchRef.current === search) {
+      return;
+    }
+
+    lastSearchRef.current = search;
+    current = { ...parseTaskListQuery(search), revision: current.revision };
+    setState(current);
+  }, [search]);
 
   return state;
 }

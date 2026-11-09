@@ -367,6 +367,28 @@ describe("TaskOverlay Trello-модал", () => {
     expect(window.location.search).not.toContain("task=");
   });
 
+  it("показывает внутри модала переключатель с сохранением task", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    const list = screen.getByTestId("project-view-modal-list");
+    const kanban = screen.getByTestId("project-view-modal-kanban");
+
+    expect(list.tagName).toBe("A");
+    expect(kanban.tagName).toBe("A");
+    expect(kanban).toHaveAttribute("href", "/view/kanban?project=project-1&task=a");
+    expect(list).toHaveAttribute("href", "/view/tasks?project=project-1&task=a");
+    expect(kanban).toHaveAttribute("aria-pressed", "true");
+    expect(list).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("при переходе A→B не показывает устаревшую задачу и не выполняет её команды", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {

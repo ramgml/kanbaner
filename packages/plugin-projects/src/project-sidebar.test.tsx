@@ -46,7 +46,14 @@ function createHarness(initial: Project[]): Harness {
       calls.push({ operationId, input });
 
       if (operationId === "kanbaner.tasks.project.list") {
-        return ok({ items: harness.projects, total: harness.projects.length, nextOffset: null });
+        const values = inputOf(input);
+        const limit = typeof values.limit === "number" ? values.limit : 200;
+        const offset = typeof values.offset === "number" ? values.offset : 0;
+        const page = harness.projects.slice(offset, offset + limit);
+        const nextOffset =
+          offset + page.length < harness.projects.length ? offset + page.length : null;
+
+        return ok({ items: page, total: harness.projects.length, nextOffset });
       }
 
       if (operationId === "kanbaner.tasks.project.create") {
@@ -339,5 +346,52 @@ describe("ProjectSidebar", () => {
     });
 
     expect(navigations).toEqual(["?project=project-1"]);
+  });
+
+  it("догружает проекты по nextOffset и открывает созданный 201-й проект", async () => {
+    const projects = Array.from({ length: 200 }, (_, index) =>
+      makeProject(
+        `project-${String(index + 1)}`,
+        index === 199 ? "Двухсотый" : `Проект ${String(index + 1)}`,
+      ),
+    );
+    const harness = createHarness(projects);
+
+    const { navigations } = registerView("/view/kanban", "project-1");
+    render(<ProjectSidebar invoke={harness.invoke} />);
+
+    expect(await screen.findByTestId("projects-sidebar-item-project-200")).toBeInTheDocument();
+    // Первая страница не смогла бы показать проект за limit=200, поэтому
+    // список обязан догрузиться, а не считать его удалённым.
+    expect(screen.getByTestId("projects-sidebar-item-project-200")).toHaveTextContent("Двухсотый");
+
+    fireEvent.click(screen.getByTestId("projects-create-button"));
+
+    const form = screen.getByTestId("project-form");
+
+    fireEvent.change(screen.getByLabelText("Название проекта"), {
+      target: { value: "Двести первый" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Создать проект" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("projects-sidebar-item-project-201")).toHaveTextContent(
+        "Двести первый",
+      );
+    });
+    expect(navigations).toContain("?project=project-201");
+
+    const listOffsets = harness.calls
+      .filter((call) => call.operationId === "kanbaner.tasks.project.list")
+      .map((call) => inputOf(call.input).offset)
+      .filter((offset): offset is number => typeof offset === "number");
+
+    expect(listOffsets).toContain(200);
+
+    act(() => {
+      fireEvent.click(screen.getByTestId("projects-sidebar-item-project-201"));
+    });
+
+    expect(navigations).toContain("?project=project-201");
   });
 });

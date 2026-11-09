@@ -42,12 +42,12 @@ function viewportIsMobile(page: Page): boolean {
 }
 
 async function openProjectCreator(page: Page): Promise<import("@playwright/test").Locator> {
-  if (viewportIsMobile(page)) {
-    await page.getByTestId("projects-mobile-trigger").click();
-    await page.getByTestId("projects-mobile-create").click();
-  } else {
-    await page.getByTestId("projects-create-button").click();
-  }
+  // Видимая кнопка заголовка списка — единая точка входа на desktop и mobile.
+  // Она открывает sidebar-форму либо bottom sheet, не кликая скрытый DOM.
+  const opener = page.getByTestId("create-project-button");
+
+  await expect(opener).toBeVisible();
+  await opener.click();
 
   const form = page.getByTestId("project-form");
 
@@ -501,6 +501,45 @@ test.describe("список задач в production shell", () => {
         )
         .toBe(`Открыть карточку задачи ${taskTitle}`);
     });
+
+    test("переключает вид внутри мобильного модала кликом и клавиатурой", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект modal toggle");
+      const taskTitle = uniqueTitle("Задача modal toggle");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await createTask(page, { projectTitle, title: taskTitle });
+      await closeDetails(page, "mobile");
+      await filterTaskListByProject(page, projectTitle);
+
+      await mobileCard(page, taskTitle).click();
+
+      const dialog = page.getByTestId("task-details-mobile");
+
+      await expect(dialog).toBeVisible();
+
+      const list = dialog.getByTestId("task-details-view-list");
+      const kanban = dialog.getByTestId("task-details-view-kanban");
+
+      await expect(list).toHaveAttribute("aria-pressed", "true");
+      await expect(kanban).toHaveAttribute("aria-pressed", "false");
+      await expect(dialog).toHaveAttribute("aria-label", "Детали задачи");
+
+      // Обычный click по ссылке внутри inert-диалога без evaluate.
+      await kanban.click();
+
+      await expect(page).toHaveURL(/\/view\/kanban\?[^#]*[?&]task=/u);
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+
+      // Обратно — клавиатурой по переключателю внутри уже канбан-модала.
+      const back = page.getByTestId("project-view-modal-list");
+
+      await back.focus();
+      await page.keyboard.press("Enter");
+
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*[?&]task=/u);
+      await expect(page.getByTestId("task-details-mobile")).toBeVisible();
+    });
   });
 
   test.describe("десктопный viewport", () => {
@@ -678,6 +717,83 @@ test.describe("список задач в production shell", () => {
       await expect(page.getByRole("heading", { name: "Плагины" })).toBeVisible();
       await expect(page.getByTestId("task-details-desktop")).toHaveCount(0);
       await expect(page.getByTestId("task-details-mobile")).toHaveCount(0);
+    });
+
+    test("сохраняет задачу, тег и проект при переключении вида", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект toggle");
+      const otherProjectTitle = uniqueTitle("Второй проект toggle");
+      const taskTitle = uniqueTitle("Задача toggle");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        tags: "release",
+      });
+
+      await closeDetails(page, "desktop");
+      await createProject(page, otherProjectTitle);
+
+      // Возвращаемся в первый проект и задаём тег: дальше проверяем, что
+      // toggle и смена проекта в sidebar не теряют query-контекст.
+      await page
+        .getByTestId("projects-sidebar-list")
+        .getByRole("button", { name: projectTitle, exact: true })
+        .click();
+
+      const filters = page.getByTestId("task-filters");
+
+      await filters.getByLabel("Тег", { exact: true }).fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+
+      await desktopRow(page, taskId)
+        .getByRole("button", { name: `Открыть задачу ${taskTitle}` })
+        .click();
+      await expect(page).toHaveURL(new RegExp(`[?&]task=${taskId}`, "u"));
+
+      const projectId = new URL(page.url()).searchParams.get("project");
+
+      expect(projectId).not.toBeNull();
+
+      // Внутри одного проекта toggle сохраняет project, tag и task.
+      await page.getByTestId("project-view-kanban").click();
+
+      await expect(page).toHaveURL(
+        new RegExp(
+          `/view/kanban\\?[^#]*project=${projectId}[^#]*tag=release[^#]*task=${taskId}`,
+          "u",
+        ),
+      );
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+
+      // Обратно в список тем же доступным переключателем внутри модала.
+      await page.getByTestId("project-view-modal-list").click();
+
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*tag=release[^#]*task=/u);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+
+      // Смена проекта в sidebar сохраняет тег, но осознанно снимает task:
+      // он принадлежит прежнему проекту.
+      await page
+        .getByTestId("projects-sidebar-list")
+        .getByRole("button", { name: otherProjectTitle, exact: true })
+        .click();
+
+      await expect(page).toHaveURL(/[?&]project=/u);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+
+      // Переключение представления после смены проекта сохраняет оба фильтра.
+      await page.getByTestId("project-view-kanban").click();
+
+      await expect(page).toHaveURL(/\/view\/kanban\?[^#]*tag=release/u);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+
+      await page.getByTestId("project-view-list").click();
+
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*tag=release/u);
+      await expect(filters.getByLabel("Тег", { exact: true })).toHaveValue("release");
     });
 
     test("синхронизирует native dialog с breakpoint mobile→desktop→mobile", async ({ page }) => {

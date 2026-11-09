@@ -24,6 +24,7 @@ import { invokeJson } from "./operations.ts";
 import { useProjectsData } from "./use-projects.ts";
 import {
   readLastProjectId,
+  readLastProjectView,
   registerWorkspaceView,
   rememberProject,
   rememberProjectView,
@@ -86,6 +87,10 @@ export function ProjectsOverview({
   const [localSearch, setLocalSearch] = useState(initialSearch);
   const [lastSearch, setLastSearch] = useState(initialSearch);
   const sequenceRef = useRef(0);
+  const entryRequested = new URLSearchParams(
+    initialSearch.startsWith("?") ? initialSearch.slice(1) : initialSearch,
+  ).has("entry");
+  const entryHandledRef = useRef(false);
 
   if (lastSearch !== initialSearch) {
     setLastSearch(initialSearch);
@@ -112,6 +117,53 @@ export function ProjectsOverview({
     },
     [replaceSearch],
   );
+
+  // Единственный nav-пункт ведёт в workspace с `entry=1`. После загрузки
+  // списка возвращаем последнее представление проекта либо остаёмся в обзоре
+  // без служебного параметра. Это делает readLastProjectView рабочим входом,
+  // а не мёртвым кодом.
+  useEffect(() => {
+    if (!entryRequested || entryHandledRef.current || projectsLoading) {
+      return;
+    }
+
+    entryHandledRef.current = true;
+
+    const params = new URLSearchParams(
+      localSearch.startsWith("?") ? localSearch.slice(1) : localSearch,
+    );
+
+    params.delete("entry");
+
+    const lastView = readLastProjectView();
+
+    if (lastView !== null && lastView !== PROJECTS_OVERVIEW_ROUTE) {
+      const stored = readLastProjectId();
+
+      if (stored !== null && projects.some((project) => project.id === stored)) {
+        params.set("project", stored);
+      }
+
+      const next = params.toString();
+
+      window.location.replace(`${lastView}${next.length === 0 ? "" : `?${next}`}`);
+
+      return;
+    }
+
+    const next = params.toString();
+    const nextSearch = next.length === 0 ? "" : `?${next}`;
+
+    if (replaceSearch !== undefined) {
+      replaceSearch(nextSearch);
+
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `${window.location.pathname}${nextSearch}`);
+    }
+  }, [entryRequested, localSearch, projects, projectsLoading, replaceSearch]);
 
   const requestedProjectId = projectIdFromSearch(localSearch);
   const effectiveProjectId = useMemo(() => {

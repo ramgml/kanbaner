@@ -8,13 +8,8 @@ import {
 } from "@kanbaner/plugin-tasks/contract";
 import { taskStatusLabel } from "@kanbaner/task-ui";
 
-import {
-  KANBAN_ROUTE,
-  PROJECTS_OVERVIEW_ROUTE,
-  TASK_LIST_ROUTE,
-  type ProjectRoute,
-} from "../metadata.ts";
-import { rememberProjectView } from "./workspace.ts";
+import { PROJECTS_OVERVIEW_ROUTE, type ProjectRoute } from "../metadata.ts";
+import { ViewToggle } from "./view-toggle.tsx";
 
 export type ProjectHeaderVariant = "kanban" | "list" | "overview";
 
@@ -27,17 +22,6 @@ export interface ProjectHeaderProps {
   readonly fallbackTitle: string;
   readonly actions?: React.ReactNode;
 }
-
-function withSearch(pathname: string, search: string): string {
-  const normalized = search.startsWith("?") ? search : search.length === 0 ? "" : `?${search}`;
-
-  return `${pathname}${normalized}`;
-}
-
-const toggleClass = (active: boolean): string =>
-  `inline-flex min-h-10 items-center px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8 ${
-    active ? "bg-primary text-primary-foreground" : "bg-background hover:bg-accent"
-  }`;
 
 /**
  * Заголовок проекта с переключателем `Список / Канбан`.
@@ -131,36 +115,7 @@ export function ProjectHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {route === PROJECTS_OVERVIEW_ROUTE ? null : (
-          <div
-            role="group"
-            aria-label="Представление проекта"
-            className="inline-flex overflow-hidden rounded-md border border-border"
-          >
-            <a
-              href={withSearch(TASK_LIST_ROUTE, search)}
-              data-testid="project-view-list"
-              aria-current={route === TASK_LIST_ROUTE ? "page" : undefined}
-              onClick={() => {
-                rememberProjectView(TASK_LIST_ROUTE);
-              }}
-              className={toggleClass(route === TASK_LIST_ROUTE)}
-            >
-              Список
-            </a>
-            <a
-              href={withSearch(KANBAN_ROUTE, search)}
-              data-testid="project-view-kanban"
-              aria-current={route === KANBAN_ROUTE ? "page" : undefined}
-              onClick={() => {
-                rememberProjectView(KANBAN_ROUTE);
-              }}
-              className={`${toggleClass(route === KANBAN_ROUTE)} border-l border-border`}
-            >
-              Канбан
-            </a>
-          </div>
-        )}
+        {route === PROJECTS_OVERVIEW_ROUTE ? null : <ViewToggle route={route} search={search} />}
 
         {actions}
       </div>

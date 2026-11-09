@@ -35,8 +35,14 @@ import {
   invokeJson,
   isVersionConflict,
 } from "../ui/operations.ts";
-import { bumpTaskListRevision, updateTaskListQuery, useTaskListQuery } from "./query-state.ts";
+import {
+  bumpTaskListRevision,
+  serializeTaskListQuery,
+  updateTaskListQuery,
+  useTaskListQuery,
+} from "./query-state.ts";
 import { TASK_LIST_ROUTE } from "../metadata.ts";
+import { ViewToggle } from "../ui/view-toggle.tsx";
 
 export interface TaskDetailsPanelProps {
   readonly invoke: UiOperationInvoker;
@@ -50,6 +56,8 @@ export interface TaskDetailsPanelProps {
    * задачу.
    */
   readonly pathname?: string | undefined;
+  /** Актуальная query string App Router: синхронизирует list/task состояние. */
+  readonly search?: string | undefined;
 }
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
@@ -104,9 +112,10 @@ function focusableElements(container: HTMLElement): readonly HTMLElement[] {
  * изменения идут через публичные команды; после команды выполняется
  * повторный `task.get` и запрос списка через общую ревизию.
  */
-export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanelProps) {
-  const query = useTaskListQuery();
+export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDetailsPanelProps) {
+  const query = useTaskListQuery(search);
   const taskId = query.taskId;
+  const workspaceSearch = serializeTaskListQuery(query);
   const onTaskRoute = pathname === TASK_LIST_ROUTE;
   const isDesktopViewport = useSyncExternalStore(
     subscribeDesktopViewport,
@@ -494,6 +503,16 @@ export function TaskDetailsPanel({ invoke, variant, pathname }: TaskDetailsPanel
         }}
         className="m-0 h-full max-h-none w-full max-w-none overflow-y-auto border-0 bg-background p-4 backdrop:bg-black/40 xl:hidden"
       >
+        {editing ? null : (
+          <div className="mb-3 flex justify-end">
+            <ViewToggle
+              route={TASK_LIST_ROUTE}
+              search={workspaceSearch}
+              testIdPrefix="task-details-view"
+              label="Представление проекта в деталях задачи"
+            />
+          </div>
+        )}
         {content}
       </dialog>
     );

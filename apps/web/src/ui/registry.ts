@@ -358,8 +358,10 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
       prepared.push({
         entry: {
           pluginId,
-          contribution:
-            normalizedRoute === null ? { ...metadata } : { ...metadata, route: normalizedRoute },
+          // Оригинальный route сохраняется: навигационный вклад может нести
+          // служебную query (`?entry=1`). Нормализованный путь ниже служит
+          // только ключом `routes` и проверкой дубликатов.
+          contribution: { ...metadata },
           render: bound?.render ?? registration.render,
         },
         fallback: registration.render,
@@ -465,8 +467,8 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
       desired.set(metadata.id, {
         entry: {
           pluginId,
-          contribution:
-            normalizedRoute === null ? { ...metadata } : { ...metadata, route: normalizedRoute },
+          // См. registerBatch: query навигационного вклада не теряется.
+          contribution: { ...metadata },
           render: bound?.render ?? registration.render,
         },
         fallback: registration.render,
@@ -486,11 +488,16 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
       }
 
       const next = desired.get(entry.contribution.id);
+      const nextRoute =
+        next === undefined || !isRouteContribution(next.entry.contribution)
+          ? null
+          : next.entry.contribution.route;
 
       if (
         next === undefined ||
-        !isRouteContribution(next.entry.contribution) ||
-        next.entry.contribution.route !== route
+        nextRoute === undefined ||
+        nextRoute === null ||
+        normalizeUiViewRoute(nextRoute) !== route
       ) {
         this.routes.delete(route);
         changed = true;
@@ -529,8 +536,10 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
       const route = next.contribution.route;
 
       if (route !== undefined && isRouteContribution(next.contribution)) {
-        if (this.routes.get(route) !== next) {
-          this.routes.set(route, next);
+        const routeKey = normalizeUiViewRoute(route);
+
+        if (this.routes.get(routeKey) !== next) {
+          this.routes.set(routeKey, next);
           changed = true;
         }
       }
@@ -595,8 +604,12 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
 
       const route = entry.contribution.route;
 
-      if (route !== undefined && this.routes.get(route) === entry) {
-        this.routes.set(route, next);
+      if (route !== undefined && isRouteContribution(entry.contribution)) {
+        const routeKey = normalizeUiViewRoute(route);
+
+        if (this.routes.get(routeKey) === entry) {
+          this.routes.set(routeKey, next);
+        }
       }
 
       this.emit();
@@ -619,8 +632,12 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
 
         const route = current.contribution.route;
 
-        if (route !== undefined && this.routes.get(route) === current) {
-          this.routes.set(route, restored);
+        if (route !== undefined && isRouteContribution(current.contribution)) {
+          const routeKey = normalizeUiViewRoute(route);
+
+          if (this.routes.get(routeKey) === current) {
+            this.routes.set(routeKey, restored);
+          }
         }
 
         this.emit();

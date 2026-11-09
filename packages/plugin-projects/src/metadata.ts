@@ -101,4 +101,16 @@ export const projectsUiContributions: readonly UiContribution[] = Object.freeze(
     title: "Проекты",
     description: "Мобильный bottom sheet со списком проектов",
   },
+  {
+    // Единственный вход из shell в рабочее пространство. `entry=1` заставляет
+    // обзор восстановить последнее представление проекта, не дублируя два
+    // старых пункта навигации.
+    id: "kanbaner.projects.navigation",
+    slot: "app.sidebar",
+    kind: "navigation",
+    priority: 40,
+    title: "Проекты",
+    description: "Вход в рабочее пространство проектов",
+    route: `${PROJECTS_OVERVIEW_ROUTE}?entry=1`,
+  },
 ]);

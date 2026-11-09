@@ -62,17 +62,11 @@ async function closeDetails(page: Page): Promise<void> {
   await expect(page).not.toHaveURL(/[?&]task=/u);
 }
 
-function viewportIsMobile(page: Page): boolean {
-  return (page.viewportSize()?.width ?? DESKTOP_VIEWPORT.width) < 768;
-}
-
 async function openProjectCreator(page: Page): Promise<Locator> {
-  if (viewportIsMobile(page)) {
-    await page.getByTestId("projects-mobile-trigger").click();
-    await page.getByTestId("projects-mobile-create").click();
-  } else {
-    await page.getByTestId("projects-create-button").click();
-  }
+  const opener = page.getByTestId("create-project-button");
+
+  await expect(opener).toBeVisible();
+  await opener.click();
 
   const form = page.getByTestId("project-form");
 
@@ -473,6 +467,22 @@ async function openProjectsMode(page: Page): Promise<void> {
 }
 
 /**
+ * Вход в workspace из shell: единственный пункт «Проекты» ведёт в обзор с
+ * `entry=1`, а обзор восстанавливает последнее представление.
+ */
+async function openProjectsFromNav(page: Page): Promise<void> {
+  await page.goto("/");
+
+  await page
+    .getByTestId("desktop-sidebar")
+    .getByRole("link", { name: "Проекты", exact: true })
+    .click();
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toMatch(/^\/view\/(projects|kanban|tasks)$/u);
+}
+
+/**
  * Догружает страницы сетки, пока карточка проекта не появится.
  *
  * Проекты упорядочены `createdAt asc`, поэтому только что созданный проект
@@ -725,17 +735,16 @@ test.describe("канбан в production shell", () => {
 
     // Выполняется первым: база E2E-прогона ещё пуста, поэтому пустое
     // состояние можно проверить без искусственного удаления чужих данных.
-    test("показывает пустое состояние проектов и создаёт первый проект", async ({ page }) => {
+    test("вход из shell показывает пустой обзор, создаёт первый проект и восстанавливает вид", async ({
+      page,
+    }) => {
       const projectTitle = uniqueTitle("Первый проект сетки");
 
-      await openBoard(page);
+      await openProjectsFromNav(page);
 
-      await expect(page.getByTestId("kanban-empty-projects")).toBeVisible();
-      // Пока проект не выбран, сводки по «всем проектам» нет: доска всегда
-      // показывает один проект.
-      await expect(page.getByTestId("kanban-summary-total")).toHaveCount(0);
+      await expect(page.getByTestId("projects-overview-empty")).toBeVisible();
 
-      await page.getByTestId("kanban-create-first-project").click();
+      await page.getByTestId("projects-create-button").click();
 
       const form = page.getByTestId("project-form");
 
@@ -743,11 +752,7 @@ test.describe("канбан в production shell", () => {
       await form.getByLabel("Название проекта", { exact: true }).fill(projectTitle);
       await form.getByRole("button", { name: "Создать проект" }).click();
       await expect(form).toHaveCount(0);
-
-      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
-      await expect(page.getByTestId("kanban-summary-total")).toHaveText("0");
-
-      await openProjectsMode(page);
+      await expect(page).toHaveURL(/[?&]project=/u);
 
       const projectId = await projectIdByTitle(page, projectTitle);
 
@@ -757,6 +762,22 @@ test.describe("канбан в production shell", () => {
         { backlog: 0, todo: 0, in_progress: 0, done: 0 },
         0,
       );
+
+      await page.getByTestId(`projects-overview-open-${projectId}`).click();
+
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect(page.getByTestId("kanban-summary-total")).toHaveText("0");
+
+      await expect
+        .poll(() => page.evaluate(() => window.localStorage.getItem("kanbaner.projects.lastView")))
+        .toBe("/view/kanban");
+
+      // Возврат через единственный nav-пункт открывает сохранённую доску и
+      // проект, а не пустой обзор: readLastProjectView не остаётся мёртвым.
+      await openProjectsFromNav(page);
+
+      await expect(page).toHaveURL(new RegExp(`/view/kanban\\?project=${projectId}`, "u"));
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
     });
 
     test("показывает проект и задачи в четырёх фиксированных колонках", async ({ page }) => {
@@ -1278,9 +1299,7 @@ test.describe("канбан в production shell", () => {
       await expectCardInColumn(page, doneMoverId, "done");
     });
 
-    test("клиентская навигация по тому же маршруту и настоящий Link закрывают overlay", async ({
-      page,
-    }) => {
+    test("переключатель внутри модала и настоящая ссылка закрывают overlay", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект Link навигации");
       const taskTitle = uniqueTitle("Задача Link навигации");
 
@@ -1297,14 +1316,9 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(page).toHaveURL(/[?&]task=/u);
 
-      // Переключатель представления — настоящая Next Link-навигация по тому
-      // же рабочему пространству. Она сохраняет выбранную задачу: на
-      // /view/tasks открывается панель деталей, overlay канбана исчезает.
-      // Нативный modal делает фон inert, поэтому ссылку активируем
-      // программно — это эквивалент client navigation из другого компонента.
-      await page.getByTestId("project-view-list").evaluate((element) => {
-        (element as HTMLElement).click();
-      });
+      // Переключатель внутри модала доступен, хотя фон нативного modal inert.
+      // Обычный click (без evaluate) сохраняет выбранную задачу.
+      await page.getByTestId("project-view-modal-list").click();
 
       await expect(page).toHaveURL(/\/view\/tasks\?[^#]*[?&]task=/u);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
@@ -1313,19 +1327,26 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
       // Обратный переход тоже сохраняет задачу и снова открывает overlay.
-      await page.getByTestId("project-view-kanban").evaluate((element) => {
-        (element as HTMLElement).click();
-      });
+      await page.getByTestId("project-view-kanban").click();
 
       await expect(page).toHaveURL(/\/view\/kanban\?[^#]*[?&]task=/u);
       await expect(page.getByTestId("kanban-details")).toBeVisible();
+
+      // Клавиатурный путь внутри модала: focus + Enter на настоящей ссылке.
+      const modalList = page.getByTestId("project-view-modal-list");
+
+      await modalList.focus();
+      await page.keyboard.press("Enter");
+
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*[?&]task=/u);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
       // Уход на другой маршрут тоже скрывает уже открытый overlay.
       const pluginsLink = page
         .getByTestId("desktop-sidebar")
         .getByRole("link", { name: "Плагины", exact: true });
 
-      await pluginsLink.evaluate((element) => (element as HTMLElement).click());
+      await pluginsLink.click();
 
       await expect(page).toHaveURL(/\/plugins$/u);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);

@@ -146,5 +146,11 @@ export const projectsUiPlugin = defineUiPlugin({
       metadata: contributionAt(7),
       render: (props) => <ProjectsMobileSheet invoke={props.invoke} />,
     },
+    {
+      // Навигационный вклад рендерит shell по route; рендерер нужен только
+      // для единого контракта UI-плагина.
+      metadata: contributionAt(8),
+      render: () => null,
+    },
   ],
 });
