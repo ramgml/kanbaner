@@ -601,6 +601,57 @@ test.describe("список задач в production shell", () => {
       await expect(desktopRow(page, taskId)).toContainText(updatedTitle);
     });
 
+    test("переименовывает проект из списка и сохраняет проект и выбранную задачу", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект переименования списка");
+      const taskTitle = uniqueTitle("Задача переименования списка");
+      const renamedTitle = uniqueTitle("Список переименован");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle });
+
+      await filterTaskListByProject(page, projectTitle);
+
+      const before = new URL(page.url());
+
+      expect(before.searchParams.get("project")).not.toBeNull();
+      expect(before.searchParams.get("task")).toBe(taskId);
+      await expect(page.getByTestId("project-board-title")).toHaveText(projectTitle);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+
+      await page.getByTestId("project-rename-button").click();
+
+      const dialog = page.getByTestId("project-rename-dialog");
+
+      await expect(dialog).toBeVisible();
+      await expect(page.getByTestId("project-rename-input")).toHaveValue(projectTitle);
+      await page.getByTestId("project-rename-input").fill(renamedTitle);
+      await page.getByTestId("project-rename-submit").click();
+
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("project-board-title")).toHaveText(renamedTitle);
+      // Task query и выбранные детали не сбрасываются.
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+
+      const after = new URL(page.url());
+
+      expect(after.pathname).toBe(before.pathname);
+      expect(after.searchParams.get("project")).toBe(before.searchParams.get("project"));
+      expect(after.searchParams.get("task")).toBe(taskId);
+      await expect(
+        page.getByTestId("projects-sidebar-list").getByRole("button", {
+          name: renamedTitle,
+          exact: true,
+        }),
+      ).toHaveCount(1);
+
+      await page.reload();
+      await expect(page.getByTestId("project-board-title")).toHaveText(renamedTitle);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+    });
+
     test("не перезаписывает задачу при VERSION_CONFLICT из второй вкладки", async ({
       page,
       context,

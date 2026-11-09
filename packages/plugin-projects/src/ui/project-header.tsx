@@ -6,9 +6,10 @@ import {
   type ProjectSummary,
   type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
-import { taskStatusLabel } from "@kanbaner/task-ui";
+import { taskStatusLabel, type UiOperationInvoker } from "@kanbaner/task-ui";
 
 import { PROJECTS_OVERVIEW_ROUTE, type ProjectRoute } from "../metadata.ts";
+import { ProjectRenameButton } from "./project-rename.tsx";
 import { ViewToggle } from "./view-toggle.tsx";
 
 export type ProjectHeaderVariant = "kanban" | "list" | "overview";
@@ -20,6 +21,10 @@ export interface ProjectHeaderProps {
   readonly summary: ProjectSummary | null;
   readonly search: string;
   readonly fallbackTitle: string;
+  /** Инвокер для действия «Переименовать»; обзор без проекта его не получает. */
+  readonly invoke?: UiOperationInvoker | undefined;
+  /** Уведомляет представление об успешном переименовании. */
+  readonly onProjectRenamed?: (() => void) | undefined;
   readonly actions?: React.ReactNode;
 }
 
@@ -37,6 +42,8 @@ export function ProjectHeader({
   summary,
   search,
   fallbackTitle,
+  invoke,
+  onProjectRenamed,
   actions,
 }: ProjectHeaderProps) {
   const counts = summary?.counts ?? null;
@@ -115,6 +122,10 @@ export function ProjectHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        {project === null || invoke === undefined ? null : (
+          <ProjectRenameButton invoke={invoke} project={project} onRenamed={onProjectRenamed} />
+        )}
+
         {route === PROJECTS_OVERVIEW_ROUTE ? null : <ViewToggle route={route} search={search} />}
 
         {actions}

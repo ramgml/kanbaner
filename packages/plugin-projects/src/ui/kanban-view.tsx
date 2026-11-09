@@ -1179,6 +1179,8 @@ export function KanbanView({
         summary={summary}
         search={workspaceSearch}
         fallbackTitle={projects.length === 0 ? "Проекты" : "Выберите проект"}
+        invoke={invoke}
+        onProjectRenamed={bumpKanbanRevision}
         actions={
           onKanbanRoute ? (
             <button

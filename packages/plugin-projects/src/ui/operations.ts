@@ -40,6 +40,9 @@ export function errorMessage(error: unknown): string {
 export const VERSION_CONFLICT_MESSAGE =
   "Задача уже изменена в другом месте. Доска перечитана — проверьте её и повторите действие.";
 
+export const PROJECT_VERSION_CONFLICT_MESSAGE =
+  "Проект уже изменён в другом месте. Данные перечитаны — проверьте название и повторите действие.";
+
 export function isVersionConflict(error: unknown): boolean {
   return error instanceof KanbanOperationError && error.code === "VERSION_CONFLICT";
 }
