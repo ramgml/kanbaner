@@ -1,7 +1,7 @@
 ---
 id: KAN-025
 title: Настройки доски и удобство карточек
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-025
@@ -36,44 +36,44 @@ specs:
 
 ### Настройки доски
 
-- [ ] Общая кнопка «Настроить» в ProjectHeader для канбана и списка.
-- [ ] Модалка: название проекта с независимым сохранением; список колонок с
+- [x] Общая кнопка «Настроить» в ProjectHeader для канбана и списка.
+- [x] Модалка: название проекта с независимым сохранением; список колонок с
   редактированием названий, drag reorder и кнопками вверх/вниз; «Готово».
-- [ ] Использовать `project.update`, `column.update`, `column.move`; новых
+- [x] Использовать `project.update`, `column.update`, `column.move`; новых
   доменных операций и пакетного частичного сохранения нет.
-- [ ] Сохранить expectedVersion, pending per action, awaited refresh, conflict
+- [x] Сохранить expectedVersion, pending per action, awaited refresh, conflict
   retry, ошибки без потери ввода и actual project guards.
-- [ ] Создание/удаление/тип колонок не дублировать в модалке.
-- [ ] Dirty-close confirm, focus/Escape, selected task и другие формы не
+- [x] Создание/удаление/тип колонок не дублировать в модалке.
+- [x] Dirty-close confirm, focus/Escape, selected task и другие формы не
   закрываются вместе с модалкой; mobile 360 px.
 
 ### Drag карточки за любую область
 
-- [ ] Pointer down на неинтерактивной области article, desktop threshold 6–8 px.
-- [ ] Клик открывает карточку; после drag click подавляется.
-- [ ] Игнорировать buttons/links/inputs/selects/contenteditable и выделение
+- [x] Pointer down на неинтерактивной области article, desktop threshold 6–8 px.
+- [x] Клик открывает карточку; после drag click подавляется.
+- [x] Игнорировать buttons/links/inputs/selects/contenteditable и выделение
   текста. Меню и ручка не должны быть единственным способом drag.
-- [ ] Mobile long-press 200–250 ms без поломки вертикального scroll.
-- [ ] Сохранить top/between/append, cleanup при project switch/unmount и меню
+- [x] Mobile long-press 200–250 ms без поломки вертикального scroll.
+- [x] Сохранить top/between/append, cleanup при project switch/unmount и меню
   «Переместить в…» как альтернативу.
 
 ### Меню и ширина
 
-- [ ] Меню карточки через portal/fixed overlay от кнопки, flip вверх при нехватке
+- [x] Меню карточки через portal/fixed overlay от кнопки, flip вверх при нехватке
   места, viewport clamp, outside/Escape/focus return, одно открытое меню.
-- [ ] Меню не растягивает карточку и не обрезается scroll-контейнером; scroll
+- [x] Меню не растягивает карточку и не обрезается scroll-контейнером; scroll
   reposition или close.
-- [ ] Desktop columns `flex: 0 0 288px`, left aligned; add-column не растягивается;
+- [x] Desktop columns `flex: 0 0 288px`, left aligned; add-column не растягивается;
   многоколоночный horizontal scroll и mobile 85vw сохраняются.
 
 ### Тесты и документация
 
-- [ ] Component: settings operations/conflicts/dirty close, card drag threshold/
+- [x] Component: settings operations/conflicts/dirty close, card drag threshold/
   exclusions/click suppression/touch, popover geometry и fixed widths.
-- [ ] E2E: настройки из канбана/списка, rename/reorder persistence, drag из
+- [x] E2E: настройки из канбана/списка, rename/reorder persistence, drag из
   title/tags/padding, menu rect не меняет card, viewport edges, desktop resize,
   mobile 360, прежние DnD/CRUD.
-- [ ] README и `tasks/reports/KAN-025.md`.
+- [x] README и `tasks/reports/KAN-025.md`.
 
 ## Владение файлами
 
@@ -96,17 +96,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Настройки доступны в обоих представлениях и сохраняют данные после reload.
-- [ ] Drag работает за неинтерактивные области и не мешает кликам/scroll.
-- [ ] Меню не меняет card layout и остаётся в viewport.
-- [ ] Колонки не растягиваются при resize широкого экрана.
-- [ ] Все проверки зелёные.
+- [x] Настройки доступны в обоих представлениях и сохраняют данные после reload.
+- [x] Drag работает за неинтерактивные области и не мешает кликам/scroll.
+- [x] Меню не меняет card layout и остаётся в viewport.
+- [x] Колонки не растягиваются при resize широкого экрана.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Strict frozen install, check:imports и self-test.
-- [ ] Полный `pnpm check`.
-- [ ] Все Playwright и deferred SIGTERM.
+- [x] Strict frozen install, check:imports и self-test.
+- [x] Полный `pnpm check`.
+- [x] Все Playwright и deferred SIGTERM.
 
 ## Риски
 
@@ -117,8 +117,16 @@ specs:
 
 ## Журнал
 
+- 2026-11-10 — Влита в `dev` merge-коммитом
+  `aede51d8935b0447c9881fd4ca0799671a86aef2`. Финальное ревью разрешило
+  интеграцию; повторные проверки на ветке и `dev` зелёные.
 - 2026-11-10 — Требования согласованы с пользователем.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммит: merge `aede51d8935b0447c9881fd4ca0799671a86aef2`.
+- Ветка: `feat/kan-025-board-usability` влита, ветка и worktree удалены.
+- Проверки: 96 файлов / 1323 теста, 92 production E2E, strict install,
+  check:imports и deferred SIGTERM зелёные.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись; реальные
+  touch-жесты проверены через CDP Chromium.
