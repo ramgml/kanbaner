@@ -377,6 +377,54 @@ describe("управление колонками в KanbanView", () => {
     expect(
       screen.getByTestId("kanban-column-title-column-column-project-1-custom-1"),
     ).toHaveTextContent("Проверка");
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("kanban-column-empty-column-column-project-1-custom-1"),
+      ).toBeVisible();
+    });
+  });
+
+  it("при ошибке refresh после create просит повторить загрузку, а не создание", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    let listCalls = 0;
+    let createCalls = 0;
+    const operations = renderBoard(board, {
+      "kanbaner.tasks.column.create": () => {
+        createCalls += 1;
+
+        return ok({
+          column: makeColumn("column-project-1-custom-1", "Проверка", "in_progress", 3),
+          resource: {},
+          eventId: "event",
+        });
+      },
+      "kanbaner.tasks.column.list": () => {
+        listCalls += 1;
+
+        return listCalls === 1
+          ? ok({ items: board.columns, total: board.columns.length, nextOffset: null })
+          : fail("INTERNAL_ERROR", "Список колонок недоступен");
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-add-column")).toBeVisible();
+    });
+    fireEvent.click(screen.getByTestId("kanban-add-column"));
+    fireEvent.change(screen.getByTestId("kanban-column-title-input"), {
+      target: { value: "Проверка" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-error")).toHaveTextContent("Повторите загрузку доски");
+    });
+    expect(createCalls).toBe(1);
+    expect(screen.queryByTestId("kanban-column-form")).toBeNull();
+    expect(screen.queryByTestId("kanban-column-notice")).toBeNull();
+    expect(
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.column.create"),
+    ).toHaveLength(1);
   });
 
   it("переименовывает колонку с expectedVersion и сохраняет ввод при ошибке", async () => {
@@ -745,7 +793,13 @@ describe("управление колонками в KanbanView", () => {
       "kanbaner.tasks.task.list": (input) => {
         const values = inputOf(input);
 
-        if (values.limit === 1 && values.offset === 0 && values.tag === undefined) {
+        if (
+          values.limit === 1 &&
+          values.offset === 0 &&
+          values.tag === undefined &&
+          typeof values.columnId === "string" &&
+          values.parentTaskId === undefined
+        ) {
           return delayedCount;
         }
 
@@ -953,7 +1007,7 @@ describe("управление колонками в KanbanView", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-error")).toHaveTextContent(
-        "Колонки: Список колонок недоступен",
+        "Порядок сохранён, но список колонок не обновлён",
       );
     });
     expect(screen.getByTestId("kanban-column-move-right-todo")).toBeEnabled();
@@ -1035,5 +1089,307 @@ describe("управление колонками в KanbanView", () => {
       expectedVersion: 2,
       targetColumnId: "column-project-1-next",
     });
+  });
+
+  it("delete перепроверяет счётчик и требует повторного confirm при изменении", async () => {
+    const columns = defaultColumns();
+    const todo = columns[0] as TaskColumn;
+    const board: Board = {
+      columns,
+      tasks: [makeTask("a", todo, 0, "A")],
+      nextColumn: 1,
+    };
+    let countCalls = 0;
+    let deleteCalls = 0;
+
+    renderBoard(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        const values = inputOf(input);
+
+        if (
+          values.limit === 1 &&
+          values.offset === 0 &&
+          values.tag === undefined &&
+          typeof values.columnId === "string" &&
+          values.parentTaskId === undefined
+        ) {
+          countCalls += 1;
+
+          return ok({
+            items: [],
+            total: countCalls === 1 ? 1 : 2,
+            nextOffset: null,
+          });
+        }
+
+        const columnId = typeof values.columnId === "string" ? values.columnId : null;
+        const items = board.tasks.filter((task) => task.columnId === columnId);
+
+        return ok({ items, total: items.length, nextOffset: null });
+      },
+      "kanbaner.tasks.column.delete": () => {
+        deleteCalls += 1;
+
+        return ok({
+          deleted: true,
+          resource: {},
+          version: 1,
+          eventVersion: 2,
+          targetColumnId: "column-project-1-in-progress",
+          movedTasks: [],
+          eventId: "event",
+        });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-todo")).toHaveTextContent("1");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("1");
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-delete-confirm"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-error")).toHaveTextContent(
+        "Последствия изменились",
+      );
+    });
+    expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("2");
+    expect(screen.getByTestId("kanban-column-delete-confirm")).toBeEnabled();
+    expect(deleteCalls).toBe(0);
+
+    fireEvent.click(screen.getByTestId("kanban-column-delete-confirm"));
+
+    await waitFor(() => {
+      expect(deleteCalls).toBe(1);
+    });
+  });
+
+  it("не отправляет task.move после deferred scope, если проект переключился", async () => {
+    const columnsA = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-a"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-a",
+      ),
+    );
+    const columnsB = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-b"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-b",
+      ),
+    );
+    const taskA = makeTask("task-a", columnsA[0] as TaskColumn, 0, "Задача A");
+    let moveCalls = 0;
+    let resolveScope: ((value: UiOperationResult) => void) | null = null;
+    const delayedScope = new Promise<UiOperationResult>((settle) => {
+      resolveScope = settle;
+    });
+    const projects = [
+      { ...project, id: "project-a", title: "Проект A" },
+      { ...project, id: "project-b", title: "Проект B" },
+    ];
+
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({ items: projects, total: 2, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const projectId = String(inputOf(input).projectId);
+        const columns = projectId === "project-a" ? columnsA : columnsB;
+
+        return ok({ items: columns, total: columns.length, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.task.list") {
+        const values = inputOf(input);
+        const projectId = String(values.projectId);
+        const columnId = typeof values.columnId === "string" ? values.columnId : null;
+
+        if (values.limit === 200 && projectId === "project-a") {
+          return delayedScope;
+        }
+
+        const items = projectId === "project-a" && columnId === columnsA[0]?.id ? [taskA] : [];
+
+        return ok({ items, total: items.length, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.task.move") {
+        moveCalls += 1;
+      }
+
+      return emptyResult();
+    };
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-a");
+    resetKanbanQueryForTests("?project=project-a");
+    render(<KanbanView invoke={invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-task-a")).toBeVisible();
+    });
+
+    const details = screen.getByTestId("kanban-card-task-a").querySelector("details");
+
+    if (details !== null) {
+      details.open = true;
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-b" });
+    });
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-kanban-column-id="column-project-b-todo"]'),
+      ).not.toBeNull();
+    });
+
+    await act(async () => {
+      resolveScope?.(
+        ok({
+          items: [taskA],
+          total: 1,
+          nextOffset: null,
+        }),
+      );
+      await delayedScope;
+    });
+
+    await waitFor(() => {
+      expect(moveCalls).toBe(0);
+    });
+    expect(
+      document.querySelector('[data-kanban-column-id="column-project-b-todo"]'),
+    ).not.toBeNull();
+  });
+
+  it("не отправляет column.delete после deferred revalidation, если проект переключился", async () => {
+    const columnsA = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-a"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-a",
+      ),
+    );
+    const columnsB = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-b"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-b",
+      ),
+    );
+    const taskA = makeTask("task-a", columnsA[0] as TaskColumn, 0, "Задача A");
+    let countCalls = 0;
+    let deleteCalls = 0;
+    let resolveRevalidate: ((value: UiOperationResult) => void) | null = null;
+    const delayedRevalidate = new Promise<UiOperationResult>((settle) => {
+      resolveRevalidate = settle;
+    });
+    const projects = [
+      { ...project, id: "project-a", title: "Проект A" },
+      { ...project, id: "project-b", title: "Проект B" },
+    ];
+
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({ items: projects, total: 2, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const projectId = String(inputOf(input).projectId);
+        const columns = projectId === "project-a" ? columnsA : columnsB;
+
+        return ok({ items: columns, total: columns.length, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.task.list") {
+        const values = inputOf(input);
+
+        if (
+          values.limit === 1 &&
+          values.offset === 0 &&
+          values.tag === undefined &&
+          typeof values.columnId === "string" &&
+          values.parentTaskId === undefined
+        ) {
+          countCalls += 1;
+
+          return countCalls === 1
+            ? ok({ items: [], total: 1, nextOffset: null })
+            : delayedRevalidate;
+        }
+
+        const columnId = typeof values.columnId === "string" ? values.columnId : null;
+        const items =
+          String(values.projectId) === "project-a" && columnId === columnsA[0]?.id ? [taskA] : [];
+
+        return ok({ items, total: items.length, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.column.delete") {
+        deleteCalls += 1;
+      }
+
+      return emptyResult();
+    };
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-a");
+    resetKanbanQueryForTests("?project=project-a");
+    render(<KanbanView invoke={invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-task-a")).toBeVisible();
+    });
+    await openMenu("column-project-a-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("1");
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-delete-confirm"));
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-b" });
+    });
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-kanban-column-id="column-project-b-todo"]'),
+      ).not.toBeNull();
+    });
+
+    await act(async () => {
+      resolveRevalidate?.(ok({ items: [], total: 1, nextOffset: null }));
+      await delayedRevalidate;
+    });
+
+    await waitFor(() => {
+      expect(deleteCalls).toBe(0);
+    });
+    expect(
+      document.querySelector('[data-kanban-column-id="column-project-b-todo"]'),
+    ).not.toBeNull();
   });
 });

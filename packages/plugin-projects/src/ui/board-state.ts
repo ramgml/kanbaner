@@ -96,6 +96,28 @@ export function reorderKanbanColumns(
   return { order, byId: columns.byId };
 }
 
+/** Восстанавливает снимок порядка, сохраняя актуальный byId. */
+export function restoreColumnOrder(
+  columns: KanbanColumns,
+  snapshot: readonly string[],
+): KanbanColumns {
+  const order: string[] = [];
+
+  for (const id of snapshot) {
+    if (columns.byId[id] !== undefined) {
+      order.push(id);
+    }
+  }
+
+  for (const id of columns.order) {
+    if (!order.includes(id)) {
+      order.push(id);
+    }
+  }
+
+  return { order, byId: columns.byId };
+}
+
 /** Убирает колонку из отображения после успешного удаления. */
 export function withoutColumn(columns: KanbanColumns, columnId: string): KanbanColumns {
   if (!columns.order.includes(columnId)) {

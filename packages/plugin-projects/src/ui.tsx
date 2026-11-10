@@ -45,6 +45,7 @@ export {
   placementForIndex,
   reorderKanbanColumns,
   resolveMovePosition,
+  restoreColumnOrder,
   syncColumns,
   visibleMoveIntent,
   withoutColumn,
