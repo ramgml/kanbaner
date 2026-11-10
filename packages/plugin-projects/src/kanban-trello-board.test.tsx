@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
@@ -44,7 +44,64 @@ function makeTask(
 interface Board {
   projects: Project[];
   tasks: Task[];
+  columns?: TaskColumn[];
   nextTask: number;
+}
+
+const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+function columnIdFor(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function columnStatus(board: Board, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
+  }
+
+  return column.status;
+}
+
+function boardColumns(board: Board, projectId: string): readonly TaskColumn[] {
+  const own = board.columns?.filter((column) => column.projectId === projectId) ?? [];
+
+  if (own.length > 0) {
+    return own;
+  }
+
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+
+  return statuses.map((status, position) => ({
+    id: columnIdFor(projectId, status),
+    projectId,
+    title: STATUS_LABELS[status],
+    status,
+    position,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  }));
+}
+
+function statusOfTask(board: Board, task: Task): TaskStatus {
+  const columns = boardColumns(board, task.projectId);
+  const column =
+    task.columnId === undefined
+      ? columns.find((entry) => entry.status === task.status)
+      : columns.find((entry) => entry.id === task.columnId);
+
+  if (column === undefined) {
+    throw new Error(`Задача ${task.id} ссылается на неизвестную колонку`);
+  }
+
+  return column.status;
 }
 
 function ok(data: JsonValue): UiOperationResult {
@@ -65,8 +122,13 @@ function listTasks(board: Board, input: JsonValue): UiOperationResult {
   const filters = inputOf(input);
   let items = [...board.tasks];
 
-  if (typeof filters.status === "string") {
-    items = items.filter((task) => task.status === filters.status);
+  if (typeof filters.columnId === "string") {
+    const columnId = filters.columnId;
+
+    items = items.filter(
+      (task) =>
+        (task.columnId ?? columnIdFor(task.projectId, statusOfTask(board, task))) === columnId,
+    );
   }
 
   if (typeof filters.projectId === "string") {
@@ -144,15 +206,29 @@ function createOperations(board: Board): {
       return listTasks(board, input);
     }
 
+    if (operationId === "kanbaner.tasks.column.list") {
+      const projectId = String(inputOf(input).projectId);
+      const columns = boardColumns(board, projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    }
+
     if (operationId === "kanbaner.tasks.task.create") {
       const values = inputOf(input);
       const projectId = String(values.projectId);
-      const status = (values.status as TaskStatus | undefined) ?? "todo";
+      const columnId =
+        typeof values.columnId === "string"
+          ? values.columnId
+          : columnIdFor(projectId, (values.status as TaskStatus | undefined) ?? "todo");
+      const status = columnStatus(board, projectId, columnId);
       const position = board.tasks.filter(
-        (task) => task.projectId === projectId && task.status === status,
+        (task) =>
+          task.projectId === projectId &&
+          (task.columnId ?? columnIdFor(projectId, statusOfTask(board, task))) === columnId,
       ).length;
       const task = makeTask(`task-${String(board.nextTask)}`, {
         projectId,
+        columnId,
         title: String(values.title),
         status,
         position,
@@ -174,7 +250,15 @@ function createOperations(board: Board): {
 
       board.tasks = board.tasks.map((candidate) =>
         candidate.id === task.id
-          ? ({ ...candidate, status: values.status as TaskStatus } as Task)
+          ? ({
+              ...candidate,
+              ...(typeof values.columnId === "string"
+                ? {
+                    columnId: values.columnId,
+                    status: columnStatus(board, candidate.projectId, values.columnId),
+                  }
+                : { status: values.status as TaskStatus }),
+            } as Task)
           : candidate,
       );
 
@@ -347,7 +431,7 @@ describe("Trello-доска", () => {
     expect(payload).toMatchObject({
       projectId: "project-1",
       title: "Быстрая задача",
-      status: "todo",
+      columnId: "column-project-1-legacy-todo",
     });
     expect(payload).not.toHaveProperty("position");
     await waitFor(() => {

@@ -8,6 +8,7 @@ import type {
   Project,
   ProjectSummaryOutput,
   Task,
+  TaskColumn,
   TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
@@ -111,6 +112,18 @@ function summarize(board: Board, input: JsonValue): ProjectSummaryOutput {
 }
 
 function makeInvoke(board: Board): UiOperationInvoker {
+  const columnsFor = (projectId: string): readonly TaskColumn[] =>
+    (["backlog", "todo", "in_progress", "done"] as const).map((status, position) => ({
+      id: `column-${projectId}-legacy-${status}`,
+      projectId,
+      title: status,
+      status,
+      position,
+      version: 1,
+      createdAt: new Date(NOW).toISOString(),
+      updatedAt: new Date(NOW).toISOString(),
+    }));
+
   return async (operationId, input) => {
     if (operationId === "kanbaner.tasks.project.list") {
       return ok({ items: board.projects, total: board.projects.length, nextOffset: null });
@@ -120,8 +133,25 @@ function makeInvoke(board: Board): UiOperationInvoker {
       return ok(summarize(board, input) as unknown as JsonValue);
     }
 
+    if (operationId === "kanbaner.tasks.column.list") {
+      const projectId = String(inputOf(input).projectId);
+      const columns = columnsFor(projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    }
+
     if (operationId === "kanbaner.tasks.task.list") {
-      return ok({ items: [], total: 0, nextOffset: null });
+      const filters = inputOf(input);
+      const projectId = typeof filters.projectId === "string" ? filters.projectId : null;
+      const columnId = typeof filters.columnId === "string" ? filters.columnId : null;
+      const items = board.tasks
+        .filter((task) => projectId === null || task.projectId === projectId)
+        .filter(
+          (task) =>
+            columnId === null || columnId === `column-${task.projectId}-legacy-${task.status}`,
+        );
+
+      return ok({ items, total: items.length, nextOffset: null });
     }
 
     return ok({ items: [], total: 0, nextOffset: null });

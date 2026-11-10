@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
@@ -54,6 +54,63 @@ function makeTask(
 interface FakeBoard {
   tasks: Task[];
   projects: Project[];
+  columns?: TaskColumn[];
+}
+
+const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+function columnIdFor(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function columnStatus(board: FakeBoard, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
+  }
+
+  return column.status;
+}
+
+function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
+  const own = board.columns?.filter((column) => column.projectId === projectId) ?? [];
+
+  if (own.length > 0) {
+    return own;
+  }
+
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+
+  return statuses.map((status, position) => ({
+    id: columnIdFor(projectId, status),
+    projectId,
+    title: STATUS_LABELS[status],
+    status,
+    position,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  }));
+}
+
+function statusOfTask(board: FakeBoard, task: Task): TaskStatus {
+  const columns = boardColumns(board, task.projectId);
+  const column =
+    task.columnId === undefined
+      ? columns.find((entry) => entry.status === task.status)
+      : columns.find((entry) => entry.id === task.columnId);
+
+  if (column === undefined) {
+    throw new Error(`Задача ${task.id} ссылается на неизвестную колонку`);
+  }
+
+  return column.status;
 }
 
 type Handler = (input: JsonValue) => UiOperationResult | Promise<UiOperationResult>;
@@ -96,8 +153,14 @@ function deferred<T>(): Deferred<T> {
   };
 }
 
-function statusOf(input: JsonValue): string | null {
-  const value = inputOf(input).status;
+function statusOf(board: FakeBoard, input: JsonValue): string | null {
+  const values = inputOf(input);
+
+  if (typeof values.columnId === "string") {
+    return columnStatus(board, String(values.projectId), values.columnId);
+  }
+
+  const value = values.status;
 
   return typeof value === "string" ? value : null;
 }
@@ -118,8 +181,13 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
   const filters = inputOf(input);
   let items = [...board.tasks];
 
-  if (typeof filters.status === "string") {
-    items = items.filter((task) => task.status === filters.status);
+  if (typeof filters.columnId === "string") {
+    const columnId = filters.columnId;
+
+    items = items.filter(
+      (task) =>
+        (task.columnId ?? columnIdFor(task.projectId, statusOfTask(board, task))) === columnId,
+    );
   }
 
   if (typeof filters.projectId === "string") {
@@ -171,14 +239,26 @@ function applyMove(
     return { ok: false, code: "VERSION_CONFLICT" };
   }
 
-  const status = values.status as TaskStatus;
+  const columnId =
+    typeof values.columnId === "string"
+      ? values.columnId
+      : columnIdFor(task.projectId, values.status as TaskStatus);
+  const status = columnStatus(board, task.projectId, columnId);
   const position = Number(values.position);
   const projectTasks = board.tasks.filter((candidate) => candidate.projectId === task.projectId);
   const target = projectTasks
-    .filter((candidate) => candidate.status === status && candidate.id !== id)
+    .filter(
+      (candidate) =>
+        (candidate.columnId ?? columnIdFor(candidate.projectId, statusOfTask(board, candidate))) ===
+          columnId && candidate.id !== id,
+    )
     .sort(compareTasks);
   const source = projectTasks
-    .filter((candidate) => candidate.status === task.status && candidate.id !== id)
+    .filter(
+      (candidate) =>
+        (candidate.columnId ?? columnIdFor(candidate.projectId, statusOfTask(board, candidate))) ===
+          (task.columnId ?? columnIdFor(task.projectId, task.status)) && candidate.id !== id,
+    )
     .sort(compareTasks);
 
   target.splice(Math.min(position, target.length), 0, task);
@@ -186,17 +266,24 @@ function applyMove(
   const updated = new Map<string, Task>();
 
   target.forEach((candidate, index) => {
-    updated.set(candidate.id, {
+    const next = {
       ...candidate,
+      columnId,
       status,
       position: index,
       version: candidate.id === id ? candidate.version + 1 : candidate.version,
       completedAt: status === "done" ? (candidate.completedAt ?? TIMESTAMP) : null,
       updatedAt: TIMESTAMP,
-    } as Task);
+    } as Task;
+
+    if (columnStatus(board, next.projectId, columnId) !== next.status) {
+      throw new Error(`Нарушено зеркало status/columnId для ${next.id}`);
+    }
+
+    updated.set(candidate.id, next);
   });
 
-  if (task.status !== status) {
+  if (statusOfTask(board, task) !== status) {
     source.forEach((candidate, index) => {
       updated.set(candidate.id, { ...candidate, position: index } as Task);
     });
@@ -223,6 +310,12 @@ function createOperations(
       return found === undefined ? fail("NOT_FOUND") : ok({ project: found });
     },
     "kanbaner.tasks.task.list": (input) => listTasks(board, input),
+    "kanbaner.tasks.column.list": (input) => {
+      const projectId = String(inputOf(input).projectId);
+      const columns = boardColumns(board, projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    },
     "kanbaner.tasks.task.get": (input) => {
       const found = getTask(board, String(inputOf(input).id));
 
@@ -243,7 +336,27 @@ function createOperations(
     "kanbaner.tasks.task.complete": (input) => {
       const task = getTask(board, String(inputOf(input).id));
 
-      return task === undefined ? fail("NOT_FOUND") : ok({ task });
+      if (task === undefined) {
+        return fail("NOT_FOUND");
+      }
+
+      board.tasks = board.tasks.map((candidate) =>
+        candidate.id === task.id
+          ? (() => {
+              const columnId = columnIdFor(candidate.projectId, "done");
+
+              return {
+                ...candidate,
+                columnId,
+                status: columnStatus(board, candidate.projectId, columnId),
+                completedAt: TIMESTAMP,
+                version: candidate.version + 1,
+              } as Task;
+            })()
+          : candidate,
+      );
+
+      return ok({ task: getTask(board, task.id) ?? task });
     },
   };
 
@@ -515,7 +628,8 @@ describe("KanbanView", () => {
 
     const pageCalls = operations.calls.filter(
       (call) =>
-        call.operationId === "kanbaner.tasks.task.list" && inputOf(call.input).status === "backlog",
+        call.operationId === "kanbaner.tasks.task.list" &&
+        inputOf(call.input).columnId === "column-project-1-legacy-backlog",
     );
 
     expect(pageCalls.some((call) => inputOf(call.input).offset === 10)).toBe(true);
@@ -701,7 +815,7 @@ describe("KanbanView", () => {
         .filter(
           (call) =>
             call.operationId === "kanbaner.tasks.task.list" &&
-            statusOf(call.input) === "done" &&
+            statusOf(board, call.input) === "done" &&
             offsetOf(call.input) > 0,
         );
 
@@ -744,7 +858,7 @@ describe("KanbanView", () => {
 
         // Полный scope (limit 200) не придерживаем: второй move должен
         // увидеть уже применённую первую команду.
-        if (statusOf(input) === "done" && deferDoneReload && limit !== 200) {
+        if (statusOf(board, input) === "done" && deferDoneReload && limit !== 200) {
           const gate = deferred<UiOperationResult>();
 
           pendingLists.push({ input, gate });
@@ -900,7 +1014,7 @@ describe("KanbanView", () => {
         const values = inputOf(input);
 
         if (
-          statusOf(input) === "backlog" &&
+          statusOf(board, input) === "backlog" &&
           offsetOf(input) === 10 &&
           values.tag === undefined &&
           values.parentTaskId === undefined
@@ -1020,7 +1134,7 @@ describe("KanbanView", () => {
         const values = inputOf(input);
 
         if (
-          statusOf(input) === "backlog" &&
+          statusOf(board, input) === "backlog" &&
           offsetOf(input) === 10 &&
           values.parentTaskId === undefined
         ) {
@@ -1080,7 +1194,7 @@ describe("KanbanView", () => {
     let serveDuplicate = true;
     const operations = createOperations(board, {
       "kanbaner.tasks.task.list": (input) => {
-        if (statusOf(input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
+        if (statusOf(board, input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
           return ok({ items: board.tasks.slice(0, 10), total: 12, nextOffset: 10 });
         }
 
@@ -1127,7 +1241,7 @@ describe("KanbanView", () => {
     let serveDuplicate = true;
     const operations = createOperations(board, {
       "kanbaner.tasks.task.list": (input) => {
-        if (statusOf(input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
+        if (statusOf(board, input) === "backlog" && offsetOf(input) === 10 && serveDuplicate) {
           return terminal.promise;
         }
 
@@ -1145,7 +1259,7 @@ describe("KanbanView", () => {
     const firstPageCallsBefore = operations.calls.filter(
       (call) =>
         call.operationId === "kanbaner.tasks.task.list" &&
-        statusOf(call.input) === "backlog" &&
+        statusOf(board, call.input) === "backlog" &&
         offsetOf(call.input) === 0,
     ).length;
 
@@ -1168,7 +1282,7 @@ describe("KanbanView", () => {
     const firstPageCallsAfter = operations.calls.filter(
       (call) =>
         call.operationId === "kanbaner.tasks.task.list" &&
-        statusOf(call.input) === "backlog" &&
+        statusOf(board, call.input) === "backlog" &&
         offsetOf(call.input) === 0,
     ).length;
 
@@ -1198,7 +1312,7 @@ describe("KanbanView", () => {
     const operations = createOperations(board, {
       "kanbaner.tasks.task.list": (input) => {
         // Другая вкладка удалила задачи, и страница за новым концом пуста.
-        if (statusOf(input) === "backlog" && offsetOf(input) === 10) {
+        if (statusOf(board, input) === "backlog" && offsetOf(input) === 10) {
           return ok({ items: [], total: 10, nextOffset: null });
         }
 
@@ -1245,7 +1359,7 @@ describe("KanbanView", () => {
     };
     const operations = createOperations(board, {
       "kanbaner.tasks.task.list": (input) => {
-        if (statusOf(input) === "backlog" && offsetOf(input) === 10) {
+        if (statusOf(board, input) === "backlog" && offsetOf(input) === 10) {
           return ok({
             items: [board.tasks[0] as Task, board.tasks[10] as Task, board.tasks[11] as Task],
             total: 12,

@@ -70,11 +70,18 @@ async function createProject(page: Page, title: string): Promise<void> {
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }
 
+const STATUS_LABELS = {
+  backlog: "Backlog",
+  todo: "ToDo",
+  in_progress: "In Progress",
+  done: "Done",
+} as const;
+
 interface TaskSeed {
   readonly projectTitle: string;
   readonly title: string;
   readonly priority?: string;
-  readonly status?: string;
+  readonly status?: keyof typeof STATUS_LABELS;
   readonly dueAt?: string;
   readonly tags?: string;
   readonly parentTitle?: string;
@@ -132,7 +139,7 @@ async function editTaskDetails(page: Page, seed: TaskSeed): Promise<void> {
 
     await next
       .getByRole("combobox", { name: "Переместить в", exact: true })
-      .selectOption(seed.status);
+      .selectOption({ label: STATUS_LABELS[seed.status] });
     await move.click();
     await expect(move).toBeDisabled();
   }
@@ -180,8 +187,8 @@ async function createSubtask(page: Page, seed: TaskSeed): Promise<string> {
 
   if (seed.status !== undefined) {
     await page
-      .getByRole("combobox", { name: "Статус подзадачи", exact: true })
-      .selectOption(seed.status);
+      .getByRole("combobox", { name: "Колонка подзадачи", exact: true })
+      .selectOption({ label: STATUS_LABELS[seed.status] });
   }
 
   await page.getByTestId("kanban-subtask-submit").click();
@@ -316,7 +323,7 @@ test.describe("список задач в production shell", () => {
       await expect(page.getByTestId(`task-card-${taskId}`)).toBeVisible();
       await expect(mobileCard(page, taskTitle)).toBeVisible();
       await expect(page.getByTestId(`task-card-${taskId}`)).toContainText(projectTitle);
-      await expect(page.getByTestId(`task-card-${taskId}`)).toContainText("К выполнению");
+      await expect(page.getByTestId(`task-card-${taskId}`)).toContainText("ToDo");
       await expect(page.getByTestId(`task-card-${taskId}`)).toContainText("Высокий");
       await expect(page.getByTestId(`task-card-${taskId}`)).toContainText("10.01.2030");
       await expect(page.getByTestId("task-pagination")).toContainText("Всего задач:");
@@ -1036,7 +1043,7 @@ test.describe("список задач в production shell", () => {
       await expect(desktopRow(page, taskId)).toContainText(taskTitle);
     });
 
-    test("подзадача, завершение и фильтры status/tag/due", async ({ page }) => {
+    test("подзадача, завершение и фильтры column/tag/due", async ({ page }) => {
       test.setTimeout(120_000);
 
       const projectTitle = uniqueTitle("Проект подзадачи");
@@ -1076,7 +1083,7 @@ test.describe("список задач в production shell", () => {
       // complete выставляет статус и completedAt; completedAt проверяется
       // server-side integration-тестом, здесь — наблюдаемый статус.
       await details.getByRole("button", { name: "Завершить", exact: true }).click();
-      await expect(details).toContainText("Готово");
+      await expect(details).toContainText("Done");
       await expect(details.getByRole("button", { name: "Завершить", exact: true })).toHaveCount(0);
 
       const filters = page.getByTestId("task-filters");
@@ -1085,11 +1092,15 @@ test.describe("список задач в production shell", () => {
         .getByRole("combobox", { name: "Проект", exact: true })
         .selectOption({ label: projectTitle });
 
-      await filters.getByRole("combobox", { name: "Статус", exact: true }).selectOption("done");
+      await filters
+        .getByRole("combobox", { name: "Колонка", exact: true })
+        .selectOption({ label: "Done" });
       await expect(desktopRow(page, childId)).toContainText(childTitle);
       await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);
 
-      await filters.getByRole("combobox", { name: "Статус", exact: true }).selectOption("");
+      await filters
+        .getByRole("combobox", { name: "Колонка", exact: true })
+        .selectOption({ label: "Все колонки" });
       await filters.getByLabel("Тег", { exact: true }).fill("childtag");
       await expect(desktopRow(page, childId)).toContainText(childTitle);
       await expect(page.locator('[data-testid^="task-row-"]')).toHaveCount(1);

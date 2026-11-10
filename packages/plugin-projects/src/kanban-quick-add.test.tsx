@@ -3,6 +3,8 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+
 import { KanbanQuickComposer, type QuickCreateResult } from "./ui/kanban-quick-composer.tsx";
 
 interface Deferred<T> {
@@ -24,6 +26,42 @@ function deferred<T>(): Deferred<T> {
   };
 }
 
+const TIMESTAMP = "2026-02-01T00:00:00.000Z";
+
+const LABELS: Record<"backlog" | "todo" | "done", string> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  done: "Готово",
+};
+
+function makeColumn(status: "backlog" | "todo" | "done"): TaskColumn {
+  return {
+    id: `column-project-1-legacy-${status}`,
+    projectId: "project-1",
+    title: LABELS[status],
+    status: status as TaskStatus,
+    position: status === "backlog" ? 0 : status === "todo" ? 1 : 2,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  };
+}
+
+function renderComposer(
+  status: "backlog" | "todo" | "done",
+  onCreate: () => Promise<QuickCreateResult>,
+) {
+  return render(
+    <KanbanQuickComposer
+      column={makeColumn(status)}
+      slug={status}
+      projectId="project-1"
+      disabled={false}
+      onCreate={onCreate}
+    />,
+  );
+}
+
 afterEach(() => {
   cleanup();
 });
@@ -32,14 +70,7 @@ describe("KanbanQuickComposer", () => {
   it("открывает поле названия с autofocus и создаёт задачу", async () => {
     const onCreate = vi.fn(async (): Promise<QuickCreateResult> => ({ ok: true }));
 
-    render(
-      <KanbanQuickComposer
-        status="todo"
-        projectId="project-1"
-        disabled={false}
-        onCreate={onCreate}
-      />,
-    );
+    renderComposer("todo", onCreate);
 
     const opener = screen.getByTestId("kanban-quick-add-todo");
 
@@ -58,7 +89,7 @@ describe("KanbanQuickComposer", () => {
     fireEvent.click(screen.getByTestId("kanban-quick-add-todo-submit"));
 
     await waitFor(() => {
-      expect(onCreate).toHaveBeenCalledWith("Первая быстрая");
+      expect(onCreate).toHaveBeenCalledWith("column-project-1-legacy-todo", "Первая быстрая");
     });
     await waitFor(() => {
       expect(input).toHaveValue("");
@@ -77,14 +108,7 @@ describe("KanbanQuickComposer", () => {
   it("не добавляет строку и закрывается по Escape", async () => {
     const onCreate = vi.fn(async (): Promise<QuickCreateResult> => ({ ok: true }));
 
-    render(
-      <KanbanQuickComposer
-        status="todo"
-        projectId="project-1"
-        disabled={false}
-        onCreate={onCreate}
-      />,
-    );
+    renderComposer("todo", onCreate);
 
     fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
 
@@ -109,14 +133,7 @@ describe("KanbanQuickComposer", () => {
     const pending = deferred<QuickCreateResult>();
     const onCreate = vi.fn(() => pending.promise);
 
-    render(
-      <KanbanQuickComposer
-        status="todo"
-        projectId="project-1"
-        disabled={false}
-        onCreate={onCreate}
-      />,
-    );
+    renderComposer("todo", onCreate);
 
     fireEvent.click(screen.getByTestId("kanban-quick-add-todo"));
 
@@ -131,7 +148,6 @@ describe("KanbanQuickComposer", () => {
 
     fireEvent.click(submit);
 
-    // Пока команда не завершилась, поле disabled и фокус не ставится.
     expect(input).toBeDisabled();
     expect(input).not.toHaveFocus();
 
@@ -152,7 +168,8 @@ describe("KanbanQuickComposer", () => {
 
     const { rerender } = render(
       <KanbanQuickComposer
-        status="todo"
+        column={makeColumn("todo")}
+        slug="todo"
         projectId="project-1"
         disabled={false}
         resetToken={0}
@@ -169,7 +186,8 @@ describe("KanbanQuickComposer", () => {
 
     rerender(
       <KanbanQuickComposer
-        status="todo"
+        column={makeColumn("todo")}
+        slug="todo"
         projectId="project-1"
         disabled={false}
         resetToken={1}
@@ -185,7 +203,13 @@ describe("KanbanQuickComposer", () => {
     const onCreate = vi.fn(async (): Promise<QuickCreateResult> => ({ ok: true }));
 
     render(
-      <KanbanQuickComposer status="backlog" projectId="" disabled={false} onCreate={onCreate} />,
+      <KanbanQuickComposer
+        column={makeColumn("backlog")}
+        slug="backlog"
+        projectId=""
+        disabled={false}
+        onCreate={onCreate}
+      />,
     );
 
     fireEvent.click(screen.getByTestId("kanban-quick-add-backlog"));
@@ -201,7 +225,6 @@ describe("KanbanQuickComposer", () => {
     );
     expect(input).toHaveValue("Заголовок не теряется");
     expect(screen.getByTestId("kanban-quick-add-backlog-submit")).toBeDisabled();
-    // Проект определяется доской: внутреннего выбора проекта больше нет.
     expect(screen.queryByRole("combobox", { name: "Проект" })).toBeNull();
   });
 
@@ -209,14 +232,7 @@ describe("KanbanQuickComposer", () => {
     const pending = deferred<QuickCreateResult>();
     const onCreate = vi.fn(() => pending.promise);
 
-    render(
-      <KanbanQuickComposer
-        status="done"
-        projectId="project-1"
-        disabled={false}
-        onCreate={onCreate}
-      />,
-    );
+    renderComposer("done", onCreate);
 
     fireEvent.click(screen.getByTestId("kanban-quick-add-done"));
 
@@ -253,7 +269,8 @@ describe("KanbanQuickComposer", () => {
 
     const { rerender } = render(
       <KanbanQuickComposer
-        status="todo"
+        column={makeColumn("todo")}
+        slug="todo"
         projectId="project-1"
         disabled={false}
         onCreate={onCreate}
@@ -267,7 +284,15 @@ describe("KanbanQuickComposer", () => {
 
     fireEvent.keyDown(screen.getByTestId("kanban-quick-add-todo-input"), { key: "Escape" });
 
-    rerender(<KanbanQuickComposer status="todo" projectId="" disabled onCreate={onCreate} />);
+    rerender(
+      <KanbanQuickComposer
+        column={makeColumn("todo")}
+        slug="todo"
+        projectId=""
+        disabled
+        onCreate={onCreate}
+      />,
+    );
 
     expect(screen.getByTestId("kanban-quick-add-todo")).toBeDisabled();
   });

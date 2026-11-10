@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { ProjectSidebar } from "../ui/project-sidebar.tsx";
@@ -49,6 +49,25 @@ function ok(data: JsonValue): UiOperationResult {
   return { ok: true, data };
 }
 
+function deferred<T>() {
+  let resolve: ((value: T) => void) | null = null;
+  let reject: ((reason?: unknown) => void) | null = null;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+
+  return {
+    promise,
+    resolve: (value: T) => {
+      resolve?.(value);
+    },
+    reject: (reason?: unknown) => {
+      reject?.(reason);
+    },
+  };
+}
+
 function fail(code: string, message = code): UiOperationResult {
   return { ok: false, error: { code, message, retryable: code === "VERSION_CONFLICT" } };
 }
@@ -79,9 +98,34 @@ function createOperations(handlers: Record<string, Handler>): FakeOperations {
 }
 
 function baseHandlers(): Record<string, Handler> {
+  const columns: readonly TaskColumn[] = [
+    {
+      id: "column-project-1-legacy-todo",
+      projectId: "project-1",
+      title: "К выполнению",
+      status: "todo",
+      position: 0,
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "column-project-1-legacy-done",
+      projectId: "project-1",
+      title: "Готово",
+      status: "done",
+      position: 1,
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
   return {
     "kanbaner.tasks.project.list": () => ok({ items: [project], total: 1, nextOffset: null }),
     "kanbaner.tasks.task.list": () => ok({ items: [task], total: 1, nextOffset: null }),
+    "kanbaner.tasks.column.list": () =>
+      ok({ items: [...columns], total: columns.length, nextOffset: null }),
     "kanbaner.tasks.project.get": () => ok({ project }),
     "kanbaner.tasks.task.get": () => ok({ task }),
   };
@@ -193,6 +237,10 @@ describe("TaskListView", () => {
       updateTaskListQuery({ projectId: "project-1" });
     });
 
+    await waitFor(() => {
+      expect(screen.getByTestId("create-task-button")).toBeEnabled();
+    });
+
     fireEvent.click(screen.getByTestId("create-task-button"));
     fireEvent.change(screen.getByTestId("task-list-create-input"), {
       target: { value: "Новая задача" },
@@ -208,8 +256,8 @@ describe("TaskListView", () => {
     );
     expect(createCall?.input).toMatchObject({
       projectId: "project-1",
+      columnId: "column-project-1-legacy-todo",
       title: "Новая задача",
-      status: "todo",
       priority: "medium",
     });
 
@@ -447,6 +495,188 @@ describe("TaskDetailsPanel", () => {
 
     await waitFor(() => {
       expect(operations.counts.get("kanbaner.tasks.task.complete")).toBe(1);
+    });
+  });
+
+  it("legacy composer использует один destination и подпись Backlog", async () => {
+    const handlers = baseHandlers();
+
+    handlers["kanbaner.tasks.task.create"] = () =>
+      ok({
+        task: { ...task, id: "task-legacy", title: "Legacy" },
+        resource: {},
+        eventId: "event",
+      });
+
+    const operations = createOperations(handlers);
+
+    window.history.replaceState(null, "", "/view/tasks?project=project-1&status=backlog");
+    resetTaskListQueryForTests("?project=project-1&status=backlog");
+    render(<TaskListView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("create-task-button")).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByTestId("create-task-button"));
+
+    const form = screen.getByTestId("task-list-create-form");
+
+    expect(form.getAttribute("aria-label")).toContain("Backlog");
+    fireEvent.change(screen.getByTestId("task-list-create-input"), {
+      target: { value: "Legacy composer" },
+    });
+    fireEvent.click(screen.getByTestId("task-list-create-submit"));
+
+    await waitFor(() => {
+      const createCall = operations.calls.find(
+        (call) => call.operationId === "kanbaner.tasks.task.create",
+      );
+
+      expect(createCall?.input).toMatchObject({
+        projectId: "project-1",
+        status: "backlog",
+      });
+      expect(createCall?.input).not.toHaveProperty("columnId");
+    });
+  });
+
+  it("не сбрасывает ?column до успешной загрузки колонок текущего проекта", async () => {
+    const handlers = baseHandlers();
+    const columns = deferred<UiOperationResult>();
+
+    handlers["kanbaner.tasks.column.list"] = () => columns.promise;
+
+    const operations = createOperations(handlers);
+
+    window.history.replaceState(
+      null,
+      "",
+      "/view/tasks?project=project-1&column=column-project-1-legacy-todo",
+    );
+    resetTaskListQueryForTests("?project=project-1&column=column-project-1-legacy-todo");
+
+    render(<TaskListView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      const listCall = operations.calls.find(
+        (call) => call.operationId === "kanbaner.tasks.task.list",
+      );
+
+      expect(listCall?.input).toMatchObject({
+        projectId: "project-1",
+        columnId: "column-project-1-legacy-todo",
+      });
+    });
+    expect(window.location.search).toContain("column=column-project-1-legacy-todo");
+    expect(screen.getByTestId("create-task-button")).toBeDisabled();
+
+    await act(async () => {
+      columns.resolve(
+        ok({
+          items: [
+            {
+              id: "column-project-1-legacy-todo",
+              projectId: "project-1",
+              title: "К выполнению",
+              status: "todo",
+              position: 0,
+              version: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+          total: 1,
+          nextOffset: null,
+        }),
+      );
+      await columns.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("create-task-button")).toBeEnabled();
+    });
+    expect(window.location.search).toContain("column=column-project-1-legacy-todo");
+  });
+
+  it("не сбрасывает ?column при ошибке или пустом ответе column.list", async () => {
+    const handlers = baseHandlers();
+
+    handlers["kanbaner.tasks.column.list"] = () => fail("INTERNAL_ERROR", "Колонки недоступны");
+
+    const operations = createOperations(handlers);
+
+    window.history.replaceState(
+      null,
+      "",
+      "/view/tasks?project=project-1&column=column-project-1-legacy-todo",
+    );
+    resetTaskListQueryForTests("?project=project-1&column=column-project-1-legacy-todo");
+    render(<TaskListView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Колонки: Колонки недоступны/u)).toBeInTheDocument();
+    });
+    expect(window.location.search).toContain("column=column-project-1-legacy-todo");
+
+    cleanup();
+
+    const emptyHandlers = baseHandlers();
+
+    emptyHandlers["kanbaner.tasks.column.list"] = () =>
+      ok({ items: [], total: 0, nextOffset: null });
+
+    const emptyOperations = createOperations(emptyHandlers);
+
+    render(<TaskListView invoke={emptyOperations.invoke} />);
+
+    await waitFor(() => {
+      expect(emptyOperations.counts.get("kanbaner.tasks.column.list")).toBe(1);
+    });
+    expect(window.location.search).toContain("column=column-project-1-legacy-todo");
+  });
+
+  it("включает legacy status в task.list, сбрасывает фильтр и понимает back/forward", async () => {
+    const handlers = baseHandlers();
+    const operations = createOperations(handlers);
+
+    window.history.replaceState(null, "", "/view/tasks?project=project-1&status=backlog");
+    resetTaskListQueryForTests("?project=project-1&status=backlog");
+    render(<TaskListView invoke={operations.invoke} />);
+
+    await waitFor(() => {
+      const listCall = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(listCall?.input).toMatchObject({
+        projectId: "project-1",
+        status: "backlog",
+      });
+    });
+    expect(screen.getByTestId("task-list-legacy-status")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("task-list-legacy-status-reset"));
+
+    await waitFor(() => {
+      expect(window.location.search).not.toContain("status=");
+    });
+    expect(screen.queryByTestId("task-list-legacy-status")).toBeNull();
+
+    act(() => {
+      window.history.pushState(null, "", "/view/tasks?project=project-1&status=backlog");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("status=backlog");
+    });
+    await waitFor(() => {
+      const listCall = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(listCall?.input).toMatchObject({ status: "backlog" });
     });
   });
 });

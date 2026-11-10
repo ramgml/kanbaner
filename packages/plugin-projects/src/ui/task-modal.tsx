@@ -2,9 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { Project, Task, TaskPriority, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
 import {
-  TASK_STATUS_LABELS,
   TaskForm,
   dueAtToDateInput,
   formatDueAt,
@@ -12,13 +11,13 @@ import {
   taskPriorities,
   taskPriorityLabel,
   taskStatusLabel,
-  taskStatuses,
   type TaskFormValues,
 } from "@kanbaner/task-ui";
 
 export interface SubtaskDraft {
   readonly title: string;
-  readonly status: TaskStatus;
+  /** Фактическая колонка, в которой создаётся подзадача. */
+  readonly columnId: string;
 }
 
 export interface SubtaskFormDraft extends SubtaskDraft {
@@ -26,7 +25,7 @@ export interface SubtaskFormDraft extends SubtaskDraft {
 }
 
 /** Быстрые поля, для которых возможен конфликт локального и серверного значения. */
-export type QuickDraftField = "status" | "due" | "tags";
+export type QuickDraftField = "column" | "due" | "tags";
 
 export interface TaskModalProps {
   readonly variant: "desktop" | "mobile";
@@ -46,7 +45,9 @@ export interface TaskModalProps {
   /** Есть несохранённый ввод (полная форма или быстрые поля). */
   readonly draftDirty: boolean;
   readonly quickConflicts: readonly QuickDraftField[];
-  readonly nextStatus: TaskStatus;
+  readonly columns: readonly TaskColumn[];
+  readonly currentColumnId: string;
+  readonly nextColumnId: string;
   readonly dueValue: string;
   readonly tagsValue: string;
   readonly subtaskDraft: SubtaskFormDraft;
@@ -59,8 +60,8 @@ export interface TaskModalProps {
   readonly onOpenTask: (taskId: string) => void;
   readonly onCreateSubtask: (draft: SubtaskDraft) => Promise<boolean>;
   readonly onComplete: () => void;
-  readonly onMove: (status: TaskStatus) => void;
-  readonly onNextStatusChange: (status: TaskStatus) => void;
+  readonly onMove: (columnId: string) => void;
+  readonly onNextColumnChange: (columnId: string) => void;
   readonly onPriority: (priority: TaskPriority) => void;
   readonly onDue: (value: string) => void;
   readonly onDueValueChange: (value: string) => void;
@@ -90,7 +91,7 @@ const DESTRUCTIVE_BUTTON =
   "rounded-md border border-destructive/40 px-2.5 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50";
 
 const QUICK_CONFLICT_LABELS: Record<QuickDraftField, string> = {
-  status: "статус",
+  column: "колонка",
   due: "срок",
   tags: "теги",
 };
@@ -156,7 +157,9 @@ export function TaskModal({
   closeConfirm,
   draftDirty,
   quickConflicts,
-  nextStatus,
+  columns,
+  currentColumnId,
+  nextColumnId,
   dueValue,
   tagsValue,
   subtaskDraft,
@@ -170,7 +173,7 @@ export function TaskModal({
   onCreateSubtask,
   onComplete,
   onMove,
-  onNextStatusChange,
+  onNextColumnChange,
   onPriority,
   onDue,
   onDueValueChange,
@@ -194,6 +197,16 @@ export function TaskModal({
   const dueDirty = dueValue !== dueAtToDateInput(task.dueAt);
   const tagsDirty = tagsValue !== tagsToInput(task.tags);
   const isMobile = variant === "mobile";
+  const currentColumn =
+    columns.find((column) => column.id === currentColumnId) ??
+    columns.find((column) => column.status === task.status) ??
+    null;
+  const currentColumnDone = currentColumn?.status === "done";
+  const columnTitleOf = (subtask: Task): string | null =>
+    columns.find((column) => column.id === subtask.columnId)?.title ??
+    columns.find((column) => column.status === subtask.status)?.title ??
+    null;
+  const subtaskColumn = columns.find((column) => column.id === subtaskDraft.columnId) ?? null;
 
   // Подтверждение закрытия — модальный alertdialog внутри модала: фокус
   // переходит в него, а Tab/Shift+Tab не выходят к форме за подтверждением.
@@ -266,7 +279,7 @@ export function TaskModal({
       ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-due"]')
       : tagsDirty
         ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-tags"]')
-        : nextStatus !== task.status
+        : nextColumnId !== currentColumnId
           ? root.querySelector<HTMLElement>('[data-testid="kanban-modal-move-field"]')
           : subtaskDraft.open && subtaskDraft.title.trim().length > 0
             ? root.querySelector<HTMLElement>('[data-testid="kanban-subtask-input"]')
@@ -284,7 +297,7 @@ export function TaskModal({
     }
 
     setSubtaskError(null);
-    await onCreateSubtask({ title, status: subtaskDraft.status });
+    await onCreateSubtask({ title, columnId: subtaskDraft.columnId });
   };
 
   return (
@@ -310,7 +323,7 @@ export function TaskModal({
               data-testid="kanban-modal-status"
               className="rounded-full bg-secondary px-2 py-0.5 font-medium text-secondary-foreground"
             >
-              {taskStatusLabel(task.status)}
+              {currentColumn?.title ?? taskStatusLabel(task.status)}
             </span>
             {completed === null ? null : (
               <span data-testid="kanban-modal-completed">Завершено: {completed}</span>
@@ -543,21 +556,25 @@ export function TaskModal({
                       />
                     </label>
                     <label className={labelClass}>
-                      Статус подзадачи
+                      Колонка подзадачи
                       <select
-                        name="status"
-                        value={subtaskDraft.status}
-                        disabled={busy}
+                        name="columnId"
+                        value={subtaskDraft.columnId}
+                        disabled={busy || columns.length === 0}
                         onChange={(event) => {
-                          onSubtaskDraftChange({ status: event.target.value as TaskStatus });
+                          onSubtaskDraftChange({ columnId: event.target.value });
                         }}
                         className={inputClass}
                       >
-                        {taskStatuses().map((status) => (
-                          <option key={status} value={status}>
-                            {TASK_STATUS_LABELS[status]}
-                          </option>
-                        ))}
+                        {columns.length === 0 ? (
+                          <option value="">Нет доступных колонок</option>
+                        ) : (
+                          columns.map((column) => (
+                            <option key={column.id} value={column.id}>
+                              {column.title}
+                            </option>
+                          ))
+                        )}
                       </select>
                     </label>
                     {subtaskError === null ? null : (
@@ -569,7 +586,9 @@ export function TaskModal({
                       <button
                         type="submit"
                         data-testid="kanban-subtask-submit"
-                        disabled={busy || subtaskDraft.title.trim().length === 0}
+                        disabled={
+                          busy || subtaskDraft.title.trim().length === 0 || subtaskColumn === null
+                        }
                         className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                       >
                         Создать подзадачу
@@ -623,7 +642,7 @@ export function TaskModal({
                         >
                           <span className="min-w-0 break-words">{subtask.title}</span>
                           <span className="shrink-0 rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-secondary-foreground">
-                            {taskStatusLabel(subtask.status)}
+                            {columnTitleOf(subtask) ?? taskStatusLabel(subtask.status)}
                           </span>
                         </button>
                       </li>
@@ -636,38 +655,43 @@ export function TaskModal({
             <aside aria-label="Действия с задачей" className="flex min-w-0 flex-col gap-3">
               <section className={sectionClass}>
                 <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                  Статус и перемещение
+                  Колонка и перемещение
                 </h3>
                 <label className={`${labelClass} mt-2`}>
                   Переместить в
                   <select
                     data-testid="kanban-modal-move-field"
-                    value={nextStatus}
-                    disabled={busy}
+                    value={nextColumnId}
+                    disabled={busy || columns.length === 0}
                     onChange={(event) => {
-                      onNextStatusChange(event.target.value as TaskStatus);
+                      onNextColumnChange(event.target.value);
                     }}
                     className={inputClass}
                   >
-                    {taskStatuses().map((status) => (
-                      <option key={status} value={status}>
-                        {taskStatusLabel(status)}
-                      </option>
-                    ))}
+                    {columns.length === 0 ? (
+                      <option value="">Нет доступных колонок</option>
+                    ) : (
+                      columns.map((column) => (
+                        <option key={column.id} value={column.id}>
+                          {column.title}
+                          {column.status === "done" ? " (Done)" : ""}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </label>
                 <button
                   type="button"
                   data-testid="kanban-modal-move"
-                  disabled={busy || nextStatus === task.status}
+                  disabled={busy || nextColumnId.length === 0 || nextColumnId === currentColumnId}
                   onClick={() => {
-                    onMove(nextStatus);
+                    onMove(nextColumnId);
                   }}
                   className={`${actionClass} mt-2 w-full`}
                 >
                   Переместить
                 </button>
-                {task.status === "done" ? null : (
+                {currentColumnDone ? null : (
                   <button
                     type="button"
                     data-testid="kanban-modal-complete"

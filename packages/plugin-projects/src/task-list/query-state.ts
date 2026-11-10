@@ -13,7 +13,10 @@ export type TaskListSortField = Extract<
 
 export interface TaskListQueryState {
   readonly projectId: string;
-  readonly status: string;
+  /** Фактическая колонка выбранного проекта. */
+  readonly columnId: string;
+  /** Legacy-статус из старой ссылки; поддерживает ленивую материализацию колонки. */
+  readonly legacyStatus: string;
   readonly priority: string;
   readonly tag: string;
   readonly dueAfter: string;
@@ -31,7 +34,8 @@ const SORT_FIELDS: readonly TaskListSortField[] = ["position", "dueAt", "updated
 
 export const DEFAULT_TASK_LIST_QUERY: TaskListQueryState = Object.freeze({
   projectId: "",
-  status: "",
+  columnId: "",
+  legacyStatus: "",
   priority: "",
   tag: "",
   dueAfter: "",
@@ -82,7 +86,8 @@ export function parseTaskListQuery(search: string): TaskListQueryState {
   return {
     ...DEFAULT_TASK_LIST_QUERY,
     projectId: first(params, "project"),
-    status: first(params, "status"),
+    columnId: first(params, "column"),
+    legacyStatus: first(params, "status"),
     priority: first(params, "priority"),
     tag: first(params, "tag"),
     dueAfter: first(params, "dueAfter"),
@@ -101,8 +106,12 @@ function toSearchParams(state: TaskListQueryState): URLSearchParams {
     params.set("project", state.projectId);
   }
 
-  if (state.status.length > 0) {
-    params.set("status", state.status);
+  if (state.columnId.length > 0) {
+    params.set("column", state.columnId);
+  }
+
+  if (state.legacyStatus.length > 0) {
+    params.set("status", state.legacyStatus);
   }
 
   if (state.priority.length > 0) {
@@ -226,7 +235,8 @@ export function setTaskListSearch(search: string): void {
 /** Сбрасывает фильтры и страницу, сохраняя проект, задачу и сортировку. */
 export function resetTaskListFilters(): void {
   updateTaskListQuery({
-    status: "",
+    columnId: "",
+    legacyStatus: "",
     priority: "",
     tag: "",
     dueAfter: "",

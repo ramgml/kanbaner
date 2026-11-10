@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
@@ -55,8 +55,51 @@ function makeTask(
 interface FakeBoard {
   tasks: Task[];
   projects: Project[];
+  columns?: TaskColumn[];
   nextProject: number;
   nextTask: number;
+}
+
+const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+function columnIdFor(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function columnStatus(board: FakeBoard, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
+  }
+
+  return column.status;
+}
+
+function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
+  const own = board.columns?.filter((column) => column.projectId === projectId) ?? [];
+
+  if (own.length > 0) {
+    return own;
+  }
+
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+
+  return statuses.map((status, position) => ({
+    id: columnIdFor(projectId, status),
+    projectId,
+    title: STATUS_LABELS[status],
+    status,
+    position,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  }));
 }
 
 type Handler = (input: JsonValue) => UiOperationResult | Promise<UiOperationResult>;
@@ -108,8 +151,12 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
   const filters = inputOf(input);
   let items = [...board.tasks];
 
-  if (typeof filters.status === "string") {
-    items = items.filter((task) => task.status === filters.status);
+  if (typeof filters.columnId === "string") {
+    const columnId = filters.columnId;
+
+    items = items.filter(
+      (task) => (task.columnId ?? columnIdFor(task.projectId, task.status)) === columnId,
+    );
   }
 
   if (typeof filters.projectId === "string") {
@@ -168,9 +215,12 @@ function summaryOf(board: FakeBoard, input: JsonValue): UiOperationResult {
   });
 }
 
-function nextPosition(board: FakeBoard, projectId: string, status: TaskStatus): number {
-  return board.tasks.filter((task) => task.projectId === projectId && task.status === status)
-    .length;
+function nextPosition(board: FakeBoard, projectId: string, columnId: string): number {
+  return board.tasks.filter(
+    (task) =>
+      task.projectId === projectId &&
+      (task.columnId ?? columnIdFor(task.projectId, task.status)) === columnId,
+  ).length;
 }
 
 function createOperations(
@@ -194,6 +244,31 @@ function createOperations(
       return ok({ project });
     },
     "kanbaner.tasks.task.list": (input) => listTasks(board, input),
+    "kanbaner.tasks.column.list": (input) => {
+      const projectId = String(inputOf(input).projectId);
+      const columns = boardColumns(board, projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    },
+    "kanbaner.tasks.column.create": (input) => {
+      const values = inputOf(input);
+      const projectId = String(values.projectId);
+      const existing = boardColumns(board, projectId);
+      const column: TaskColumn = {
+        id: `column-${projectId}-custom-${String(existing.length)}`,
+        projectId,
+        title: String(values.title),
+        status: values.type === "done" ? "done" : "in_progress",
+        position: existing.length,
+        version: 1,
+        createdAt: TIMESTAMP,
+        updatedAt: TIMESTAMP,
+      };
+
+      board.columns = [...(board.columns ?? []), column];
+
+      return ok({ column, resource: { type: "task-column", id: column.id }, eventId: "event-1" });
+    },
     "kanbaner.tasks.task.get": (input) => {
       const found = board.tasks.find((task) => task.id === inputOf(input).id);
 
@@ -202,10 +277,15 @@ function createOperations(
     "kanbaner.tasks.task.create": (input) => {
       const values = inputOf(input);
       const projectId = String(values.projectId);
-      const status = (values.status as TaskStatus | undefined) ?? "todo";
+      const columnId =
+        typeof values.columnId === "string"
+          ? values.columnId
+          : columnIdFor(projectId, (values.status as TaskStatus | undefined) ?? "todo");
+      const status = columnStatus(board, projectId, columnId);
       const id = `task-${String(board.nextTask)}`;
       const task = makeTask(id, {
         projectId,
+        columnId,
         title: String(values.title),
         descriptionMarkdown: String(values.descriptionMarkdown ?? ""),
         status,
@@ -213,7 +293,7 @@ function createOperations(
         dueAt: (values.dueAt as string | null | undefined) ?? null,
         tags: (values.tags as string[] | undefined) ?? [],
         parentTaskId: (values.parentTaskId as string | undefined) ?? null,
-        position: nextPosition(board, projectId, status),
+        position: nextPosition(board, projectId, columnId),
       });
 
       board.nextTask += 1;
@@ -285,6 +365,7 @@ describe("создание на канбане", () => {
     await waitFor(() => {
       expect(screen.getByTestId("kanban-create-task")).toBeEnabled();
     });
+    await screen.findByTestId("kanban-quick-add-backlog");
 
     for (const [status, label] of [
       ["backlog", "Бэклог"],
@@ -346,8 +427,8 @@ describe("создание на канбане", () => {
 
     expect(payload).toMatchObject({
       projectId: "project-1",
+      columnId: "column-project-1-legacy-backlog",
       title: "Новая с доски",
-      status: "todo",
       descriptionMarkdown: "",
       tags: [],
     });
@@ -395,7 +476,7 @@ describe("создание на канбане", () => {
     expect(payload).toMatchObject({
       projectId: "project-1",
       title: "Готовая без деталей",
-      status: "done",
+      columnId: "column-project-1-legacy-done",
     });
     expect(payload).not.toHaveProperty("position");
   });
@@ -541,7 +622,8 @@ describe("создание на канбане", () => {
 
     const backlogPages = operations.calls.filter(
       (call) =>
-        call.operationId === "kanbaner.tasks.task.list" && inputOf(call.input).status === "backlog",
+        call.operationId === "kanbaner.tasks.task.list" &&
+        inputOf(call.input).columnId === "column-project-1-legacy-backlog",
     );
 
     expect(backlogPages.some((call) => inputOf(call.input).offset === 10)).toBe(true);
