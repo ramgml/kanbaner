@@ -506,14 +506,34 @@ async function dragColumn(
 }
 
 async function addColumn(page: Page, title: string, type: "open" | "done"): Promise<string> {
-  await page.getByTestId("kanban-add-column").click();
-  await expect(page.getByTestId("kanban-column-form")).toBeVisible();
-  await page.getByTestId("kanban-column-title-input").fill(title);
-  await page.getByTestId("kanban-column-type").selectOption(type);
-  await page.getByTestId("kanban-column-submit").click();
-  await expect(page.getByTestId("kanban-column-form")).toHaveCount(0);
+  await openSettings(page);
+  await createColumnInSettings(page, title, type);
+  await closeSettings(page);
 
   return columnIdByTitle(page, title);
+}
+
+/**
+ * Создаёт колонку в уже открытых настройках и дожидается awaited refresh.
+ *
+ * Домен всегда дописывает колонку в конец, поэтому отдельного поля позиции нет.
+ */
+async function createColumnInSettings(
+  page: Page,
+  title: string,
+  type: "open" | "done",
+): Promise<void> {
+  const before = (await settingsColumnIds(page)).length;
+
+  await page.getByTestId("project-settings-column-create-title").fill(title);
+  await page.getByTestId("project-settings-column-create-type").selectOption(type);
+  await page.getByTestId("project-settings-column-create-submit").click();
+  await expect(page.getByTestId("project-settings-column-create-notice")).toContainText(
+    "Колонка добавлена",
+  );
+  await expect.poll(async () => (await settingsColumnIds(page)).length).toBe(before + 1);
+  await expect(page.getByTestId("project-settings-column-create-title")).toHaveValue("");
+  await expect(page.getByTestId("project-settings-column-create-title")).toBeFocused();
 }
 
 async function addCardToColumn(page: Page, columnId: string, title: string): Promise<void> {
@@ -1141,11 +1161,15 @@ test.describe("канбан в production shell", () => {
       expect(selection.start).toBe(0);
       expect(selection.end).toBe(projectTitle.length);
 
-      // Список фактических колонок доступен, но создание/удаление/тип — нет.
+      // Список фактических колонок и форма создания доступны в настройках;
+      // удаление и смена типа существующих колонок — нет.
       await expect(page.getByTestId("project-settings-columns")).toBeVisible();
+      await expect(page.getByTestId("project-settings-column-create")).toBeVisible();
+      await expect(page.getByTestId("project-settings-column-create-type")).toBeVisible();
       await expect(page.getByTestId("kanban-column-form")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-add-column")).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Удалить колонку" })).toHaveCount(0);
-      await expect(page.getByRole("combobox")).toHaveCount(0);
+      await expect(dialog.getByRole("combobox")).toHaveCount(1);
 
       // Пустое название не отправляется и не теряет введённое значение.
       await input.fill("   ");
@@ -3761,8 +3785,12 @@ test.describe("канбан в production shell", () => {
 
       expect(await settingsColumnIds(page)).toEqual([todoId, progressId, doneId]);
       await expect(page.getByTestId("kanban-column-form")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-add-column")).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-column-create")).toBeVisible();
       await expect(page.getByRole("button", { name: "Удалить колонку" })).toHaveCount(0);
-      await expect(page.getByRole("combobox")).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-dialog").getByRole("combobox")).toHaveCount(
+        1,
+      );
 
       await saveColumnTitle(page, todoId, renamedTitle);
       await expect(page.getByTestId(`project-settings-column-input-${todoId}`)).toHaveValue(
@@ -3807,6 +3835,130 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
       await expect.poll(async () => columnIdList(page)).toEqual([doneId, progressId, todoId]);
       await expect(page.getByTestId("kanban-column-title-todo")).toHaveText(renamedTitle);
+    });
+
+    test("создаёт open и Done-колонки из настроек канбана с empty state и reload", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект создания колонок канбана");
+      const openTitle = uniqueTitle("Проверка");
+      const doneTitle = uniqueTitle("Done 2");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      const baseline = await columnIdList(page);
+
+      await openSettings(page);
+
+      const createTitle = page.getByTestId("project-settings-column-create-title");
+
+      // Черновик новой колонки участвует в dirty-confirm и не теряется Escape.
+      await createTitle.fill("Черновик");
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+      await expect(createTitle).toHaveValue("Черновик");
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("project-settings-dirty-confirm")).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-dialog")).toBeVisible();
+      await createTitle.fill("");
+
+      await createColumnInSettings(page, openTitle, "open");
+      await createColumnInSettings(page, doneTitle, "done");
+
+      const settingsIds = await settingsColumnIds(page);
+
+      expect(settingsIds.slice(0, baseline.length)).toEqual(baseline);
+      expect(settingsIds).toHaveLength(baseline.length + 2);
+
+      await closeSettings(page);
+
+      const openId = await columnIdByTitle(page, openTitle);
+      const doneId = await columnIdByTitle(page, doneTitle);
+
+      await expect.poll(() => columnIdList(page)).toEqual([...baseline, openId, doneId]);
+      await expect(page.getByTestId(`kanban-column-empty-column-${openId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-column-empty-column-${doneId}`)).toBeVisible();
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await filterByProject(page, projectTitle);
+      await expect.poll(() => columnIdList(page)).toEqual([...baseline, openId, doneId]);
+      await expect(page.getByRole("heading", { name: openTitle, exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: doneTitle, exact: true })).toBeVisible();
+      await expect(page.getByTestId(`kanban-column-empty-column-${openId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-column-empty-column-${doneId}`)).toBeVisible();
+    });
+
+    test("ошибка refresh после create предлагает только повторную загрузку", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект refresh создания колонки");
+      const columnTitle = uniqueTitle("Колонка retry");
+      let failNextColumnList = false;
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      const baseline = await columnIdList(page);
+
+      await openSettings(page);
+
+      await page.route("**/*", async (route) => {
+        const request = route.request();
+
+        if (failNextColumnList && request.method() === "POST") {
+          const body = request.postData() ?? "";
+
+          if (body.includes("kanbaner.tasks.column.list")) {
+            failNextColumnList = false;
+            await route.abort("failed");
+
+            return;
+          }
+        }
+
+        await route.continue();
+      });
+
+      try {
+        failNextColumnList = true;
+
+        const createTitle = page.getByTestId("project-settings-column-create-title");
+
+        await createTitle.fill(columnTitle);
+        await page.getByTestId("project-settings-column-create-type").selectOption("open");
+        await page.getByTestId("project-settings-column-create-submit").click();
+
+        await expect(page.getByTestId("project-settings-columns-refresh-error")).toContainText(
+          "создавать колонку повторно не нужно",
+        );
+        await expect(createTitle).toHaveValue("");
+        await expect(page.getByTestId("project-settings-column-create-submit")).toBeDisabled();
+
+        // Повтор доступен только для чтения: мутация не отправляется снова.
+        await page.getByTestId("project-settings-columns-retry").click();
+        await expect(page.getByTestId("project-settings-column-create-notice")).toContainText(
+          "Список колонок обновлён",
+        );
+        await expect(page.getByTestId("project-settings-columns-refresh-error")).toHaveCount(0);
+        await expect
+          .poll(async () => (await settingsColumnIds(page)).length)
+          .toBe(baseline.length + 1);
+      } finally {
+        await page.unroute("**/*");
+      }
+
+      await closeSettings(page);
+
+      const columnId = await columnIdByTitle(page, columnTitle);
+
+      await expect.poll(() => columnIdList(page)).toEqual([...baseline, columnId]);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await filterByProject(page, projectTitle);
+      await expect.poll(() => columnIdList(page)).toEqual([...baseline, columnId]);
     });
 
     test("настраивает колонки из списка и сохраняет порядок после reload", async ({ page }) => {
@@ -4095,7 +4247,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId(`kanban-card-menu-${taskId}`)).toHaveCount(0);
     });
 
-    test("держит desktop-колонки 288 px при resize и не растягивает add-column", async ({
+    test("держит desktop-колонки 288 px при resize без отдельной add-column кнопки", async ({
       page,
     }) => {
       const projectTitle = uniqueTitle("Проект фиксированной ширины");
@@ -4108,13 +4260,10 @@ test.describe("канбан в production shell", () => {
         await addColumn(page, `Width ${String(index)}`, "open");
       }
 
-      // После создания последней колонки её opener получает focus через rAF и
-      // может досрочно прокрутить доску к концу. Дожидаемся этого focus и уже
-      // затем сбрасываем scroll, иначе left alignment измеряется по offscreen
-      // первой колонке.
-      const addColumnButton = page.getByTestId("kanban-add-column");
-
-      await expect(addColumnButton).toBeFocused();
+      // Создание колонок живёт только в настройках: после закрытия модалки
+      // фокус возвращается на её opener, а отдельной кнопки на доске нет.
+      await expect(page.getByTestId("kanban-add-column")).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-button")).toBeFocused();
 
       const readMetrics = async () => {
         const columns = await page.locator("[data-kanban-column-id]").evaluateAll((elements) =>
@@ -4185,11 +4334,6 @@ test.describe("канбан в production shell", () => {
       expect(Math.abs((initial.columns[0]?.x ?? 0) - initial.board.x)).toBeLessThanOrEqual(2);
       expect(initial.board.scrollWidth).toBeGreaterThan(initial.board.clientWidth);
 
-      const addColumnBox = await page.getByTestId("kanban-add-column").boundingBox();
-
-      expect(addColumnBox).not.toBeNull();
-      expect(addColumnBox?.width ?? 0).toBeLessThanOrEqual(230);
-
       await page.setViewportSize({ width: 1920, height: 900 });
       await expect(page.getByTestId("kanban-columns")).toBeVisible();
       await expect
@@ -4217,6 +4361,37 @@ test.describe("канбан в production shell", () => {
 
   test.describe("мобильный viewport", () => {
     test.use({ viewport: MOBILE_VIEWPORT });
+
+    test("создаёт колонку из настроек на 360 px без горизонтального overflow", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект мобильного создания колонки");
+      const columnTitle = uniqueTitle("Мобильная колонка");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      await openSettings(page);
+      await expectNoHorizontalOverflow(page);
+
+      await createColumnInSettings(page, columnTitle, "done");
+      await expectNoHorizontalOverflow(page);
+
+      const columnId = await (async () => {
+        await closeSettings(page);
+
+        return columnIdByTitle(page, columnTitle);
+      })();
+
+      await expect(page.getByTestId(`kanban-column-empty-column-${columnId}`)).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await filterByProject(page, projectTitle);
+      await expect(page.getByRole("heading", { name: columnTitle, exact: true })).toBeVisible();
+      await expect(page.getByTestId(`kanban-column-empty-column-${columnId}`)).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
 
     test("на 360 px прокручивает только колонки и открывает overlay с фокусом", async ({
       page,

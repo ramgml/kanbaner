@@ -13,6 +13,7 @@ import {
   type ProjectListOutput,
   type ProjectMutationOutput,
   type TaskColumn,
+  type TaskColumnType,
 } from "@kanbaner/plugin-tasks/contract";
 import { LoadingState, ModalDialog, type UiOperationInvoker } from "@kanbaner/task-ui";
 
@@ -34,6 +35,10 @@ const COLUMN_VERSION_CONFLICT_MESSAGE =
   "Колонка уже изменена в другом месте. Список обновлён — проверьте название или порядок и повторите действие.";
 const COLUMN_REFRESH_FAILED_MESSAGE =
   "Команда выполнена, но список колонок не обновлён. Проверьте соединение и повторите загрузку.";
+const CREATE_COLUMNS_REFRESH_FAILED_MESSAGE =
+  "Колонка добавлена, но список колонок не обновлён. Повторите загрузку списка — создавать колонку повторно не нужно.";
+const CREATE_COLUMNS_REFRESH_RETRY_FAILED_MESSAGE =
+  "Список колонок всё ещё не обновлён. Повторите загрузку — создавать колонку повторно не нужно.";
 
 type ColumnsRefreshResult =
   | { readonly kind: "ok"; readonly columns: readonly TaskColumn[] }
@@ -150,12 +155,13 @@ export interface ProjectSettingsButtonProps {
 /**
  * Кнопка «Настроить» и модалка «Настройки доски».
  *
- * Название проекта и каждая колонка сохраняются независимо существующими
- * командами `project.update`, `column.update` и `column.move`. Общего
- * пакетного сохранения нет: каждая операция имеет собственный pending,
- * актуальный `expectedVersion` и awaited refresh. Порядок меняется drag
- * handle или кнопками выше/ниже; создание, удаление и тип колонок здесь
- * намеренно отсутствуют.
+ * Название проекта, создание и каждая колонка сохраняются независимо
+ * существующими командами `project.update`, `column.create`, `column.update`
+ * и `column.move`. Общего пакетного сохранения нет: каждая операция имеет
+ * собственный pending, актуальный `expectedVersion` и awaited refresh.
+ * Новая колонка всегда дописывается в конец порядка; порядок существующих
+ * меняется drag handle или кнопками выше/ниже. Удаление и смена типа
+ * существующих колонок здесь по-прежнему недоступны.
  */
 export function ProjectSettingsButton({
   invoke,
@@ -180,6 +186,16 @@ export function ProjectSettingsButton({
   const [columnPending, setColumnPending] = useState<ReadonlySet<string>>(() => new Set());
   const [columnErrors, setColumnErrors] = useState<Readonly<Record<string, string | null>>>({});
   const [columnNotices, setColumnNotices] = useState<Readonly<Record<string, string | null>>>({});
+
+  const [createTitle, setCreateTitle] = useState("");
+  const [createType, setCreateType] = useState<TaskColumnType>("open");
+  const [createValidation, setCreateValidation] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createNotice, setCreateNotice] = useState<string | null>(null);
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [columnsRefreshError, setColumnsRefreshError] = useState<string | null>(null);
+  const [columnsRefreshing, setColumnsRefreshing] = useState(false);
+  const [createFocusRequest, setCreateFocusRequest] = useState(0);
 
   const [draggingColumnId, setDraggingColumnId] = useState<string | null>(null);
   const [reorderPending, setReorderPending] = useState(false);
@@ -208,6 +224,9 @@ export function ProjectSettingsButton({
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const doneButtonRef = useRef<HTMLButtonElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const createTitleInputRef = useRef<HTMLInputElement>(null);
+  const createGuardRef = useRef(false);
+  const createOperationRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -331,6 +350,16 @@ export function ProjectSettingsButton({
     reorderPendingRef.current = false;
     setColumnErrors({});
     setColumnNotices({});
+    setCreateTitle("");
+    setCreateType("open");
+    setCreateValidation(null);
+    setCreateError(null);
+    setCreateNotice(null);
+    setCreateSubmitting(false);
+    setColumnsRefreshError(null);
+    setColumnsRefreshing(false);
+    createGuardRef.current = false;
+    createOperationRef.current += 1;
     setDraggingColumnId(null);
     setDragOver(null);
     setDirtyConfirm(false);
@@ -377,6 +406,10 @@ export function ProjectSettingsButton({
       return true;
     }
 
+    if (createTitle.trim().length > 0) {
+      return true;
+    }
+
     return columns.some((column) => (drafts[column.id] ?? column.title) !== column.title);
   };
 
@@ -390,12 +423,17 @@ export function ProjectSettingsButton({
     columnOperationRef.current.clear();
     reorderOperationRef.current += 1;
     reorderPendingRef.current = false;
+    createGuardRef.current = false;
+    createOperationRef.current += 1;
     setOpen(false);
     resetState();
   };
 
   const isBusy = (): boolean =>
-    projectGuardRef.current || pendingRef.current.size > 0 || reorderPendingRef.current;
+    projectGuardRef.current ||
+    createGuardRef.current ||
+    pendingRef.current.size > 0 ||
+    reorderPendingRef.current;
 
   const requestClose = (): void => {
     // Пока команда или refresh в полёте, закрытие заблокировано: иначе
@@ -477,6 +515,14 @@ export function ProjectSettingsButton({
 
     titleInputRef.current?.focus();
   }, [projectFocusRequest]);
+
+  useEffect(() => {
+    if (createFocusRequest === 0) {
+      return;
+    }
+
+    createTitleInputRef.current?.focus();
+  }, [createFocusRequest]);
 
   useEffect(() => {
     if (!dirtyConfirm) {
@@ -736,6 +782,127 @@ export function ProjectSettingsButton({
     }
   };
 
+  /**
+   * Создаёт колонку в конец порядка и сразу перечитывает список.
+   *
+   * Успешная команда очищает черновик и никогда не предлагает повторную
+   * мутацию: при ошибке refresh доступна только повторная загрузка списка.
+   */
+  const submitCreateColumn = async (): Promise<void> => {
+    if (createGuardRef.current || createSubmitting || loading || loadError !== null) {
+      return;
+    }
+
+    const value = createTitle.trim();
+
+    if (value.length === 0) {
+      setCreateValidation("Укажите название колонки");
+
+      return;
+    }
+
+    if (value.length > MAX_TITLE_LENGTH) {
+      setCreateValidation(`Название не может быть длиннее ${String(MAX_TITLE_LENGTH)} символов`);
+
+      return;
+    }
+
+    const projectId = project.id;
+    const generation = generationRef.current;
+    const operation = createOperationRef.current + 1;
+
+    createOperationRef.current = operation;
+    createGuardRef.current = true;
+    setDirtyConfirm(false);
+    setCreateSubmitting(true);
+    setCreateValidation(null);
+    setCreateError(null);
+    setCreateNotice(null);
+    setColumnsRefreshError(null);
+
+    try {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnCreate, {
+        projectId,
+        title: value,
+        type: createType,
+      } as unknown as JsonValue);
+
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      // Команда уже прошла: черновик очищается, чтобы повторная отправка не
+      // создала дубликат. Ошибка refresh не отменяет факт создания.
+      setCreateTitle("");
+
+      const refreshed = await refreshColumns(projectId, generation);
+
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      if (refreshed.kind === "error") {
+        setColumnsRefreshError(CREATE_COLUMNS_REFRESH_FAILED_MESSAGE);
+      } else if (refreshed.kind === "ok") {
+        setCreateNotice("Колонка добавлена");
+        onColumnsChanged?.();
+      }
+
+      setCreateFocusRequest((current) => current + 1);
+    } catch (commandError) {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      setCreateError(errorMessage(commandError));
+      setCreateFocusRequest((current) => current + 1);
+    } finally {
+      if (createOperationRef.current === operation) {
+        createGuardRef.current = false;
+
+        if (isCurrent(projectId, generation)) {
+          setCreateSubmitting(false);
+        }
+      }
+    }
+  };
+
+  /** Повторяет только чтение списка: мутацию после refresh-ошибки не предлагает. */
+  const retryColumnsRefresh = async (): Promise<void> => {
+    if (columnsRefreshing || loading) {
+      return;
+    }
+
+    const projectId = project.id;
+    const generation = generationRef.current;
+
+    setColumnsRefreshing(true);
+    setColumnsRefreshError(null);
+
+    try {
+      const refreshed = await refreshColumns(projectId, generation);
+
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      if (refreshed.kind === "error") {
+        setColumnsRefreshError(CREATE_COLUMNS_REFRESH_RETRY_FAILED_MESSAGE);
+      } else if (refreshed.kind === "ok") {
+        setCreateNotice("Список колонок обновлён");
+        onColumnsChanged?.();
+      }
+    } finally {
+      if (isCurrent(projectId, generation)) {
+        setColumnsRefreshing(false);
+      }
+    }
+  };
+
   const applyReorder = async (columnId: string, targetIndex: number): Promise<void> => {
     if (reorderPendingRef.current || columnOperationRef.current.has(columnId) || loading) {
       return;
@@ -955,6 +1122,8 @@ export function ProjectSettingsButton({
     projectRefreshing ||
     columnPending.size > 0 ||
     reorderPending ||
+    createSubmitting ||
+    columnsRefreshing ||
     draggingColumnId !== null;
 
   return (
@@ -1140,6 +1309,28 @@ export function ProjectSettingsButton({
                   </p>
                 </div>
 
+                {columnsRefreshError === null ? null : (
+                  <div
+                    role="alert"
+                    data-testid="project-settings-columns-refresh-error"
+                    className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
+                  >
+                    <p className="m-0">{columnsRefreshError}</p>
+                    <button
+                      type="button"
+                      data-testid="project-settings-columns-retry"
+                      disabled={columnsRefreshing}
+                      aria-busy={columnsRefreshing}
+                      onClick={() => {
+                        void retryColumnsRefresh();
+                      }}
+                      className={actionButtonClass}
+                    >
+                      {columnsRefreshing ? "Загрузка…" : "Повторить загрузку"}
+                    </button>
+                  </div>
+                )}
+
                 <ol
                   data-testid="project-settings-columns"
                   aria-label="Колонки доски"
@@ -1287,6 +1478,127 @@ export function ProjectSettingsButton({
                     );
                   })}
                 </ol>
+
+                {columns.length === 0 ? (
+                  <p
+                    data-testid="project-settings-columns-empty"
+                    className="m-0 rounded-md border border-dashed border-border bg-background px-2 py-3 text-xs text-muted-foreground"
+                  >
+                    Пока нет колонок. Создайте первую колонку.
+                  </p>
+                ) : null}
+
+                <form
+                  data-testid="project-settings-column-create"
+                  aria-label="Создание колонки"
+                  className="flex flex-col gap-2 rounded-md border border-dashed border-border bg-background p-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitCreateColumn();
+                  }}
+                >
+                  <p className="m-0 text-xs font-medium">Новая колонка</p>
+
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                    <label
+                      className="flex min-w-0 flex-1 flex-col gap-1 text-xs font-medium text-muted-foreground"
+                      htmlFor="project-settings-column-create-title"
+                    >
+                      Название
+                      <input
+                        ref={createTitleInputRef}
+                        id="project-settings-column-create-title"
+                        name="title"
+                        type="text"
+                        data-testid="project-settings-column-create-title"
+                        value={createTitle}
+                        maxLength={MAX_TITLE_LENGTH}
+                        disabled={createSubmitting}
+                        onChange={(event) => {
+                          setCreateTitle(event.target.value);
+                          setCreateValidation(null);
+                          setCreateError(null);
+                          setCreateNotice(null);
+                          setDirtyConfirm(false);
+                        }}
+                        className={inputClass}
+                      />
+                    </label>
+
+                    <label
+                      className="flex w-full flex-col gap-1 text-xs font-medium text-muted-foreground sm:w-32 sm:shrink-0"
+                      htmlFor="project-settings-column-create-type"
+                    >
+                      Тип
+                      <select
+                        id="project-settings-column-create-type"
+                        name="type"
+                        data-testid="project-settings-column-create-type"
+                        value={createType}
+                        disabled={createSubmitting}
+                        onChange={(event) => {
+                          setCreateType(event.target.value === "done" ? "done" : "open");
+                          setCreateValidation(null);
+                          setCreateError(null);
+                          setCreateNotice(null);
+                          setDirtyConfirm(false);
+                        }}
+                        className="h-10 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 xl:h-8"
+                      >
+                        <option value="open">Обычная</option>
+                        <option value="done">Done</option>
+                      </select>
+                    </label>
+
+                    <button
+                      type="submit"
+                      data-testid="project-settings-column-create-submit"
+                      disabled={createSubmitting || createTitle.trim().length === 0}
+                      aria-busy={createSubmitting}
+                      className={`${primaryButtonClass} shrink-0`}
+                    >
+                      {createSubmitting ? "Добавление…" : "Добавить колонку"}
+                    </button>
+                  </div>
+
+                  <p className="m-0 text-[11px] text-muted-foreground">
+                    Колонка добавляется в конец порядка. Задачи в Done получают дату завершения.
+                  </p>
+
+                  {createValidation === null &&
+                  createError === null &&
+                  createNotice === null ? null : (
+                    <div className="flex flex-col gap-1">
+                      {createValidation === null ? null : (
+                        <p
+                          role="alert"
+                          data-testid="project-settings-column-create-validation"
+                          className="m-0 text-xs text-destructive"
+                        >
+                          {createValidation}
+                        </p>
+                      )}
+                      {createError === null ? null : (
+                        <p
+                          role="alert"
+                          data-testid="project-settings-column-create-error"
+                          className="m-0 text-xs text-destructive"
+                        >
+                          {createError}
+                        </p>
+                      )}
+                      {createNotice === null ? null : (
+                        <p
+                          role="status"
+                          data-testid="project-settings-column-create-notice"
+                          className="m-0 text-xs text-muted-foreground"
+                        >
+                          {createNotice}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </form>
               </section>
 
               <div className="flex flex-col gap-2 border-t border-border pt-3">

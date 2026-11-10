@@ -332,26 +332,31 @@ describe("управление колонками в KanbanView", () => {
     expect(screen.getByTestId("kanban-column-title-in_progress")).toHaveTextContent("In Progress");
     expect(screen.getByTestId("kanban-column-title-done")).toHaveTextContent("Done");
     expect(screen.queryByTestId("kanban-column-backlog")).toBeNull();
-    expect(screen.getByTestId("kanban-add-column")).toBeVisible();
+    expect(screen.queryByTestId("kanban-add-column")).toBeNull();
   });
 
-  it("добавляет open и Done-колонки через форму с валидацией и без дублей", async () => {
+  it("создаёт open и Done-колонки из настроек и показывает их на доске", async () => {
     const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
     const operations = renderBoard(board);
 
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-add-column")).toBeVisible();
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
     });
+    expect(screen.queryByTestId("kanban-add-column")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("kanban-add-column"));
-    expect(screen.getByTestId("kanban-column-title-input")).toHaveFocus();
-    expect(screen.getByTestId("kanban-column-submit")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("project-settings-button"));
 
-    fireEvent.change(screen.getByTestId("kanban-column-title-input"), {
-      target: { value: "Проверка" },
+    const input = (await screen.findByTestId(
+      "project-settings-column-create-title",
+    )) as HTMLInputElement;
+
+    expect(screen.getByTestId("project-settings-column-create-submit")).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "Проверка" } });
+    fireEvent.change(screen.getByTestId("project-settings-column-create-type"), {
+      target: { value: "done" },
     });
-    fireEvent.change(screen.getByTestId("kanban-column-type"), { target: { value: "done" } });
-    fireEvent.click(screen.getByTestId("kanban-column-submit"));
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
 
     await waitFor(() => {
       expect(
@@ -370,13 +375,25 @@ describe("управление колонками в KanbanView", () => {
     });
 
     await waitFor(() => {
-      expect(
-        document.querySelector('[data-kanban-column-id="column-project-1-custom-1"]'),
-      ).not.toBeNull();
+      expect(screen.getByTestId("project-settings-column-create-notice")).toHaveTextContent(
+        "Колонка добавлена",
+      );
     });
     expect(
-      screen.getByTestId("kanban-column-title-column-column-project-1-custom-1"),
-    ).toHaveTextContent("Проверка");
+      screen.getByTestId("project-settings-column-input-column-project-1-custom-1"),
+    ).toHaveValue("Проверка");
+    expect(screen.getByTestId("project-settings-column-column-project-1-custom-1")).toHaveAttribute(
+      "data-settings-column-id",
+      "column-project-1-custom-1",
+    );
+
+    fireEvent.click(screen.getByTestId("project-settings-done"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("kanban-column-title-column-column-project-1-custom-1"),
+      ).toHaveTextContent("Проверка");
+    });
     await waitFor(() => {
       expect(
         screen.getByTestId("kanban-column-empty-column-column-project-1-custom-1"),
@@ -384,47 +401,56 @@ describe("управление колонками в KanbanView", () => {
     });
   });
 
-  it("при ошибке refresh после create просит повторить загрузку, а не создание", async () => {
+  it("после create просит повторить загрузку, а не создание, и не теряет факт создания", async () => {
     const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
     let listCalls = 0;
     let createCalls = 0;
     const operations = renderBoard(board, {
-      "kanbaner.tasks.column.create": () => {
+      "kanbaner.tasks.column.create": (input) => {
         createCalls += 1;
+        const values = inputOf(input);
+        const column = makeColumn(
+          "column-project-1-custom-1",
+          String(values.title),
+          "in_progress",
+          3,
+        );
 
-        return ok({
-          column: makeColumn("column-project-1-custom-1", "Проверка", "in_progress", 3),
-          resource: {},
-          eventId: "event",
-        });
+        board.columns.push(column);
+
+        return ok({ column, resource: {}, eventId: "event" });
       },
       "kanbaner.tasks.column.list": () => {
         listCalls += 1;
 
-        return listCalls === 1
+        return listCalls <= 2
           ? ok({ items: board.columns, total: board.columns.length, nextOffset: null })
           : fail("INTERNAL_ERROR", "Список колонок недоступен");
       },
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-add-column")).toBeVisible();
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
     });
-    fireEvent.click(screen.getByTestId("kanban-add-column"));
-    fireEvent.change(screen.getByTestId("kanban-column-title-input"), {
+    fireEvent.click(screen.getByTestId("project-settings-button"));
+    await screen.findByTestId("project-settings-column-create-title");
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
       target: { value: "Проверка" },
     });
-    fireEvent.click(screen.getByTestId("kanban-column-submit"));
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-error")).toHaveTextContent("Повторите загрузку доски");
+      expect(screen.getByTestId("project-settings-columns-refresh-error")).toHaveTextContent(
+        "создавать колонку повторно не нужно",
+      );
     });
     expect(createCalls).toBe(1);
-    expect(screen.queryByTestId("kanban-column-form")).toBeNull();
-    expect(screen.queryByTestId("kanban-column-notice")).toBeNull();
+    expect(screen.getByTestId("project-settings-column-create-title")).toHaveValue("");
+    expect(screen.queryByTestId("project-settings-column-create-error")).toBeNull();
     expect(
       operations.calls.filter((call) => call.operationId === "kanbaner.tasks.column.create"),
     ).toHaveLength(1);
+    expect(screen.getByTestId("project-settings-columns-retry")).toBeEnabled();
   });
 
   it("переименовывает колонку с expectedVersion и сохраняет ввод при ошибке", async () => {
@@ -634,7 +660,7 @@ describe("управление колонками в KanbanView", () => {
     });
     expect(screen.getByTestId("kanban-tab-in_progress")).toBeVisible();
     expect(screen.getByTestId("kanban-tab-done")).toBeVisible();
-    expect(screen.getByTestId("kanban-add-column")).toBeVisible();
+    expect(screen.queryByTestId("kanban-add-column")).toBeNull();
 
     await openMenu("column-project-1-in-progress", "in_progress");
     const left = screen.getByTestId("kanban-column-move-left-in_progress");
@@ -728,7 +754,7 @@ describe("управление колонками в KanbanView", () => {
     expect(document.querySelectorAll("[data-kanban-column-id]")).toHaveLength(0);
     expect(screen.queryByTestId("kanban-card-task-a")).toBeNull();
     expect(screen.getByTestId("kanban-create-task")).toBeDisabled();
-    expect(screen.getByTestId("kanban-add-column")).toBeDisabled();
+    expect(screen.queryByTestId("kanban-add-column")).toBeNull();
 
     await act(async () => {
       resolveB?.(

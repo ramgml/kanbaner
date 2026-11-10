@@ -1424,7 +1424,321 @@ describe("Настройки доски", () => {
     expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
   });
 
-  it("не дублирует создание, удаление и тип колонок", async () => {
+  it("создаёт колонку из настроек с валидацией, порядком и awaited refresh", async () => {
+    const project = makeProject("project-1", "Релиз");
+    let columns: TaskColumn[] = [];
+    const createInputs: Array<Record<string, unknown>> = [];
+    const onColumnsChanged = vi.fn();
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList(columns));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+
+      createInputs.push(values);
+
+      const column = makeColumn("column-new", String(values.title), {
+        status: values.type === "done" ? "done" : "in_progress",
+        position: columns.length,
+        version: 1,
+      });
+
+      columns = [...columns, column];
+
+      return ok(columnMutation(column));
+    };
+
+    render(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={project}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+    await openSettings();
+
+    expect(screen.getByTestId("project-settings-columns-empty")).toHaveTextContent(
+      "Пока нет колонок",
+    );
+
+    const form = screen.getByTestId("project-settings-column-create");
+    const titleInput = screen.getByTestId("project-settings-column-create-title");
+
+    expect(screen.getByTestId("project-settings-column-create-submit")).toBeDisabled();
+
+    fireEvent.submit(form);
+
+    expect(screen.getByTestId("project-settings-column-create-validation")).toHaveTextContent(
+      "Укажите название колонки",
+    );
+    expect(titleInput).toHaveValue("");
+
+    fireEvent.change(titleInput, { target: { value: "  Новая колонка  " } });
+    fireEvent.change(screen.getByTestId("project-settings-column-create-type"), {
+      target: { value: "done" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-create-notice")).toHaveTextContent(
+        "Колонка добавлена",
+      );
+    });
+
+    expect(createInputs).toEqual([
+      { projectId: "project-1", title: "Новая колонка", type: "done" },
+    ]);
+    expect(onColumnsChanged).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("project-settings-columns-empty")).toBeNull();
+    expect(screen.getByTestId("project-settings-column-input-column-new")).toHaveValue(
+      "Новая колонка",
+    );
+    expect(titleInput).toHaveValue("");
+    expect(screen.getByTestId("project-settings-column-create-submit")).toBeDisabled();
+    await waitFor(() => {
+      expect(titleInput).toHaveFocus();
+    });
+  });
+
+  it("защищает создание колонки от двойной отправки и сохраняет ввод при ошибке", async () => {
+    const project = makeProject("project-1", "Релиз");
+    let createCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      createCalls += 1;
+
+      return {
+        ok: false,
+        error: { code: "INTERNAL", message: "Сервер недоступен", retryable: true },
+      };
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    const form = screen.getByTestId("project-settings-column-create");
+    const titleInput = screen.getByTestId("project-settings-column-create-title");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик" } });
+
+    await act(async () => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+
+    await screen.findByTestId("project-settings-column-create-error");
+
+    expect(createCalls).toBe(1);
+    expect(screen.getByTestId("project-settings-column-create-error")).toHaveTextContent(
+      "Сервер недоступен",
+    );
+    expect(titleInput).toHaveValue("Черновик");
+    expect(screen.getByTestId("project-settings-column-create-submit")).toBeEnabled();
+    await waitFor(() => {
+      expect(titleInput).toHaveFocus();
+    });
+  });
+
+  it("после ошибки refresh создания предлагает только повторную загрузку", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const created = makeColumn("column-new", "Новая", { position: 0 });
+    let columns: TaskColumn[] = [];
+    let listCalls = 0;
+    let createCalls = 0;
+    const onColumnsChanged = vi.fn();
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(columnList(columns));
+        }
+
+        if (listCalls === 2) {
+          return {
+            ok: false,
+            error: { code: "INTERNAL", message: "Список недоступен", retryable: true },
+          };
+        }
+
+        return ok(columnList(columns));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      createCalls += 1;
+      columns = [created];
+
+      return ok(columnMutation(created));
+    };
+
+    render(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={project}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Новая" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-columns-refresh-error")).toHaveTextContent(
+        "создавать колонку повторно не нужно",
+      );
+    });
+
+    const titleInput = screen.getByTestId("project-settings-column-create-title");
+
+    expect(createCalls).toBe(1);
+    expect(titleInput).toHaveValue("");
+    expect(screen.queryByTestId("project-settings-column-create-error")).toBeNull();
+    expect(onColumnsChanged).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("project-settings-columns-retry"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-create-notice")).toHaveTextContent(
+        "Список колонок обновлён",
+      );
+    });
+    expect(createCalls).toBe(1);
+    expect(screen.queryByTestId("project-settings-columns-refresh-error")).toBeNull();
+    expect(screen.getByTestId("project-settings-column-input-column-new")).toHaveValue("Новая");
+    expect(onColumnsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("не отправляет создание колонки после смены проекта", async () => {
+    const firstProject = makeProject("project-1", "Первый");
+    const secondProject = makeProject("project-2", "Второй");
+    const secondColumn = makeColumn("column-b", "B", { projectId: "project-2" });
+    let resolveCreate!: (value: UiOperationResult) => void;
+    const pendingCreate = new Promise<UiOperationResult>((resolve) => {
+      resolveCreate = resolve;
+    });
+    let createCalls = 0;
+    const onColumnsChanged = vi.fn();
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({
+          items: [firstProject, secondProject],
+          total: 2,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const values = inputOf(input);
+
+        return ok(columnList(values.projectId === secondProject.id ? [secondColumn] : []));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      createCalls += 1;
+
+      return pendingCreate;
+    };
+
+    const view = render(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={firstProject}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Из первого" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
+
+    await waitFor(() => {
+      expect(createCalls).toBe(1);
+    });
+
+    view.rerender(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={secondProject}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+    });
+
+    await act(async () => {
+      resolveCreate(ok(columnMutation(makeColumn("column-a", "Из первого"))));
+      await pendingCreate;
+    });
+
+    expect(createCalls).toBe(1);
+    expect(onColumnsChanged).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+
+    await openSettings();
+    expect(screen.getByTestId("project-settings-column-input-column-b")).toHaveValue("B");
+    expect(screen.queryByTestId("project-settings-column-input-column-a")).toBeNull();
+  });
+
+  it("считает черновик новой колонки несохранённым и сохраняет его при Escape", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const invoke = vi.fn<UiOperationInvoker>(simpleInvoke(project, []));
+
+    renderHeader(project, invoke);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Черновик новой" },
+    });
+    fireEvent.keyDown(screen.getByTestId("project-settings-dialog"), { key: "Escape" });
+
+    expect(screen.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+    expect(screen.getByTestId("project-settings-column-create-title")).toHaveValue(
+      "Черновик новой",
+    );
+
+    fireEvent.click(screen.getByTestId("project-settings-dirty-discard"));
+    expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("kanbaner.tasks.column.create", expect.anything());
+  });
+
+  it("не дублирует удаление и смену типа существующих колонок", async () => {
     const project = makeProject("project-1", "Релиз");
     const invoke = vi.fn<UiOperationInvoker>(
       simpleInvoke(project, [makeColumn("column-1", "ToDo")]),
@@ -1434,9 +1748,10 @@ describe("Настройки доски", () => {
     await openSettings();
 
     expect(screen.queryByTestId("kanban-column-form")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Добавить колонку" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Удалить колонку" })).toBeNull();
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Сохранить тип" })).toBeNull();
+    expect(screen.getByTestId("project-settings-column-create")).toBeInTheDocument();
+    expect(screen.getByTestId("project-settings-column-create-type")).toBeInTheDocument();
     expect(screen.getByTestId("project-settings-columns")).toBeInTheDocument();
   });
 });
