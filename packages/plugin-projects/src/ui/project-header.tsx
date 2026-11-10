@@ -1,12 +1,7 @@
 "use client";
 
-import {
-  TASK_STATUSES,
-  type Project,
-  type ProjectSummary,
-  type TaskStatus,
-} from "@kanbaner/plugin-tasks/contract";
-import { taskStatusLabel, type UiOperationInvoker } from "@kanbaner/task-ui";
+import type { Project, ProjectSummary } from "@kanbaner/plugin-tasks/contract";
+import type { UiOperationInvoker } from "@kanbaner/task-ui";
 
 import { PROJECTS_OVERVIEW_ROUTE, type ProjectRoute } from "../metadata.ts";
 import { ProjectRenameButton } from "./project-rename.tsx";
@@ -14,11 +9,25 @@ import { ViewToggle } from "./view-toggle.tsx";
 
 export type ProjectHeaderVariant = "kanban" | "list" | "overview";
 
+export interface ProjectHeaderColumnCount {
+  readonly id: string;
+  readonly title: string;
+  readonly slug: string;
+  readonly total: number;
+}
+
 export interface ProjectHeaderProps {
   readonly variant: ProjectHeaderVariant;
   readonly route: ProjectRoute;
   readonly project: Project | null;
   readonly summary: ProjectSummary | null;
+  /**
+   * Счётчики фактических колонок.
+   *
+   * Без них заголовок показывает только общий итог и просроченные задачи и не
+   * навязывает фиксированный набор legacy-статусов.
+   */
+  readonly columnCounts?: readonly ProjectHeaderColumnCount[] | undefined;
   readonly search: string;
   readonly fallbackTitle: string;
   /** Инвокер для действия «Переименовать»; обзор без проекта его не получает. */
@@ -40,15 +49,17 @@ export function ProjectHeader({
   route,
   project,
   summary,
+  columnCounts,
   search,
   fallbackTitle,
   invoke,
   onProjectRenamed,
   actions,
 }: ProjectHeaderProps) {
-  const counts = summary?.counts ?? null;
   const titleId = `project-header-title-${variant}`;
   const description = project?.descriptionMarkdown.trim() ?? "";
+  const summaryTestId = (suffix: string): string =>
+    variant === "kanban" ? `kanban-summary-${suffix}` : `project-summary-${suffix}`;
 
   return (
     <header className="flex shrink-0 flex-wrap items-start justify-between gap-3">
@@ -81,33 +92,29 @@ export function ProjectHeader({
             <div className="flex items-baseline gap-1">
               <dt>Всего:</dt>
               <dd
-                data-testid={
-                  variant === "kanban" ? "kanban-summary-total" : "project-summary-total"
-                }
+                data-testid={summaryTestId("total")}
                 className="m-0 font-semibold text-foreground"
               >
                 {summary.total}
               </dd>
             </div>
-            {TASK_STATUSES.map((status: TaskStatus) => (
-              <div key={status} className="flex items-baseline gap-1">
-                <dt>{taskStatusLabel(status)}:</dt>
+            {columnCounts?.map((column) => (
+              <div key={column.id} className="flex items-baseline gap-1">
+                <dt className="max-w-40 truncate" title={column.title}>
+                  {column.title}:
+                </dt>
                 <dd
-                  data-testid={
-                    variant === "kanban" ? `kanban-summary-${status}` : `project-summary-${status}`
-                  }
+                  data-testid={summaryTestId(column.slug)}
                   className="m-0 font-semibold text-foreground"
                 >
-                  {counts?.[status] ?? 0}
+                  {column.total}
                 </dd>
               </div>
             ))}
             <div className="flex items-baseline gap-1">
               <dt>Просрочено:</dt>
               <dd
-                data-testid={
-                  variant === "kanban" ? "kanban-summary-overdue" : "project-summary-overdue"
-                }
+                data-testid={summaryTestId("overdue")}
                 className={
                   summary.overdueCount > 0
                     ? "m-0 font-semibold text-destructive"

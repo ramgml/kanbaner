@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 
 import {
   TASK_STATUS_LABELS,
@@ -14,12 +14,18 @@ export interface TaskDetailsProps {
   readonly task: Task;
   readonly project: Project | null;
   readonly parentTask: Task | null;
+  /** Фактические колонки проекта; при наличии заменяют legacy-статус. */
+  readonly columns?: readonly TaskColumn[] | undefined;
+  readonly currentColumnId?: string | null | undefined;
   readonly busy?: boolean;
   readonly error?: string | null;
   readonly onClose: () => void;
   readonly onEdit: () => void;
   readonly onComplete: () => void;
-  readonly onMove: (status: TaskStatus) => void;
+  /** Legacy-перемещение по статусу; используется без списка колонок. */
+  readonly onMove?: ((status: TaskStatus) => void) | undefined;
+  /** Перемещение в фактическую колонку. */
+  readonly onMoveToColumn?: ((columnId: string) => void) | undefined;
   readonly onDelete: () => void;
 }
 
@@ -37,12 +43,15 @@ export function TaskDetails({
   task,
   project,
   parentTask,
+  columns,
+  currentColumnId = null,
   busy = false,
   error = null,
   onClose,
   onEdit,
   onComplete,
   onMove,
+  onMoveToColumn,
   onDelete,
 }: TaskDetailsProps) {
   // Подтверждение привязано к ID задачи: при переходе к другой задаче
@@ -50,6 +59,18 @@ export function TaskDetails({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const confirmingDelete = confirmingDeleteId === task.id;
   const [nextStatus, setNextStatus] = useState<TaskStatus>("todo");
+  const [selectedColumnId, setSelectedColumnId] = useState<string | null>(null);
+  const useColumns = columns !== undefined && columns.length > 0;
+  const currentColumn =
+    columns?.find((column) => column.id === currentColumnId) ??
+    columns?.find((column) => column.status === task.status) ??
+    null;
+  // Явный выбор пользователя живёт до смены задачи; после команды и
+  // перечитывания актуальная колонка становится значением по умолчанию.
+  const nextColumnId =
+    selectedColumnId !== null && columns?.some((column) => column.id === selectedColumnId) === true
+      ? selectedColumnId
+      : (currentColumnId ?? "");
 
   return (
     <section
@@ -74,8 +95,12 @@ export function TaskDetails({
 
       <dl className="grid grid-cols-2 gap-2 text-xs">
         <div>
-          <dt className="text-muted-foreground">Статус</dt>
-          <dd className="font-medium">{taskStatusLabel(task.status)}</dd>
+          <dt className="text-muted-foreground">{useColumns ? "Колонка" : "Статус"}</dt>
+          <dd className="font-medium">
+            {useColumns
+              ? (currentColumn?.title ?? taskStatusLabel(task.status))
+              : taskStatusLabel(task.status)}
+          </dd>
         </div>
         <div>
           <dt className="text-muted-foreground">Приоритет</dt>
@@ -143,27 +168,53 @@ export function TaskDetails({
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
           Переместить в
-          <select
-            value={nextStatus}
-            disabled={busy}
-            onChange={(event) => {
-              setNextStatus(event.target.value as TaskStatus);
-            }}
-            className="h-8 rounded-md border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            {taskStatuses().map((status) => (
-              <option key={status} value={status}>
-                {TASK_STATUS_LABELS[status]}
-              </option>
-            ))}
-          </select>
+          {useColumns ? (
+            <select
+              value={nextColumnId}
+              disabled={busy}
+              onChange={(event) => {
+                setSelectedColumnId(event.target.value);
+              }}
+              className="h-8 rounded-md border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {columns.map((column) => (
+                <option key={column.id} value={column.id}>
+                  {column.title}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <select
+              value={nextStatus}
+              disabled={busy}
+              onChange={(event) => {
+                setNextStatus(event.target.value as TaskStatus);
+              }}
+              className="h-8 rounded-md border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {taskStatuses().map((status) => (
+                <option key={status} value={status}>
+                  {TASK_STATUS_LABELS[status]}
+                </option>
+              ))}
+            </select>
+          )}
         </label>
         <button
           type="button"
           onClick={() => {
-            onMove(nextStatus);
+            if (useColumns) {
+              onMoveToColumn?.(nextColumnId);
+            } else {
+              onMove?.(nextStatus);
+            }
           }}
-          disabled={busy || nextStatus === task.status}
+          disabled={
+            busy ||
+            (useColumns
+              ? nextColumnId.length === 0 || nextColumnId === currentColumnId
+              : nextStatus === task.status)
+          }
           className={actionClass}
         >
           Переместить

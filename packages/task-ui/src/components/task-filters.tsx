@@ -1,10 +1,13 @@
-import type { Project } from "@kanbaner/plugin-tasks/contract";
+import type { Project, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
 import { taskPriorities, taskPriorityLabel, taskStatuses, taskStatusLabel } from "../format.ts";
 
 export interface TaskFilterValues {
   readonly projectId: string;
+  /** Legacy-статус; используется только без фактических колонок. */
   readonly status: string;
+  /** Фактическая колонка выбранного проекта. */
+  readonly columnId?: string;
   readonly priority: string;
   readonly tag: string;
   readonly dueAfter: string;
@@ -14,6 +17,7 @@ export interface TaskFilterValues {
 export const EMPTY_TASK_FILTERS: TaskFilterValues = Object.freeze({
   projectId: "",
   status: "",
+  columnId: "",
   priority: "",
   tag: "",
   dueAfter: "",
@@ -22,6 +26,8 @@ export const EMPTY_TASK_FILTERS: TaskFilterValues = Object.freeze({
 
 export interface TaskFiltersProps {
   readonly projects: readonly Project[];
+  /** Фактические колонки выбранного проекта; заменяют фиксированный статус. */
+  readonly columns?: readonly TaskColumn[] | undefined;
   readonly values: TaskFilterValues;
   readonly onChange: (patch: Partial<TaskFilterValues>) => void;
   readonly onReset: () => void;
@@ -36,6 +42,7 @@ const labelClass = "flex min-w-0 flex-col gap-1 text-xs font-medium text-muted-f
 /** Панель фильтров списка задач. Все поля доступны с клавиатуры. */
 export function TaskFilters({
   projects,
+  columns,
   values,
   onChange,
   onReset,
@@ -58,7 +65,7 @@ export function TaskFilters({
             value={values.projectId}
             disabled={disabled}
             onChange={(event) => {
-              onChange({ projectId: event.target.value });
+              onChange({ projectId: event.target.value, columnId: "", status: "" });
             }}
             className={inputClass}
           >
@@ -71,25 +78,48 @@ export function TaskFilters({
           </select>
         </label>
 
-        <label className={labelClass}>
-          Статус
-          <select
-            name="status"
-            value={values.status}
-            disabled={disabled}
-            onChange={(event) => {
-              onChange({ status: event.target.value });
-            }}
-            className={inputClass}
-          >
-            <option value="">Все статусы</option>
-            {taskStatuses().map((status) => (
-              <option key={status} value={status}>
-                {taskStatusLabel(status)}
-              </option>
-            ))}
-          </select>
-        </label>
+        {columns === undefined ? (
+          <label className={labelClass}>
+            Статус
+            <select
+              name="status"
+              value={values.status}
+              disabled={disabled}
+              onChange={(event) => {
+                onChange({ status: event.target.value });
+              }}
+              className={inputClass}
+            >
+              <option value="">Все статусы</option>
+              {taskStatuses().map((status) => (
+                <option key={status} value={status}>
+                  {taskStatusLabel(status)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className={labelClass}>
+            Колонка
+            <select
+              name="columnId"
+              data-testid="task-filter-column"
+              value={values.columnId ?? ""}
+              disabled={disabled || values.projectId.length === 0}
+              onChange={(event) => {
+                onChange({ columnId: event.target.value });
+              }}
+              className={inputClass}
+            >
+              <option value="">Все колонки</option>
+              {columns.map((column) => (
+                <option key={column.id} value={column.id}>
+                  {column.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <label className={labelClass}>
           Приоритет

@@ -1,11 +1,11 @@
-import type { Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
 /** Размер страницы одной колонки. */
 export const KANBAN_PAGE_SIZE = 10;
 
-export const KANBAN_STATUSES: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
-
+/** Данные одной фактической колонки проекта. */
 export interface KanbanColumnData {
+  readonly column: TaskColumn;
   readonly items: readonly Task[];
   readonly total: number;
   readonly nextOffset: number | null;
@@ -13,40 +13,119 @@ export interface KanbanColumnData {
   readonly error: string | null;
 }
 
-export type KanbanColumns = Readonly<Record<TaskStatus, KanbanColumnData>>;
+/**
+ * Колонки доски в фактическом порядке `column.list`.
+ *
+ * `order` хранит ID в порядке `position asc`, `id asc`; `byId` — данные
+ * конкретной колонки. Фиксированного набора статусов здесь нет.
+ */
+export interface KanbanColumns {
+  readonly order: readonly string[];
+  readonly byId: Readonly<Record<string, KanbanColumnData>>;
+}
 
 export interface Placement {
-  readonly status: TaskStatus;
+  readonly columnId: string;
   /** Карточка, перед которой нужно вставить задачу; `null` — в конец. */
   readonly beforeId: string | null;
 }
 
-export function createEmptyColumn(): KanbanColumnData {
-  return { items: [], total: 0, nextOffset: null, loading: true, error: null };
+export function createEmptyColumns(): KanbanColumns {
+  return { order: [], byId: {} };
 }
 
-export function createEmptyColumns(): KanbanColumns {
-  return {
-    backlog: createEmptyColumn(),
-    todo: createEmptyColumn(),
-    in_progress: createEmptyColumn(),
-    done: createEmptyColumn(),
-  };
+export function createEmptyColumn(column: TaskColumn): KanbanColumnData {
+  return { column, items: [], total: 0, nextOffset: null, loading: true, error: null };
 }
 
 /** Безопасный доступ к колонке: `noUncheckedIndexedAccess` не теряет тип. */
-export function getColumn(columns: KanbanColumns, status: TaskStatus): KanbanColumnData {
-  return columns[status] ?? createEmptyColumn();
+export function getColumn(columns: KanbanColumns, columnId: string): KanbanColumnData | null {
+  return columns.byId[columnId] ?? null;
 }
 
-const columnOf = getColumn;
+export function getColumns(columns: KanbanColumns): readonly KanbanColumnData[] {
+  const result: KanbanColumnData[] = [];
+
+  for (const columnId of columns.order) {
+    const data = columns.byId[columnId];
+
+    if (data !== undefined) {
+      result.push(data);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Собирает доску из фактических колонок, сохраняя уже загруженные данные.
+ *
+ * Новые колонки получают пустую страницу в состоянии загрузки; исчезнувшие
+ * удаляются из порядка и словаря.
+ */
+export function syncColumns(current: KanbanColumns, columns: readonly TaskColumn[]): KanbanColumns {
+  const order = columns.map((column) => column.id);
+  const byId: Record<string, KanbanColumnData> = {};
+
+  for (const column of columns) {
+    const existing = current.byId[column.id];
+
+    byId[column.id] = existing === undefined ? createEmptyColumn(column) : { ...existing, column };
+  }
+
+  return { order, byId };
+}
+
+/** Оптимистично переставляет колонку на целевой индекс итогового порядка. */
+export function reorderKanbanColumns(
+  columns: KanbanColumns,
+  columnId: string,
+  targetIndex: number,
+): KanbanColumns {
+  const currentIndex = columns.order.indexOf(columnId);
+
+  if (currentIndex === -1) {
+    return columns;
+  }
+
+  const order = columns.order.filter((id) => id !== columnId);
+  const index = Math.max(0, Math.min(targetIndex, order.length));
+
+  order.splice(index, 0, columnId);
+
+  return { order, byId: columns.byId };
+}
+
+/** Убирает колонку из отображения после успешного удаления. */
+export function withoutColumn(columns: KanbanColumns, columnId: string): KanbanColumns {
+  if (!columns.order.includes(columnId)) {
+    return columns;
+  }
+
+  const byId = Object.fromEntries(
+    Object.entries(columns.byId).filter(([id]) => id !== columnId),
+  ) as KanbanColumns["byId"];
+
+  return { order: columns.order.filter((id) => id !== columnId), byId };
+}
 
 function findTask(columns: KanbanColumns, taskId: string): Task | null {
-  for (const status of KANBAN_STATUSES) {
-    const task = columnOf(columns, status).items.find((item) => item.id === taskId);
+  for (const column of getColumns(columns)) {
+    const task = column.items.find((item) => item.id === taskId);
 
     if (task !== undefined) {
       return task;
+    }
+  }
+
+  return null;
+}
+
+/** Колонка, в которой сейчас отображается задача. */
+export function columnContainingTask(columns: KanbanColumns, taskId: string): string | null {
+  for (const column of getColumns(columns)) {
+    if (column.items.some((task) => task.id === taskId)) {
+      return column.column.id;
     }
   }
 
@@ -80,27 +159,22 @@ export function applyPlacements(
     }
   }
 
-  const next: Record<TaskStatus, KanbanColumnData> = {
-    backlog: columnOf(columns, "backlog"),
-    todo: columnOf(columns, "todo"),
-    in_progress: columnOf(columns, "in_progress"),
-    done: columnOf(columns, "done"),
-  };
-  const items: Record<TaskStatus, Task[]> = {
-    backlog: [...columnOf(columns, "backlog").items],
-    todo: [...columnOf(columns, "todo").items],
-    in_progress: [...columnOf(columns, "in_progress").items],
-    done: [...columnOf(columns, "done").items],
-  };
+  const items: Record<string, Task[]> = {};
+  const byId: Record<string, KanbanColumnData> = {};
 
-  for (const status of KANBAN_STATUSES) {
-    const current = columnOf(columns, status);
-    const source = items[status] ?? [];
+  for (const columnId of columns.order) {
+    const current = columns.byId[columnId];
+
+    if (current === undefined) {
+      continue;
+    }
+
+    const source = [...current.items];
     const removed = source.filter((task) => movedIds.has(task.id)).length;
     const remaining = source.filter((task) => !movedIds.has(task.id));
 
-    items[status] = remaining;
-    next[status] = {
+    items[columnId] = remaining;
+    byId[columnId] = {
       ...current,
       items: remaining,
       total: Math.max(0, current.total - removed),
@@ -114,31 +188,40 @@ export function applyPlacements(
       continue;
     }
 
-    const target = items[placement.status] ?? [];
+    const target = items[placement.columnId];
+
+    if (target === undefined) {
+      continue;
+    }
+
     const foundIndex =
       placement.beforeId === null
         ? target.length
         : target.findIndex((candidate) => candidate.id === placement.beforeId);
     const insertion = foundIndex === -1 ? target.length : foundIndex;
+    const targetData = byId[placement.columnId];
+
+    if (targetData === undefined) {
+      continue;
+    }
 
     target.splice(insertion, 0, task);
-    items[placement.status] = target;
-    next[placement.status] = {
-      ...columnOf(next, placement.status),
+    byId[placement.columnId] = {
+      ...targetData,
       items: target,
-      total: columnOf(next, placement.status).total + 1,
+      total: targetData.total + 1,
     };
   }
 
-  return next;
+  return { order: columns.order, byId };
 }
 
 /**
  * Намерение перемещения, независимое от видимого (отфильтрованного или
  * постраничного) списка карточек.
  *
- * Позиция команды вычисляется по полному scope `(projectId, status)`, поэтому
- * скрытый фильтром сосед не сдвигает индекс.
+ * Позиция команды вычисляется по полному scope `(projectId, columnId)`,
+ * поэтому скрытый фильтром сосед не сдвигает индекс.
  */
 export type MoveIntent =
   | { readonly kind: "append" }
@@ -148,9 +231,9 @@ export type MoveIntent =
 /**
  * Позиция для `task.move` по полному упорядоченному списку scope.
  *
- * `tasks` — все задачи целевого `(projectId, status)` без UI-фильтров и
- * пагинации. Перемещаемая карточка исключается: `append` равен реальной длине
- * остальных, `beforeId` — индексу в этом же полном списке.
+ * `tasks` — все задачи целевой колонки без UI-фильтров и пагинации.
+ * Перемещаемая карточка исключается: `append` равен реальной длине остальных,
+ * `beforeId` — индексу в этом же полном списке.
  */
 export function resolveMovePosition(
   tasks: readonly Task[],
@@ -177,9 +260,7 @@ export function resolveMovePosition(
  *
  * Действия «Выше»/«Ниже» относятся к видимому порядку: после вставки берётся
  * следующая видимая карточка. Её ID становится anchor-ом для `before`, а
- * отсутствие следующей означает `append`. Полный scope используется только
- * для перевода anchor-а в позицию, поэтому скрытые соседи не сдвигают
- * направление.
+ * отсутствие следующей означает `append`.
  */
 export function visibleMoveIntent(
   items: readonly Task[],
@@ -198,7 +279,7 @@ export function visibleMoveIntent(
 
 /** Строит placement для целевого индекса внутри колонки. */
 export function placementForIndex(
-  status: TaskStatus,
+  columnId: string,
   items: readonly Task[],
   taskId: string,
   targetIndex: number,
@@ -206,5 +287,78 @@ export function placementForIndex(
   const rest = items.filter((task) => task.id !== taskId);
   const index = Math.max(0, Math.min(targetIndex, rest.length));
 
-  return { status, beforeId: rest[index]?.id ?? null };
+  return { columnId, beforeId: rest[index]?.id ?? null };
+}
+
+const STATUS_SLUGS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/-legacy-backlog$/u, "backlog"],
+  [/-legacy-todo$/u, "todo"],
+  [/-legacy-in_progress$/u, "in_progress"],
+  [/-legacy-done$/u, "done"],
+  [/-in-progress$/u, "in_progress"],
+  [/-todo$/u, "todo"],
+  [/-done$/u, "done"],
+];
+
+/**
+ * Безопасный суффикс test ID для колонки.
+ *
+ * Канонические default/legacy-колонки сохраняют прежние статусные суффиксы
+ * (`todo`, `in_progress`, `done`, `backlog`), а пользовательские колонки
+ * получают суффикс из собственного ID. ID не попадает в CSS-селектор
+ * дословно: небезопасные символы заменяются на `-`.
+ */
+export function columnTestSlug(column: Pick<TaskColumn, "id">): string {
+  for (const [pattern, slug] of STATUS_SLUGS) {
+    if (pattern.test(column.id)) {
+      return slug;
+    }
+  }
+
+  return `column-${column.id.replace(/[^A-Za-z0-9_-]/gu, "-")}`;
+}
+
+/** Колонка по умолчанию для создания карточки: первая открытая. */
+export function defaultCreateColumnId(columns: readonly TaskColumn[]): string | null {
+  return columns.find((column) => column.status !== "done")?.id ?? columns[0]?.id ?? null;
+}
+
+/** Фактическая колонка задачи с учётом legacy-документов без `columnId`. */
+export function effectiveColumnId(task: Task, columns: readonly TaskColumn[]): string | null {
+  if (task.columnId !== undefined && columns.some((column) => column.id === task.columnId)) {
+    return task.columnId;
+  }
+
+  return columns.find((column) => column.status === task.status)?.id ?? columns[0]?.id ?? null;
+}
+
+/** Колонка того же типа, что и указанная, либо первая другая. */
+export function defaultDeleteTargetColumn(
+  columns: readonly TaskColumn[],
+  sourceId: string,
+): string | null {
+  const source = columns.find((column) => column.id === sourceId);
+
+  if (source === undefined) {
+    return null;
+  }
+
+  const sameType = columns.find(
+    (column) => column.id !== sourceId && column.status === source.status,
+  );
+
+  return sameType?.id ?? columns.find((column) => column.id !== sourceId)?.id ?? null;
+}
+
+/** Осталась ли колонка последней открытой или последней Done в проекте. */
+export function isLastColumnOfType(columns: readonly TaskColumn[], columnId: string): boolean {
+  const source = columns.find((column) => column.id === columnId);
+
+  if (source === undefined) {
+    return false;
+  }
+
+  return !columns.some(
+    (column) => column.id !== columnId && (column.status === "done") === (source.status === "done"),
+  );
 }

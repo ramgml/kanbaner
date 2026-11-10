@@ -10,6 +10,7 @@ import {
   type Project,
   type ProjectGetOutput,
   type Task,
+  type TaskColumn,
   type TaskCompleteInput,
   type TaskCreateInput,
   type TaskDeleteInput,
@@ -18,7 +19,6 @@ import {
   type TaskMoveInput,
   type TaskMutationOutput,
   type TaskPriority,
-  type TaskStatus,
   type TaskUpdateInput,
 } from "@kanbaner/plugin-tasks/contract";
 import {
@@ -37,6 +37,8 @@ import {
 } from "@kanbaner/task-ui";
 
 import { KANBAN_ROUTE } from "../metadata.ts";
+import { defaultCreateColumnId, effectiveColumnId } from "./board-state.ts";
+import { fetchProjectColumns } from "./load-columns.ts";
 import {
   VERSION_CONFLICT_MESSAGE,
   errorMessage,
@@ -86,7 +88,7 @@ const EMPTY_SUBTASKS: SubtasksState = Object.freeze({
 /** Серверные значения, от которых отсчитывается черновик быстрых действий. */
 interface QuickBaseline {
   readonly taskId: string;
-  readonly status: TaskStatus;
+  readonly columnId: string;
   readonly dueAt: string | null;
   readonly tags: readonly string[];
 }
@@ -94,12 +96,12 @@ interface QuickBaseline {
 /** Несохранённые значения быстрых действий, живущие вне breakpoint-модала. */
 interface QuickDraft {
   readonly taskId: string;
-  readonly nextStatus: TaskStatus;
+  readonly nextColumnId: string;
   readonly dueValue: string;
   readonly tagsValue: string;
   readonly subtaskOpen: boolean;
   readonly subtaskTitle: string;
-  readonly subtaskStatus: TaskStatus;
+  readonly subtaskColumnId: string;
 }
 
 /** Черновик и поля, по которым сервер и локальное значение разошлись. */
@@ -114,24 +116,24 @@ interface EditSession {
   readonly expectedVersion: number;
 }
 
-function baselineOf(task: Task): QuickBaseline {
+function baselineOf(task: Task, columns: readonly TaskColumn[]): QuickBaseline {
   return {
     taskId: task.id,
-    status: task.status,
+    columnId: effectiveColumnId(task, columns) ?? "",
     dueAt: task.dueAt,
     tags: [...task.tags],
   };
 }
 
-function createQuickDraft(task: Task): QuickDraft {
+function createQuickDraft(task: Task, columns: readonly TaskColumn[]): QuickDraft {
   return {
     taskId: task.id,
-    nextStatus: task.status,
+    nextColumnId: effectiveColumnId(task, columns) ?? "",
     dueValue: dueAtToDateInput(task.dueAt),
     tagsValue: tagsToInput(task.tags),
     subtaskOpen: false,
     subtaskTitle: "",
-    subtaskStatus: "todo",
+    subtaskColumnId: defaultCreateColumnId(columns) ?? "",
   };
 }
 
@@ -165,9 +167,14 @@ function sameDueValue(value: string, dueAt: string | null): boolean {
 }
 
 /** Поле всё ещё отличается от серверного значения. */
-function fieldConflicted(field: QuickDraftField, draft: QuickDraft, task: Task): boolean {
-  if (field === "status") {
-    return draft.nextStatus !== task.status;
+function fieldConflicted(
+  field: QuickDraftField,
+  draft: QuickDraft,
+  task: Task,
+  columns: readonly TaskColumn[],
+): boolean {
+  if (field === "column") {
+    return draft.nextColumnId !== (effectiveColumnId(task, columns) ?? "");
   }
 
   if (field === "due") {
@@ -195,30 +202,41 @@ function syncQuickState(
   current: QuickState | null,
   task: Task,
   baseline: QuickBaseline | null,
+  columns: readonly TaskColumn[],
 ): QuickState {
-  if (current === null || current.draft.taskId !== task.id || baseline?.taskId !== task.id) {
-    return { draft: createQuickDraft(task), conflicts: [] };
+  if (
+    current === null ||
+    current.draft.taskId !== task.id ||
+    baseline === null ||
+    baseline.taskId !== task.id
+  ) {
+    return { draft: createQuickDraft(task, columns), conflicts: [] };
   }
 
+  const serverColumnId = effectiveColumnId(task, columns) ?? "";
   const next: {
     taskId: string;
-    nextStatus: TaskStatus;
+    nextColumnId: string;
     dueValue: string;
     tagsValue: string;
     subtaskOpen: boolean;
     subtaskTitle: string;
-    subtaskStatus: TaskStatus;
+    subtaskColumnId: string;
   } = { ...current.draft };
   const conflicts = new Set(current.conflicts);
 
-  if (next.nextStatus === task.status) {
-    next.nextStatus = task.status;
-    conflicts.delete("status");
-  } else if (baseline.status === next.nextStatus) {
-    next.nextStatus = task.status;
-    conflicts.delete("status");
-  } else if (baseline.status !== task.status) {
-    conflicts.add("status");
+  if (next.nextColumnId === serverColumnId) {
+    next.nextColumnId = serverColumnId;
+    conflicts.delete("column");
+  } else if (baseline.columnId === next.nextColumnId) {
+    next.nextColumnId = serverColumnId;
+    conflicts.delete("column");
+  } else if (baseline.columnId !== serverColumnId) {
+    conflicts.add("column");
+  }
+
+  if (columns.length > 0 && !columns.some((column) => column.id === next.subtaskColumnId)) {
+    next.subtaskColumnId = defaultCreateColumnId(columns) ?? "";
   }
 
   if (sameDueValue(next.dueValue, task.dueAt)) {
@@ -323,6 +341,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const isDesktopViewport = useMediaQuery(DESKTOP_MEDIA_QUERY);
   const [task, setTask] = useState<Task | null>(null);
   const [project, setProject] = useState<Project | null>(null);
+  const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
   const [parentTask, setParentTask] = useState<Task | null>(null);
   const [subtasks, setSubtasks] = useState<SubtasksState>(EMPTY_SUBTASKS);
   const [rootTasks, setRootTasks] = useState<readonly Task[]>([]);
@@ -368,12 +387,15 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         ? quickState
         : null;
   const activeQuickDraft =
-    activeQuickState?.draft ?? (currentTask === null ? null : createQuickDraft(currentTask));
+    activeQuickState?.draft ??
+    (currentTask === null ? null : createQuickDraft(currentTask, columns));
+  const currentColumnId =
+    currentTask === null ? "" : (effectiveColumnId(currentTask, columns) ?? "");
   const quickConflicts = activeQuickState?.conflicts ?? [];
   const quickDirty =
     currentTask !== null &&
     activeQuickDraft !== null &&
-    (activeQuickDraft.nextStatus !== currentTask.status ||
+    (activeQuickDraft.nextColumnId !== currentColumnId ||
       !sameDueValue(activeQuickDraft.dueValue, currentTask.dueAt) ||
       !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags) ||
       (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
@@ -412,6 +434,14 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
                 id: loadedTask.parentTaskId,
               }),
         ]);
+        let projectColumns: readonly TaskColumn[] = [];
+
+        try {
+          projectColumns = await fetchProjectColumns(invoke, loadedTask.projectId);
+        } catch {
+          // Колонки недоступны — карточка остаётся работоспособной через
+          // legacy-статус, но quick move и подзадачи без колонок блокируются.
+        }
 
         let subtaskItems: readonly Task[] = [];
         let subtaskError: string | null = null;
@@ -430,6 +460,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
           setTask(loadedTask);
           setProject(projectOutput.project);
+          setColumns(projectColumns);
           setParentTask(parentOutput?.task ?? null);
           setSubtasks({
             taskId: loadedTask.id,
@@ -437,8 +468,10 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             loading: false,
             error: subtaskError,
           });
-          setQuickState((current) => syncQuickState(current, loadedTask, previousBaseline));
-          quickBaselineRef.current = baselineOf(loadedTask);
+          setQuickState((current) =>
+            syncQuickState(current, loadedTask, previousBaseline, projectColumns),
+          );
+          quickBaselineRef.current = baselineOf(loadedTask, projectColumns);
           setError(null);
         }
       } catch (loadError) {
@@ -568,7 +601,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
   const changeQuickDraft = (patch: Partial<Omit<QuickDraft, "taskId">>): void => {
     setQuickState((current) => {
-      const base = current?.draft ?? (currentTask === null ? null : createQuickDraft(currentTask));
+      const base =
+        current?.draft ?? (currentTask === null ? null : createQuickDraft(currentTask, columns));
 
       if (base === null) {
         return current;
@@ -582,7 +616,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
           currentTask === null
             ? []
             : (current?.conflicts ?? []).filter((field) =>
-                fieldConflicted(field, draft, currentTask),
+                fieldConflicted(field, draft, currentTask, columns),
               ),
       };
     });
@@ -593,7 +627,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       return;
     }
 
-    const server = createQuickDraft(currentTask);
+    const server = createQuickDraft(currentTask, columns);
 
     setQuickState((current) => {
       if (current === null || current.draft.taskId !== currentTask.id) {
@@ -606,8 +640,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       // конфликт. Неконфликтные dirty-черновики (в том числе subtask-форма)
       // остаются локальными и продолжают удерживать общий dirty guard.
       for (const field of current.conflicts) {
-        if (field === "status") {
-          draft.nextStatus = server.nextStatus;
+        if (field === "column") {
+          draft.nextColumnId = server.nextColumnId;
         } else if (field === "due") {
           draft.dueValue = server.dueValue;
         } else {
@@ -713,15 +747,15 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     });
   };
 
-  const move = (status: TaskStatus): void => {
-    if (currentTask === null) {
+  const move = (columnId: string): void => {
+    if (currentTask === null || columnId.length === 0) {
       return;
     }
 
     const input: TaskMoveInput = {
       id: currentTask.id,
       expectedVersion: currentTask.version,
-      status,
+      columnId,
       position: 0,
     };
 
@@ -781,12 +815,18 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       return false;
     }
 
+    if (draft.columnId.length === 0 || !columns.some((column) => column.id === draft.columnId)) {
+      setError("Выберите существующую колонку для подзадачи");
+
+      return false;
+    }
+
     const input: TaskCreateInput = {
       projectId: currentTask.projectId,
       parentTaskId: currentTask.id,
       title,
       descriptionMarkdown: "",
-      status: draft.status,
+      columnId: draft.columnId,
       priority: "medium",
       dueAt: null,
       tags: [],
@@ -810,7 +850,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
                 ...current.draft,
                 subtaskOpen: false,
                 subtaskTitle: "",
-                subtaskStatus: "todo",
+                subtaskColumnId: defaultCreateColumnId(columns) ?? "",
               },
               conflicts: current.conflicts,
             }
@@ -857,14 +897,16 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         closeConfirm={closeConfirm}
         draftDirty={draftDirty}
         quickConflicts={quickConflicts}
-        nextStatus={activeQuickDraft?.nextStatus ?? currentTask.status}
+        columns={columns}
+        currentColumnId={currentColumnId}
+        nextColumnId={activeQuickDraft?.nextColumnId ?? currentColumnId}
         dueValue={activeQuickDraft?.dueValue ?? dueAtToDateInput(currentTask.dueAt)}
         tagsValue={activeQuickDraft?.tagsValue ?? tagsToInput(currentTask.tags)}
         subtaskDraft={
           {
             open: activeQuickDraft?.subtaskOpen ?? false,
             title: activeQuickDraft?.subtaskTitle ?? "",
-            status: activeQuickDraft?.subtaskStatus ?? "todo",
+            columnId: activeQuickDraft?.subtaskColumnId ?? "",
           } satisfies SubtaskFormDraft
         }
         onChangeEditValues={setEditValues}
@@ -879,8 +921,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         onCreateSubtask={createSubtask}
         onComplete={complete}
         onMove={move}
-        onNextStatusChange={(status) => {
-          changeQuickDraft({ nextStatus: status });
+        onNextColumnChange={(columnId) => {
+          changeQuickDraft({ nextColumnId: columnId });
         }}
         onPriority={changePriority}
         onDue={changeDue}
@@ -895,7 +937,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
           changeQuickDraft({
             ...(patch.open === undefined ? {} : { subtaskOpen: patch.open }),
             ...(patch.title === undefined ? {} : { subtaskTitle: patch.title }),
-            ...(patch.status === undefined ? {} : { subtaskStatus: patch.status }),
+            ...(patch.columnId === undefined ? {} : { subtaskColumnId: patch.columnId }),
           });
         }}
         onAcceptServerDrafts={acceptServerDrafts}

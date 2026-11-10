@@ -3,11 +3,34 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Task } from "@kanbaner/plugin-tasks/contract";
+import type { Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
 import { KanbanCard } from "./ui/kanban-card.tsx";
 
 const TIMESTAMP = "2026-02-01T00:00:00.000Z";
+
+const COLUMNS: readonly TaskColumn[] = [
+  {
+    id: "column-project-1-legacy-todo",
+    projectId: "project-1",
+    title: "К выполнению",
+    status: "todo",
+    position: 0,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  },
+  {
+    id: "column-project-1-legacy-done",
+    projectId: "project-1",
+    title: "Готово",
+    status: "done",
+    position: 1,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  },
+];
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -35,6 +58,8 @@ function renderCard(task: Task, overrides: Partial<Parameters<typeof KanbanCard>
       task={task}
       index={0}
       columnSize={1}
+      columns={COLUMNS}
+      currentColumnId="column-project-1-legacy-todo"
       subtaskCount={1}
       selected={false}
       pending={false}
@@ -79,6 +104,8 @@ describe("KanbanCard", () => {
         task={makeTask({ dueAt: `${today}T00:00:00.000Z` })}
         index={0}
         columnSize={1}
+        columns={COLUMNS}
+        currentColumnId="column-project-1-legacy-todo"
         subtaskCount={1}
         selected={false}
         pending={false}
@@ -97,6 +124,8 @@ describe("KanbanCard", () => {
         task={makeTask({ dueAt: `${tomorrow}T00:00:00.000Z` })}
         index={0}
         columnSize={1}
+        columns={COLUMNS}
+        currentColumnId="column-project-1-legacy-todo"
         subtaskCount={1}
         selected={false}
         pending={false}
@@ -115,6 +144,8 @@ describe("KanbanCard", () => {
         task={makeTask({ dueAt: "2030-01-10T00:00:00.000Z" })}
         index={0}
         columnSize={1}
+        columns={COLUMNS}
+        currentColumnId="column-project-1-legacy-todo"
         subtaskCount={1}
         selected={false}
         pending={false}
@@ -151,6 +182,8 @@ describe("KanbanCard", () => {
         task={makeTask()}
         index={0}
         columnSize={1}
+        columns={COLUMNS}
+        currentColumnId="column-project-1-legacy-todo"
         subtaskCount={1}
         selected={false}
         pending

@@ -10,6 +10,8 @@ export type TitleCreateResult =
 
 export interface TitleComposerProps {
   readonly status: TaskStatus;
+  /** Фактический заголовок колонки; без него используется legacy-статус. */
+  readonly columnTitle?: string | undefined;
   readonly projectId: string;
   readonly disabled?: boolean;
   readonly onCreate: (title: string) => Promise<TitleCreateResult>;
@@ -42,6 +44,7 @@ const GUARD_MESSAGE = "Выберите проект в списке проек�
  */
 export function TitleComposer({
   status,
+  columnTitle,
   projectId,
   disabled = false,
   onCreate,
@@ -114,7 +117,7 @@ export function TitleComposer({
     }
   };
 
-  const label = taskStatusLabel(status);
+  const label = columnTitle ?? taskStatusLabel(status);
 
   return (
     <form

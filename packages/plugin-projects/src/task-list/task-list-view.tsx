@@ -7,10 +7,10 @@ import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
   type Task,
+  type TaskColumn,
   type TaskCreateInput,
   type TaskListInput,
   type TaskListOutput,
-  type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
 import {
   EmptyState,
@@ -24,7 +24,9 @@ import {
 } from "@kanbaner/task-ui";
 
 import { TASK_LIST_ROUTE } from "../metadata.ts";
-import { invokeJson } from "../ui/operations.ts";
+import { defaultCreateColumnId } from "../ui/board-state.ts";
+import { fetchProjectColumns } from "../ui/load-columns.ts";
+import { invokeJson, errorMessage } from "../ui/operations.ts";
 import { ProjectHeader } from "../ui/project-header.tsx";
 import { TitleComposer, type TitleCreateResult } from "../ui/title-composer.tsx";
 import { useProjectSummary } from "../ui/use-project-summary.ts";
@@ -61,7 +63,8 @@ function buildTaskListInput(query: ReturnType<typeof useTaskListQuery>): TaskLis
 
   return {
     ...(query.projectId.length === 0 ? {} : { projectId: query.projectId }),
-    ...(query.status.length === 0 ? {} : { status: query.status as TaskStatus }),
+    ...(query.columnId.length === 0 ? {} : { columnId: query.columnId }),
+    ...(query.legacyStatus.length === 0 ? {} : { status: query.legacyStatus as Task["status"] }),
     ...(query.priority.length === 0 ? {} : { priority: query.priority as Task["priority"] }),
     ...(query.tag.length === 0 ? {} : { tag: query.tag }),
     ...(dueAfter === null ? {} : { dueAfter }),
@@ -89,6 +92,9 @@ export function TaskListView({
   const [tasksLoading, setTasksLoading] = useState(true);
   const [taskError, setTaskError] = useState<string | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
+  const [columnsLoading, setColumnsLoading] = useState(false);
+  const [columnsError, setColumnsError] = useState<string | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === query.projectId) ?? null,
@@ -155,7 +161,7 @@ export function TaskListView({
     invoke,
     query.revision,
     query.projectId,
-    query.status,
+    query.columnId,
     query.priority,
     query.tag,
     query.dueAfter,
@@ -165,9 +171,56 @@ export function TaskListView({
     query.page,
   ]);
 
+  useEffect(() => {
+    if (query.projectId.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setColumnsLoading(true);
+
+    void (async () => {
+      try {
+        const loaded = await fetchProjectColumns(invoke, query.projectId);
+
+        if (!cancelled) {
+          setColumns(loaded);
+          setColumnsError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setColumns([]);
+          setColumnsError(errorMessage(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setColumnsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [invoke, query.projectId, query.revision]);
+
+  // Фильтр колонки всегда принадлежит текущему проекту.
+  useEffect(() => {
+    if (
+      query.columnId.length > 0 &&
+      !columnsLoading &&
+      !columns.some((column) => column.id === query.columnId)
+    ) {
+      updateTaskListQuery({ columnId: "", page: 1 });
+    }
+  }, [columns, columnsLoading, query.columnId]);
+
   const filterValues: TaskFilterValues = {
     projectId: query.projectId,
-    status: query.status,
+    status: query.legacyStatus,
+    columnId: query.columnId,
     priority: query.priority,
     tag: query.tag,
     dueAfter: query.dueAfter,
@@ -177,6 +230,15 @@ export function TaskListView({
   const tasks = taskPage?.items ?? [];
   const total = taskPage?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / TASK_LIST_PAGE_SIZE));
+  const createColumn =
+    columns.find((column) => column.id === defaultCreateColumnId(columns)) ?? null;
+  const legacyCreateStatus =
+    query.legacyStatus === "backlog" ||
+    query.legacyStatus === "todo" ||
+    query.legacyStatus === "in_progress" ||
+    query.legacyStatus === "done"
+      ? query.legacyStatus
+      : null;
 
   const createTask = useCallback(
     async (title: string): Promise<TitleCreateResult> => {
@@ -184,11 +246,22 @@ export function TaskListView({
         return { ok: false, message: "Выберите проект в списке проектов" };
       }
 
+      const columnId = defaultCreateColumnId(columns);
+
+      if (columnId === null && query.legacyStatus.length === 0) {
+        return {
+          ok: false,
+          message: "В проекте нет доступных колонок. Добавьте колонку на доске.",
+        };
+      }
+
       const input: TaskCreateInput = {
         projectId: query.projectId,
+        ...(query.legacyStatus.length > 0
+          ? { status: query.legacyStatus as Task["status"] }
+          : { columnId: columnId as string }),
         title,
         descriptionMarkdown: "",
-        status: "todo",
         priority: "medium",
         dueAt: null,
         tags: [],
@@ -213,7 +286,7 @@ export function TaskListView({
         };
       }
     },
-    [invoke, query.projectId],
+    [columns, invoke, query.legacyStatus, query.projectId],
   );
 
   return (
@@ -233,11 +306,17 @@ export function TaskListView({
               type="button"
               className={primaryButton}
               data-testid="create-task-button"
-              disabled={query.projectId.length === 0}
+              disabled={
+                query.projectId.length === 0 ||
+                columnsLoading ||
+                (columns.length === 0 && legacyCreateStatus === null)
+              }
               title={
                 query.projectId.length === 0
                   ? "Сначала выберите проект в списке проектов"
-                  : "Новая задача"
+                  : columns.length === 0 && legacyCreateStatus === null
+                    ? "В проекте нет доступных колонок"
+                    : "Новая задача"
               }
               onClick={() => {
                 setComposerOpen((current) => !current);
@@ -259,12 +338,41 @@ export function TaskListView({
         }
       />
 
+      {legacyCreateStatus === null ? null : (
+        <div
+          data-testid="task-list-legacy-status"
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200"
+        >
+          <span>
+            Legacy-фильтр статуса «{legacyCreateStatus}». Новые задачи создаются через публичный
+            legacy status и материализуют колонку.
+          </span>
+          <button
+            type="button"
+            data-testid="task-list-legacy-status-reset"
+            onClick={() => {
+              updateTaskListQuery({ legacyStatus: "", columnId: "", page: 1 });
+            }}
+            className={secondaryButton}
+          >
+            Показать все колонки
+          </button>
+        </div>
+      )}
+
       {composerOpen ? (
         <section data-testid="task-list-create-panel" aria-label="Новая задача">
           <TitleComposer
-            status="todo"
+            status={createColumn?.status ?? legacyCreateStatus ?? "todo"}
+            columnTitle={
+              createColumn?.title ??
+              (legacyCreateStatus === null ? undefined : `Legacy ${legacyCreateStatus}`)
+            }
             projectId={query.projectId}
-            disabled={query.projectId.length === 0}
+            disabled={
+              query.projectId.length === 0 || (columns.length === 0 && legacyCreateStatus === null)
+            }
             onCreate={createTask}
             onCancel={() => {
               setComposerOpen(false);
@@ -277,6 +385,7 @@ export function TaskListView({
 
       <TaskFilters
         projects={projects}
+        columns={query.projectId.length === 0 ? [] : columns}
         values={filterValues}
         onChange={(patch) => {
           updateTaskListQuery({ ...patch, page: 1 });
@@ -329,6 +438,10 @@ export function TaskListView({
         <ErrorState message={taskError} onRetry={bumpTaskListRevision} />
       )}
 
+      {columnsError === null ? null : (
+        <ErrorState message={`Колонки: ${columnsError}`} onRetry={bumpTaskListRevision} />
+      )}
+
       {tasksLoading && taskPage === null ? <LoadingState label="Загрузка задач…" /> : null}
 
       {!tasksLoading && taskError === null && tasks.length === 0 ? (
@@ -346,6 +459,7 @@ export function TaskListView({
         <TaskTable
           tasks={tasks}
           projects={projects}
+          columns={query.projectId.length === 0 ? undefined : columns}
           selectedTaskId={query.taskId}
           onSelect={(task) => {
             updateTaskListQuery({ taskId: task.id });
@@ -390,8 +504,8 @@ export function TaskListView({
       </nav>
 
       <p className="text-xs text-muted-foreground">
-        Статусы: backlog, todo, in_progress, done. Все изменения выполняются публичными командами, а
-        список перечитывается после каждой команды.
+        Колонки загружаются из проекта; фильтр колонки сохраняется в адресе. Все изменения
+        выполняются публичными командами, а список перечитывается после каждой команды.
       </p>
 
       <span className="sr-only" data-testid="task-list-projects-loading">

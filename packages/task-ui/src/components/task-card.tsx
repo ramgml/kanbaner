@@ -7,6 +7,8 @@ import { formatDueAt, taskPriorityLabel, taskStatusLabel } from "../format.ts";
 export interface TaskCardProps {
   readonly task: Task;
   readonly project: Project | null;
+  /** Фактическая колонка задачи; без неё показывается legacy-статус. */
+  readonly columnTitle?: string | null | undefined;
   readonly selected?: boolean;
   readonly onSelect: (task: Task) => void;
 }
@@ -21,7 +23,13 @@ function MetaRow({ label, children }: { readonly label: string; readonly childre
 }
 
 /** Мобильная карточка задачи. */
-export function TaskCard({ task, project, selected = false, onSelect }: TaskCardProps) {
+export function TaskCard({
+  task,
+  project,
+  columnTitle,
+  selected = false,
+  onSelect,
+}: TaskCardProps) {
   return (
     <article
       data-testid={`task-card-${task.id}`}
@@ -43,7 +51,9 @@ export function TaskCard({ task, project, selected = false, onSelect }: TaskCard
 
       <dl className="mt-2 flex flex-col gap-1">
         <MetaRow label="Проект">{project?.title ?? "—"}</MetaRow>
-        <MetaRow label="Статус">{taskStatusLabel(task.status)}</MetaRow>
+        <MetaRow label={columnTitle === undefined || columnTitle === null ? "Статус" : "Колонка"}>
+          {columnTitle ?? taskStatusLabel(task.status)}
+        </MetaRow>
         <MetaRow label="Приоритет">{taskPriorityLabel(task.priority)}</MetaRow>
         <MetaRow label="Срок">{formatDueAt(task.dueAt)}</MetaRow>
       </dl>

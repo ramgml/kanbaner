@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
@@ -54,6 +54,59 @@ function makeTask(
 interface FakeBoard {
   tasks: Task[];
   projects: Project[];
+  columns?: TaskColumn[];
+}
+
+const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+function columnIdFor(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function statusOfColumnId(columnId: string): TaskStatus {
+  if (columnId.endsWith("-done")) {
+    return "done";
+  }
+
+  if (columnId.endsWith("-in-progress")) {
+    return "in_progress";
+  }
+
+  if (columnId.endsWith("-todo")) {
+    return "todo";
+  }
+
+  return "backlog";
+}
+
+function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
+  const own = board.columns?.filter((column) => column.projectId === projectId) ?? [];
+
+  if (own.length > 0) {
+    return own;
+  }
+
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+
+  return statuses.map((status, position) => ({
+    id: columnIdFor(projectId, status),
+    projectId,
+    title: STATUS_LABELS[status],
+    status,
+    position,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  }));
+}
+
+function statusOfTask(task: Task): TaskStatus {
+  return task.columnId === undefined ? task.status : statusOfColumnId(task.columnId);
 }
 
 type Handler = (input: JsonValue) => UiOperationResult | Promise<UiOperationResult>;
@@ -97,7 +150,13 @@ function deferred<T>(): Deferred<T> {
 }
 
 function statusOf(input: JsonValue): string | null {
-  const value = inputOf(input).status;
+  const values = inputOf(input);
+
+  if (typeof values.columnId === "string") {
+    return statusOfColumnId(values.columnId);
+  }
+
+  const value = values.status;
 
   return typeof value === "string" ? value : null;
 }
@@ -118,8 +177,12 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
   const filters = inputOf(input);
   let items = [...board.tasks];
 
-  if (typeof filters.status === "string") {
-    items = items.filter((task) => task.status === filters.status);
+  if (typeof filters.columnId === "string") {
+    const columnId = filters.columnId;
+
+    items = items.filter(
+      (task) => (task.columnId ?? columnIdFor(task.projectId, statusOfTask(task))) === columnId,
+    );
   }
 
   if (typeof filters.projectId === "string") {
@@ -171,14 +234,27 @@ function applyMove(
     return { ok: false, code: "VERSION_CONFLICT" };
   }
 
-  const status = values.status as TaskStatus;
+  const status =
+    typeof values.columnId === "string"
+      ? statusOfColumnId(values.columnId)
+      : (values.status as TaskStatus);
+  const columnId =
+    typeof values.columnId === "string" ? values.columnId : columnIdFor(task.projectId, status);
   const position = Number(values.position);
   const projectTasks = board.tasks.filter((candidate) => candidate.projectId === task.projectId);
   const target = projectTasks
-    .filter((candidate) => candidate.status === status && candidate.id !== id)
+    .filter(
+      (candidate) =>
+        (candidate.columnId ?? columnIdFor(candidate.projectId, statusOfTask(candidate))) ===
+          columnId && candidate.id !== id,
+    )
     .sort(compareTasks);
   const source = projectTasks
-    .filter((candidate) => candidate.status === task.status && candidate.id !== id)
+    .filter(
+      (candidate) =>
+        (candidate.columnId ?? columnIdFor(candidate.projectId, statusOfTask(candidate))) ===
+          (task.columnId ?? columnIdFor(task.projectId, task.status)) && candidate.id !== id,
+    )
     .sort(compareTasks);
 
   target.splice(Math.min(position, target.length), 0, task);
@@ -188,6 +264,7 @@ function applyMove(
   target.forEach((candidate, index) => {
     updated.set(candidate.id, {
       ...candidate,
+      columnId,
       status,
       position: index,
       version: candidate.id === id ? candidate.version + 1 : candidate.version,
@@ -196,7 +273,7 @@ function applyMove(
     } as Task);
   });
 
-  if (task.status !== status) {
+  if (statusOfTask(task) !== status) {
     source.forEach((candidate, index) => {
       updated.set(candidate.id, { ...candidate, position: index } as Task);
     });
@@ -223,6 +300,12 @@ function createOperations(
       return found === undefined ? fail("NOT_FOUND") : ok({ project: found });
     },
     "kanbaner.tasks.task.list": (input) => listTasks(board, input),
+    "kanbaner.tasks.column.list": (input) => {
+      const projectId = String(inputOf(input).projectId);
+      const columns = boardColumns(board, projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    },
     "kanbaner.tasks.task.get": (input) => {
       const found = getTask(board, String(inputOf(input).id));
 
@@ -243,7 +326,23 @@ function createOperations(
     "kanbaner.tasks.task.complete": (input) => {
       const task = getTask(board, String(inputOf(input).id));
 
-      return task === undefined ? fail("NOT_FOUND") : ok({ task });
+      if (task === undefined) {
+        return fail("NOT_FOUND");
+      }
+
+      board.tasks = board.tasks.map((candidate) =>
+        candidate.id === task.id
+          ? ({
+              ...candidate,
+              columnId: columnIdFor(candidate.projectId, "done"),
+              status: "done",
+              completedAt: TIMESTAMP,
+              version: candidate.version + 1,
+            } as Task)
+          : candidate,
+      );
+
+      return ok({ task: getTask(board, task.id) ?? task });
     },
   };
 
@@ -515,7 +614,8 @@ describe("KanbanView", () => {
 
     const pageCalls = operations.calls.filter(
       (call) =>
-        call.operationId === "kanbaner.tasks.task.list" && inputOf(call.input).status === "backlog",
+        call.operationId === "kanbaner.tasks.task.list" &&
+        inputOf(call.input).columnId === "column-project-1-legacy-backlog",
     );
 
     expect(pageCalls.some((call) => inputOf(call.input).offset === 10)).toBe(true);

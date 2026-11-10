@@ -1,4 +1,4 @@
-import type { Project, Task } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
 import { formatDueAt, taskPriorityLabel, taskStatusLabel } from "../format.ts";
 import { TaskCard } from "./task-card.tsx";
@@ -6,6 +6,8 @@ import { TaskCard } from "./task-card.tsx";
 export interface TaskTableProps {
   readonly tasks: readonly Task[];
   readonly projects: readonly Project[];
+  /** Фактические колонки; при наличии заменяют legacy-статус в ячейке. */
+  readonly columns?: readonly TaskColumn[] | undefined;
   readonly selectedTaskId?: string | null;
   readonly onSelect: (task: Task) => void;
   readonly className?: string;
@@ -13,6 +15,16 @@ export interface TaskTableProps {
 
 function projectTitle(projects: readonly Project[], projectId: string): string {
   return projects.find((project) => project.id === projectId)?.title ?? "—";
+}
+
+function columnTitle(columns: readonly TaskColumn[] | undefined, task: Task): string | null {
+  if (columns === undefined) {
+    return null;
+  }
+
+  const byId = columns.find((column) => column.id === task.columnId);
+
+  return (byId ?? columns.find((column) => column.status === task.status))?.title ?? null;
 }
 
 function Tags({ tags }: { readonly tags: readonly string[] }) {
@@ -41,6 +53,7 @@ function Tags({ tags }: { readonly tags: readonly string[] }) {
 export function TaskTable({
   tasks,
   projects,
+  columns,
   selectedTaskId = null,
   onSelect,
   className = "",
@@ -59,7 +72,7 @@ export function TaskTable({
                 Проект
               </th>
               <th scope="col" className="px-3 py-2 font-medium">
-                Статус
+                Колонка
               </th>
               <th scope="col" className="px-3 py-2 font-medium">
                 Приоритет
@@ -96,7 +109,9 @@ export function TaskTable({
                     </button>
                   </th>
                   <td className="px-3 py-2">{projectTitle(projects, task.projectId)}</td>
-                  <td className="px-3 py-2">{taskStatusLabel(task.status)}</td>
+                  <td className="px-3 py-2">
+                    {columnTitle(columns, task) ?? taskStatusLabel(task.status)}
+                  </td>
                   <td className="px-3 py-2">{taskPriorityLabel(task.priority)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{formatDueAt(task.dueAt)}</td>
                   <td className="px-3 py-2">
@@ -119,6 +134,7 @@ export function TaskTable({
             <TaskCard
               task={task}
               project={projects.find((project) => project.id === task.projectId) ?? null}
+              columnTitle={columnTitle(columns, task)}
               selected={task.id === selectedTaskId}
               onSelect={onSelect}
             />

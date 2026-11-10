@@ -2,8 +2,8 @@
 
 import type { PointerEvent as ReactPointerEvent } from "react";
 
-import type { Task, TaskPriority, TaskStatus } from "@kanbaner/plugin-tasks/contract";
-import { taskPriorityLabel, taskStatusLabel, taskStatuses } from "@kanbaner/task-ui";
+import type { Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
+import { taskPriorityLabel } from "@kanbaner/task-ui";
 
 import { describeDue, type DueTone } from "./due.ts";
 
@@ -53,6 +53,9 @@ export interface KanbanCardProps {
   readonly task: Task;
   readonly index: number;
   readonly columnSize: number;
+  /** Фактические колонки проекта; текущая исключается из меню. */
+  readonly columns: readonly TaskColumn[];
+  readonly currentColumnId: string;
   /** `null` — счётчик неизвестен из-за ошибки запроса, а не реальный ноль. */
   readonly subtaskCount: number | null;
   readonly selected: boolean;
@@ -60,7 +63,7 @@ export interface KanbanCardProps {
   readonly conflict: boolean;
   readonly dragging: boolean;
   readonly onOpen: (task: Task) => void;
-  readonly onMoveTo: (task: Task, status: TaskStatus) => void;
+  readonly onMoveTo: (task: Task, columnId: string) => void;
   readonly onReorder: (task: Task, kind: KanbanReorderKind) => void;
   readonly onDragStart: (task: Task, event: ReactPointerEvent<HTMLElement>) => void;
 }
@@ -78,6 +81,8 @@ export function KanbanCard({
   task,
   index,
   columnSize,
+  columns,
+  currentColumnId,
   subtaskCount,
   selected,
   pending,
@@ -93,6 +98,7 @@ export function KanbanCard({
   const dueStyle = DUE_STYLES[due.tone];
   const visibleTags = task.tags.slice(0, 2);
   const extraTags = task.tags.length - visibleTags.length;
+  const moveTargets = columns.filter((column) => column.id !== currentColumnId);
 
   return (
     <article
@@ -133,22 +139,21 @@ export function KanbanCard({
             aria-label={`Перемещение задачи ${task.title}`}
             className="mt-1 flex flex-col gap-1 rounded-md border border-border bg-popover p-1 shadow-md"
           >
-            {taskStatuses()
-              .filter((status) => status !== task.status)
-              .map((status) => (
-                <button
-                  key={status}
-                  type="button"
-                  disabled={pending}
-                  onClick={() => {
-                    onMoveTo(task, status);
-                  }}
-                  className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-                  style={actionButtonStyle}
-                >
-                  Переместить в {taskStatusLabel(status)}
-                </button>
-              ))}
+            {moveTargets.map((column) => (
+              <button
+                key={column.id}
+                type="button"
+                data-testid={`kanban-move-${task.id}-${column.id}`}
+                disabled={pending}
+                onClick={() => {
+                  onMoveTo(task, column.id);
+                }}
+                className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+                style={actionButtonStyle}
+              >
+                Переместить в {column.title}
+              </button>
+            ))}
 
             <button
               type="button"

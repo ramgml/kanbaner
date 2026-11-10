@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-import type { TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
 import { ModalDialog, ProjectForm, useMediaQuery, type ProjectFormValues } from "@kanbaner/task-ui";
 
 import { KANBAN_ROUTE } from "../metadata.ts";
@@ -21,7 +21,8 @@ export interface KanbanCreatePanelProps {
   /** Увеличивается при каждом открытии: форма начинает с новых значений. */
   readonly session: number;
   readonly projectId: string;
-  readonly status: TaskStatus;
+  /** Фактическая колонка по умолчанию; `null` — колонок ещё нет. */
+  readonly column: TaskColumn | null;
   readonly projectValues: ProjectFormValues;
   readonly onProjectValuesChange: (values: ProjectFormValues) => void;
   /** Draft названия переживает размонтирование composer-а при смене layout. */
@@ -39,15 +40,15 @@ export interface KanbanCreatePanelProps {
  * Панель создания проекта или карточки на доске.
  *
  * Создание карточки — короткий composer с одним названием: проект уже
- * определяется доской, статус — колонкой. Полная `TaskForm` используется
- * только для редактирования открытой карточки.
+ * определяется доской, колонка — фактическим заголовком. Полная `TaskForm`
+ * используется только для редактирования открытой карточки.
  */
 export function KanbanCreatePanel({
   pathname,
   mode,
   session,
   projectId,
-  status,
+  column,
   projectValues,
   onProjectValuesChange,
   taskDraftTitle,
@@ -100,10 +101,19 @@ export function KanbanCreatePanel({
         onSubmit={onCreateProject}
         onCancel={onCancel}
       />
+    ) : column === null ? (
+      <div
+        data-testid="kanban-create-no-column"
+        role="alert"
+        className="rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+      >
+        В проекте нет доступных колонок. Добавьте колонку и повторите создание.
+      </div>
     ) : (
       <TitleComposer
         key={`task-${String(session)}`}
-        status={status}
+        status={column.status}
+        columnTitle={column.title}
         projectId={projectId}
         onCreate={onCreateTask}
         onCancel={onCancel}

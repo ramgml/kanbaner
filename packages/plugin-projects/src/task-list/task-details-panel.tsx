@@ -9,13 +9,13 @@ import {
   type Project,
   type ProjectGetOutput,
   type Task,
+  type TaskColumn,
   type TaskCompleteInput,
   type TaskDeleteInput,
   type TaskGetOutput,
   type TaskListOutput,
   type TaskMoveInput,
   type TaskUpdateInput,
-  type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
 import {
   ErrorState,
@@ -35,6 +35,8 @@ import {
   invokeJson,
   isVersionConflict,
 } from "../ui/operations.ts";
+import { effectiveColumnId } from "../ui/board-state.ts";
+import { fetchProjectColumns } from "../ui/load-columns.ts";
 import {
   bumpTaskListRevision,
   serializeTaskListQuery,
@@ -124,6 +126,7 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
   );
   const [task, setTask] = useState<Task | null>(null);
   const [project, setProject] = useState<Project | null>(null);
+  const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
   const [parentTask, setParentTask] = useState<Task | null>(null);
   const [rootTasks, setRootTasks] = useState<readonly Task[]>([]);
   const [loading, setLoading] = useState(false);
@@ -164,6 +167,13 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
           TASKS_QUERY_IDS.projectGet,
           { id: taskOutput.task.projectId },
         );
+        let projectColumns: readonly TaskColumn[] = [];
+
+        try {
+          projectColumns = await fetchProjectColumns(invoke, taskOutput.task.projectId);
+        } catch {
+          // Детали доступны и без колонок: legacy-статус остаётся fallback.
+        }
         const parentOutput =
           taskOutput.task.parentTaskId === null
             ? null
@@ -174,6 +184,7 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
         if (!cancelled) {
           setTask(taskOutput.task);
           setProject(projectOutput.project);
+          setColumns(projectColumns);
           setParentTask(parentOutput?.task ?? null);
           setError(null);
         }
@@ -404,7 +415,7 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
     });
   };
 
-  const move = (status: TaskStatus): void => {
+  const move = (columnId: string): void => {
     if (task === null) {
       return;
     }
@@ -412,7 +423,7 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
     const input: TaskMoveInput = {
       id: task.id,
       expectedVersion: task.version,
-      status,
+      columnId,
       position: 0,
     };
 
@@ -475,9 +486,12 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
       </div>
     ) : (
       <TaskDetails
+        key={task.id}
         task={task}
         project={project}
         parentTask={parentTask}
+        columns={columns.length === 0 ? undefined : columns}
+        currentColumnId={effectiveColumnId(task, columns)}
         busy={busy}
         error={error ?? conflict}
         onClose={close}
@@ -490,7 +504,7 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
           }
         }}
         onComplete={complete}
-        onMove={move}
+        onMoveToColumn={move}
         onDelete={remove}
       />
     );

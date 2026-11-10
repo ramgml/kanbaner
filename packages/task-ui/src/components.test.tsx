@@ -78,7 +78,7 @@ describe("TaskTable и TaskCard", () => {
 
     expect(table).toHaveTextContent("Название");
     expect(table).toHaveTextContent("Проект");
-    expect(table).toHaveTextContent("Статус");
+    expect(table).toHaveTextContent("Колонка");
     expect(table).toHaveTextContent("Приоритет");
     expect(table).toHaveTextContent("Срок");
     expect(table).toHaveTextContent("Теги");
@@ -154,7 +154,7 @@ describe("TaskFilters", () => {
     fireEvent.change(screen.getByLabelText("Срок с"), { target: { value: "2026-02-01" } });
     fireEvent.change(screen.getByLabelText("Срок по"), { target: { value: "2026-02-28" } });
 
-    expect(onChange).toHaveBeenCalledWith({ projectId: "project-1" });
+    expect(onChange).toHaveBeenCalledWith({ projectId: "project-1", columnId: "", status: "" });
     expect(onChange).toHaveBeenCalledWith({ status: "in_progress" });
     expect(onChange).toHaveBeenCalledWith({ priority: "high" });
     expect(onChange).toHaveBeenCalledWith({ tag: " Release " });

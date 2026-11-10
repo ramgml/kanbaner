@@ -8,6 +8,7 @@ import {
   normalizeTags,
   type Project,
   type Task,
+  type TaskColumn,
   type TaskStatus,
 } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
@@ -59,6 +60,59 @@ function makeTask(
 interface FakeBoard {
   tasks: Task[];
   projects: Project[];
+  columns?: TaskColumn[];
+}
+
+const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  backlog: "Бэклог",
+  todo: "К выполнению",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+function columnIdFor(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function statusOfColumnId(columnId: string): TaskStatus {
+  if (columnId.endsWith("-done")) {
+    return "done";
+  }
+
+  if (columnId.endsWith("-in-progress")) {
+    return "in_progress";
+  }
+
+  if (columnId.endsWith("-todo")) {
+    return "todo";
+  }
+
+  return "backlog";
+}
+
+function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
+  const own = board.columns?.filter((column) => column.projectId === projectId) ?? [];
+
+  if (own.length > 0) {
+    return own;
+  }
+
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+
+  return statuses.map((status, position) => ({
+    id: columnIdFor(projectId, status),
+    projectId,
+    title: STATUS_LABELS[status],
+    status,
+    position,
+    version: 1,
+    createdAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  }));
+}
+
+function statusOfTask(task: Task): TaskStatus {
+  return task.columnId === undefined ? task.status : statusOfColumnId(task.columnId);
 }
 
 interface FakeOperations {
@@ -95,8 +149,12 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
   const filters = inputOf(input);
   let items = [...board.tasks];
 
-  if (typeof filters.status === "string") {
-    items = items.filter((task) => task.status === filters.status);
+  if (typeof filters.columnId === "string") {
+    const columnId = filters.columnId;
+
+    items = items.filter(
+      (task) => (task.columnId ?? columnIdFor(task.projectId, statusOfTask(task))) === columnId,
+    );
   }
 
   if (typeof filters.projectId === "string") {
@@ -136,6 +194,12 @@ function createOperations(
       return found === undefined ? fail("NOT_FOUND") : ok({ project: found });
     },
     "kanbaner.tasks.task.list": (input) => listTasks(board, input),
+    "kanbaner.tasks.column.list": (input) => {
+      const projectId = String(inputOf(input).projectId);
+      const columns = boardColumns(board, projectId);
+
+      return ok({ items: [...columns], total: columns.length, nextOffset: null });
+    },
     "kanbaner.tasks.task.get": (input) => {
       const found = getTask(board, String(inputOf(input).id));
 
@@ -144,13 +208,18 @@ function createOperations(
     "kanbaner.tasks.task.create": (input) => {
       const values = inputOf(input);
       created += 1;
+      const requestedColumnId = typeof values.columnId === "string" ? values.columnId : undefined;
       const task = makeTask(`created-${String(created)}`, {
         projectId: String(values.projectId),
+        ...(requestedColumnId === undefined ? {} : { columnId: requestedColumnId }),
         parentTaskId: typeof values.parentTaskId === "string" ? values.parentTaskId : null,
         title: String(values.title),
         descriptionMarkdown:
           typeof values.descriptionMarkdown === "string" ? values.descriptionMarkdown : "",
-        status: (values.status as TaskStatus | undefined) ?? "todo",
+        status:
+          requestedColumnId === undefined
+            ? ((values.status as TaskStatus | undefined) ?? "todo")
+            : statusOfColumnId(requestedColumnId),
         priority: (values.priority as Task["priority"] | undefined) ?? "medium",
         position: board.tasks.length,
       });
@@ -206,10 +275,14 @@ function createOperations(
         return fail("VERSION_CONFLICT");
       }
 
-      const status = values.status as TaskStatus;
+      const status =
+        typeof values.columnId === "string"
+          ? statusOfColumnId(values.columnId)
+          : (values.status as TaskStatus);
       const updated: Task = {
         ...task,
         status,
+        ...(typeof values.columnId === "string" ? { columnId: values.columnId } : {}),
         completedAt: status === "done" ? (task.completedAt ?? TIMESTAMP) : null,
         version: task.version + 1,
         updatedAt: TIMESTAMP,
@@ -230,6 +303,7 @@ function createOperations(
 
       const updated: Task = {
         ...task,
+        columnId: columnIdFor(task.projectId, "done"),
         status: "done",
         completedAt: TIMESTAMP,
         version: task.version + 1,
@@ -405,11 +479,11 @@ describe("TaskOverlay Trello-модал", () => {
     // Быстрый статус: переключатель исчезает, выбранное значение остаётся.
     const move = screen.getByTestId("kanban-modal-move-field");
 
-    fireEvent.change(move, { target: { value: "in_progress" } });
+    fireEvent.change(move, { target: { value: "column-project-1-legacy-in_progress" } });
     expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
-    expect(move).toHaveValue("in_progress");
+    expect(move).toHaveValue("column-project-1-legacy-in_progress");
 
-    fireEvent.change(move, { target: { value: "todo" } });
+    fireEvent.change(move, { target: { value: "column-project-1-legacy-todo" } });
     await waitFor(() => {
       expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
     });
@@ -566,9 +640,9 @@ describe("TaskOverlay Trello-модал", () => {
     });
     fireEvent.change(
       within(screen.getByTestId("kanban-subtask-form")).getByRole("combobox", {
-        name: "Статус подзадачи",
+        name: "Колонка подзадачи",
       }),
-      { target: { value: "in_progress" } },
+      { target: { value: "column-project-1-legacy-in_progress" } },
     );
     fireEvent.click(screen.getByTestId("kanban-subtask-submit"));
 
@@ -581,7 +655,7 @@ describe("TaskOverlay Trello-модал", () => {
         projectId: "project-1",
         parentTaskId: "parent",
         title: "Новая подзадача",
-        status: "in_progress",
+        columnId: "column-project-1-legacy-in_progress",
       });
     });
 
@@ -864,7 +938,7 @@ describe("TaskOverlay Trello-модал", () => {
       target: { value: "alpha, beta" },
     });
     fireEvent.change(screen.getByTestId("kanban-modal-move-field"), {
-      target: { value: "in_progress" },
+      target: { value: "column-project-1-legacy-in_progress" },
     });
     fireEvent.click(screen.getByTestId("kanban-subtask-create"));
     fireEvent.change(screen.getByTestId("kanban-subtask-input"), {
@@ -893,7 +967,9 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
     expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("alpha, beta");
-    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue("in_progress");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue(
+      "column-project-1-legacy-in_progress",
+    );
     expect(screen.getByTestId("kanban-subtask-input")).toHaveValue("Черновик подзадачи");
     expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-due"));
 
@@ -1271,7 +1347,7 @@ describe("TaskOverlay Trello-модал", () => {
       target: { value: "Alpha, beta" },
     });
     fireEvent.change(screen.getByTestId("kanban-modal-move-field"), {
-      target: { value: "in_progress" },
+      target: { value: "column-project-1-legacy-in_progress" },
     });
 
     // Внешне изменился только срок; статус и теги на сервере не менялись.
@@ -1298,14 +1374,18 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
     expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2031-01-01");
     expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("Alpha, beta");
-    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue("in_progress");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue(
+      "column-project-1-legacy-in_progress",
+    );
 
     // Неконфликтные dirty-поля остались, поэтому закрытие требует confirm.
     fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
 
     expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
     expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("Alpha, beta");
-    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue("in_progress");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue(
+      "column-project-1-legacy-in_progress",
+    );
 
     fireEvent.click(screen.getByTestId("kanban-draft-discard"));
 

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task } from "@kanbaner/plugin-tasks/contract";
+import type { Project, Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { ProjectSidebar } from "../ui/project-sidebar.tsx";
@@ -79,9 +79,34 @@ function createOperations(handlers: Record<string, Handler>): FakeOperations {
 }
 
 function baseHandlers(): Record<string, Handler> {
+  const columns: readonly TaskColumn[] = [
+    {
+      id: "column-project-1-legacy-todo",
+      projectId: "project-1",
+      title: "К выполнению",
+      status: "todo",
+      position: 0,
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "column-project-1-legacy-done",
+      projectId: "project-1",
+      title: "Готово",
+      status: "done",
+      position: 1,
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
   return {
     "kanbaner.tasks.project.list": () => ok({ items: [project], total: 1, nextOffset: null }),
     "kanbaner.tasks.task.list": () => ok({ items: [task], total: 1, nextOffset: null }),
+    "kanbaner.tasks.column.list": () =>
+      ok({ items: [...columns], total: columns.length, nextOffset: null }),
     "kanbaner.tasks.project.get": () => ok({ project }),
     "kanbaner.tasks.task.get": () => ok({ task }),
   };
@@ -193,6 +218,10 @@ describe("TaskListView", () => {
       updateTaskListQuery({ projectId: "project-1" });
     });
 
+    await waitFor(() => {
+      expect(screen.getByTestId("create-task-button")).toBeEnabled();
+    });
+
     fireEvent.click(screen.getByTestId("create-task-button"));
     fireEvent.change(screen.getByTestId("task-list-create-input"), {
       target: { value: "Новая задача" },
@@ -208,8 +237,8 @@ describe("TaskListView", () => {
     );
     expect(createCall?.input).toMatchObject({
       projectId: "project-1",
+      columnId: "column-project-1-legacy-todo",
       title: "Новая задача",
-      status: "todo",
       priority: "medium",
     });
 

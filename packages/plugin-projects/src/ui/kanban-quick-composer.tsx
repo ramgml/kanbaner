@@ -2,18 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { TaskStatus } from "@kanbaner/plugin-tasks/contract";
-import { taskStatusLabel } from "@kanbaner/task-ui";
+import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
 import { TitleComposer, type TitleCreateResult } from "./title-composer.tsx";
 
 export type QuickCreateResult = TitleCreateResult;
 
 export interface KanbanQuickComposerProps {
-  readonly status: TaskStatus;
+  readonly column: TaskColumn;
+  /** Безопасный суффикс test ID фактической колонки. */
+  readonly slug: string;
   readonly projectId: string;
   readonly disabled: boolean;
-  readonly onCreate: (title: string) => Promise<QuickCreateResult>;
+  readonly onCreate: (columnId: string, title: string) => Promise<QuickCreateResult>;
   /** Открытие/закрытие composer: колонка скрывает дублирующий путь в форму. */
   readonly onOpenChange?: ((open: boolean) => void) | undefined;
   /** Увеличивается после создания из другой формы: очищает заголовок. */
@@ -23,12 +24,13 @@ export interface KanbanQuickComposerProps {
 /**
  * Trello-like быстрый composer в начале колонки.
  *
- * Создание требует только название. Проект берётся из текущей доски, статус —
- * из колонки, позицию определяет доменный append. Полная форма доступна
- * только для редактирования уже открытой карточки.
+ * Создание требует только название. Проект берётся из текущей доски, колонка —
+ * из фактического заголовка, позицию определяет доменный append. Полная форма
+ * доступна только для редактирования уже открытой карточки.
  */
 export function KanbanQuickComposer({
-  status,
+  column,
+  slug,
   projectId,
   disabled,
   onCreate,
@@ -63,14 +65,14 @@ export function KanbanQuickComposer({
     onOpenChange?.(false);
   };
 
-  const label = taskStatusLabel(status);
+  const label = column.title;
 
   if (!open) {
     return (
       <button
         ref={openerRef}
         type="button"
-        data-testid={`kanban-quick-add-${status}`}
+        data-testid={`kanban-quick-add-${slug}`}
         aria-label={`Добавить карточку в колонку «${label}»`}
         title={disabled ? "Сначала создайте проект" : `Добавить карточку в колонку «${label}»`}
         disabled={disabled}
@@ -87,13 +89,14 @@ export function KanbanQuickComposer({
 
   return (
     <TitleComposer
-      status={status}
+      status={column.status}
+      columnTitle={column.title}
       projectId={projectId}
       disabled={disabled}
-      onCreate={onCreate}
+      onCreate={(title) => onCreate(column.id, title)}
       onCancel={closeComposer}
       keepOpen
-      testIdPrefix={`kanban-quick-add-${status}`}
+      testIdPrefix={`kanban-quick-add-${slug}`}
       resetToken={resetToken}
     />
   );
