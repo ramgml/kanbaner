@@ -1,7 +1,7 @@
 ---
 id: KAN-025
 title: Настройки доски и удобство карточек
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-025
