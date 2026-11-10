@@ -934,6 +934,7 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
       const afterColumns = await snapshotProjectColumns(transaction, normalized.projectId);
       const neighbors = shiftedNeighbors(before, after, task.id);
       const materialized = createdColumns(beforeColumns, afterColumns);
+      const shiftedColumnsByMaterialization = shiftedColumns(beforeColumns, afterColumns, null);
       const eventId = newEventId();
 
       return {
@@ -941,6 +942,9 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
         effects: effects({
           events: [
             ...materialized.map((column) => columnCreatedEvent(column, newEventId())),
+            ...shiftedColumnsByMaterialization.map((column) =>
+              columnUpdatedEvent(column, ["position"]),
+            ),
             taskCreatedEvent(task, eventId),
             ...neighbors.map(neighborUpdatedEvent),
           ],
@@ -1047,6 +1051,7 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
       const afterColumns = await snapshotProjectColumns(transaction, current.projectId);
       const neighbors = shiftedNeighbors(before, after, task.id);
       const materialized = createdColumns(beforeColumns, afterColumns);
+      const shiftedColumnsByMaterialization = shiftedColumns(beforeColumns, afterColumns, null);
       const eventId = newEventId();
 
       return {
@@ -1054,6 +1059,9 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
         effects: effects({
           events: [
             ...materialized.map((column) => columnCreatedEvent(column, newEventId())),
+            ...shiftedColumnsByMaterialization.map((column) =>
+              columnUpdatedEvent(column, ["position"]),
+            ),
             taskMovedEvent(task, { status: current.status, columnId: current.columnId }, eventId),
             ...neighbors.map(neighborUpdatedEvent),
           ],
@@ -1417,11 +1425,11 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     },
   });
 
-  // Материализация legacy-колонок awaited до завершения активации: после неё
-  // `column.list`/`task.list` не должны видеть пустой набор колонок, а
-  // `columnId` существующего проекта не должен давать NOT_FOUND. Каждый проект
-  // обрабатывается в отдельной транзакции; сбой одного проекта логируется и не
-  // отменяет остальные.
+  // Материализация legacy-колонок awaited до завершения активации: query-пути
+  // read-only и не делают read-repair. Каждый проект обрабатывается в
+  // отдельной транзакции; сбой одного проекта логируется и не отменяет
+  // остальные. Внутренний backfill не публикует доменные события: подписчики
+  // восстанавливаются полной переиндексацией и чтением list после рестарта.
   await serialize(async () => {
     let offset = 0;
 

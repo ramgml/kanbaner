@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 
 import type { JsonValue, UtcTimestamp } from "@kanbaner/plugin-sdk";
 
-import { COLUMN_COLLECTION, PLUGIN_ID, PROJECT_COLLECTION, TASK_COLLECTION } from "./constants.ts";
+import {
+  COLUMN_COLLECTION,
+  MAX_POSITION,
+  PLUGIN_ID,
+  PROJECT_COLLECTION,
+  TASK_COLLECTION,
+} from "./constants.ts";
 import {
   deleteEventVersion,
   type Project,
@@ -1938,6 +1944,60 @@ export function createTasksStoreConformanceSuite(
       },
     },
     {
+      name: "query: column.list и task.list не выполняют read-repair",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const legacy = await createLegacyProject(store, context);
+          const countDocuments = async (collection: string): Promise<number> => {
+            const documents = await store.withTransaction(async (transaction) =>
+              transaction.documents.list(PLUGIN_ID, collection),
+            );
+
+            return documents.length;
+          };
+          const columnsBefore = await countDocuments(COLUMN_COLLECTION);
+          const tasksBefore = await countDocuments(TASK_COLLECTION);
+
+          const columns = await store.listColumns({
+            projectId: legacy.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(columns.total, 0);
+          assert.deepEqual(columns.items, []);
+
+          await rejectsCode(
+            store.listTasks({
+              projectId: legacy.id,
+              columnId: `column-${legacy.id}-legacy-todo`,
+              limit: 200,
+              offset: 0,
+            }),
+            "NOT_FOUND",
+            "task.list по отсутствующей колонке",
+          );
+
+          const tasks = await store.listTasks({
+            projectId: legacy.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(tasks.total, 4);
+          assert.equal(
+            tasks.items.every((task) => task.columnId === undefined),
+            true,
+          );
+
+          // Ни один query не создал колонку и не изменил задачу.
+          assert.equal(await countDocuments(COLUMN_COLLECTION), columnsBefore);
+          assert.equal(await countDocuments(TASK_COLLECTION), tasksBefore);
+        });
+      },
+    },
+    {
       name: "column: create/update/move сохраняют порядок и повышают версии сдвинутых соседей",
       async run() {
         await withStore(async (store) => {
@@ -2282,6 +2342,72 @@ export function createTasksStoreConformanceSuite(
             ],
           );
           assert.equal(new Set(scope.map((task) => task.position)).size, scope.length);
+
+          // Переполнение MAX_POSITION отвергается доменной ошибкой до записи.
+          const overflowProject = await createProject(store, context, { title: "Overflow" });
+          const overflowTodo = `column-${overflowProject.id}-todo`;
+          const overflowTarget = `column-${overflowProject.id}-in-progress`;
+          const overflowTargetTask = await createTask(store, context, {
+            id: "task-overflow-target",
+            projectId: overflowProject.id,
+            columnId: overflowTarget,
+            title: "Max target",
+            createdAtOffset: 4,
+          });
+          const overflowSourceTask = await createTask(store, context, {
+            id: "task-overflow-source",
+            projectId: overflowProject.id,
+            title: "Max source",
+            createdAtOffset: 5,
+          });
+
+          await store.withTransaction(async (transaction) => {
+            const document = await transaction.documents.get(
+              PLUGIN_ID,
+              TASK_COLLECTION,
+              overflowTargetTask.id,
+            );
+
+            assert.notEqual(document, null);
+
+            if (document === null) {
+              return;
+            }
+
+            await transaction.documents.put({
+              pluginId: PLUGIN_ID,
+              collection: TASK_COLLECTION,
+              id: overflowTargetTask.id,
+              data: {
+                ...(document.data as Record<string, JsonValue>),
+                position: MAX_POSITION,
+                version: overflowTargetTask.version + 1,
+              },
+              indexedFields: {
+                projectId: overflowProject.id,
+                columnId: overflowTarget as JsonValue,
+                status: overflowTargetTask.status as JsonValue,
+                priority: overflowTargetTask.priority as JsonValue,
+                parentTaskId: overflowTargetTask.parentTaskId as JsonValue,
+              },
+              expectedVersion: document.version,
+            });
+          });
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: overflowTodo,
+              expectedVersion: 1,
+              targetColumnId: overflowTarget,
+              updatedAt: context.at(6),
+            }),
+            "INVALID_POSITION",
+            "переполнение MAX_POSITION при переносе задач",
+          );
+
+          const overflowSource = await store.getTask(overflowSourceTask.id);
+
+          assert.equal((overflowSource as Task).columnId, overflowTodo);
         });
       },
     },

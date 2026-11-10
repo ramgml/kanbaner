@@ -630,8 +630,9 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
   /**
    * Возвращает колонки проекта, материализуя исходные четыре для legacy-проекта
-   * без колонок. Используется мутациями и queries, которым нужна область
-   * позиции; полный backfill задач выполняет `backfillLegacyColumns`.
+   * без колонок. Используется только мутациями, которым нужна область позиции;
+   * query-пути read-only, а полный backfill задач выполняет
+   * `backfillLegacyColumns`/`backfillLegacyProject`.
    */
   async function ensureProjectColumns(project: Project): Promise<ColumnRecord[]> {
     const columns = await loadProjectColumns(project.id);
@@ -649,9 +650,10 @@ function createCore(dependencies: StoreDependencies): CoreStore {
    * Новый проект остаётся с тремя default-колонками. Если старый клиент
    * создаёт или перемещает задачу со статусом `backlog` (или другим
    * отсутствующим legacy-статусом), недостающая колонка создаётся в той же
-   * транзакции. Позиция детерминирована порядком legacy-статусов: Backlog
-   * встаёт в начало, остальные — перед первой колонкой с более поздним
-   * статусом. Сдвинутые соседи получают новую версию и `updatedAt`.
+   * транзакции. Позиция детерминирована порядком legacy-статусов: вставляется
+   * после всех колонок с более ранним legacy-статусом в текущем порядке
+   * (Backlog — в начало), затем колонки с позицией >= insertion сдвигаются на
+   * единицу и получают новую версию и `updatedAt`.
    */
   async function materializeLegacyStatusColumn(
     project: Project,
@@ -1176,12 +1178,12 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
     async listColumns(query) {
       const pagination = resolvePagination(query.limit, query.offset);
-      const projectRecord = await requireProjectRecord(query.projectId);
-      // Default-колонки читаются только через `column.list`: для legacy-проекта
-      // без документов колонок запрос материализует исходный набор, чтобы не
-      // отдавать пустой список и не создавать окно total = 0.
+      await requireProjectRecord(query.projectId);
+      // Query остаётся read-only: default/legacy-колонки материализует awaited
+      // startup backfill, а не чтение. Если backfill упал, возвращается
+      // фактическое состояние проекта.
       const columns = sortTaskColumns(
-        (await ensureProjectColumns(projectRecord.project)).map((record) => record.column),
+        (await loadProjectColumns(query.projectId)).map((record) => record.column),
       );
 
       return pageOf(columns, pagination.offset, pagination.limit);
@@ -1386,6 +1388,13 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       // разреженными и содержать дыры после прошлых операций.
       const appendPosition =
         targetTasks.reduce((max, entry) => Math.max(max, entry.task.position), -1) + 1;
+
+      // Диапазон позиции доменно ограничен MAX_POSITION: перенос не должен
+      // создавать позицию, которую отвергнет схема.
+      if (sourceTasks.length > 0) {
+        assertPosition(appendPosition + sourceTasks.length - 1);
+      }
+
       const movedTasks: Task[] = [];
 
       for (const source of sourceTasks) {
@@ -1534,7 +1543,9 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         }
 
         const projectRecord = await requireProjectRecord(column.column.projectId);
-        const columns = await ensureProjectColumns(projectRecord.project);
+        // Read-only: не материализуем колонки в query-пути. Legacy-задачи без
+        // `columnId` разрешаются по уже существующим документам колонок.
+        const columns = await loadProjectColumns(projectRecord.project.id);
         const available = columns.map((record) => record.column);
         const projectTasks = (await loadProjectTasks(projectRecord.project.id)).map(
           (record) => record.task,

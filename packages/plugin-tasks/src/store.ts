@@ -233,7 +233,7 @@ export interface LegacyColumnBackfillResult {
  * Вход создания задачи; ID и время подготовлены доменом.
  *
  * `position === undefined` означает атомарный append в конец области
- * `(projectId, status)`. Явная позиция означает транзакционный сдвиг соседей
+ * `(projectId, columnId)`. Явная позиция означает транзакционный сдвиг соседей
  * в той же области. Store вычисляет `completedAt` через
  * `resolveCompletedAt(status, null, createdAt)`: для `done` он равен
  * `createdAt`, иначе `null`.

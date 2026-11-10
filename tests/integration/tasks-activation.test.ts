@@ -541,6 +541,26 @@ describe("активация kanbaner.tasks", () => {
       );
       expect(backlogEvents[0]?.payload).toMatchObject({ status: "backlog", position: 0 });
 
+      // Сдвинутые default-колонки получают column.updated, но не считаются
+      // созданными: in_progress — open, done — Done.
+      const shiftedDefaultEvents = harness.events
+        .filter((event) => event.type === COLUMN_EVENT_TYPES.updated)
+        .map((event) => [
+          event.resource,
+          event.resourceVersion,
+          (event.payload as { readonly position?: unknown }).position,
+          (event.payload as { readonly changed?: unknown }).changed,
+        ])
+        .sort();
+
+      expect(shiftedDefaultEvents).toEqual(
+        [
+          [formatColumnRef(`column-${project.project.id}-todo`), 2, 1, ["position"]],
+          [formatColumnRef(`column-${project.project.id}-in-progress`), 2, 2, ["position"]],
+          [formatColumnRef(`column-${project.project.id}-done`), 2, 3, ["position"]],
+        ].sort(),
+      );
+
       // Повторная legacy-операция не создаёт второй Backlog.
       const repeat = expectOk<TaskMutationOutput>(
         await harness.command(TASKS_COMMAND_IDS.taskCreate, {
@@ -1781,11 +1801,9 @@ describe("активация kanbaner.tasks", () => {
     await first.close(false);
 
     const second = await startHarness({ dataDirectory, removeOnClose: false });
-    const columns = await waitFor(async () => {
-      const page = await listColumns(second, project.project.id);
-
-      return page.items.length === 4 ? page : null;
-    });
+    // Awaited startup backfill: колонки уже материализованы к возврату
+    // активации, без read-repair в query и без ожидания.
+    const columns = await listColumns(second, project.project.id);
 
     expect(
       columns.items.map((column) => [column.id, column.title, column.status, column.position]),

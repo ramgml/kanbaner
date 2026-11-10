@@ -70,7 +70,9 @@ KANBANER_PLUGIN_DIRS=packages pnpm dev
 - регистрирует типы ресурсов `project`, `task-column` и `task` с `resolve`;
 - материализует legacy-колонки и `task.columnId` для проектов без колонок:
   отдельной транзакцией на проект, awaited до завершения активации; сбой
-  одного проекта даёт `tasks.column_backfill_failed` и не отменяет остальные;
+  одного проекта даёт `tasks.column_backfill_failed` и не отменяет остальные.
+  Backfill не публикует события; полная переиндексация и list после рестарта
+  служат восстановлением;
 - запускает best-effort полную переиндексацию задач независимо от backfill;
 - создаёт собственную последовательную очередь, которая сериализует backfill,
   доменные транзакции, поисковые эффекты и переиндексацию, чтобы reindex не
@@ -188,12 +190,16 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   техническим backfill без изменения публичных `version`/`updatedAt`.
   Backfill идёт отдельной транзакцией на проект и awaited до завершения
   активации; сбой одного проекта логируется как
-  `tasks.column_backfill_failed` и не отменяет остальные. `column.list` и
-  `task.list` дополнительно материализуют колонки проекта перед чтением.
+  `tasks.column_backfill_failed` и не отменяет остальные. Backfill не публикует
+  доменные события: восстановление выполняется полной переиндексацией и
+  чтением list после рестарта. `column.list` и `task.list{columnId}` —
+  read-only: они не материализуют колонки и не делают read-repair; при упавшем
+  startup backfill запрос честно возвращает пустой список или `NOT_FOUND`.
 - Явный legacy `status` в `task.create`/`task.move`, для которого в проекте нет
   колонки, лениво создаёт её в той же транзакции: Backlog встаёт в позицию 0,
   остальные — по порядку legacy-статусов. После коммита публикуется
-  `column.created`, а `columnId`/`status` задачи синхронизируются. Три
+  `column.created`, сдвинутые существующие колонки получают `column.updated`
+  с `changed: ["position"]`, а `columnId`/`status` задачи синхронизируются. Три
   default-колонки нового проекта при этом сохраняются.
 - `column.create` вставляет колонку и повышает версии сдвинутых соседей;
   `position === undefined` означает append. `column.update` меняет только
@@ -206,8 +212,9 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   открытая и одна Done-колонка. Задачи переносятся в target в той же
   транзакции с обновлением `columnId`, `status`, `position`, `completedAt` и
   версий; позиция — `max(position) + 1` по target, а не `count`, поэтому
-  разреженные позиции не дают дублей. Результат содержит `movedTasks` и
-  сдвинутые `updatedColumns`.
+  разреженные позиции не дают дублей. Результат проверяется на `MAX_POSITION`
+  и при переполнении отвергается `INVALID_POSITION` без частичной записи.
+  Результат содержит `movedTasks` и сдвинутые `updatedColumns`.
 - `task.complete` выбирает первую Done-колонку по `position`; если её нет —
   `DONE_COLUMN_NOT_FOUND`.
 - `task.create`/`task.move` принимают `columnId` и/или legacy `status`.
@@ -336,9 +343,11 @@ update(v3) → delete event(v4). У каждой задачи и колонки 
 `task.updated` со своей новой `position` и `resourceVersion`; основная задача
 операции в этот список не попадает. Для `column.create/move/delete` так же
 сравниваются снимки колонок: сдвинутые колонки получают `column.updated`, а
-задачи, перенесённые при `column.delete`, — `task.moved`; для `task.delete`
-события удалённых задач публикуются отдельно от `task.updated` оставшихся
-соседей.
+задачи, перенесённые при `column.delete`, — `task.moved`. Ленивая
+материализация в `task.create`/`task.move` публикует `column.created` для новой
+колонки и `column.updated` (`changed: ["position"]`) для сдвинутых
+существующих default-колонок. Для `task.delete` события удалённых задач
+публикуются отдельно от `task.updated` оставшихся соседей.
 
 Все события имеют `source = "kanbaner.tasks"` и `contractVersion = 1`.
 Ошибка публикации или отклонённый конверт логируются и не превращают успешную
@@ -445,13 +454,13 @@ const store = createTasksStore({
 `createTasksStoreConformanceSuite({ createStore })` экспортируется из
 `@kanbaner/plugin-tasks/testing` и не импортирует backend. Драйвер
 `tests/integration/tasks-store-conformance.test.ts` запускает его на четырёх
-вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite из 37
+вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite из 38
 case проверяет CAS, rollback rejected Promise, вложенную транзакцию, scoped
 `documents`, конкурентные create/complete/move и backfill, уникальность
 позиций, подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию,
 UTC/application IDs, default/legacy-колонки, CRUD/reorder/delete-transfer
-колонок, разреженные позиции при delete, multi-Done и
-`columnId`/`status`-совместимость.
+колонок, разреженные позиции и `MAX_POSITION` при delete, read-only query,
+multi-Done и `columnId`/`status`-совместимость.
 
 ### Транзакции и idempotency
 
