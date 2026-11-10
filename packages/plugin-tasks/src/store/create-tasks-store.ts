@@ -9,7 +9,15 @@ import {
   type UtcTimestamp,
 } from "@kanbaner/plugin-sdk";
 
-import { PLUGIN_ID, PROJECT_COLLECTION, TASK_COLLECTION } from "../constants.ts";
+import {
+  COLUMN_COLLECTION,
+  DEFAULT_COLUMN_TITLES,
+  LEGACY_COLUMN_TITLES,
+  LEGACY_STATUS_ORDER,
+  PLUGIN_ID,
+  PROJECT_COLLECTION,
+  TASK_COLLECTION,
+} from "../constants.ts";
 import {
   compareCodePoints,
   compareProjects,
@@ -22,15 +30,19 @@ import {
   ProjectSchema,
   SORT_DIRECTIONS,
   TASK_SORT_FIELDS,
+  TaskColumnSchema,
   TaskSchema,
+  columnStatusForType,
   deleteEventVersion,
+  type DeletedColumnDescriptor,
   type DeletedTaskDescriptor,
   type Project,
   type Task,
+  type TaskColumn,
   type TaskSort,
   type TaskStatus,
 } from "../model.ts";
-import { formatProjectRef, formatTaskRef } from "../resources.ts";
+import { formatColumnRef, formatProjectRef, formatTaskRef } from "../resources.ts";
 import type { ProjectSummary, ProjectSummaryTotals, TaskStatusCounts } from "../schemas/queries.ts";
 import {
   TasksValidationError,
@@ -38,7 +50,9 @@ import {
   normalizeTag,
   normalizeTags,
   resolveCompletedAt,
-  taskPositionScopeKey,
+  resolveTaskColumn,
+  resolveTaskColumnId,
+  sortTaskColumns,
   validateExpectedVersion,
   validatePagination,
   validatePosition,
@@ -46,13 +60,20 @@ import {
 } from "../validation.ts";
 import {
   TasksNestedTransactionError,
+  type ColumnDeleteStoreResult,
+  type ColumnDeleteStoreSuccess,
+  type ColumnStoreQuery,
   type CompleteTaskStoreInput,
+  type CreateColumnStoreInput,
   type CreateProjectStoreInput,
   type CreateTaskStoreInput,
+  type DeleteColumnStoreInput,
   type DeleteProjectStoreInput,
   type DeleteStoreResult,
   type DeleteStoreSuccess,
   type DeleteTaskStoreInput,
+  type LegacyColumnBackfillResult,
+  type MoveColumnStoreInput,
   type MoveTaskStoreInput,
   type ProjectStoreQuery,
   type ProjectSummaryStorePage,
@@ -62,6 +83,7 @@ import {
   type TasksStore,
   type TasksStoreTransaction,
   type TaskStoreQuery,
+  type UpdateColumnStoreInput,
   type UpdateProjectStoreInput,
   type UpdateTaskStoreInput,
 } from "../store.ts";
@@ -100,6 +122,11 @@ interface ProjectRecord {
   readonly document: PluginDocument;
 }
 
+interface ColumnRecord {
+  readonly column: TaskColumn;
+  readonly document: PluginDocument;
+}
+
 interface StoreDependencies {
   readonly documents: PluginDocumentStore;
   readonly idFactory: TasksIdFactory | undefined;
@@ -119,6 +146,15 @@ interface CoreStore {
   createProject(input: CreateProjectStoreInput): Promise<Project>;
   updateProject(input: UpdateProjectStoreInput): Promise<Project>;
   deleteProject(input: DeleteProjectStoreInput): Promise<DeleteStoreResult>;
+
+  getColumn(id: string): Promise<TaskColumn | null>;
+  listColumns(query: ColumnStoreQuery): Promise<StorePage<TaskColumn>>;
+  createColumn(input: CreateColumnStoreInput): Promise<TaskColumn>;
+  updateColumn(input: UpdateColumnStoreInput): Promise<TaskColumn>;
+  moveColumn(input: MoveColumnStoreInput): Promise<TaskColumn>;
+  deleteColumn(input: DeleteColumnStoreInput): Promise<ColumnDeleteStoreResult>;
+  backfillLegacyColumns(): Promise<LegacyColumnBackfillResult>;
+  backfillLegacyProject(projectId: string): Promise<LegacyColumnBackfillResult>;
 
   getTask(id: string): Promise<Task | null>;
   listTasks(query: TaskStoreQuery): Promise<StorePage<Task>>;
@@ -277,7 +313,10 @@ function parseProjectDocument(document: PluginDocument): Project {
 function parseTaskDocument(document: PluginDocument): Task {
   const task = buildTask(document.data);
 
-  if (task.id !== document.id || task.version !== document.version) {
+  // Ревизия документа может опережать публичную версию после технического
+  // backfill legacy-колонок. Обратное расхождение запрещено: публичная версия
+  // не может быть новее сохранённого документа.
+  if (task.id !== document.id || task.version > document.version) {
     throw new TasksStoreValidationError(
       "Документ задачи и публичная версия не совпадают с сохранённой моделью",
     );
@@ -286,9 +325,70 @@ function parseTaskDocument(document: PluginDocument): Task {
   return task;
 }
 
+function buildColumn(value: unknown): TaskColumn {
+  const result = validateWithSchema(TaskColumnSchema, value);
+
+  if (!result.ok) {
+    throw new TasksStoreValidationError("Колонка не соответствует модели", {
+      cause: result.errors,
+    });
+  }
+
+  return result.value;
+}
+
+function parseColumnDocument(document: PluginDocument): TaskColumn {
+  const column = buildColumn(document.data);
+
+  if (column.id !== document.id || column.version !== document.version) {
+    throw new TasksStoreValidationError("Документ колонки не совпадает с сохранённой моделью");
+  }
+
+  return column;
+}
+
+function columnIndexedFields(column: TaskColumn): JsonObject {
+  return {
+    projectId: column.projectId,
+    status: column.status,
+  };
+}
+
+function columnDescriptor(column: TaskColumn): DeletedColumnDescriptor {
+  return {
+    id: column.id,
+    projectId: column.projectId,
+    resourceRef: formatColumnRef(column.id),
+    version: column.version,
+    eventVersion: deleteEventVersion(column.version),
+  };
+}
+
+function defaultColumnId(projectId: string, slug: "todo" | "in-progress" | "done"): string {
+  return `column-${projectId}-${slug}`;
+}
+
+function legacyColumnId(projectId: string, status: TaskStatus): string {
+  return `column-${projectId}-legacy-${status}`;
+}
+
+function legacyTitleForStatus(status: TaskStatus): string {
+  switch (status) {
+    case "backlog":
+      return LEGACY_COLUMN_TITLES.backlog;
+    case "todo":
+      return LEGACY_COLUMN_TITLES.todo;
+    case "in_progress":
+      return LEGACY_COLUMN_TITLES.inProgress;
+    case "done":
+      return LEGACY_COLUMN_TITLES.done;
+  }
+}
+
 function taskIndexedFields(task: Task): JsonObject {
   return {
     projectId: task.projectId,
+    ...(task.columnId === undefined ? {} : { columnId: task.columnId }),
     status: task.status,
     priority: task.priority,
     parentTaskId: task.parentTaskId,
@@ -376,11 +476,247 @@ function createCore(dependencies: StoreDependencies): CoreStore {
     return record;
   }
 
-  async function loadScope(projectId: string, status: TaskStatus): Promise<TaskRecord[]> {
-    const documentsInScope = await queryTaskDocuments({ projectId, status });
+  async function queryColumnDocuments(filter: JsonObject | undefined): Promise<PluginDocument[]> {
+    const result: PluginDocument[] = [];
+    let offset = 0;
 
-    return documentsInScope
-      .map((document) => ({ task: parseTaskDocument(document), document }))
+    for (;;) {
+      const page = await documents.query({
+        pluginId: PLUGIN_ID,
+        collection: COLUMN_COLLECTION,
+        ...(filter === undefined ? {} : { indexedFields: filter }),
+        limit: DOCUMENT_PAGE_SIZE,
+        offset,
+      });
+
+      result.push(...page);
+
+      if (page.length < DOCUMENT_PAGE_SIZE) {
+        return result;
+      }
+
+      offset += page.length;
+    }
+  }
+
+  async function loadColumnRecord(id: string): Promise<ColumnRecord | null> {
+    const document = await documents.get(PLUGIN_ID, COLUMN_COLLECTION, id);
+
+    return document === null ? null : { column: parseColumnDocument(document), document };
+  }
+
+  async function requireColumnRecord(id: string): Promise<ColumnRecord> {
+    const record = await loadColumnRecord(id);
+
+    if (record === null) {
+      throw new TasksNotFoundError("column", id);
+    }
+
+    return record;
+  }
+
+  async function saveColumn(
+    column: TaskColumn,
+    expectedDocumentVersion: number,
+  ): Promise<ColumnRecord> {
+    const document = await documents.put({
+      pluginId: PLUGIN_ID,
+      collection: COLUMN_COLLECTION,
+      id: column.id,
+      data: column as unknown as JsonValue,
+      indexedFields: columnIndexedFields(column),
+      expectedVersion: expectedDocumentVersion,
+    });
+
+    if (document.version !== column.version) {
+      throw new TasksStoreValidationError("Версия документа колонки не совпадает с моделью");
+    }
+
+    return { column, document };
+  }
+
+  async function loadProjectColumns(projectId: string): Promise<ColumnRecord[]> {
+    const columnDocuments = await queryColumnDocuments({ projectId });
+
+    return columnDocuments
+      .map((document) => ({ column: parseColumnDocument(document), document }))
+      .sort((left, right) => {
+        const byPosition = left.column.position - right.column.position;
+
+        return byPosition === 0 ? compareCodePoints(left.column.id, right.column.id) : byPosition;
+      });
+  }
+
+  async function createColumns(
+    project: Project,
+    definitions: readonly {
+      readonly id: string;
+      readonly title: string;
+      readonly status: TaskStatus;
+      readonly position: number;
+    }[],
+  ): Promise<ColumnRecord[]> {
+    const created: ColumnRecord[] = [];
+
+    for (const definition of definitions) {
+      const column = buildColumn({
+        id: definition.id,
+        projectId: project.id,
+        title: definition.title,
+        status: definition.status,
+        position: definition.position,
+        version: 1,
+        createdAt: project.createdAt,
+        updatedAt: project.createdAt,
+      });
+
+      created.push(await saveColumn(column, 0));
+    }
+
+    return created;
+  }
+
+  async function createDefaultColumns(project: Project): Promise<ColumnRecord[]> {
+    return createColumns(project, [
+      {
+        id: defaultColumnId(project.id, "todo"),
+        title: DEFAULT_COLUMN_TITLES.todo,
+        status: "todo",
+        position: 0,
+      },
+      {
+        id: defaultColumnId(project.id, "in-progress"),
+        title: DEFAULT_COLUMN_TITLES.inProgress,
+        status: "in_progress",
+        position: 1,
+      },
+      {
+        id: defaultColumnId(project.id, "done"),
+        title: DEFAULT_COLUMN_TITLES.done,
+        status: "done",
+        position: 2,
+      },
+    ]);
+  }
+
+  async function createLegacyColumns(project: Project): Promise<ColumnRecord[]> {
+    return createColumns(project, [
+      {
+        id: legacyColumnId(project.id, "backlog"),
+        title: LEGACY_COLUMN_TITLES.backlog,
+        status: "backlog",
+        position: 0,
+      },
+      {
+        id: legacyColumnId(project.id, "todo"),
+        title: LEGACY_COLUMN_TITLES.todo,
+        status: "todo",
+        position: 1,
+      },
+      {
+        id: legacyColumnId(project.id, "in_progress"),
+        title: LEGACY_COLUMN_TITLES.inProgress,
+        status: "in_progress",
+        position: 2,
+      },
+      {
+        id: legacyColumnId(project.id, "done"),
+        title: LEGACY_COLUMN_TITLES.done,
+        status: "done",
+        position: 3,
+      },
+    ]);
+  }
+
+  /**
+   * Возвращает колонки проекта, материализуя исходные четыре для legacy-проекта
+   * без колонок. Используется только мутациями, которым нужна область позиции;
+   * query-пути read-only, а полный backfill задач выполняет
+   * `backfillLegacyColumns`/`backfillLegacyProject`.
+   */
+  async function ensureProjectColumns(project: Project): Promise<ColumnRecord[]> {
+    const columns = await loadProjectColumns(project.id);
+
+    if (columns.length > 0) {
+      return columns;
+    }
+
+    return createLegacyColumns(project);
+  }
+
+  /**
+   * Лениво материализует отсутствующую legacy-колонку для явного `status`.
+   *
+   * Новый проект остаётся с тремя default-колонками. Если старый клиент
+   * создаёт или перемещает задачу со статусом `backlog` (или другим
+   * отсутствующим legacy-статусом), недостающая колонка создаётся в той же
+   * транзакции. Позиция детерминирована порядком legacy-статусов: вставляется
+   * после всех колонок с более ранним legacy-статусом в текущем порядке
+   * (Backlog — в начало), затем колонки с позицией >= insertion сдвигаются на
+   * единицу и получают новую версию и `updatedAt`.
+   */
+  async function materializeLegacyStatusColumn(
+    project: Project,
+    columns: readonly ColumnRecord[],
+    status: TaskStatus,
+    timestamp: UtcTimestamp,
+  ): Promise<{ readonly columns: ColumnRecord[]; readonly created: ColumnRecord | null }> {
+    if (columns.some((record) => record.column.status === status)) {
+      return { columns: [...columns], created: null };
+    }
+
+    const statusIndex = LEGACY_STATUS_ORDER.indexOf(status);
+    const ordered = sortTaskColumns(columns.map((record) => record.column));
+    const insertion =
+      statusIndex === -1
+        ? ordered.length
+        : ordered.filter((column) => LEGACY_STATUS_ORDER.indexOf(column.status) < statusIndex)
+            .length;
+
+    for (const record of columns) {
+      const column = record.column;
+      const position = column.position < insertion ? column.position : column.position + 1;
+
+      if (position === column.position) {
+        continue;
+      }
+
+      const shifted = buildColumn({
+        ...column,
+        position,
+        version: column.version + 1,
+        updatedAt: timestamp,
+      });
+
+      await saveColumn(shifted, record.document.version);
+    }
+
+    const column = buildColumn({
+      id: legacyColumnId(project.id, status),
+      projectId: project.id,
+      title: legacyTitleForStatus(status),
+      status,
+      position: insertion,
+      version: 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const saved = await saveColumn(column, 0);
+    const next = await loadProjectColumns(project.id);
+
+    return { columns: next, created: saved };
+  }
+
+  async function loadScope(
+    projectId: string,
+    columns: readonly ColumnRecord[],
+    columnId: string,
+  ): Promise<TaskRecord[]> {
+    const projectTasks = await loadProjectTasks(projectId);
+    const available = columns.map((record) => record.column);
+
+    return projectTasks
+      .filter((record) => resolveTaskColumnId(record.task, available) === columnId)
       .sort(compareTaskRecords);
   }
 
@@ -388,6 +724,35 @@ function createCore(dependencies: StoreDependencies): CoreStore {
     const projectTasks = await queryTaskDocuments({ projectId });
 
     return projectTasks.map((document) => ({ task: parseTaskDocument(document), document }));
+  }
+
+  async function backfillProject(project: Project): Promise<{
+    readonly columns: ColumnRecord[];
+    readonly createdColumns: ColumnRecord[];
+    readonly updatedTasks: TaskRecord[];
+  }> {
+    const existing = await loadProjectColumns(project.id);
+    const createdColumns = existing.length === 0 ? await createLegacyColumns(project) : [];
+    const columns = existing.length === 0 ? createdColumns : existing;
+    const available = columns.map((record) => record.column);
+    const tasks = await loadProjectTasks(project.id);
+    const updatedTasks: TaskRecord[] = [];
+
+    for (const record of tasks) {
+      const effective = resolveTaskColumnId(record.task, available);
+
+      if (effective === null || record.task.columnId === effective) {
+        continue;
+      }
+
+      // Технический backfill: публичные version/updatedAt не меняются.
+      const updated = buildTask({ ...record.task, columnId: effective });
+      const saved = await saveTask(updated, record.document.version);
+
+      updatedTasks.push(saved);
+    }
+
+    return { columns, createdColumns, updatedTasks };
   }
 
   async function saveProject(project: Project, expectedVersion: number): Promise<ProjectRecord> {
@@ -418,7 +783,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       expectedVersion: expectedDocumentVersion,
     });
 
-    if (document.version !== task.version) {
+    if (document.version < task.version) {
       throw new TasksStoreValidationError("Версия документа задачи не совпадает с моделью");
     }
 
@@ -458,23 +823,48 @@ function createCore(dependencies: StoreDependencies): CoreStore {
     records: readonly TaskRecord[],
     updatedAt: UtcTimestamp,
   ): Promise<void> {
-    const scopes = new Map<string, { readonly projectId: string; readonly status: TaskStatus }>();
+    const projects = new Map<
+      string,
+      { readonly projectId: string; readonly columnIds: Set<string> }
+    >();
 
     for (const record of records) {
-      scopes.set(taskPositionScopeKey(record.task.projectId, record.task.status), {
+      const project = projects.get(record.task.projectId) ?? {
         projectId: record.task.projectId,
-        status: record.task.status,
-      });
+        columnIds: new Set<string>(),
+      };
+
+      if (record.task.columnId !== undefined) {
+        project.columnIds.add(record.task.columnId);
+      }
+
+      projects.set(record.task.projectId, project);
     }
 
-    for (const scope of scopes.values()) {
-      const remaining = await loadScope(scope.projectId, scope.status);
+    for (const project of projects.values()) {
+      const projectRecord = await requireProjectRecord(project.projectId);
+      const columns = await ensureProjectColumns(projectRecord.project);
+      const available = columns.map((record) => record.column);
 
-      for (let index = 0; index < remaining.length; index += 1) {
-        const record = remaining[index];
+      for (const record of records.filter(
+        (candidate) => candidate.task.projectId === project.projectId,
+      )) {
+        const columnId = resolveTaskColumnId(record.task, available);
 
-        if (record !== undefined) {
-          await shiftRecord(record, index, updatedAt);
+        if (columnId !== null) {
+          project.columnIds.add(columnId);
+        }
+      }
+
+      for (const columnId of project.columnIds) {
+        const remaining = await loadScope(project.projectId, columns, columnId);
+
+        for (let index = 0; index < remaining.length; index += 1) {
+          const record = remaining[index];
+
+          if (record !== undefined) {
+            await shiftRecord(record, index, updatedAt);
+          }
         }
       }
     }
@@ -490,16 +880,21 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
   async function relocateRecord(
     record: TaskRecord,
-    targetStatus: TaskStatus,
+    columns: readonly ColumnRecord[],
+    targetColumn: TaskColumn,
     insertion: number | undefined,
     completedAt: UtcTimestamp | null,
     updatedAt: UtcTimestamp,
   ): Promise<Task> {
     const current = record.task;
+    const currentColumnId = resolveTaskColumnId(
+      current,
+      columns.map((column) => column.column),
+    );
     let index: number;
 
-    if (targetStatus === current.status) {
-      const others = (await loadScope(current.projectId, current.status)).filter(
+    if (currentColumnId === targetColumn.id) {
+      const others = (await loadScope(current.projectId, columns, targetColumn.id)).filter(
         (candidate) => candidate.task.id !== current.id,
       );
       index = insertion === undefined ? others.length : clampInsertion(insertion, others.length);
@@ -512,19 +907,21 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         }
       }
     } else {
-      const sourceRemaining = (await loadScope(current.projectId, current.status)).filter(
-        (candidate) => candidate.task.id !== current.id,
-      );
+      if (currentColumnId !== null) {
+        const sourceRemaining = (
+          await loadScope(current.projectId, columns, currentColumnId)
+        ).filter((candidate) => candidate.task.id !== current.id);
 
-      for (let position = 0; position < sourceRemaining.length; position += 1) {
-        const candidate = sourceRemaining[position];
+        for (let position = 0; position < sourceRemaining.length; position += 1) {
+          const candidate = sourceRemaining[position];
 
-        if (candidate !== undefined) {
-          await shiftRecord(candidate, position, updatedAt);
+          if (candidate !== undefined) {
+            await shiftRecord(candidate, position, updatedAt);
+          }
         }
       }
 
-      const targetRecords = await loadScope(current.projectId, targetStatus);
+      const targetRecords = await loadScope(current.projectId, columns, targetColumn.id);
       index =
         insertion === undefined
           ? targetRecords.length
@@ -541,7 +938,8 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
     const moved = buildTask({
       ...current,
-      status: targetStatus,
+      columnId: targetColumn.id,
+      status: targetColumn.status,
       position: index,
       completedAt,
       updatedAt,
@@ -676,6 +1074,10 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       });
       const saved = await saveProject(project, 0);
 
+      // Default-колонки создаются в той же транзакции, что и проект. Сбой
+      // любой записи откатывает и проект, и колонки.
+      await createDefaultColumns(saved.project);
+
       return saved.project;
     },
 
@@ -713,6 +1115,9 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       const tasks = (await loadProjectTasks(record.project.id)).sort((left, right) =>
         compareCodePoints(left.task.id, right.task.id),
       );
+      const columns = (await loadProjectColumns(record.project.id)).sort((left, right) =>
+        compareCodePoints(left.column.id, right.column.id),
+      );
 
       for (const task of tasks) {
         const removed = await documents.delete(PLUGIN_ID, TASK_COLLECTION, task.task.id, {
@@ -722,6 +1127,18 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         if (!removed) {
           throw new TasksStoreValidationError(
             "Задача проекта исчезла во время каскадного удаления",
+          );
+        }
+      }
+
+      for (const column of columns) {
+        const removed = await documents.delete(PLUGIN_ID, COLUMN_COLLECTION, column.column.id, {
+          expectedVersion: column.document.version,
+        });
+
+        if (!removed) {
+          throw new TasksStoreValidationError(
+            "Колонка проекта исчезла во время каскадного удаления",
           );
         }
       }
@@ -738,6 +1155,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       }
 
       const deletedTasks = tasks.map((task) => taskDescriptor(task.task));
+      const deletedColumns = columns.map((column) => columnDescriptor(column.column));
       const result: DeleteStoreSuccess = {
         deleted: true,
         version: record.project.version,
@@ -745,11 +1163,333 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         deletedResourceRefs: [
           formatProjectRef(record.project.id),
           ...deletedTasks.map((descriptor) => descriptor.resourceRef),
+          ...deletedColumns.map((descriptor) => descriptor.resourceRef),
         ],
         deletedTasks,
+        deletedColumns,
       };
 
       return result;
+    },
+
+    async getColumn(id) {
+      return (await loadColumnRecord(id))?.column ?? null;
+    },
+
+    async listColumns(query) {
+      const pagination = resolvePagination(query.limit, query.offset);
+      await requireProjectRecord(query.projectId);
+      // Query остаётся read-only: default/legacy-колонки материализует awaited
+      // startup backfill, а не чтение. Если backfill упал, возвращается
+      // фактическое состояние проекта.
+      const columns = sortTaskColumns(
+        (await loadProjectColumns(query.projectId)).map((record) => record.column),
+      );
+
+      return pageOf(columns, pagination.offset, pagination.limit);
+    },
+
+    async createColumn(input) {
+      const expectedVersion = assertExpectedVersion(input.expectedVersion, true);
+
+      if (expectedVersion !== 0) {
+        throw new TasksStoreValidationError("Создание колонки требует expectedVersion = 0");
+      }
+
+      const projectRecord = await requireProjectRecord(input.projectId);
+      const columns = await ensureProjectColumns(projectRecord.project);
+      const id = resolveIdentifier(input.id, idFactory?.nextColumnId.bind(idFactory), "ID колонки");
+      const existing = await loadColumnRecord(id);
+
+      if (existing !== null) {
+        throw new TasksVersionConflictError(0, existing.column.version);
+      }
+
+      const createdAt = resolveTimestamp(input.createdAt, now, "createdAt");
+      const ordered = columns.map((record) => record.column);
+      const index =
+        input.position === undefined
+          ? ordered.length
+          : clampInsertion(assertPosition(input.position), ordered.length);
+
+      for (let position = 0; position < ordered.length; position += 1) {
+        const column = ordered[position];
+
+        if (column !== undefined) {
+          const record = columns.find((candidate) => candidate.column.id === column.id);
+
+          if (
+            record !== undefined &&
+            column.position !== (position < index ? position : position + 1)
+          ) {
+            const shifted = buildColumn({
+              ...column,
+              position: position < index ? position : position + 1,
+              version: column.version + 1,
+              updatedAt: createdAt,
+            });
+
+            await saveColumn(shifted, record.document.version);
+          }
+        }
+      }
+
+      const column = buildColumn({
+        id,
+        projectId: input.projectId,
+        title: input.title,
+        status: columnStatusForType(input.type),
+        position: index,
+        version: 1,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      const saved = await saveColumn(column, 0);
+
+      return saved.column;
+    },
+
+    async updateColumn(input) {
+      const expectedVersion = assertExpectedVersion(input.expectedVersion);
+      const record = await requireColumnRecord(input.id);
+
+      if (record.column.version !== expectedVersion) {
+        throw new TasksVersionConflictError(expectedVersion, record.column.version);
+      }
+
+      const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
+      const column = buildColumn({
+        ...record.column,
+        title: input.title,
+        version: record.column.version + 1,
+        updatedAt,
+      });
+      const saved = await saveColumn(column, record.document.version);
+
+      return saved.column;
+    },
+
+    async moveColumn(input) {
+      const expectedVersion = assertExpectedVersion(input.expectedVersion);
+      const record = await requireColumnRecord(input.id);
+
+      if (record.column.version !== expectedVersion) {
+        throw new TasksVersionConflictError(expectedVersion, record.column.version);
+      }
+
+      const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
+      const position = assertPosition(input.position);
+      const columns = await loadProjectColumns(record.column.projectId);
+      const ordered = columns.map((candidate) => candidate.column);
+      const others = ordered.filter((candidate) => candidate.id !== record.column.id);
+      const index = clampInsertion(position, others.length);
+      const finalOrder = [...others.slice(0, index), record.column, ...others.slice(index)];
+      let moved: ColumnRecord = record;
+
+      for (let target = 0; target < finalOrder.length; target += 1) {
+        const column = finalOrder[target];
+
+        if (column === undefined) {
+          continue;
+        }
+
+        const source = columns.find((entry) => entry.column.id === column.id);
+
+        if (source === undefined) {
+          continue;
+        }
+
+        const isMoving = column.id === record.column.id;
+
+        if (!isMoving && column.position === target) {
+          continue;
+        }
+
+        const next = buildColumn({
+          ...column,
+          position: target,
+          version: column.version + 1,
+          updatedAt,
+        });
+        const saved = await saveColumn(next, source.document.version);
+
+        if (isMoving) {
+          moved = saved;
+        }
+      }
+
+      return moved.column;
+    },
+
+    async deleteColumn(input) {
+      const expectedVersion = assertExpectedVersion(input.expectedVersion);
+      const record = await requireColumnRecord(input.id);
+
+      if (record.column.version !== expectedVersion) {
+        throw new TasksVersionConflictError(expectedVersion, record.column.version);
+      }
+
+      if (input.targetColumnId === record.column.id) {
+        throw new TasksValidationError(
+          "COLUMN_TARGET_SELF",
+          "Целевая колонка должна отличаться от удаляемой",
+        );
+      }
+
+      const projectRecord = await requireProjectRecord(record.column.projectId);
+      const columns = await loadProjectColumns(record.column.projectId);
+      const isDoneColumn = record.column.status === "done";
+      const remainingSameType = columns.filter(
+        (candidate) =>
+          candidate.column.id !== record.column.id &&
+          (candidate.column.status === "done") === isDoneColumn,
+      );
+
+      if (remainingSameType.length === 0) {
+        if (isDoneColumn) {
+          throw new TasksValidationError(
+            "COLUMN_LAST_DONE",
+            "Нельзя удалить последнюю Done-колонку проекта",
+          );
+        }
+
+        throw new TasksValidationError(
+          "COLUMN_LAST_OPEN",
+          "Нельзя удалить последнюю открытую колонку проекта",
+        );
+      }
+
+      const targetRecord = columns.find(
+        (candidate) => candidate.column.id === input.targetColumnId,
+      );
+
+      if (targetRecord === undefined) {
+        const foreign = await loadColumnRecord(input.targetColumnId);
+
+        if (foreign !== null && foreign.column.projectId !== record.column.projectId) {
+          throw new TasksValidationError(
+            "COLUMN_TARGET_OTHER_PROJECT",
+            "Целевая колонка принадлежит другому проекту",
+          );
+        }
+
+        throw new TasksValidationError("COLUMN_NOT_FOUND", "Целевая колонка не найдена");
+      }
+
+      const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
+      const available = columns.map((entry) => entry.column);
+      const sourceTasks = await loadScope(projectRecord.project.id, columns, record.column.id);
+      const targetTasks = await loadScope(
+        projectRecord.project.id,
+        columns,
+        targetRecord.column.id,
+      );
+      // Append идёт за фактический максимум, а не за count: позиции могут быть
+      // разреженными и содержать дыры после прошлых операций.
+      const appendPosition =
+        targetTasks.reduce((max, entry) => Math.max(max, entry.task.position), -1) + 1;
+
+      // Диапазон позиции доменно ограничен MAX_POSITION: перенос не должен
+      // создавать позицию, которую отвергнет схема.
+      if (sourceTasks.length > 0) {
+        assertPosition(appendPosition + sourceTasks.length - 1);
+      }
+
+      const movedTasks: Task[] = [];
+
+      for (const source of sourceTasks) {
+        const moved = buildTask({
+          ...source.task,
+          columnId: targetRecord.column.id,
+          status: targetRecord.column.status,
+          position: appendPosition + movedTasks.length,
+          completedAt: resolveCompletedAt(
+            targetRecord.column.status,
+            source.task.completedAt,
+            updatedAt,
+          ),
+          version: source.task.version + 1,
+          updatedAt,
+        });
+        const saved = await saveTask(moved, source.document.version);
+
+        movedTasks.push(saved.task);
+      }
+
+      const remaining = sortTaskColumns(
+        available.filter((column) => column.id !== record.column.id),
+      );
+      const updatedColumns: TaskColumn[] = [];
+
+      for (let position = 0; position < remaining.length; position += 1) {
+        const column = remaining[position];
+
+        if (column === undefined || column.position === position) {
+          continue;
+        }
+
+        const source = columns.find((entry) => entry.column.id === column.id);
+
+        if (source === undefined) {
+          continue;
+        }
+
+        const shifted = buildColumn({
+          ...column,
+          position,
+          version: column.version + 1,
+          updatedAt,
+        });
+        const saved = await saveColumn(shifted, source.document.version);
+
+        updatedColumns.push(saved.column);
+      }
+
+      const removed = await documents.delete(PLUGIN_ID, COLUMN_COLLECTION, record.column.id, {
+        expectedVersion: record.document.version,
+      });
+
+      if (!removed) {
+        throw new TasksStoreValidationError("Колонка исчезла во время удаления");
+      }
+
+      const result: ColumnDeleteStoreSuccess = {
+        deleted: true,
+        column: record.column,
+        version: record.column.version,
+        eventVersion: deleteEventVersion(record.column.version),
+        targetColumnId: targetRecord.column.id,
+        movedTasks,
+        updatedColumns,
+      };
+
+      return result;
+    },
+
+    async backfillLegacyColumns() {
+      const projectDocuments = await documents.list(PLUGIN_ID, PROJECT_COLLECTION);
+      const projects = projectDocuments.map(parseProjectDocument).sort(compareProjects);
+      const createdColumns: TaskColumn[] = [];
+      const updatedTasks: Task[] = [];
+
+      for (const project of projects) {
+        const result = await backfillProject(project);
+
+        createdColumns.push(...result.createdColumns.map((record) => record.column));
+        updatedTasks.push(...result.updatedTasks.map((record) => record.task));
+      }
+
+      return { createdColumns, updatedTasks };
+    },
+
+    async backfillLegacyProject(projectId) {
+      const projectRecord = await requireProjectRecord(projectId);
+      const result = await backfillProject(projectRecord.project);
+
+      return {
+        createdColumns: result.createdColumns.map((record) => record.column),
+        updatedTasks: result.updatedTasks.map((record) => record.task),
+      };
     },
 
     async getTask(id) {
@@ -788,8 +1528,38 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       }
 
       const filter = Object.keys(indexed).length === 0 ? undefined : (indexed as JsonObject);
-      const taskDocuments = await queryTaskDocuments(filter);
-      const tasks = taskDocuments.map(parseTaskDocument);
+      let tasks: Task[];
+
+      if (query.columnId === undefined) {
+        tasks = (await queryTaskDocuments(filter)).map(parseTaskDocument);
+      } else {
+        const column = await requireColumnRecord(query.columnId);
+
+        if (query.projectId !== undefined && query.projectId !== column.column.projectId) {
+          throw new TasksValidationError(
+            "COLUMN_TARGET_OTHER_PROJECT",
+            "columnId принадлежит другому проекту",
+          );
+        }
+
+        const projectRecord = await requireProjectRecord(column.column.projectId);
+        // Read-only: не материализуем колонки в query-пути. Legacy-задачи без
+        // `columnId` разрешаются по уже существующим документам колонок.
+        const columns = await loadProjectColumns(projectRecord.project.id);
+        const available = columns.map((record) => record.column);
+        const projectTasks = (await loadProjectTasks(projectRecord.project.id)).map(
+          (record) => record.task,
+        );
+
+        tasks = projectTasks.filter(
+          (task) =>
+            resolveTaskColumnId(task, available) === column.column.id &&
+            (query.status === undefined || task.status === query.status) &&
+            (query.priority === undefined || task.priority === query.priority) &&
+            (query.parentTaskId === undefined || task.parentTaskId === query.parentTaskId),
+        );
+      }
+
       const filtered = tasks.filter(
         (task) =>
           (tag === undefined || task.tags.includes(tag)) &&
@@ -810,7 +1580,8 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       }
 
       const id = resolveIdentifier(input.id, idFactory?.nextTaskId.bind(idFactory), "ID задачи");
-      await requireProjectRecord(input.projectId);
+      const projectRecord = await requireProjectRecord(input.projectId);
+      let columns = await ensureProjectColumns(projectRecord.project);
 
       const existing = await loadTaskRecord(id);
 
@@ -841,9 +1612,46 @@ function createCore(dependencies: StoreDependencies): CoreStore {
       }
 
       const createdAt = resolveTimestamp(input.createdAt, now, "createdAt");
-      const status = input.status;
+      let target = resolveTaskColumn(
+        columns.map((record) => record.column),
+        {
+          columnId: input.columnId,
+          status: input.status,
+        },
+      );
+
+      // Явный legacy status без подходящей колонки: лениво материализуем её
+      // в этой же транзакции, сохраняя три default-колонки нового проекта.
+      if (
+        !target.ok &&
+        target.code === "COLUMN_NOT_FOUND" &&
+        input.columnId === undefined &&
+        input.status !== undefined
+      ) {
+        const materialized = await materializeLegacyStatusColumn(
+          projectRecord.project,
+          columns,
+          input.status,
+          createdAt,
+        );
+
+        if (materialized.created !== null) {
+          columns = materialized.columns;
+          target = resolveTaskColumn(
+            columns.map((record) => record.column),
+            { status: input.status },
+          );
+        }
+      }
+
+      if (!target.ok) {
+        throw new TasksValidationError(target.code, target.message);
+      }
+
+      const targetColumn = target.value;
+      const status = targetColumn.status;
       const completedAt = resolveCompletedAt(status, null, createdAt);
-      const records = await loadScope(input.projectId, status);
+      const records = await loadScope(input.projectId, columns, targetColumn.id);
       const index =
         input.position === undefined
           ? records.length
@@ -862,6 +1670,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         id,
         projectId: input.projectId,
         parentTaskId,
+        columnId: targetColumn.id,
         title: input.title,
         descriptionMarkdown: input.descriptionMarkdown,
         status,
@@ -909,11 +1718,53 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
       assertTaskVersion(record.task, expectedVersion);
 
+      const projectRecord = await requireProjectRecord(record.task.projectId);
+      let columns = await ensureProjectColumns(projectRecord.project);
       const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
-      const position = assertPosition(input.position);
-      const completedAt = resolveCompletedAt(input.status, record.task.completedAt, updatedAt);
+      let target = resolveTaskColumn(
+        columns.map((entry) => entry.column),
+        {
+          columnId: input.columnId,
+          status: input.status,
+        },
+      );
 
-      return relocateRecord(record, input.status, position, completedAt, updatedAt);
+      // Старый клиент может перемещать задачу по legacy `status`, которого нет
+      // среди default-колонок нового проекта. Материализуем её атомарно.
+      if (
+        !target.ok &&
+        target.code === "COLUMN_NOT_FOUND" &&
+        input.columnId === undefined &&
+        input.status !== undefined
+      ) {
+        const materialized = await materializeLegacyStatusColumn(
+          projectRecord.project,
+          columns,
+          input.status,
+          updatedAt,
+        );
+
+        if (materialized.created !== null) {
+          columns = materialized.columns;
+          target = resolveTaskColumn(
+            columns.map((entry) => entry.column),
+            { status: input.status },
+          );
+        }
+      }
+
+      if (!target.ok) {
+        throw new TasksValidationError(target.code, target.message);
+      }
+
+      const position = assertPosition(input.position);
+      const completedAt = resolveCompletedAt(
+        target.value.status,
+        record.task.completedAt,
+        updatedAt,
+      );
+
+      return relocateRecord(record, columns, target.value, position, completedAt, updatedAt);
     },
 
     async completeTask(input) {
@@ -930,10 +1781,23 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         assertPosition(input.position);
       }
 
+      const projectRecord = await requireProjectRecord(record.task.projectId);
+      const columns = await ensureProjectColumns(projectRecord.project);
+      const doneColumn = sortTaskColumns(
+        columns.map((entry) => entry.column).filter((column) => column.status === "done"),
+      )[0];
+
+      if (doneColumn === undefined) {
+        throw new TasksValidationError(
+          "DONE_COLUMN_NOT_FOUND",
+          "В проекте нет Done-колонки для завершения задачи",
+        );
+      }
+
       const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
       const completedAt = resolveCompletedAt("done", record.task.completedAt, updatedAt);
 
-      return relocateRecord(record, "done", input.position, completedAt, updatedAt);
+      return relocateRecord(record, columns, doneColumn, input.position, completedAt, updatedAt);
     },
 
     async deleteTask(input) {
@@ -983,6 +1847,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         eventVersion: deleteEventVersion(record.task.version),
         deletedResourceRefs: deletedTasks.map((descriptor) => descriptor.resourceRef),
         deletedTasks,
+        deletedColumns: [],
       };
 
       return result;
@@ -1039,6 +1904,14 @@ function createScopedTransaction(
     createProject: (input) => queue.run(() => core.createProject(input)),
     updateProject: (input) => queue.run(() => core.updateProject(input)),
     deleteProject: (input) => queue.run(() => core.deleteProject(input)),
+    getColumn: (id) => queue.run(() => core.getColumn(id)),
+    listColumns: (query) => queue.run(() => core.listColumns(query)),
+    createColumn: (input) => queue.run(() => core.createColumn(input)),
+    updateColumn: (input) => queue.run(() => core.updateColumn(input)),
+    moveColumn: (input) => queue.run(() => core.moveColumn(input)),
+    deleteColumn: (input) => queue.run(() => core.deleteColumn(input)),
+    backfillLegacyColumns: () => queue.run(() => core.backfillLegacyColumns()),
+    backfillLegacyProject: (projectId) => queue.run(() => core.backfillLegacyProject(projectId)),
     getTask: (id) => queue.run(() => core.getTask(id)),
     listTasks: (query) => queue.run(() => core.listTasks(query)),
     createTask: (input) => queue.run(() => core.createTask(input)),
@@ -1087,6 +1960,15 @@ export function createTasksStore(options: CreateTasksStoreOptions): TasksStore {
     createProject: (input) => within((core) => core.createProject(input)),
     updateProject: (input) => within((core) => core.updateProject(input)),
     deleteProject: (input) => within((core) => core.deleteProject(input)),
+
+    getColumn: (id) => within((core) => core.getColumn(id)),
+    listColumns: (query) => within((core) => core.listColumns(query)),
+    createColumn: (input) => within((core) => core.createColumn(input)),
+    updateColumn: (input) => within((core) => core.updateColumn(input)),
+    moveColumn: (input) => within((core) => core.moveColumn(input)),
+    deleteColumn: (input) => within((core) => core.deleteColumn(input)),
+    backfillLegacyColumns: () => within((core) => core.backfillLegacyColumns()),
+    backfillLegacyProject: (projectId) => within((core) => core.backfillLegacyProject(projectId)),
 
     getTask: (id) => within((core) => core.getTask(id)),
     listTasks: (query) => within((core) => core.listTasks(query)),

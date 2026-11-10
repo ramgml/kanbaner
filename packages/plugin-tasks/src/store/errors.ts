@@ -33,11 +33,17 @@ export class TasksVersionConflictError extends Error {
 export class TasksNotFoundError extends Error {
   override readonly name = "TasksNotFoundError";
   readonly code = TASKS_NOT_FOUND_CODE;
-  readonly entity: "project" | "task";
+  readonly entity: "project" | "task" | "column";
   readonly id: string;
 
-  constructor(entity: "project" | "task", id: string) {
-    super(entity === "project" ? "Проект не найден" : "Задача не найдена");
+  constructor(entity: "project" | "task" | "column", id: string) {
+    super(
+      entity === "project"
+        ? "Проект не найден"
+        : entity === "column"
+          ? "Колонка не найдена"
+          : "Задача не найдена",
+    );
     this.entity = entity;
     this.id = id;
   }

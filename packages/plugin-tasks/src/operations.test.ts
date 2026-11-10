@@ -8,6 +8,7 @@ import {
 } from "@kanbaner/plugin-sdk";
 
 import {
+  COLUMN_EVENT_TYPES,
   TASK_EVENT_TYPES,
   TASKS_COMMAND_IDS,
   TASKS_COMMANDS_CONTRACT,
@@ -58,7 +59,11 @@ describe("operation metadata", () => {
       (metadata) => metadata.risk === "destructive",
     ).map((metadata) => metadata.id);
 
-    expect(destructive).toEqual([TASKS_COMMAND_IDS.projectDelete, TASKS_COMMAND_IDS.taskDelete]);
+    expect(destructive).toEqual([
+      TASKS_COMMAND_IDS.projectDelete,
+      TASKS_COMMAND_IDS.columnDelete,
+      TASKS_COMMAND_IDS.taskDelete,
+    ]);
   });
 
   it("не переиспользует ID операций", () => {
@@ -79,6 +84,7 @@ describe("event types", () => {
       expect(isTasksEventType(eventType)).toBe(true);
     }
     expect(Object.values(PROJECT_EVENT_TYPES)).toHaveLength(3);
+    expect(Object.values(COLUMN_EVENT_TYPES)).toHaveLength(4);
     expect(Object.values(TASK_EVENT_TYPES)).toHaveLength(5);
   });
 

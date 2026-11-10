@@ -14,6 +14,7 @@
 export * from "./constants.ts";
 export * from "./model.ts";
 export * from "./schemas/common.ts";
+export * from "./schemas/column.ts";
 export * from "./schemas/project.ts";
 export * from "./schemas/task.ts";
 export * from "./schemas/queries.ts";

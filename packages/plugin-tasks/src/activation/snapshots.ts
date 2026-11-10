@@ -1,4 +1,4 @@
-import type { Task } from "../model.ts";
+import type { Task, TaskColumn } from "../model.ts";
 import type { TasksStore } from "../store.ts";
 
 const PAGE_SIZE = 200;
@@ -54,6 +54,88 @@ export async function listAllTasks(store: Pick<TasksStore, "listTasks">): Promis
 
     offset = page.nextOffset;
   }
+}
+
+/** Читает все колонки проекта в стабильном порядке. */
+export async function listAllProjectColumns(
+  store: Pick<TasksStore, "listColumns">,
+  projectId: string,
+): Promise<readonly TaskColumn[]> {
+  const columns: TaskColumn[] = [];
+  let offset = 0;
+
+  for (;;) {
+    const page = await store.listColumns({ projectId, limit: PAGE_SIZE, offset });
+
+    columns.push(...page.items);
+
+    if (page.nextOffset === null) {
+      return columns;
+    }
+
+    offset = page.nextOffset;
+  }
+}
+
+/** Снимок колонок проекта по ID. */
+export async function snapshotProjectColumns(
+  store: Pick<TasksStore, "listColumns">,
+  projectId: string,
+): Promise<Map<string, TaskColumn>> {
+  const columns = await listAllProjectColumns(store, projectId);
+
+  return new Map(columns.map((column) => [column.id, column]));
+}
+
+/**
+ * Колонки, которые фактически изменились между снимками, кроме основной
+ * колонки операции.
+ */
+export function shiftedColumns(
+  before: ReadonlyMap<string, TaskColumn>,
+  after: ReadonlyMap<string, TaskColumn>,
+  mainColumnId: string | null,
+): readonly TaskColumn[] {
+  const changed: TaskColumn[] = [];
+
+  for (const [id, column] of after) {
+    if (id === mainColumnId) {
+      continue;
+    }
+
+    const previous = before.get(id);
+
+    if (previous === undefined) {
+      continue;
+    }
+
+    if (previous.position !== column.position || previous.version !== column.version) {
+      changed.push(column);
+    }
+  }
+
+  return changed;
+}
+
+/**
+ * Колонки, которых не было в первом снимке.
+ *
+ * Используется, чтобы опубликовать `column.created`, когда Store лениво
+ * материализовал legacy-колонку внутри `task.create`/`task.move`.
+ */
+export function createdColumns(
+  before: ReadonlyMap<string, TaskColumn>,
+  after: ReadonlyMap<string, TaskColumn>,
+): readonly TaskColumn[] {
+  const created: TaskColumn[] = [];
+
+  for (const [id, column] of after) {
+    if (!before.has(id)) {
+      created.push(column);
+    }
+  }
+
+  return created;
 }
 
 /** Снимок задач проекта по ID. */

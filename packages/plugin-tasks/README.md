@@ -1,8 +1,9 @@
 # @kanbaner/plugin-tasks
 
 Доменный плагин задач Kanbaner. Пакет фиксирует публичный контракт домена:
-модель проектов и задач, TypeBox/JSON Schema, метаданные команд и запросов,
-`TasksStore`, `ResourceRef`, события и поисковое представление.
+модель проектов, пользовательских колонок и задач, TypeBox/JSON Schema,
+метаданные команд и запросов, `TasksStore`, `ResourceRef`, события и поисковое
+представление.
 
 Начиная с KAN-012 пакет — рабочий **headless-плагин**: `activate` регистрирует
 команды, запросы и типы ресурсов, выполняет мутации в транзакциях, публикует
@@ -28,7 +29,8 @@ KAN-014.
 ## Состав
 
 - `src/contract.ts` — client-safe entrypoint.
-- `src/model.ts` — `Project`, `Task`, статусы, приоритеты и сортировка.
+- `src/model.ts` — `Project`, `TaskColumn`, `Task`, статусы, приоритеты и
+  сортировка.
 - `src/schemas/*.ts` — TypeBox-схемы и производные TS-типы.
 - `src/operations.ts` — серверные метаданные команд и запросов для `OperationBus`.
 - `src/activation.ts` — `activate(context)`: регистрация операций, ресурсов,
@@ -43,7 +45,7 @@ KAN-014.
   провайдеров.
 - `src/validation.ts` — чистые доменные валидаторы и нормализация тегов.
 - `src/listing.ts` — backend-neutral семантика сортировки и фильтров списков.
-- `src/resources.ts` — `ResourceRef` проектов и задач.
+- `src/resources.ts` — `ResourceRef` проектов, колонок и задач.
 - `src/events.ts` — типы и payload событий после коммита.
 - `src/search.ts` — `toTaskSearchDocument`.
 
@@ -65,11 +67,16 @@ KANBANER_PLUGIN_DIRS=packages pnpm dev
 - проверяет `pluginId === "kanbaner.tasks"`;
 - регистрирует все команды и запросы KAN-010 с `exposure.ui: true`,
   `http: false`, `mcp: false`;
-- регистрирует типы ресурсов `project` и `task` с `resolve`;
-- запускает best-effort полную переиндексацию задач;
-- создаёт собственную последовательную очередь, которая сериализует доменные
-  транзакции, поисковые эффекты и переиндексацию, чтобы reindex не пересёкся с
-  create/update/delete.
+- регистрирует типы ресурсов `project`, `task-column` и `task` с `resolve`;
+- материализует legacy-колонки и `task.columnId` для проектов без колонок:
+  отдельной транзакцией на проект, awaited до завершения активации; сбой
+  одного проекта даёт `tasks.column_backfill_failed` и не отменяет остальные.
+  Backfill не публикует события; полная переиндексация и list после рестарта
+  служат восстановлением;
+- запускает best-effort полную переиндексацию задач независимо от backfill;
+- создаёт собственную последовательную очередь, которая сериализует backfill,
+  доменные транзакции, поисковые эффекты и переиндексацию, чтобы reindex не
+  пересёкся с create/update/delete.
 
 Мутации, idempotency и снимки для diff выполняются в транзакции
 `TasksStore.withTransaction`. Поисковые upsert/delete применяются сразу после
@@ -96,16 +103,21 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 | ------------------------------- | ------------- | -------------------------------------------- |
 | `kanbaner.tasks.project.create` | `write`       | Создать проект                               |
 | `kanbaner.tasks.project.update` | `write`       | Изменить проект по `expectedVersion`         |
-| `kanbaner.tasks.project.delete` | `destructive` | Удалить проект и его задачи                  |
+| `kanbaner.tasks.project.delete` | `destructive` | Удалить проект, его задачи и колонки         |
+| `kanbaner.tasks.column.create`  | `write`       | Создать колонку и сдвинуть соседей           |
+| `kanbaner.tasks.column.update`  | `write`       | Переименовать колонку                        |
+| `kanbaner.tasks.column.move`    | `write`       | Переставить колонку и обновить позиции       |
+| `kanbaner.tasks.column.delete`  | `destructive` | Удалить колонку и перенести её задачи        |
 | `kanbaner.tasks.task.create`    | `write`       | Создать задачу или подзадачу                 |
 | `kanbaner.tasks.task.update`    | `write`       | Изменить поля задачи                         |
 | `kanbaner.tasks.task.move`      | `write`       | Сменить статус и позицию                     |
 | `kanbaner.tasks.task.complete`  | `write`       | Перевести в `done` и заполнить `completedAt` |
 | `kanbaner.tasks.task.delete`    | `destructive` | Удалить задачу и её подзадачи                |
 
-`project.delete` и `task.delete` требуют `confirm: true` в схеме. Все изменения
-версионируемой сущности требуют `expectedVersion`; создание принимает только
-`expectedVersion: 0`.
+`project.delete`, `column.delete` и `task.delete` требуют `confirm: true` в
+схеме. `column.delete` дополнительно требует `targetColumnId` того же проекта.
+Все изменения версионируемой сущности требуют `expectedVersion`; создание
+принимает только `expectedVersion: 0`.
 
 Все операции регистрируются с `exposure.ui: true` и выключенными HTTP/MCP.
 Схемы входа и выхода берутся из KAN-010 и не дублируются в activation.
@@ -119,6 +131,7 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 | `kanbaner.tasks.project.list`    | Стабильная страница проектов                   |
 | `kanbaner.tasks.project.get`     | Проект по ID                                   |
 | `kanbaner.tasks.project.summary` | Точные счётчики и просроченные задачи проектов |
+| `kanbaner.tasks.column.list`     | Колонки проекта в сохранённом порядке          |
 | `kanbaner.tasks.task.get`        | Задача по ID                                   |
 | `kanbaner.tasks.task.list`       | Задачи с фильтрами, сортировкой и пагинацией   |
 
@@ -134,11 +147,13 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 `dueAt == now` не считается просроченным, сравнение идёт через
 `compareUtcTimestamps`.
 
-`task.list` поддерживает фильтры `projectId`, `status`, `priority`, `tag`,
-`parentTaskId`, `text`, `dueBefore`, `dueAfter`. `parentTaskId: null` выбирает
-корневые задачи. Сортировка задаётся `{ field, direction }`; поля: `position`,
-`createdAt`, `updatedAt`, `dueAt`, `title`. `limit` — от 1 до 200, значение по
-умолчанию 50; `offset` — неотрицательное целое.
+`task.list` поддерживает фильтры `projectId`, `columnId`, `status`, `priority`,
+`tag`, `parentTaskId`, `text`, `dueBefore`, `dueAfter`. `columnId` выбирает
+задачи конкретной колонки проекта; сочетание с чужим `projectId` возвращает
+`COLUMN_TARGET_OTHER_PROJECT`. `parentTaskId: null` выбирает корневые задачи.
+Сортировка задаётся `{ field, direction }`; поля: `position`, `createdAt`,
+`updatedAt`, `dueAt`, `title`. `limit` — от 1 до 200, значение по умолчанию 50;
+`offset` — неотрицательное целое.
 
 ### Backend-neutral семантика списков
 
@@ -161,19 +176,69 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   `compareNullableDueAt`, `compareUtcTimestamps`, `matchesTaskText`,
   `matchesDueRange`.
 
+## Колонки проекта
+
+Колонка (`TaskColumn`) содержит `id`, `projectId`, `title`, `status`,
+`position`, `version`, `createdAt`, `updatedAt`.
+
+- Новый проект атомарно получает три default-колонки: `ToDo`, `In Progress`,
+  `Done` с ID `column-<projectId>-todo`, `column-<projectId>-in-progress`,
+  `column-<projectId>-done`.
+- Legacy-проект без документов колонок получает детерминированные `Backlog`,
+  `To do`, `In progress`, `Done` с ID
+  `column-<projectId>-legacy-<status>`; `task.columnId` проставляется
+  техническим backfill без изменения публичных `version`/`updatedAt`.
+  Backfill идёт отдельной транзакцией на проект и awaited до завершения
+  активации; сбой одного проекта логируется как
+  `tasks.column_backfill_failed` и не отменяет остальные. Backfill не публикует
+  доменные события: восстановление выполняется полной переиндексацией и
+  чтением list после рестарта. `column.list` и `task.list{columnId}` —
+  read-only: они не материализуют колонки и не делают read-repair; при упавшем
+  startup backfill запрос честно возвращает пустой список или `NOT_FOUND`.
+- Явный legacy `status` в `task.create`/`task.move`, для которого в проекте нет
+  колонки, лениво создаёт её в той же транзакции: Backlog встаёт в позицию 0,
+  остальные — по порядку legacy-статусов. После коммита публикуется
+  `column.created`, сдвинутые существующие колонки получают `column.updated`
+  с `changed: ["position"]`, а `columnId`/`status` задачи синхронизируются. Три
+  default-колонки нового проекта при этом сохраняются.
+- `column.create` вставляет колонку и повышает версии сдвинутых соседей;
+  `position === undefined` означает append. `column.update` меняет только
+  заголовок. `column.move` выполняет транзакционный reorder.
+- `column.delete` требует `confirm: true`, `expectedVersion` и
+  `targetColumnId`. Запрещены удаление последней открытой колонки
+  (`COLUMN_LAST_OPEN`), последней Done-колонки (`COLUMN_LAST_DONE`), target,
+  равный удаляемой (`COLUMN_TARGET_SELF`), и target другого проекта
+  (`COLUMN_TARGET_OTHER_PROJECT`). В проекте всегда остаётся минимум одна
+  открытая и одна Done-колонка. Задачи переносятся в target в той же
+  транзакции с обновлением `columnId`, `status`, `position`, `completedAt` и
+  версий; позиция — `max(position) + 1` по target, а не `count`, поэтому
+  разреженные позиции не дают дублей. Результат проверяется на `MAX_POSITION`
+  и при переполнении отвергается `INVALID_POSITION` без частичной записи.
+  Результат содержит `movedTasks` и сдвинутые `updatedColumns`.
+- `task.complete` выбирает первую Done-колонку по `position`; если её нет —
+  `DONE_COLUMN_NOT_FOUND`.
+- `task.create`/`task.move` принимают `columnId` и/или legacy `status`.
+  Если заданы оба и они расходятся — `COLUMN_STATUS_MISMATCH`; если не задано
+  ни одного — `COLUMN_REQUIRED`. Новые open-колонки имеют статус
+  `in_progress`, поэтому старый клиент без `columnId` создаёт задачу в `todo`,
+  а move по `status` выбирает первую колонку с этим статусом.
+- `project.delete` каскадно удаляет колонки и возвращает `deletedColumns`.
+
 ## Позиция задачи
 
-`position` уникальна и задаёт порядок в области `(projectId, status)`.
+`position` уникальна и задаёт порядок в области `(projectId, columnId)`.
 `parentTaskId` на область уникальности не влияет: корневые задачи и подзадачи
-одного проекта и статуса упорядочиваются вместе. Непрерывность `0…N-1` не
-требуется — допустимы разреженные целые позиции, если уникальность и порядок
-сохранены. Чистый ключ области даёт `taskPositionScopeKey(projectId, status)`.
+одной колонки упорядочиваются вместе. Непрерывность `0…N-1` не требуется —
+допустимы разреженные целые позиции, если уникальность и порядок сохранены.
+Для чтения legacy-задач без `columnId` effective-колонка вычисляется по
+первой колонке проекта с тем же `status` (`resolveTaskColumnId`).
 
 ## Append и completedAt
 
-`position` в `CreateTaskStoreInput` и `CompleteTaskStoreInput` необязательна:
+`position` в `CreateTaskStoreInput`, `MoveTaskStoreInput` и
+`CompleteTaskStoreInput` необязательна:
 
-- `undefined` — атомарный append в конец области `(projectId, status)`;
+- `undefined` — атомарный append в конец области `(projectId, columnId)`;
 - явное число — транзакционный сдвиг соседей в той же области.
 
 `completedAt` не передаётся в Store. Store вычисляет его чистой функцией
@@ -237,11 +302,13 @@ const document = toTaskSearchDocument(task);
 
 ```text
 kanbaner.tasks:project:<id>
+kanbaner.tasks:task-column:<id>
 kanbaner.tasks:task:<id>
 ```
 
 `parseProjectRef`, `parseTaskRef`, `isProjectRef` и `isTaskRef` проверяют
-владельца (`pluginId`) и тип ресурса. Ссылки другого плагина отклоняются.
+владельца (`pluginId`) и тип ресурса; `formatColumnRef` собирает ссылку
+колонки. Ссылки другого плагина отклоняются.
 
 ## События
 
@@ -249,22 +316,37 @@ kanbaner.tasks:task:<id>
 
 ```text
 kanbaner.tasks.project.created|updated|deleted
+kanbaner.tasks.column.created|updated|moved|deleted
 kanbaner.tasks.task.created|updated|moved|completed|deleted
 ```
 
 Payload содержит минимальные идентификаторы и версию; полное состояние
-получается запросом. События `project.deleted` и `task.deleted` несут
-`version` последней сохранённой корневой сущности, `eventVersion` и
+получается запросом. События `column.*` содержат `columnId`, `projectId`,
+`version`; `column.moved` добавляет `fromPosition`/`toPosition`,
+`column.updated` — `changed`. `column.deleted` для `column.delete` содержит
+`targetColumnId` и `movedTaskIds`; при каскадном `project.delete` эти поля
+отсутствуют, а на каждую удалённую колонку публикуется отдельный
+`column.deleted`, чтобы подписчики очистили универсальные ссылки.
+Перенесённые при `column.delete` задачи получают `task.moved` с
+`fromColumnId`/`toColumnId` и `fromStatus`/`toStatus`; сдвинутые соседи —
+`task.updated` с `position`. События `project.deleted` и `task.deleted`
+несут `version` последней сохранённой корневой сущности, `eventVersion` и
 `deletedTasks` с дескрипторами `{ id, projectId, resourceRef, version,
-eventVersion }`. Envelope использует `resourceVersion = eventVersion =
-version + 1`: update(v3) → delete event(v4). У каждой задачи каскада своя
+eventVersion }`; `project.deleted` дополнительно содержит `deletedColumns`.
+Envelope использует `resourceVersion = eventVersion = version + 1`:
+update(v3) → delete event(v4). У каждой задачи и колонки каскада своя
 `eventVersion`. Tombstone-версия не создаётся. Доставка best-effort,
 обработчик должен быть идемпотентным.
 
 При insert/move/complete/delete activation сравнивает снимки задач проекта до и
 после мутации в той же транзакции. Каждый фактически сдвинутый сосед получает
 `task.updated` со своей новой `position` и `resourceVersion`; основная задача
-операции в этот список не попадает. Для `task.delete` события удалённых задач
+операции в этот список не попадает. Для `column.create/move/delete` так же
+сравниваются снимки колонок: сдвинутые колонки получают `column.updated`, а
+задачи, перенесённые при `column.delete`, — `task.moved`. Ленивая
+материализация в `task.create`/`task.move` публикует `column.created` для новой
+колонки и `column.updated` (`changed: ["position"]`) для сдвинутых
+существующих default-колонок. Для `task.delete` события удалённых задач
 публикуются отдельно от `task.updated` оставшихся соседей.
 
 Все события имеют `source = "kanbaner.tasks"` и `contractVersion = 1`.
@@ -334,29 +416,33 @@ const store = createTasksStore({
 
 `createTasksStore({ storage, idFactory, now })`:
 
-- использует только публичный `PluginDocumentStore` и коллекции `projects` и
-  `tasks` в namespace `kanbaner.tasks`;
+- использует только публичный `PluginDocumentStore` и коллекции `projects`,
+  `task-columns` и `tasks` в namespace `kanbaner.tasks`;
 - не содержит SQL, `PRAGMA`, имён таблиц, драйвера БД и синхронных вызовов;
 - не импортирует kernel, `storage-sqlite` и другие плагины;
 - принимает готовые ID и UTC-время из контракта KAN-010; `idFactory` и `now`
   применяются как fallback только при отсутствии значения во входе;
-- на каждом чтении и записи вызывает `assertStoredTask`, а проект проверяет по
-  `ProjectSchema`; расхождение `data.version` и версии документа — доменная
-  ошибка `VALIDATION_ERROR`, а не молчаливое допущение;
+- на каждом чтении и записи вызывает `assertStoredTask`, проект проверяет по
+  `ProjectSchema`, колонку — по `TaskColumnSchema`;
+- для задач допускает `document.version >= task.version` **только** как
+  результат технического backfill `columnId`; публичные `version`/`updatedAt`
+  при этом не меняются. Обратное расхождение и расхождение у обычных мутаций —
+  доменная ошибка `VALIDATION_ERROR`;
 - при точных фильтрах использует `indexedFields`
-  (`projectId`, `status`, `priority`, `parentTaskId`), остальные фильтры и
-  сортировку выполняет в Store;
+  (`projectId`, `columnId`, `status`, `priority`, `parentTaskId`), остальные
+  фильтры и сортировку выполняет в Store;
 - возвращает `VERSION_CONFLICT` через `TasksVersionConflictError` с
   `expectedVersion` и `actualVersion`, не перезаписывая документ.
 
 Контракт требует только уникальность и порядок; непрерывность не обязательна.
 Текущая реализация Store на практике поддерживает непрерывную `0…N-1` в
-области `(projectId, status)`: append получает `max + 1`, явная позиция и move
-переставляют соседей в той же транзакции, delete закрывает разрыв. Любой
-фактический сдвиг соседа увеличивает его `Task.version` и `updatedAt` и
-сохраняется через document CAS с текущей `expectedVersion`; публичная версия и
-версия документа всегда синхронны. Соседи меняются атомарно вместе с
-операцией; `activate` публикует для них `task.updated`.
+областях `(projectId, columnId)` для задач и `projectId` для колонок: append
+получает `max + 1`, явная позиция и move переставляют соседей в той же
+транзакции, delete закрывает разрыв. Любой фактический сдвиг соседа
+увеличивает его `version` и `updatedAt` и сохраняется через document CAS с
+текущей `expectedVersion`; публичная версия и версия документа синхронны для
+всех обычных операций. Соседи меняются атомарно вместе с операцией;
+`activate` публикует для них `task.updated` или `column.updated`.
 
 Все scoped-методы одной `TasksStoreTransaction`, включая чтения, выполняются
 через локальную FIFO-очередь этой транзакции. Составные read-modify-write
@@ -368,11 +454,13 @@ const store = createTasksStore({
 `createTasksStoreConformanceSuite({ createStore })` экспортируется из
 `@kanbaner/plugin-tasks/testing` и не импортирует backend. Драйвер
 `tests/integration/tasks-store-conformance.test.ts` запускает его на четырёх
-вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite
-проверяет CAS, rollback rejected Promise, вложенную транзакцию, scoped
-`documents`, конкурентные create/complete/move, уникальность позиций,
-подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию и UTC/application
-IDs.
+вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite из 38
+case проверяет CAS, rollback rejected Promise, вложенную транзакцию, scoped
+`documents`, конкурентные create/complete/move и backfill, уникальность
+позиций, подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию,
+UTC/application IDs, default/legacy-колонки, CRUD/reorder/delete-transfer
+колонок, разреженные позиции и `MAX_POSITION` при delete, read-only query,
+multi-Done и `columnId`/`status`-совместимость.
 
 ### Транзакции и idempotency
 
@@ -400,8 +488,8 @@ await store.withTransaction(async (transaction) => {
 `DeleteStoreResult` дискриминирован:
 
 - `deleted: true` содержит `version` корня (равен `expectedVersion`),
-  `eventVersion = version + 1`, `deletedResourceRefs` и `deletedTasks` с
-  последними сохранёнными версиями и их `eventVersion`;
+  `eventVersion = version + 1`, `deletedResourceRefs`, `deletedTasks` и
+  `deletedColumns` с последними сохранёнными версиями и их `eventVersion`;
 - `deleted: false` — идемпотентный no-op без события и без `eventId`.
 
 Ответы `project.delete` и `task.delete` используют ту же дискриминацию:
@@ -415,11 +503,13 @@ await store.withTransaction(async (transaction) => {
 
 ```text
 projects
+task-columns
 tasks
 ```
 
-Теги хранятся внутри документа задачи. Конкретные имена `tasks_*` и физическая
-схема остаются деталью Storage Provider и не входят в публичный контракт.
+Теги и `columnId` хранятся внутри документа задачи, позиция и тип — внутри
+документа колонки. Конкретные имена `tasks_*` и физическая схема остаются
+деталью Storage Provider и не входят в публичный контракт.
 
 Поэтому в `plugin.json` нет `migrations`, а в пакете нет SQL-миграции: плагин
 владеет только документами в своём namespace. Manifest явно объявляет

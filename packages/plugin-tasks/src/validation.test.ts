@@ -6,6 +6,7 @@ import {
   normalizeTag,
   normalizeTags,
   resolveCompletedAt,
+  taskColumnPositionScopeKey,
   taskPositionScopeKey,
   validateCompletionInvariant,
   validateExpectedVersion,
@@ -255,6 +256,18 @@ describe("pagination and versions", () => {
     expect(taskPositionScopeKey("project-1", "todo")).not.toBe(
       taskPositionScopeKey("project-2", "todo"),
     );
+  });
+
+  it("задаёт область позиции по projectId и columnId отдельно от legacy status", () => {
+    expect(taskColumnPositionScopeKey("project-1", "column-a")).toBe("project-1:column-a");
+    expect(taskColumnPositionScopeKey("project-1", "column-a")).not.toBe(
+      taskColumnPositionScopeKey("project-1", "column-b"),
+    );
+    expect(taskColumnPositionScopeKey("project-1", "column-a")).not.toBe(
+      taskColumnPositionScopeKey("project-2", "column-a"),
+    );
+    // Legacy-ключ по статусу сохранён и не смешивается с column-scope.
+    expect(taskPositionScopeKey("project-1", "todo")).toBe("project-1:todo");
   });
 
   it("проверяет expectedVersion для update и create", () => {

@@ -5,10 +5,16 @@ import {
   type ResourceRefParts,
 } from "@kanbaner/plugin-sdk";
 
-import { PLUGIN_ID, PROJECT_RESOURCE_TYPE, TASK_RESOURCE_TYPE } from "./constants.ts";
+import {
+  COLUMN_RESOURCE_TYPE,
+  PLUGIN_ID,
+  PROJECT_RESOURCE_TYPE,
+  TASK_RESOURCE_TYPE,
+} from "./constants.ts";
 
 /** Тип ресурса задач. */
-export type TasksResourceKind = typeof PROJECT_RESOURCE_TYPE | typeof TASK_RESOURCE_TYPE;
+export type TasksResourceKind =
+  typeof PROJECT_RESOURCE_TYPE | typeof TASK_RESOURCE_TYPE | typeof COLUMN_RESOURCE_TYPE;
 
 /** Разобранная ссылка на ресурс домена задач. */
 export interface ParsedTasksResourceRef {
@@ -48,6 +54,15 @@ export function formatTaskRef(id: string): ResourceRef {
   return formatResourceRef({
     pluginId: PLUGIN_ID,
     resourceType: TASK_RESOURCE_TYPE,
+    opaqueId: id,
+  });
+}
+
+/** Собирает ResourceRef колонки. */
+export function formatColumnRef(id: string): ResourceRef {
+  return formatResourceRef({
+    pluginId: PLUGIN_ID,
+    resourceType: COLUMN_RESOURCE_TYPE,
     opaqueId: id,
   });
 }
@@ -102,7 +117,11 @@ export function parseTasksResourceRef(ref: ResourceRef): ParsedTasksResourceRef 
 
   assertOwnParts(parts);
 
-  if (parts.resourceType === PROJECT_RESOURCE_TYPE || parts.resourceType === TASK_RESOURCE_TYPE) {
+  if (
+    parts.resourceType === PROJECT_RESOURCE_TYPE ||
+    parts.resourceType === TASK_RESOURCE_TYPE ||
+    parts.resourceType === COLUMN_RESOURCE_TYPE
+  ) {
     return { kind: parts.resourceType, id: parts.opaqueId };
   }
 
@@ -116,7 +135,9 @@ export function tryParseTasksResourceRef(value: unknown): ParsedTasksResourceRef
   if (
     parts === null ||
     parts.pluginId !== PLUGIN_ID ||
-    (parts.resourceType !== PROJECT_RESOURCE_TYPE && parts.resourceType !== TASK_RESOURCE_TYPE)
+    (parts.resourceType !== PROJECT_RESOURCE_TYPE &&
+      parts.resourceType !== TASK_RESOURCE_TYPE &&
+      parts.resourceType !== COLUMN_RESOURCE_TYPE)
   ) {
     return null;
   }

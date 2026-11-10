@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 
-import type { UtcTimestamp } from "@kanbaner/plugin-sdk";
+import type { JsonValue, UtcTimestamp } from "@kanbaner/plugin-sdk";
 
-import { PLUGIN_ID, PROJECT_COLLECTION, TASK_COLLECTION } from "./constants.ts";
+import {
+  COLUMN_COLLECTION,
+  MAX_POSITION,
+  PLUGIN_ID,
+  PROJECT_COLLECTION,
+  TASK_COLLECTION,
+} from "./constants.ts";
 import {
   deleteEventVersion,
   type Project,
@@ -24,7 +30,7 @@ import { TasksValidationError } from "./validation.ts";
  */
 export interface TasksStoreConformanceContext {
   /** ID проекта или задачи в формате application-generated. */
-  nextId(kind: "project" | "task"): string;
+  nextId(kind: "project" | "task" | "column"): string;
   /** UTC timestamp со смещением в секундах от фиксированной базы. */
   at(offsetSeconds: number): UtcTimestamp;
 }
@@ -45,6 +51,7 @@ const BASE_TIME = Date.UTC(2026, 0, 1, 0, 0, 0);
 function createContext(): TasksStoreConformanceContext {
   let projectSequence = 0;
   let taskSequence = 0;
+  let columnSequence = 0;
 
   return {
     nextId(kind) {
@@ -52,6 +59,12 @@ function createContext(): TasksStoreConformanceContext {
         projectSequence += 1;
 
         return `project-${String(projectSequence)}`;
+      }
+
+      if (kind === "column") {
+        columnSequence += 1;
+
+        return `column-${String(columnSequence)}`;
       }
 
       taskSequence += 1;
@@ -130,6 +143,7 @@ async function createProject(
 
 interface TaskSeed {
   readonly projectId: string;
+  readonly columnId?: string;
   readonly parentTaskId?: string | null;
   readonly title?: string;
   readonly descriptionMarkdown?: string;
@@ -153,7 +167,12 @@ async function createTask(
     parentTaskId: seed.parentTaskId ?? null,
     title: seed.title ?? "Task",
     descriptionMarkdown: seed.descriptionMarkdown ?? "",
-    status: seed.status ?? "todo",
+    ...(seed.columnId === undefined ? {} : { columnId: seed.columnId }),
+    ...(seed.status === undefined
+      ? seed.columnId === undefined
+        ? { status: "todo" as const }
+        : {}
+      : { status: seed.status }),
     priority: seed.priority ?? "medium",
     dueAt: seed.dueAt ?? null,
     ...(seed.position === undefined ? {} : { position: seed.position }),
@@ -173,6 +192,69 @@ async function listScope(
   const page = await store.listTasks({ projectId, status, limit: 200, offset: 0 });
 
   return page.items;
+}
+
+async function listColumnScope(
+  store: TasksStore,
+  projectId: string,
+  columnId: string,
+): Promise<readonly Task[]> {
+  const page = await store.listTasks({ projectId, columnId, limit: 200, offset: 0 });
+
+  return page.items;
+}
+
+/**
+ * Создаёт проект и задачи в legacy-формате: без документов колонок и без
+ * `task.columnId`, как в базе до появления пользовательских колонок.
+ */
+async function createLegacyProject(
+  store: TasksStore,
+  context: TasksStoreConformanceContext,
+): Promise<Project> {
+  const project = await createProject(store, context, { title: "Legacy" });
+  const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+  const createdAt = context.at(0);
+
+  await store.withTransaction(async (transaction) => {
+    const columns = await transaction.listColumns({
+      projectId: project.id,
+      limit: 200,
+      offset: 0,
+    });
+
+    for (const column of columns.items) {
+      await transaction.documents.delete(PLUGIN_ID, COLUMN_COLLECTION, column.id);
+    }
+
+    for (const [index, status] of statuses.entries()) {
+      await transaction.documents.put({
+        pluginId: PLUGIN_ID,
+        collection: TASK_COLLECTION,
+        id: `legacy-task-${project.id}-${status}`,
+        data: {
+          id: `legacy-task-${project.id}-${status}`,
+          projectId: project.id,
+          parentTaskId: null,
+          title: `Legacy ${status}`,
+          descriptionMarkdown: "",
+          status,
+          priority: "medium",
+          dueAt: null,
+          position: index,
+          tags: [],
+          version: 1,
+          createdAt,
+          updatedAt: createdAt,
+          completedAt: status === "done" ? createdAt : null,
+        },
+        indexedFields: { projectId: project.id, status },
+        expectedVersion: 0,
+      });
+    }
+  });
+
+  return project;
 }
 
 function positionsOf(tasks: readonly Task[]): readonly number[] {
@@ -453,7 +535,7 @@ export function createTasksStoreConformanceSuite(
       },
     },
     {
-      name: "task: append уникален в области projectId/status и не зависит от parent",
+      name: "task: append уникален в области projectId/columnId и не зависит от parent",
       async run() {
         await withStore(async (store) => {
           const context = createContext();
@@ -465,9 +547,9 @@ export function createTasksStoreConformanceSuite(
             projectId: project.id,
             parentTaskId: first.id,
           });
-          const backlog = await createTask(store, context, {
+          const inProgress = await createTask(store, context, {
             projectId: project.id,
-            status: "backlog",
+            status: "in_progress",
           });
 
           const todo = await listScope(store, project.id, "todo");
@@ -477,8 +559,8 @@ export function createTasksStoreConformanceSuite(
             [first.id, second.id, third.id, child.id],
           );
           assert.deepEqual(positionsOf(todo), [0, 1, 2, 3]);
-          assert.equal(backlog.position, 0);
-          assert.deepEqual(positionsOf(await listScope(store, project.id, "backlog")), [0]);
+          assert.equal(inProgress.position, 0);
+          assert.deepEqual(positionsOf(await listScope(store, project.id, "in_progress")), [0]);
         });
       },
     },
@@ -1701,6 +1783,985 @@ export function createTasksStoreConformanceSuite(
           assertContiguous(positionsOf(todo), "todo после параллельного move");
           assertContiguous(positionsOf(inProgress), "in_progress после параллельного move");
           assert.equal(new Set([...todo, ...inProgress].map((task) => task.id)).size, 20);
+        });
+      },
+    },
+
+    {
+      name: "column: новый проект получает три default-колонки ToDo/In Progress/Done",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const page = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(page.total, 3);
+          assert.equal(page.nextOffset, null);
+          assert.deepEqual(
+            page.items.map((column) => ({
+              id: column.id,
+              title: column.title,
+              status: column.status,
+              position: column.position,
+              version: column.version,
+              createdAt: column.createdAt,
+              updatedAt: column.updatedAt,
+            })),
+            [
+              {
+                id: `column-${project.id}-todo`,
+                title: "ToDo",
+                status: "todo",
+                position: 0,
+                version: 1,
+                createdAt: context.at(0),
+                updatedAt: context.at(0),
+              },
+              {
+                id: `column-${project.id}-in-progress`,
+                title: "In Progress",
+                status: "in_progress",
+                position: 1,
+                version: 1,
+                createdAt: context.at(0),
+                updatedAt: context.at(0),
+              },
+              {
+                id: `column-${project.id}-done`,
+                title: "Done",
+                status: "done",
+                position: 2,
+                version: 1,
+                createdAt: context.at(0),
+                updatedAt: context.at(0),
+              },
+            ],
+          );
+        });
+      },
+    },
+    {
+      name: "column: legacy backfill создаёт 4 колонки и columnId без роста public version/updatedAt",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createLegacyProject(store, context);
+          const statuses: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "done"];
+          const before = new Map<string, Task>();
+
+          for (const status of statuses) {
+            const task = await store.getTask(`legacy-task-${project.id}-${status}`);
+
+            assert.notEqual(task, null);
+            before.set(status, task as Task);
+          }
+
+          const result = await store.backfillLegacyColumns();
+          const columns = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(result.createdColumns.length, 4);
+          assert.equal(result.updatedTasks.length, 4);
+          assert.deepEqual(
+            columns.items.map((column) => ({
+              id: column.id,
+              title: column.title,
+              status: column.status,
+              position: column.position,
+            })),
+            [
+              {
+                id: `column-${project.id}-legacy-backlog`,
+                title: "Backlog",
+                status: "backlog",
+                position: 0,
+              },
+              {
+                id: `column-${project.id}-legacy-todo`,
+                title: "To do",
+                status: "todo",
+                position: 1,
+              },
+              {
+                id: `column-${project.id}-legacy-in_progress`,
+                title: "In progress",
+                status: "in_progress",
+                position: 2,
+              },
+              {
+                id: `column-${project.id}-legacy-done`,
+                title: "Done",
+                status: "done",
+                position: 3,
+              },
+            ],
+          );
+
+          for (const status of statuses) {
+            const task = await store.getTask(`legacy-task-${project.id}-${status}`);
+            const original = before.get(status) as Task;
+
+            assert.notEqual(task, null);
+            assert.equal((task as Task).columnId, `column-${project.id}-legacy-${status}`);
+            assert.equal((task as Task).status, status);
+            assert.equal((task as Task).version, original.version);
+            assert.equal((task as Task).updatedAt, original.updatedAt);
+            assert.equal((task as Task).completedAt, original.completedAt);
+          }
+
+          // Идемпотентность: повторный проход ничего не создаёт и не пишет.
+          const repeat = await store.backfillLegacyColumns();
+
+          assert.deepEqual(repeat.createdColumns, []);
+          assert.deepEqual(repeat.updatedTasks, []);
+
+          // Конкурентный backfill другого legacy-проекта: оба вызова
+          // сериализуются провайдером, дубликатов колонок и повторного
+          // backfill задач нет.
+          const secondProject = await createLegacyProject(store, context);
+          const [firstPass, secondPass] = await Promise.all([
+            store.backfillLegacyColumns(),
+            store.backfillLegacyColumns(),
+          ]);
+          const secondColumns = await store.listColumns({
+            projectId: secondProject.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(secondColumns.items.length, 4);
+          assert.equal(firstPass.createdColumns.length + secondPass.createdColumns.length, 4);
+          assert.equal(firstPass.updatedTasks.length + secondPass.updatedTasks.length, 4);
+          assert.deepEqual(new Set(secondColumns.items.map((column) => column.id)).size, 4);
+        });
+      },
+    },
+    {
+      name: "query: column.list и task.list не выполняют read-repair",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const legacy = await createLegacyProject(store, context);
+          const countDocuments = async (collection: string): Promise<number> => {
+            const documents = await store.withTransaction(async (transaction) =>
+              transaction.documents.list(PLUGIN_ID, collection),
+            );
+
+            return documents.length;
+          };
+          const columnsBefore = await countDocuments(COLUMN_COLLECTION);
+          const tasksBefore = await countDocuments(TASK_COLLECTION);
+
+          const columns = await store.listColumns({
+            projectId: legacy.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(columns.total, 0);
+          assert.deepEqual(columns.items, []);
+
+          await rejectsCode(
+            store.listTasks({
+              projectId: legacy.id,
+              columnId: `column-${legacy.id}-legacy-todo`,
+              limit: 200,
+              offset: 0,
+            }),
+            "NOT_FOUND",
+            "task.list по отсутствующей колонке",
+          );
+
+          const tasks = await store.listTasks({
+            projectId: legacy.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(tasks.total, 4);
+          assert.equal(
+            tasks.items.every((task) => task.columnId === undefined),
+            true,
+          );
+
+          // Ни один query не создал колонку и не изменил задачу.
+          assert.equal(await countDocuments(COLUMN_COLLECTION), columnsBefore);
+          assert.equal(await countDocuments(TASK_COLLECTION), tasksBefore);
+        });
+      },
+    },
+    {
+      name: "column: create/update/move сохраняют порядок и повышают версии сдвинутых соседей",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const review = await store.createColumn({
+            id: "column-review",
+            projectId: project.id,
+            title: "Review",
+            type: "open",
+            position: 1,
+            createdAt: context.at(1),
+            expectedVersion: 0,
+          });
+
+          assert.equal(review.position, 1);
+          assert.equal(review.status, "in_progress");
+          assert.equal(review.version, 1);
+
+          let columns = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            columns.items.map((column) => [column.id, column.position, column.version]),
+            [
+              [`column-${project.id}-todo`, 0, 1],
+              ["column-review", 1, 1],
+              [`column-${project.id}-in-progress`, 2, 2],
+              [`column-${project.id}-done`, 3, 2],
+            ],
+          );
+
+          const updated = await store.updateColumn({
+            id: review.id,
+            expectedVersion: 1,
+            title: "Code Review",
+            updatedAt: context.at(2),
+          });
+
+          assert.equal(updated.title, "Code Review");
+          assert.equal(updated.version, 2);
+          assert.equal(updated.updatedAt, context.at(2));
+
+          const moved = await store.moveColumn({
+            id: review.id,
+            expectedVersion: 2,
+            position: 0,
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(moved.position, 0);
+          assert.equal(moved.version, 3);
+
+          columns = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            columns.items.map((column) => [column.id, column.position, column.version]),
+            [
+              ["column-review", 0, 3],
+              [`column-${project.id}-todo`, 1, 2],
+              [`column-${project.id}-in-progress`, 2, 2],
+              [`column-${project.id}-done`, 3, 2],
+            ],
+          );
+
+          await rejectsVersionConflict(
+            store.moveColumn({
+              id: `column-${project.id}-todo`,
+              expectedVersion: 1,
+              position: 0,
+              updatedAt: context.at(4),
+            }),
+            1,
+            2,
+            "move со старой версией колонки",
+          );
+        });
+      },
+    },
+    {
+      name: "column: delete переносит задачи атомарно с completedAt/status и сдвигает соседей",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const todoId = `column-${project.id}-todo`;
+          const inProgressId = `column-${project.id}-in-progress`;
+          const doneId = `column-${project.id}-done`;
+          const review = await store.createColumn({
+            id: "column-review",
+            projectId: project.id,
+            title: "Review",
+            type: "open",
+            position: 1,
+            createdAt: context.at(1),
+            expectedVersion: 0,
+          });
+          const first = await createTask(store, context, {
+            id: "task-delete-first",
+            projectId: project.id,
+            title: "First",
+          });
+          const second = await createTask(store, context, {
+            id: "task-delete-second",
+            projectId: project.id,
+            columnId: review.id,
+            title: "Second",
+            createdAtOffset: 1,
+          });
+          const archive = await store.createColumn({
+            id: "column-archive",
+            projectId: project.id,
+            title: "Archive",
+            type: "done",
+            createdAt: context.at(2),
+            expectedVersion: 0,
+          });
+          const third = await createTask(store, context, {
+            id: "task-delete-third",
+            projectId: project.id,
+            columnId: archive.id,
+            title: "Third",
+            createdAtOffset: 2,
+          });
+
+          const deletion = await store.deleteColumn({
+            id: review.id,
+            expectedVersion: 1,
+            targetColumnId: todoId,
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(deletion.deleted, true);
+
+          if (!deletion.deleted) {
+            assert.fail("deleteColumn должен вернуть deleted=true");
+          }
+
+          assert.equal(deletion.movedTasks.length, 1);
+          assert.equal(deletion.targetColumnId, todoId);
+
+          const movedSecond = deletion.movedTasks[0] as Task;
+
+          assert.equal(movedSecond.id, second.id);
+          assert.equal(movedSecond.columnId, todoId);
+          assert.equal(movedSecond.status, "todo");
+          assert.equal(movedSecond.position, 1);
+          assert.equal(movedSecond.completedAt, null);
+          assert.equal(movedSecond.version, second.version + 1);
+          assert.equal(movedSecond.updatedAt, context.at(3));
+          assert.deepEqual(
+            deletion.updatedColumns.map((column) => [column.id, column.position, column.version]),
+            [
+              [inProgressId, 1, 3],
+              [doneId, 2, 3],
+              [archive.id, 3, 2],
+            ],
+          );
+
+          const firstAfter = await store.getTask(first.id);
+          const secondAfter = await store.getTask(second.id);
+
+          assert.equal((firstAfter as Task).columnId, todoId);
+          assert.equal((firstAfter as Task).version, first.version);
+          assert.equal((secondAfter as Task).columnId, todoId);
+
+          const todoTasks = await listColumnScope(store, project.id, todoId);
+
+          assert.deepEqual(
+            todoTasks.map((task) => [task.id, task.position, task.version]),
+            [
+              [first.id, 0, 1],
+              [second.id, 1, 2],
+            ],
+          );
+
+          const columnsAfterReview = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            columnsAfterReview.items.map((column) => [column.id, column.position]),
+            [
+              [todoId, 0],
+              [inProgressId, 1],
+              [doneId, 2],
+              [archive.id, 3],
+            ],
+          );
+
+          // Удаление Done-колонки: задача сохраняет прежний completedAt.
+          const archiveAfterReview = columnsAfterReview.items.find(
+            (column) => column.id === archive.id,
+          );
+
+          assert.notEqual(archiveAfterReview, undefined);
+
+          const archiveDeletion = await store.deleteColumn({
+            id: archive.id,
+            expectedVersion: (archiveAfterReview as Task).version,
+            targetColumnId: doneId,
+            updatedAt: context.at(4),
+          });
+
+          assert.equal(archiveDeletion.deleted, true);
+
+          if (!archiveDeletion.deleted) {
+            assert.fail("удаление archive должно вернуть deleted=true");
+          }
+
+          assert.equal(archiveDeletion.movedTasks.length, 1);
+
+          const movedThird = archiveDeletion.movedTasks[0] as Task;
+
+          assert.equal(movedThird.id, third.id);
+          assert.equal(movedThird.columnId, doneId);
+          assert.equal(movedThird.status, "done");
+          assert.equal(movedThird.completedAt, third.completedAt);
+          assert.equal(movedThird.position, 0);
+          assert.equal(movedThird.version, third.version + 1);
+
+          const finalColumns = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            finalColumns.items.map((column) => [column.id, column.position]),
+            [
+              [todoId, 0],
+              [inProgressId, 1],
+              [doneId, 2],
+            ],
+          );
+        });
+      },
+    },
+    {
+      name: "column: delete добавляет задачи после max(position), а не count, без дублей",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const todoId = `column-${project.id}-todo`;
+          const inProgressId = `column-${project.id}-in-progress`;
+          const first = await createTask(store, context, {
+            id: "task-sparse-first",
+            projectId: project.id,
+            columnId: inProgressId,
+            title: "First",
+          });
+          const second = await createTask(store, context, {
+            id: "task-sparse-second",
+            projectId: project.id,
+            columnId: inProgressId,
+            title: "Second",
+            createdAtOffset: 1,
+          });
+          const source = await createTask(store, context, {
+            id: "task-sparse-source",
+            projectId: project.id,
+            title: "Source",
+            createdAtOffset: 2,
+          });
+
+          // Store не требует непрерывности, поэтому разреженные позиции
+          // 5 и 10 допустимы. Меняем документы напрямую, как это могло
+          // возникнуть после прошлых операций.
+          await store.withTransaction(async (transaction) => {
+            for (const [task, position] of [
+              [first, 5],
+              [second, 10],
+            ] as const) {
+              const document = await transaction.documents.get(PLUGIN_ID, TASK_COLLECTION, task.id);
+
+              assert.notEqual(document, null);
+
+              if (document === null) {
+                continue;
+              }
+
+              await transaction.documents.put({
+                pluginId: PLUGIN_ID,
+                collection: TASK_COLLECTION,
+                id: task.id,
+                data: {
+                  ...(document.data as Record<string, JsonValue>),
+                  position,
+                  version: task.version + 1,
+                },
+                indexedFields: {
+                  projectId: project.id,
+                  columnId: task.columnId as JsonValue,
+                  status: task.status as JsonValue,
+                  priority: task.priority as JsonValue,
+                  parentTaskId: task.parentTaskId as JsonValue,
+                },
+                expectedVersion: document.version,
+              });
+            }
+          });
+
+          const deletion = await store.deleteColumn({
+            id: todoId,
+            expectedVersion: 1,
+            targetColumnId: inProgressId,
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(deletion.deleted, true);
+
+          if (!deletion.deleted) {
+            assert.fail("deleteColumn должен вернуть deleted=true");
+          }
+
+          assert.equal(deletion.movedTasks.length, 1);
+
+          const moved = deletion.movedTasks[0] as Task;
+
+          assert.equal(moved.id, source.id);
+          assert.equal(moved.columnId, inProgressId);
+          assert.equal(moved.position, 11);
+
+          const scope = await listColumnScope(store, project.id, inProgressId);
+
+          assert.deepEqual(
+            scope.map((task) => [task.id, task.position]),
+            [
+              [first.id, 5],
+              [second.id, 10],
+              [source.id, 11],
+            ],
+          );
+          assert.equal(new Set(scope.map((task) => task.position)).size, scope.length);
+
+          // Переполнение MAX_POSITION отвергается доменной ошибкой до записи.
+          const overflowProject = await createProject(store, context, { title: "Overflow" });
+          const overflowTodo = `column-${overflowProject.id}-todo`;
+          const overflowTarget = `column-${overflowProject.id}-in-progress`;
+          const overflowTargetTask = await createTask(store, context, {
+            id: "task-overflow-target",
+            projectId: overflowProject.id,
+            columnId: overflowTarget,
+            title: "Max target",
+            createdAtOffset: 4,
+          });
+          const overflowSourceTask = await createTask(store, context, {
+            id: "task-overflow-source",
+            projectId: overflowProject.id,
+            title: "Max source",
+            createdAtOffset: 5,
+          });
+
+          await store.withTransaction(async (transaction) => {
+            const document = await transaction.documents.get(
+              PLUGIN_ID,
+              TASK_COLLECTION,
+              overflowTargetTask.id,
+            );
+
+            assert.notEqual(document, null);
+
+            if (document === null) {
+              return;
+            }
+
+            await transaction.documents.put({
+              pluginId: PLUGIN_ID,
+              collection: TASK_COLLECTION,
+              id: overflowTargetTask.id,
+              data: {
+                ...(document.data as Record<string, JsonValue>),
+                position: MAX_POSITION,
+                version: overflowTargetTask.version + 1,
+              },
+              indexedFields: {
+                projectId: overflowProject.id,
+                columnId: overflowTarget as JsonValue,
+                status: overflowTargetTask.status as JsonValue,
+                priority: overflowTargetTask.priority as JsonValue,
+                parentTaskId: overflowTargetTask.parentTaskId as JsonValue,
+              },
+              expectedVersion: document.version,
+            });
+          });
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: overflowTodo,
+              expectedVersion: 1,
+              targetColumnId: overflowTarget,
+              updatedAt: context.at(6),
+            }),
+            "INVALID_POSITION",
+            "переполнение MAX_POSITION при переносе задач",
+          );
+
+          const overflowSource = await store.getTask(overflowSourceTask.id);
+
+          assert.equal((overflowSource as Task).columnId, overflowTodo);
+        });
+      },
+    },
+    {
+      name: "column: delete отклоняет last/self/чужой target",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const todoId = `column-${project.id}-todo`;
+          const inProgressId = `column-${project.id}-in-progress`;
+          const doneId = `column-${project.id}-done`;
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: todoId,
+              expectedVersion: 1,
+              targetColumnId: todoId,
+              updatedAt: context.at(1),
+            }),
+            "COLUMN_TARGET_SELF",
+            "удаление колонки в саму себя",
+          );
+
+          const other = await createProject(store, context, { title: "Other" });
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: inProgressId,
+              expectedVersion: 1,
+              targetColumnId: `column-${other.id}-todo`,
+              updatedAt: context.at(1),
+            }),
+            "COLUMN_TARGET_OTHER_PROJECT",
+            "target из другого проекта",
+          );
+
+          const deletedProgress = await store.deleteColumn({
+            id: inProgressId,
+            expectedVersion: 1,
+            targetColumnId: todoId,
+            updatedAt: context.at(1),
+          });
+
+          assert.equal(deletedProgress.deleted, true);
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: todoId,
+              expectedVersion: 1,
+              targetColumnId: doneId,
+              updatedAt: context.at(2),
+            }),
+            "COLUMN_LAST_OPEN",
+            "удаление последней открытой колонки",
+          );
+
+          const remaining = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            remaining.items.map((column) => column.id),
+            [todoId, doneId],
+          );
+
+          // Отдельный проект: нельзя удалить и последнюю Done-колонку, даже
+          // если открытые колонки ещё остаются.
+          const doneProject = await createProject(store, context, { title: "Done only" });
+          const doneProjectTodo = `column-${doneProject.id}-todo`;
+          const doneProjectDone = `column-${doneProject.id}-done`;
+
+          const extraDone = await store.createColumn({
+            id: "column-extra-done-last",
+            projectId: doneProject.id,
+            title: "Second Done",
+            type: "done",
+            createdAt: context.at(4),
+            expectedVersion: 0,
+          });
+
+          await store.deleteColumn({
+            id: doneProjectDone,
+            expectedVersion: 1,
+            targetColumnId: doneProjectTodo,
+            updatedAt: context.at(5),
+          });
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: extraDone.id,
+              expectedVersion: 2,
+              targetColumnId: doneProjectTodo,
+              updatedAt: context.at(6),
+            }),
+            "COLUMN_LAST_DONE",
+            "удаление последней Done-колонки",
+          );
+
+          const doneProjectColumns = await store.listColumns({
+            projectId: doneProject.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            doneProjectColumns.items.map((column) => column.id),
+            [doneProjectTodo, `column-${doneProject.id}-in-progress`, extraDone.id],
+          );
+        });
+      },
+    },
+    {
+      name: "column: delete с устаревшей версией не переносит задачи (rollback)",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const review = await store.createColumn({
+            id: "column-review",
+            projectId: project.id,
+            title: "Review",
+            type: "open",
+            position: 1,
+            createdAt: context.at(1),
+            expectedVersion: 0,
+          });
+          const task = await createTask(store, context, {
+            id: "task-rollback",
+            projectId: project.id,
+            columnId: review.id,
+          });
+
+          await rejectsVersionConflict(
+            store.deleteColumn({
+              id: review.id,
+              expectedVersion: 99,
+              targetColumnId: `column-${project.id}-todo`,
+              updatedAt: context.at(2),
+            }),
+            99,
+            1,
+            "delete со старой версией колонки",
+          );
+
+          const storedColumn = await store.getColumn(review.id);
+          const storedTask = await store.getTask(task.id);
+
+          assert.notEqual(storedColumn, null);
+          assert.equal((storedColumn as Task).version, 1);
+          assert.equal((storedTask as Task).columnId, review.id);
+          assert.equal((storedTask as Task).version, task.version);
+        });
+      },
+    },
+    {
+      name: "task: old client без columnId, first Done и выбор колонки по статусу",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const todoId = `column-${project.id}-todo`;
+          const inProgressId = `column-${project.id}-in-progress`;
+          const doneId = `column-${project.id}-done`;
+          const plain = await createTask(store, context, {
+            id: "task-old-plain",
+            projectId: project.id,
+          });
+
+          assert.equal(plain.columnId, todoId);
+          assert.equal(plain.status, "todo");
+
+          const legacyMove = await createTask(store, context, {
+            id: "task-old-status",
+            projectId: project.id,
+            status: "in_progress",
+          });
+
+          assert.equal(legacyMove.columnId, inProgressId);
+          assert.equal(legacyMove.status, "in_progress");
+
+          await store.createColumn({
+            id: "column-extra-done",
+            projectId: project.id,
+            title: "Extra Done",
+            type: "done",
+            createdAt: context.at(1),
+            expectedVersion: 0,
+          });
+
+          const completed = await store.completeTask({
+            id: plain.id,
+            expectedVersion: plain.version,
+            updatedAt: context.at(2),
+          });
+
+          assert.equal(completed.columnId, doneId);
+          assert.equal(completed.status, "done");
+
+          const movedByStatus = await store.moveTask({
+            id: legacyMove.id,
+            expectedVersion: legacyMove.version,
+            status: "todo",
+            position: 1,
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(movedByStatus.columnId, todoId);
+          assert.equal(movedByStatus.status, "todo");
+          assert.equal(movedByStatus.position, 0);
+
+          const backlog = await store.createTask({
+            id: "task-backlog-new-project",
+            projectId: project.id,
+            parentTaskId: null,
+            title: "Backlog",
+            descriptionMarkdown: "",
+            status: "backlog",
+            priority: "medium",
+            dueAt: null,
+            tags: [],
+            createdAt: context.at(4),
+            expectedVersion: 0,
+          });
+          const backlogColumnId = `column-${project.id}-legacy-backlog`;
+
+          assert.equal(backlog.columnId, backlogColumnId);
+          assert.equal(backlog.status, "backlog");
+          assert.equal(backlog.position, 0);
+
+          // Default-набор не потерян, Backlog встал в начало, остальные
+          // legacy-позиции сдвинулись.
+          const afterBacklog = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            afterBacklog.items.map((column) => [column.id, column.position]),
+            [
+              [backlogColumnId, 0],
+              [todoId, 1],
+              [inProgressId, 2],
+              [doneId, 3],
+              ["column-extra-done", 4],
+            ],
+          );
+
+          // Повторная legacy-операция использует уже созданную колонку.
+          const repeatedBacklog = await store.createTask({
+            id: "task-backlog-new-project-repeat",
+            projectId: project.id,
+            parentTaskId: null,
+            title: "Backlog 2",
+            descriptionMarkdown: "",
+            status: "backlog",
+            priority: "medium",
+            dueAt: null,
+            tags: [],
+            createdAt: context.at(5),
+            expectedVersion: 0,
+          });
+
+          assert.equal(repeatedBacklog.columnId, backlogColumnId);
+          assert.equal(repeatedBacklog.position, 1);
+
+          const afterRepeat = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(afterRepeat.items.length, 5);
+
+          // Legacy move по отсутствующему статусу также материализует колонку.
+          const movedToBacklog = await store.moveTask({
+            id: plain.id,
+            expectedVersion: completed.version,
+            status: "backlog",
+            position: 2,
+            updatedAt: context.at(6),
+          });
+
+          assert.equal(movedToBacklog.columnId, backlogColumnId);
+          assert.equal(movedToBacklog.status, "backlog");
+          assert.equal(movedToBacklog.position, 2);
+        });
+      },
+    },
+    {
+      name: "task: mismatch status/columnId и неизвестная колонка отклоняются",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const doneId = `column-${project.id}-done`;
+
+          await rejectsCode(
+            store.createTask({
+              id: "task-mismatch",
+              projectId: project.id,
+              parentTaskId: null,
+              title: "Mismatch",
+              descriptionMarkdown: "",
+              columnId: doneId,
+              status: "todo",
+              priority: "medium",
+              dueAt: null,
+              tags: [],
+              createdAt: context.at(1),
+              expectedVersion: 0,
+            }),
+            "COLUMN_STATUS_MISMATCH",
+            "create с несовпадающими status и columnId",
+          );
+
+          await rejectsCode(
+            store.createTask({
+              id: "task-unknown-column",
+              projectId: project.id,
+              parentTaskId: null,
+              title: "Unknown",
+              descriptionMarkdown: "",
+              columnId: "column-missing",
+              priority: "medium",
+              dueAt: null,
+              tags: [],
+              createdAt: context.at(2),
+              expectedVersion: 0,
+            }),
+            "COLUMN_NOT_FOUND",
+            "create с неизвестной колонкой",
+          );
+
+          const task = await createTask(store, context, {
+            id: "task-move-mismatch",
+            projectId: project.id,
+          });
+
+          await rejectsCode(
+            store.moveTask({
+              id: task.id,
+              expectedVersion: task.version,
+              columnId: doneId,
+              status: "todo",
+              position: 0,
+              updatedAt: context.at(3),
+            }),
+            "COLUMN_STATUS_MISMATCH",
+            "move с несовпадающими status и columnId",
+          );
         });
       },
     },

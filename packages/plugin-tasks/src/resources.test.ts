@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  formatColumnRef,
   formatProjectRef,
   formatTaskRef,
   isProjectRef,
@@ -15,6 +16,7 @@ describe("ResourceRef домена задач", () => {
   it("собирает стабильные ссылки", () => {
     expect(formatProjectRef("project-1")).toBe("kanbaner.tasks:project:project-1");
     expect(formatTaskRef("task-1")).toBe("kanbaner.tasks:task:task-1");
+    expect(formatColumnRef("column-1")).toBe("kanbaner.tasks:task-column:column-1");
   });
 
   it("разбирает собственные ссылки", () => {
@@ -23,6 +25,10 @@ describe("ResourceRef домена задач", () => {
     expect(parseTasksResourceRef("kanbaner.tasks:task:task-1")).toEqual({
       kind: "task",
       id: "task-1",
+    });
+    expect(parseTasksResourceRef("kanbaner.tasks:task-column:column-1")).toEqual({
+      kind: "task-column",
+      id: "column-1",
     });
   });
 
@@ -46,6 +52,10 @@ describe("ResourceRef домена задач", () => {
   it("не разбирает чужие ссылки без исключения", () => {
     expect(tryParseTasksResourceRef("kanbaner.notes:task:task-1")).toBeNull();
     expect(tryParseTasksResourceRef("kanbaner.tasks:note:note-1")).toBeNull();
+    expect(tryParseTasksResourceRef("kanbaner.tasks:task-column:column-1")).toEqual({
+      kind: "task-column",
+      id: "column-1",
+    });
     expect(tryParseTasksResourceRef(undefined)).toBeNull();
   });
 

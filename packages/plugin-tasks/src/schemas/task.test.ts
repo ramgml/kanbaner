@@ -337,4 +337,36 @@ describe("task schemas", () => {
       }).ok,
     ).toBe(false);
   });
+
+  it("принимает optional columnId в task.create и task.move", () => {
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        columnId: "column-1",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskMoveInputSchema, {
+        id: "task-1",
+        expectedVersion: 1,
+        columnId: "column-1",
+        position: 0,
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(TaskCreateInputSchema, {
+        projectId: "project-1",
+        title: "Задача",
+        columnId: 42,
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(TaskMutationOutputSchema, {
+        task: { ...task, columnId: "column-1" },
+        resource: "kanbaner.tasks:task:task-1",
+        eventId: "event-1",
+      }).ok,
+    ).toBe(true);
+  });
 });

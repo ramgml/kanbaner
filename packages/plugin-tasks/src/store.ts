@@ -8,9 +8,12 @@ import {
 
 import { PLUGIN_ID, TASKS_CONTRACT_VERSION, TASKS_STORE_CONTRACT } from "./constants.ts";
 import type {
+  DeletedColumnDescriptor,
   DeletedTaskDescriptor,
   Project,
   Task,
+  TaskColumn,
+  TaskColumnType,
   TaskPriority,
   TaskSort,
   TaskStatus,
@@ -76,12 +79,14 @@ export interface ProjectSummaryStorePage extends StorePage<ProjectSummary> {
  *   `id asc`;
  * - `title` — по code points Unicode, без `localeCompare`, затем `id asc`.
  *
- * Позиции уникальны и упорядочены в области `(projectId, status)`;
+ * Позиции уникальны и упорядочены в области `(projectId, columnId)`;
  * `parentTaskId` на область не влияет, непрерывность `0…N-1` не требуется.
- * По умолчанию используется `position asc`.
+ * `columnId` фильтрует пользовательскую колонку. По умолчанию используется
+ * `position asc`.
  */
 export interface TaskStoreQuery {
   readonly projectId?: string;
+  readonly columnId?: string;
   readonly status?: TaskStatus;
   readonly priority?: TaskPriority;
   readonly tag?: string;
@@ -133,6 +138,7 @@ export interface DeleteStoreSuccess {
   readonly eventVersion: number;
   readonly deletedResourceRefs: readonly ResourceRef[];
   readonly deletedTasks: readonly DeletedTaskDescriptor[];
+  readonly deletedColumns: readonly DeletedColumnDescriptor[];
 }
 
 /** Идемпотентный no-op: удаляемая сущность уже отсутствует. */
@@ -143,11 +149,91 @@ export interface DeleteStoreNoop {
 /** Результат каскадного удаления с дискриминатором `deleted`. */
 export type DeleteStoreResult = DeleteStoreSuccess | DeleteStoreNoop;
 
+/** Параметры списка колонок проекта. */
+export interface ColumnStoreQuery {
+  readonly projectId: string;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** Вход создания пользовательской колонки. */
+export interface CreateColumnStoreInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly type: TaskColumnType;
+  readonly position?: number | undefined;
+  readonly createdAt: UtcTimestamp;
+  readonly expectedVersion: 0;
+}
+
+/** Вход переименования колонки. */
+export interface UpdateColumnStoreInput {
+  readonly id: string;
+  readonly expectedVersion: number;
+  readonly title: string;
+  readonly updatedAt: UtcTimestamp;
+}
+
+/** Вход транзакционного reorder колонки. */
+export interface MoveColumnStoreInput {
+  readonly id: string;
+  readonly expectedVersion: number;
+  readonly position: number;
+  readonly updatedAt: UtcTimestamp;
+}
+
+/**
+ * Вход удаления колонки с переносом задач.
+ *
+ * `targetColumnId` обязателен, принадлежит тому же проекту и не совпадает с
+ * удаляемой колонкой. Последняя колонка проекта не удаляется.
+ */
+export interface DeleteColumnStoreInput {
+  readonly id: string;
+  readonly expectedVersion: number;
+  readonly targetColumnId: string;
+  readonly updatedAt: UtcTimestamp;
+}
+
+/** Успешное удаление колонки с атомарным переносом задач. */
+export interface ColumnDeleteStoreSuccess {
+  readonly deleted: true;
+  readonly column: TaskColumn;
+  readonly version: number;
+  readonly eventVersion: number;
+  readonly targetColumnId: string;
+  /** Задачи после переноса: новые `columnId`, `status`, `position`, версии. */
+  readonly movedTasks: readonly Task[];
+  /** Оставшиеся колонки, у которых изменились позиции/версии. */
+  readonly updatedColumns: readonly TaskColumn[];
+}
+
+/** Идемпотентный no-op: колонка уже отсутствует. */
+export interface ColumnDeleteStoreNoop {
+  readonly deleted: false;
+}
+
+/** Результат `deleteColumn`. */
+export type ColumnDeleteStoreResult = ColumnDeleteStoreSuccess | ColumnDeleteStoreNoop;
+
+/**
+ * Результат детерминированного backfill legacy-проектов.
+ *
+ * `createdColumns` — материализованные исходные колонки, `updatedTasks` —
+ * задачи, которым технически проставлен `columnId`. Публичные версии и
+ * `updatedAt` этих задач не меняются.
+ */
+export interface LegacyColumnBackfillResult {
+  readonly createdColumns: readonly TaskColumn[];
+  readonly updatedTasks: readonly Task[];
+}
+
 /**
  * Вход создания задачи; ID и время подготовлены доменом.
  *
  * `position === undefined` означает атомарный append в конец области
- * `(projectId, status)`. Явная позиция означает транзакционный сдвиг соседей
+ * `(projectId, columnId)`. Явная позиция означает транзакционный сдвиг соседей
  * в той же области. Store вычисляет `completedAt` через
  * `resolveCompletedAt(status, null, createdAt)`: для `done` он равен
  * `createdAt`, иначе `null`.
@@ -156,9 +242,16 @@ export interface CreateTaskStoreInput {
   readonly id: string;
   readonly projectId: string;
   readonly parentTaskId: string | null;
+  /**
+   * Целевая колонка. При отсутствии Store выбирает первую колонку проекта с
+   * указанным `status` (legacy-совместимость). `status` обязан совпадать со
+   * статусом колонки.
+   */
+  readonly columnId?: string | undefined;
   readonly title: string;
   readonly descriptionMarkdown: string;
-  readonly status: TaskStatus;
+  /** Legacy-статус; обязателен, если не задан `columnId`. */
+  readonly status?: TaskStatus | undefined;
   readonly priority: TaskPriority;
   readonly dueAt: UtcTimestamp | null;
   readonly position?: number | undefined;
@@ -189,7 +282,9 @@ export interface UpdateTaskStoreInput {
 export interface MoveTaskStoreInput {
   readonly id: string;
   readonly expectedVersion: number;
-  readonly status: TaskStatus;
+  readonly columnId?: string | undefined;
+  /** Legacy-статус; обязателен, если не задан `columnId`. */
+  readonly status?: TaskStatus | undefined;
   readonly position: number;
   readonly updatedAt: UtcTimestamp;
 }
@@ -276,6 +371,28 @@ export interface TasksStore {
   updateProject(input: UpdateProjectStoreInput): Promise<Project>;
   deleteProject(input: DeleteProjectStoreInput): Promise<DeleteStoreResult>;
 
+  getColumn(id: string): Promise<TaskColumn | null>;
+  listColumns(query: ColumnStoreQuery): Promise<StorePage<TaskColumn>>;
+  createColumn(input: CreateColumnStoreInput): Promise<TaskColumn>;
+  updateColumn(input: UpdateColumnStoreInput): Promise<TaskColumn>;
+  moveColumn(input: MoveColumnStoreInput): Promise<TaskColumn>;
+  deleteColumn(input: DeleteColumnStoreInput): Promise<ColumnDeleteStoreResult>;
+  /**
+   * Материализует legacy-колонки и `columnId` одного проекта.
+   *
+   * Root-метод открывает собственную транзакцию. Activation вызывает его
+   * отдельно для каждого проекта, чтобы сбой одного проекта не откатывал
+   * остальные.
+   */
+  backfillLegacyProject(projectId: string): Promise<LegacyColumnBackfillResult>;
+
+  /**
+   * Материализует исходные колонки и `task.columnId` для legacy-проектов без
+   * колонок. Идемпотентен, не повышает версии/`updatedAt` существующих задач и
+   * не публикует доменные события.
+   */
+  backfillLegacyColumns(): Promise<LegacyColumnBackfillResult>;
+
   getTask(id: string): Promise<Task | null>;
   listTasks(query: TaskStoreQuery): Promise<StorePage<Task>>;
 
@@ -318,6 +435,7 @@ export interface TasksStoreTransaction extends TasksStore {
 export interface TasksIdFactory {
   nextProjectId(): string;
   nextTaskId(): string;
+  nextColumnId(): string;
 }
 
 /** Источник UTC-времени, внедряемый в домен. */

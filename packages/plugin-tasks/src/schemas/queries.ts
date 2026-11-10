@@ -5,6 +5,7 @@ import { DRAFT_2020_12, UtcTimestampSchema } from "@kanbaner/plugin-sdk";
 import { MAX_SEARCH_TEXT_LENGTH } from "../constants.ts";
 import {
   ProjectSchema,
+  TaskColumnSchema,
   TaskPrioritySchema,
   TaskSchema,
   TaskSortSchema,
@@ -37,6 +38,22 @@ export const ProjectGetInputSchema = Type.Object(
 
 export type ProjectGetInput = Static<typeof ProjectGetInputSchema>;
 
+/**
+ * Вход запроса `column.list`.
+ *
+ * Возвращает колонки одного проекта в порядке `position asc`, затем `id asc`.
+ */
+export const ColumnListInputSchema = Type.Object(
+  {
+    projectId: EntityIdSchema,
+    limit: Type.Optional(LimitSchema),
+    offset: Type.Optional(OffsetSchema),
+  },
+  { ...DRAFT_2020_12, additionalProperties: false },
+);
+
+export type ColumnListInput = Static<typeof ColumnListInputSchema>;
+
 /** Вход запроса `task.get`. */
 export const TaskGetInputSchema = Type.Object(
   {
@@ -51,7 +68,9 @@ export type TaskGetInput = Static<typeof TaskGetInputSchema>;
  * Вход запроса `task.list`.
  *
  * Все фильтры комбинируются по AND. `parentTaskId = null` выбирает корневые
- * задачи, отсутствие поля не ограничивает вложенность.
+ * задачи, отсутствие поля не ограничивает вложенность. `columnId`
+ * ограничивает выборку пользовательской колонкой и совместим с `status`:
+ * при одновременном задании фильтры должны соответствовать одной колонке.
  *
  * `tag` принимается в сыром виде и нормализуется как теги задачи (trim, нижний
  * регистр, дедупликация, лимиты). `text` ищет подстроку без учёта регистра по
@@ -65,6 +84,7 @@ export type TaskGetInput = Static<typeof TaskGetInputSchema>;
 export const TaskListInputSchema = Type.Object(
   {
     projectId: Type.Optional(EntityIdSchema),
+    columnId: Type.Optional(EntityIdSchema),
     status: Type.Optional(TaskStatusSchema),
     priority: Type.Optional(TaskPrioritySchema),
     tag: Type.Optional(RawTagSchema),
@@ -109,6 +129,11 @@ export const ProjectGetOutputSchema = Type.Object(
 );
 
 export type ProjectGetOutput = Static<typeof ProjectGetOutputSchema>;
+
+/** Результат `column.list`. */
+export const ColumnListOutputSchema = createPageSchema(TaskColumnSchema);
+
+export type ColumnListOutput = Static<typeof ColumnListOutputSchema>;
 
 /** Результат `task.get`. */
 export const TaskGetOutputSchema = Type.Object(

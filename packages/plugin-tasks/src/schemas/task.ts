@@ -20,7 +20,12 @@ import {
 /**
  * Вход команды `task.create`.
  *
- * `position` задаёт порядок в области `(projectId, status)` и не зависит от
+ * `columnId` и `status` необязательны. Если задана колонка, её статус
+ * используется как совместимое зеркало; если задан только `status`, выбирается
+ * первая колонка проекта с этим статусом. Оба поля обязаны быть согласованы.
+ * Отсутствие обоих сохраняет прежнее поведение: `status = todo`.
+ *
+ * `position` задаёт порядок в области `(projectId, columnId)` и не зависит от
  * `parentTaskId`; отсутствие поля означает атомарный append. Непрерывность
  * позиций не требуется.
  *
@@ -31,6 +36,7 @@ export const TaskCreateInputSchema = Type.Object(
   {
     projectId: EntityIdSchema,
     parentTaskId: Type.Optional(Type.Union([EntityIdSchema, Type.Null()])),
+    columnId: Type.Optional(EntityIdSchema),
     title: TitleSchema,
     descriptionMarkdown: Type.Optional(DescriptionMarkdownSchema),
     status: Type.Optional(TaskStatusSchema),
@@ -67,16 +73,20 @@ export const TaskUpdateInputSchema = Type.Object(
 export type TaskUpdateInput = Static<typeof TaskUpdateInputSchema>;
 
 /**
- * Вход команды `task.move`: смена статуса и позиции.
+ * Вход команды `task.move`: смена колонки/статуса и позиции.
  *
- * Новая позиция проверяется в области `(projectId, status)` целевого статуса;
- * `parentTaskId` на область не влияет.
+ * Обязательно хотя бы одно из `columnId` и `status`. Если задана колонка, она
+ * определяет статус и область позиции; `status` без `columnId` выбирает первую
+ * колонку проекта с этим статусом (legacy-совместимость). Если заданы оба
+ * поля, они обязаны совпадать. Новая позиция проверяется в области
+ * `(projectId, columnId)`; `parentTaskId` на область не влияет.
  */
 export const TaskMoveInputSchema = Type.Object(
   {
     id: EntityIdSchema,
     expectedVersion: ExpectedVersionSchema,
-    status: TaskStatusSchema,
+    columnId: Type.Optional(EntityIdSchema),
+    status: Type.Optional(TaskStatusSchema),
     position: PositionSchema,
   },
   { ...DRAFT_2020_12, additionalProperties: false },
