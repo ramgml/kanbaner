@@ -608,11 +608,9 @@ test.describe("список задач в production shell", () => {
       await expect(desktopRow(page, taskId)).toContainText(updatedTitle);
     });
 
-    test("переименовывает проект из списка и сохраняет проект и выбранную задачу", async ({
-      page,
-    }) => {
-      const projectTitle = uniqueTitle("Проект переименования списка");
-      const taskTitle = uniqueTitle("Задача переименования списка");
+    test("настраивает проект из списка и сохраняет выбранную задачу и task=", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект настроек списка");
+      const taskTitle = uniqueTitle("Задача настроек списка");
       const renamedTitle = uniqueTitle("Список переименован");
 
       await openTaskList(page);
@@ -628,31 +626,49 @@ test.describe("список задач в production shell", () => {
       await expect(page.getByTestId("project-board-title")).toHaveText(projectTitle);
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
-      const renameOpener = page.getByTestId("project-rename-button");
+      const settingsOpener = page.getByTestId("project-settings-button");
 
-      await renameOpener.click();
+      await settingsOpener.click();
 
-      const dialog = page.getByTestId("project-rename-dialog");
+      const dialog = page.getByTestId("project-settings-dialog");
 
       await expect(dialog).toBeVisible();
-      await expect(page.getByTestId("project-rename-input")).toHaveValue(projectTitle);
+      await expect(page.getByTestId("project-settings-title-input")).toHaveValue(projectTitle);
+      await expect(page.getByTestId("project-settings-columns")).toBeVisible();
 
-      // Escape закрывает только rename: выбранная задача и task= остаются.
+      // Escape без черновика закрывает только настройки: задача и task= остаются.
       await page.keyboard.press("Escape");
       await expect(dialog).toHaveCount(0);
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
       expect(new URL(page.url()).searchParams.get("task")).toBe(taskId);
-      await expect(renameOpener).toBeFocused();
+      await expect(settingsOpener).toBeFocused();
 
-      await renameOpener.click();
+      // Dirty close не сбрасывает выбранную задачу и черновик.
+      await settingsOpener.click();
       await expect(dialog).toBeVisible();
-      await page.getByTestId("project-rename-input").fill(renamedTitle);
-      await page.getByTestId("project-rename-submit").click();
-
+      await page.getByTestId("project-settings-title-input").fill(renamedTitle);
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+      await page.getByTestId("project-settings-dirty-discard").click();
       await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+      expect(new URL(page.url()).searchParams.get("task")).toBe(taskId);
+
+      await settingsOpener.click();
+      await expect(dialog).toBeVisible();
+      await page.getByTestId("project-settings-title-input").fill(renamedTitle);
+      await page.getByTestId("project-settings-title-save").click();
+      await expect(page.getByTestId("project-settings-title-notice")).toContainText(
+        "Название проекта сохранено",
+      );
+
       await expect(page.getByTestId("project-board-title")).toHaveText(renamedTitle);
       // Task query и выбранные детали не сбрасываются.
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+
+      await page.getByTestId("project-settings-done").click();
+      await expect(dialog).toHaveCount(0);
 
       const after = new URL(page.url());
 

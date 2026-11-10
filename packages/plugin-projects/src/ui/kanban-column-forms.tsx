@@ -39,7 +39,7 @@ export function KanbanAddColumnForm({
     <section
       data-testid="kanban-add-column-panel"
       aria-label="Новая колонка"
-      className="flex min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border border-dashed border-border bg-background/70 p-2.5 md:w-auto md:max-w-none md:min-w-[272px]"
+      className="flex min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border border-dashed border-border bg-background/70 p-2.5 md:w-[288px] md:min-w-[288px] md:max-w-[288px] md:flex-[0_0_288px]"
     >
       <h2 className="m-0 px-0.5 text-sm font-semibold tracking-tight">Новая колонка</h2>
 

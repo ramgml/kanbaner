@@ -1303,11 +1303,7 @@ describe("управление колонками в KanbanView", () => {
       expect(screen.getByTestId("kanban-card-task-a")).toBeVisible();
     });
 
-    const details = screen.getByTestId("kanban-card-task-a").querySelector("details");
-
-    if (details !== null) {
-      details.open = true;
-    }
+    fireEvent.click(screen.getByTestId("kanban-menu-task-a"));
 
     fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
 
@@ -1406,11 +1402,7 @@ describe("управление колонками в KanbanView", () => {
       expect(screen.getByTestId("kanban-card-a")).toBeVisible();
     });
 
-    const details = screen.getByTestId("kanban-card-a").querySelector("details");
-
-    if (details !== null) {
-      details.open = true;
-    }
+    fireEvent.click(screen.getByTestId("kanban-menu-a"));
 
     fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
     view.unmount();

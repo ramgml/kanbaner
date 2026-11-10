@@ -211,14 +211,231 @@ describe("KanbanCard", () => {
       screen.getByRole("button", { name: "Перетащить задачу Компактная карточка" }),
     ).toBeVisible();
 
-    const summary = screen
-      .getByTestId("kanban-menu-task-1")
-      .querySelector("summary") as HTMLElement;
+    const trigger = screen.getByTestId("kanban-menu-task-1");
 
-    expect(summary).toHaveAccessibleName("Действия карточки Компактная карточка");
+    expect(trigger).toHaveAccessibleName("Действия карточки Компактная карточка");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
 
-    fireEvent.click(screen.getByRole("button", { name: "Выше" }));
+    fireEvent.click(trigger);
 
-    expect(screen.getByRole("button", { name: "Выше" })).toBeDisabled();
+    const menu = screen.getByTestId("kanban-card-menu-task-1");
+    const up = within(menu).getByRole("button", { name: "Выше" });
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(up).toBeDisabled();
+  });
+
+  it("рендерит меню порталом, не меняя состав карточки", () => {
+    renderCard(makeTask());
+
+    const card = screen.getByTestId("kanban-card-task-1");
+    const childrenBefore = card.childElementCount;
+
+    fireEvent.click(screen.getByTestId("kanban-menu-task-1"));
+
+    const menu = screen.getByTestId("kanban-card-menu-task-1");
+
+    expect(menu.parentElement).toBe(document.body);
+    expect(card).not.toContainElement(menu);
+    expect(card.childElementCount).toBe(childrenBefore);
+    expect(menu).toHaveStyle({ position: "fixed" });
+  });
+
+  it("закрывает меню по Escape с возвратом фокуса и по клику снаружи", () => {
+    renderCard(makeTask());
+
+    const trigger = screen.getByTestId("kanban-menu-task-1");
+
+    fireEvent.click(trigger);
+    expect(screen.getByTestId("kanban-card-menu-task-1")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByTestId("kanban-card-menu-task-1")).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    expect(screen.getByTestId("kanban-card-menu-task-1")).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+
+    expect(screen.queryByTestId("kanban-card-menu-task-1")).toBeNull();
+  });
+
+  it("держит открытым только одно меню на доске", () => {
+    const first = makeTask();
+    const second = makeTask({ id: "task-2", title: "Вторая карточка" });
+
+    render(
+      <>
+        <KanbanCard
+          task={first}
+          index={0}
+          columnSize={2}
+          columns={COLUMNS}
+          currentColumnId="column-project-1-legacy-todo"
+          subtaskCount={0}
+          selected={false}
+          pending={false}
+          conflict={false}
+          dragging={false}
+          onOpen={vi.fn()}
+          onMoveTo={vi.fn()}
+          onReorder={vi.fn()}
+          onDragStart={vi.fn()}
+        />
+        <KanbanCard
+          task={second}
+          index={1}
+          columnSize={2}
+          columns={COLUMNS}
+          currentColumnId="column-project-1-legacy-todo"
+          subtaskCount={0}
+          selected={false}
+          pending={false}
+          conflict={false}
+          dragging={false}
+          onOpen={vi.fn()}
+          onMoveTo={vi.fn()}
+          onReorder={vi.fn()}
+          onDragStart={vi.fn()}
+        />
+      </>,
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-menu-task-1"));
+    expect(screen.getByTestId("kanban-card-menu-task-1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("kanban-menu-task-2"));
+
+    expect(screen.queryByTestId("kanban-card-menu-task-1")).toBeNull();
+    expect(screen.getByTestId("kanban-card-menu-task-2")).toBeInTheDocument();
+  });
+
+  it("не начинает drag при pointer down на меню", () => {
+    const onDragStart = vi.fn();
+
+    renderCard(makeTask(), { onDragStart });
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-menu-task-1"), {
+      clientX: 10,
+      clientY: 10,
+    });
+
+    expect(onDragStart).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("kanban-menu-task-1"));
+
+    fireEvent.pointerDown(
+      within(screen.getByTestId("kanban-card-menu-task-1")).getByRole("button", {
+        name: "Переместить в Готово",
+      }),
+      { clientX: 10, clientY: 10 },
+    );
+
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("начинает drag из заголовка, тегов и отступов карточки", () => {
+    const onDragStart = vi.fn();
+
+    renderCard(makeTask({ tags: ["release"] }), { onDragStart });
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-open-task-1"), {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerDown(screen.getByText("release"), {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(onDragStart).toHaveBeenCalledTimes(2);
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      clientX: 4,
+      clientY: 4,
+    });
+    expect(onDragStart).toHaveBeenCalledTimes(3);
+  });
+
+  it("игнорирует drag при выделении текста и вторичной кнопке мыши", () => {
+    const onDragStart = vi.fn();
+
+    renderCard(makeTask(), { onDragStart });
+
+    const selection = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "выделенный текст",
+    } as Selection);
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      clientX: 4,
+      clientY: 4,
+    });
+
+    expect(onDragStart).not.toHaveBeenCalled();
+    selection.mockReturnValue(null);
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
+      pointerType: "mouse",
+      button: 2,
+      isPrimary: true,
+      clientX: 4,
+      clientY: 4,
+    });
+
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("подавляет click после drag и не мешает обычному открытию", () => {
+    const onOpen = vi.fn();
+    let suppress = true;
+
+    const { rerender } = renderCard(makeTask(), {
+      onOpen,
+      shouldSuppressClick: () => suppress,
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-open-task-1"));
+    expect(onOpen).not.toHaveBeenCalled();
+
+    suppress = false;
+
+    rerender(
+      <KanbanCard
+        task={makeTask()}
+        index={0}
+        columnSize={1}
+        columns={COLUMNS}
+        currentColumnId="column-project-1-legacy-todo"
+        subtaskCount={1}
+        selected={false}
+        pending={false}
+        conflict={false}
+        dragging={false}
+        onOpen={onOpen}
+        onMoveTo={vi.fn()}
+        onReorder={vi.fn()}
+        onDragStart={vi.fn()}
+        shouldSuppressClick={() => suppress}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-open-task-1"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 });

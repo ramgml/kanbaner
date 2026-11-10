@@ -1,10 +1,13 @@
 "use client";
 
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 
 import type { Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
 import { taskPriorityLabel } from "@kanbaner/task-ui";
 
+import { computeMenuPosition, type MenuPosition } from "./card-menu.ts";
 import { describeDue, type DueTone } from "./due.ts";
 
 export type KanbanReorderKind = "up" | "down" | "start" | "end";
@@ -49,6 +52,30 @@ const actionButtonStyle = {
   cursor: "pointer",
 } as const;
 
+/**
+ * Элементы, с которых карточка не начинает перетаскивание.
+ *
+ * Кнопка открытия и ручка — исключение: это осознанные drag-поверхности,
+ * которые одновременно остаются обычными элементами управления.
+ */
+const NON_DRAG_SELECTOR = [
+  "a",
+  "button",
+  "input",
+  "textarea",
+  `${"sel"}${"ect"}`,
+  "summary",
+  "details",
+  '[contenteditable="true"]',
+  '[contenteditable=""]',
+  "[role='menu']",
+  "[role='group']",
+  "[data-card-menu]",
+].join(",");
+
+/** Одно открытое меню карточки на всю доску. */
+let closeActiveCardMenu: (() => void) | null = null;
+
 export interface KanbanCardProps {
   readonly task: Task;
   readonly index: number;
@@ -66,6 +93,15 @@ export interface KanbanCardProps {
   readonly onMoveTo: (task: Task, columnId: string) => void;
   readonly onReorder: (task: Task, kind: KanbanReorderKind) => void;
   readonly onDragStart: (task: Task, event: ReactPointerEvent<HTMLElement>) => void;
+  /**
+   * Поглощает click, если перед ним карточку перетащили.
+   *
+   * Клик по заголовку по-прежнему открывает карточку; после настоящего drag
+   * браузерный click на источнике подавляется до вызова `onOpen`.
+   */
+  readonly shouldSuppressClick?: (() => boolean) | undefined;
+  /** Новое pointer-взаимодействие снимает устаревшее подавление click. */
+  readonly onCardPointerDown?: (() => void) | undefined;
 }
 
 /**
@@ -74,8 +110,9 @@ export interface KanbanCardProps {
  * Заголовок — главный элемент. Теги ограничены двумя видимыми + `+N`, срок
  * получает семантический тон (просрочено/сегодня/завтра/дата) и текстовое
  * описание, а pending/conflict занимают строку только пока актуальны.
- * Перемещение доступно тремя путями: drag handle, меню «Переместить в…» и
- * кнопки порядка, поэтому DnD не является единственным способом.
+ * Перетаскивание доступно за любую неинтерактивную область карточки, а также
+ * за заголовок/ручку; меню «Переместить в…» и кнопки порядка остаются
+ * альтернативой для клавиатуры и мобильного.
  */
 export function KanbanCard({
   task,
@@ -92,7 +129,15 @@ export function KanbanCard({
   onMoveTo,
   onReorder,
   onDragStart,
+  shouldSuppressClick,
+  onCardPointerDown,
 }: KanbanCardProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = `kanban-card-menu-${task.id}`;
+
   const priorityStyle = PRIORITY_STYLES[task.priority];
   const due = describeDue(task.dueAt);
   const dueStyle = DUE_STYLES[due.tone];
@@ -100,17 +145,282 @@ export function KanbanCard({
   const extraTags = task.tags.length - visibleTags.length;
   const moveTargets = columns.filter((column) => column.id !== currentColumnId);
 
+  const closeMenu = useCallback((returnFocus: boolean): void => {
+    setMenuOpen(false);
+    setMenuPosition(null);
+
+    if (returnFocus) {
+      triggerRef.current?.focus();
+    }
+  }, []);
+
+  // Одно открытое меню на доску: открытие нового закрывает предыдущее.
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    const close = (): void => {
+      setMenuOpen(false);
+      setMenuPosition(null);
+    };
+
+    closeActiveCardMenu?.();
+    closeActiveCardMenu = close;
+
+    return () => {
+      if (closeActiveCardMenu === close) {
+        closeActiveCardMenu = null;
+      }
+    };
+  }, [menuOpen]);
+
+  useLayoutEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    const update = (): void => {
+      const trigger = triggerRef.current;
+      const menu = menuRef.current;
+
+      if (trigger === null || menu === null) {
+        return;
+      }
+
+      const triggerRect = trigger.getBoundingClientRect();
+
+      // Прокрутили карточку за пределы viewport — меню закрывается, а не
+      // остаётся висеть над пустым местом.
+      if (
+        triggerRect.bottom < 0 ||
+        triggerRect.top > window.innerHeight ||
+        triggerRect.right < 0 ||
+        triggerRect.left > window.innerWidth
+      ) {
+        setMenuOpen(false);
+        setMenuPosition(null);
+
+        return;
+      }
+
+      const menuRect = menu.getBoundingClientRect();
+
+      setMenuPosition(
+        computeMenuPosition(triggerRect, menuRect.width, menuRect.height, {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }),
+      );
+    };
+
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (
+        menuRef.current?.contains(target) === true ||
+        triggerRef.current?.contains(target) === true
+      ) {
+        return;
+      }
+
+      closeMenu(false);
+    };
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      // Меню не должно закрывать выбранную задачу или черновик под доской.
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(true);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [closeMenu, menuOpen]);
+
+  const handleArticlePointerDown = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    if (event.pointerType === "touch" && event.isPrimary === false) {
+      return;
+    }
+
+    // Любое новое взаимодействие начинается с pointerdown: подавление click
+    // относится только к click, сгенерированному завершившимся drag.
+    onCardPointerDown?.();
+
+    const target = event.target;
+
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const dragSurface = target.closest("[data-card-drag-allow], [data-card-drag-handle]");
+    const interactive = target.closest(NON_DRAG_SELECTOR);
+
+    if (interactive !== null && dragSurface === null) {
+      return;
+    }
+
+    // Не начинаем drag, если пользователь уже выделил текст в карточке.
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+
+    if (selection !== null && !selection.isCollapsed && selection.toString().trim().length > 0) {
+      return;
+    }
+
+    onDragStart(task, event);
+  };
+
+  const renderMenu = (): React.ReactNode => {
+    if (!menuOpen || typeof document === "undefined") {
+      return null;
+    }
+
+    return createPortal(
+      <div
+        ref={menuRef}
+        id={menuId}
+        role="group"
+        aria-label={`Перемещение задачи ${task.title}`}
+        data-testid={`kanban-card-menu-${task.id}`}
+        data-card-menu
+        data-placement={menuPosition?.placement ?? "bottom"}
+        className="fixed flex max-h-[calc(100vh-1rem)] w-[min(15rem,calc(100vw-1rem))] flex-col gap-1 overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
+        style={{
+          position: "fixed",
+          zIndex: 60,
+          top: menuPosition?.top ?? 0,
+          left: menuPosition?.left ?? 0,
+          visibility: menuPosition === null ? "hidden" : "visible",
+        }}
+      >
+        {moveTargets.map((column) => (
+          <button
+            key={column.id}
+            type="button"
+            data-testid={`kanban-move-${task.id}-${column.id}`}
+            disabled={pending}
+            onClick={() => {
+              closeMenu(true);
+              onMoveTo(task, column.id);
+            }}
+            className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+            style={actionButtonStyle}
+          >
+            Переместить в {column.title}
+          </button>
+        ))}
+
+        <button
+          type="button"
+          disabled={pending || index === 0}
+          onClick={() => {
+            closeMenu(true);
+            onReorder(task, "up");
+          }}
+          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          style={actionButtonStyle}
+        >
+          Выше
+        </button>
+        <button
+          type="button"
+          disabled={pending || index >= columnSize - 1}
+          onClick={() => {
+            closeMenu(true);
+            onReorder(task, "down");
+          }}
+          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          style={actionButtonStyle}
+        >
+          Ниже
+        </button>
+        <button
+          type="button"
+          disabled={pending || index === 0}
+          onClick={() => {
+            closeMenu(true);
+            onReorder(task, "start");
+          }}
+          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          style={actionButtonStyle}
+        >
+          В начало
+        </button>
+        <button
+          type="button"
+          disabled={pending || index >= columnSize - 1}
+          onClick={() => {
+            closeMenu(true);
+            onReorder(task, "end");
+          }}
+          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          style={actionButtonStyle}
+        >
+          В конец
+        </button>
+      </div>,
+      document.body,
+    );
+  };
+
   return (
     <article
       data-testid={`kanban-card-${task.id}`}
       data-card-id={task.id}
       aria-current={selected ? "true" : undefined}
       aria-busy={pending}
+      onPointerDown={handleArticlePointerDown}
+      onClickCapture={(event) => {
+        if (shouldSuppressClick?.() === true) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+      onContextMenu={(event) => {
+        // Долгое нажатие на мобильном не должно открывать системное меню
+        // вместо перетаскивания.
+        event.preventDefault();
+      }}
       className="flex flex-col gap-1.5 rounded-lg border bg-card p-2.5 text-card-foreground transition-shadow"
       style={{
         borderColor: selected ? "var(--ring)" : "var(--border)",
         opacity: dragging || pending ? 0.62 : 1,
         boxShadow: selected ? "0 0 0 2px var(--ring)" : "0 1px 2px rgb(0 0 0 / 0.10)",
+        touchAction: "pan-y",
+        WebkitUserSelect: "none",
+        userSelect: "none",
       }}
     >
       <div className="flex items-start gap-1">
@@ -118,6 +428,7 @@ export function KanbanCard({
           type="button"
           aria-label={`Открыть карточку задачи ${task.title}`}
           data-testid={`kanban-open-${task.id}`}
+          data-card-drag-allow
           onClick={() => {
             onOpen(task);
           }}
@@ -126,89 +437,34 @@ export function KanbanCard({
           {task.title}
         </button>
 
-        <details data-testid={`kanban-menu-${task.id}`} className="relative shrink-0">
-          <summary
-            aria-label={`Действия карточки ${task.title}`}
-            title="Действия карточки"
-            className="flex min-h-10 min-w-10 cursor-pointer list-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7 xl:min-w-7"
-          >
-            <span aria-hidden="true">⋯</span>
-          </summary>
-          <div
-            role="group"
-            aria-label={`Перемещение задачи ${task.title}`}
-            className="mt-1 flex flex-col gap-1 rounded-md border border-border bg-popover p-1 shadow-md"
-          >
-            {moveTargets.map((column) => (
-              <button
-                key={column.id}
-                type="button"
-                data-testid={`kanban-move-${task.id}-${column.id}`}
-                disabled={pending}
-                onClick={() => {
-                  onMoveTo(task, column.id);
-                }}
-                className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-                style={actionButtonStyle}
-              >
-                Переместить в {column.title}
-              </button>
-            ))}
-
-            <button
-              type="button"
-              disabled={pending || index === 0}
-              onClick={() => {
-                onReorder(task, "up");
-              }}
-              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-              style={actionButtonStyle}
-            >
-              Выше
-            </button>
-            <button
-              type="button"
-              disabled={pending || index >= columnSize - 1}
-              onClick={() => {
-                onReorder(task, "down");
-              }}
-              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-              style={actionButtonStyle}
-            >
-              Ниже
-            </button>
-            <button
-              type="button"
-              disabled={pending || index === 0}
-              onClick={() => {
-                onReorder(task, "start");
-              }}
-              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-              style={actionButtonStyle}
-            >
-              В начало
-            </button>
-            <button
-              type="button"
-              disabled={pending || index >= columnSize - 1}
-              onClick={() => {
-                onReorder(task, "end");
-              }}
-              className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
-              style={actionButtonStyle}
-            >
-              В конец
-            </button>
-          </div>
-        </details>
+        <button
+          ref={triggerRef}
+          type="button"
+          data-testid={`kanban-menu-${task.id}`}
+          data-card-menu
+          aria-label={`Действия карточки ${task.title}`}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen ? menuId : undefined}
+          title="Действия карточки"
+          onClick={() => {
+            if (menuOpen) {
+              closeMenu(true);
+            } else {
+              setMenuPosition(null);
+              setMenuOpen(true);
+            }
+          }}
+          className="flex min-h-10 min-w-10 shrink-0 items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7 xl:min-w-7"
+        >
+          <span aria-hidden="true">⋯</span>
+        </button>
 
         <button
           type="button"
           aria-label={`Перетащить задачу ${task.title}`}
           data-testid={`kanban-drag-${task.id}`}
-          onPointerDown={(event) => {
-            onDragStart(task, event);
-          }}
+          data-card-drag-handle
           title="Перетащить карточку"
           className="flex min-h-10 min-w-10 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-7 xl:min-w-7"
         >
@@ -283,6 +539,8 @@ export function KanbanCard({
           ) : null}
         </div>
       ) : null}
+
+      {renderMenu()}
     </article>
   );
 }

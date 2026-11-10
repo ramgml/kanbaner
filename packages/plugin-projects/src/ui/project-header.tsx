@@ -4,7 +4,7 @@ import type { Project, ProjectSummary } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker } from "@kanbaner/task-ui";
 
 import { PROJECTS_OVERVIEW_ROUTE, type ProjectRoute } from "../metadata.ts";
-import { ProjectRenameButton } from "./project-rename.tsx";
+import { ProjectSettingsButton } from "./project-settings.tsx";
 import { ViewToggle } from "./view-toggle.tsx";
 
 export type ProjectHeaderVariant = "kanban" | "list" | "overview";
@@ -30,10 +30,12 @@ export interface ProjectHeaderProps {
   readonly columnCounts?: readonly ProjectHeaderColumnCount[] | undefined;
   readonly search: string;
   readonly fallbackTitle: string;
-  /** Инвокер для действия «Переименовать»; обзор без проекта его не получает. */
+  /** Инвокер для настроек доски; обзор без проекта его не получает. */
   readonly invoke?: UiOperationInvoker | undefined;
-  /** Уведомляет представление об успешном переименовании. */
-  readonly onProjectRenamed?: (() => void) | undefined;
+  /** Уведомляет представление об успешном переименовании проекта. */
+  readonly onProjectUpdated?: (() => void) | undefined;
+  /** Уведомляет представление об успешном изменении колонок. */
+  readonly onColumnsChanged?: (() => void) | undefined;
   readonly actions?: React.ReactNode;
 }
 
@@ -53,7 +55,8 @@ export function ProjectHeader({
   search,
   fallbackTitle,
   invoke,
-  onProjectRenamed,
+  onProjectUpdated,
+  onColumnsChanged,
   actions,
 }: ProjectHeaderProps) {
   const titleId = `project-header-title-${variant}`;
@@ -130,7 +133,12 @@ export function ProjectHeader({
 
       <div className="flex flex-wrap items-center gap-2">
         {project === null || invoke === undefined ? null : (
-          <ProjectRenameButton invoke={invoke} project={project} onRenamed={onProjectRenamed} />
+          <ProjectSettingsButton
+            invoke={invoke}
+            project={project}
+            onProjectUpdated={onProjectUpdated}
+            onColumnsChanged={onColumnsChanged}
+          />
         )}
 
         {route === PROJECTS_OVERVIEW_ROUTE ? null : <ViewToggle route={route} search={search} />}

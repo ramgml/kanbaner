@@ -92,14 +92,50 @@ async function createProject(page: Page, title: string): Promise<void> {
 }
 
 async function renameProject(page: Page, title: string): Promise<void> {
-  await page.getByTestId("project-rename-button").click();
+  await page.getByTestId("project-settings-button").click();
 
-  const dialog = page.getByTestId("project-rename-dialog");
+  const dialog = page.getByTestId("project-settings-dialog");
 
   await expect(dialog).toBeVisible();
-  await page.getByTestId("project-rename-input").fill(title);
-  await page.getByTestId("project-rename-submit").click();
+  await page.getByTestId("project-settings-title-input").fill(title);
+  await page.getByTestId("project-settings-title-save").click();
+  await expect(page.getByTestId("project-settings-title-notice")).toContainText(
+    "Название проекта сохранено",
+  );
+  await page.getByTestId("project-settings-done").click();
   await expect(dialog).toHaveCount(0);
+}
+
+async function openSettings(page: Page): Promise<Locator> {
+  await page.getByTestId("project-settings-button").click();
+
+  const dialog = page.getByTestId("project-settings-dialog");
+
+  await expect(dialog).toBeVisible();
+  await expect(page.getByTestId("project-settings-columns")).toBeVisible();
+
+  return dialog;
+}
+
+async function closeSettings(page: Page): Promise<void> {
+  await page.getByTestId("project-settings-done").click();
+  await expect(page.getByTestId("project-settings-dialog")).toHaveCount(0);
+}
+
+async function saveColumnTitle(page: Page, columnId: string, title: string): Promise<void> {
+  await page.getByTestId(`project-settings-column-input-${columnId}`).fill(title);
+  await page.getByTestId(`project-settings-column-save-${columnId}`).click();
+  await expect(page.getByTestId(`project-settings-column-notice-${columnId}`)).toContainText(
+    "Название колонки сохранено",
+  );
+}
+
+async function settingsColumnIds(page: Page): Promise<string[]> {
+  return page
+    .locator("[data-settings-column-id]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-settings-column-id") ?? ""),
+    );
 }
 
 interface TaskEditSeed {
@@ -347,16 +383,18 @@ async function expectCardInColumn(
   await expect(page.getByTestId(`kanban-pending-${taskId}`)).toHaveCount(0);
 }
 
-async function openCardActions(page: Page, taskId: string): Promise<void> {
-  const menuCard = card(page, taskId);
-  const details = menuCard.locator("details");
+async function openCardActions(page: Page, taskId: string): Promise<Locator> {
+  const trigger = page.getByTestId(`kanban-menu-${taskId}`);
+  const menu = page.getByTestId(`kanban-card-menu-${taskId}`);
 
-  if (!(await details.evaluate((element) => (element as HTMLDetailsElement).open))) {
-    await menuCard.locator("summary").focus();
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.focus();
     await page.keyboard.press("Enter");
   }
 
-  await expect(details).toHaveAttribute("open", /.*/u);
+  await expect(menu).toBeVisible();
+
+  return menu;
 }
 
 async function waitForCardSettled(page: Page, taskId: string): Promise<void> {
@@ -368,9 +406,8 @@ async function moveWithMenu(
   taskId: string,
   target: keyof typeof STATUS_LABELS,
 ): Promise<void> {
-  await openCardActions(page, taskId);
-
-  const button = card(page, taskId).getByRole("button", {
+  const menu = await openCardActions(page, taskId);
+  const button = menu.getByRole("button", {
     name: `Переместить в ${STATUS_LABELS[target]}`,
   });
 
@@ -385,9 +422,8 @@ async function reorderWithMenu(
   taskId: string,
   label: "Выше" | "Ниже" | "В начало" | "В конец",
 ): Promise<void> {
-  await openCardActions(page, taskId);
-
-  const button = card(page, taskId).getByRole("button", { name: label, exact: true });
+  const menu = await openCardActions(page, taskId);
+  const button = menu.getByRole("button", { name: label, exact: true });
 
   await expect(button).toBeVisible();
   await button.focus();
@@ -539,6 +575,28 @@ async function dragCardAfter(page: Page, taskId: string, afterTaskId: string): P
     destination.y + destination.height - 4,
     { steps: 10 },
   );
+  await page.mouse.up();
+}
+
+async function dragCardFromPoint(
+  page: Page,
+  source: { readonly x: number; readonly y: number },
+  target: keyof typeof STATUS_LABELS,
+): Promise<void> {
+  const destination = await column(page, target).boundingBox();
+
+  expect(destination).not.toBeNull();
+
+  if (destination === null) {
+    return;
+  }
+
+  const x = destination.x + destination.width / 2;
+  const y = destination.y + destination.height - 16;
+
+  await page.mouse.move(source.x, source.y);
+  await page.mouse.down();
+  await page.mouse.move(x, y, { steps: 10 });
   await page.mouse.up();
 }
 
@@ -1048,10 +1106,10 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-board-title")).toHaveText(secondTitle);
     });
 
-    test("переименовывает проект из канбана с валидацией, Escape и сохранением query", async ({
+    test("настраивает проект из канбана с валидацией, dirty-confirm и сохранением query", async ({
       page,
     }) => {
-      const projectTitle = uniqueTitle("Проект переименования канбана");
+      const projectTitle = uniqueTitle("Проект настроек канбана");
       const renamedTitle = uniqueTitle("Канбан переименован");
 
       await openTaskList(page);
@@ -1064,9 +1122,9 @@ test.describe("канбан в production shell", () => {
       await page.goto(`/view/kanban?project=${projectId}&tag=release`);
       await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
 
-      const opener = page.getByTestId("project-rename-button");
-      const dialog = page.getByTestId("project-rename-dialog");
-      const input = page.getByTestId("project-rename-input");
+      const opener = page.getByTestId("project-settings-button");
+      const dialog = page.getByTestId("project-settings-dialog");
+      const input = page.getByTestId("project-settings-title-input");
 
       // Кнопка доступна с клавиатуры и открывает modal-диалог.
       await opener.focus();
@@ -1083,28 +1141,50 @@ test.describe("канбан в production shell", () => {
       expect(selection.start).toBe(0);
       expect(selection.end).toBe(projectTitle.length);
 
+      // Список фактических колонок доступен, но создание/удаление/тип — нет.
+      await expect(page.getByTestId("project-settings-columns")).toBeVisible();
+      await expect(page.getByTestId("kanban-column-form")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Удалить колонку" })).toHaveCount(0);
+      await expect(page.getByRole("combobox")).toHaveCount(0);
+
       // Пустое название не отправляется и не теряет введённое значение.
       await input.fill("   ");
-      await page.getByTestId("project-rename-submit").click();
-      await expect(page.getByTestId("project-rename-error")).toContainText(
+      await page.getByTestId("project-settings-title-save").click();
+      await expect(page.getByTestId("project-settings-title-validation")).toContainText(
         "Укажите название проекта",
       );
       await expect(dialog).toBeVisible();
       await expect(input).toHaveValue("   ");
 
-      // Escape закрывает без сохранения и возвращает фокус на кнопку.
+      // Escape с несохранённым вводом требует подтверждения.
       await input.fill(renamedTitle);
       await page.keyboard.press("Escape");
-      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+      await expect(dialog).toBeVisible();
+      await expect(input).toHaveValue(renamedTitle);
       await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+
+      // Escape внутри подтверждения остаётся в настройках.
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("project-settings-dirty-confirm")).toHaveCount(0);
+      await expect(dialog).toBeVisible();
+
+      // Отказ от сохранения закрывает только настройки и возвращает фокус.
+      await page.getByTestId("project-settings-done").click();
+      await page.getByTestId("project-settings-dirty-discard").click();
+      await expect(dialog).toHaveCount(0);
       await expect(opener).toBeFocused();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
 
       await opener.click();
       await expect(dialog).toBeVisible();
       await input.fill(renamedTitle);
-      await input.press("Enter");
+      await page.getByTestId("project-settings-title-save").click();
 
-      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("project-settings-title-notice")).toContainText(
+        "Название проекта сохранено",
+      );
+      await expect(input).toHaveValue(renamedTitle);
       await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
       await expect(
         page.getByTestId("projects-sidebar-list").getByRole("button", {
@@ -1123,6 +1203,9 @@ test.describe("канбан в production shell", () => {
         new RegExp(`/view/kanban\\?[^#]*project=${projectId}[^#]*tag=release`, "u"),
       );
 
+      await page.getByTestId("project-settings-done").click();
+      await expect(dialog).toHaveCount(0);
+
       await page.reload();
       await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
       await expect(
@@ -1138,9 +1221,9 @@ test.describe("канбан в production shell", () => {
       );
     });
 
-    test("Escape в переименовании не закрывает inline-создание с черновиком", async ({ page }) => {
-      const projectTitle = uniqueTitle("Проект переименования с черновиком");
-      const draftTitle = uniqueTitle("Черновик задачи при переименовании");
+    test("Escape в настройках не закрывает inline-создание с черновиком", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект настроек с черновиком");
+      const draftTitle = uniqueTitle("Черновик задачи при настройках");
 
       await openTaskList(page);
       await createProject(page, projectTitle);
@@ -1160,19 +1243,19 @@ test.describe("канбан в production shell", () => {
 
       const before = new URL(page.url());
 
-      await page.getByTestId("project-rename-button").click();
+      await page.getByTestId("project-settings-button").click();
 
-      const renameDialog = page.getByTestId("project-rename-dialog");
+      const settingsDialog = page.getByTestId("project-settings-dialog");
 
-      await expect(renameDialog).toBeVisible();
+      await expect(settingsDialog).toBeVisible();
       await page.keyboard.press("Escape");
 
-      // Закрылся только rename; inline create и черновик не тронуты.
-      await expect(renameDialog).toHaveCount(0);
+      // Закрылись только настройки; inline create и черновик не тронуты.
+      await expect(settingsDialog).toHaveCount(0);
       await expect(createPanel).toBeVisible();
       await expect(draftInput).toHaveValue(draftTitle);
       expect(new URL(page.url()).search).toBe(before.search);
-      await expect(page.getByTestId("project-rename-button")).toBeFocused();
+      await expect(page.getByTestId("project-settings-button")).toBeFocused();
 
       // Повторный Escape уже закрывает inline create как раньше.
       await page.keyboard.press("Escape");
@@ -1180,11 +1263,11 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
     });
 
-    test("не перезаписывает переименование из второй вкладки и сохраняет ввод", async ({
+    test("не перезаписывает настройки проекта из второй вкладки и сохраняет ввод", async ({
       page,
       context,
     }) => {
-      const projectTitle = uniqueTitle("Проект конфликта переименования");
+      const projectTitle = uniqueTitle("Проект конфликта настроек");
       const firstTitle = uniqueTitle("Переименование вкладки A");
       const staleTitle = uniqueTitle("Переименование вкладки B");
 
@@ -1204,21 +1287,24 @@ test.describe("канбан в production shell", () => {
       await stalePage.goto(`/view/kanban?project=${projectId}`);
       await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(projectTitle);
 
+      // Вкладка B открывает настройки и держит версию до правки вкладки A.
+      await stalePage.getByTestId("project-settings-button").click();
+
+      const staleDialog = stalePage.getByTestId("project-settings-dialog");
+      const staleInput = stalePage.getByTestId("project-settings-title-input");
+
+      await expect(staleDialog).toBeVisible();
+      await expect(staleInput).toHaveValue(projectTitle);
+      await staleInput.fill(staleTitle);
+
       // Вкладка A сохраняет первую версию.
       await renameProject(page, firstTitle);
       await expect(page.getByTestId("kanban-board-title")).toHaveText(firstTitle);
 
-      // Вкладка B держит устаревшую версию.
-      await stalePage.getByTestId("project-rename-button").click();
+      // Вкладка B отправляет устаревшую версию и получает конфликт.
+      await stalePage.getByTestId("project-settings-title-save").click();
 
-      const staleDialog = stalePage.getByTestId("project-rename-dialog");
-      const staleInput = stalePage.getByTestId("project-rename-input");
-
-      await expect(staleDialog).toBeVisible();
-      await staleInput.fill(staleTitle);
-      await stalePage.getByTestId("project-rename-submit").click();
-
-      await expect(stalePage.getByTestId("project-rename-error")).toContainText(
+      await expect(stalePage.getByTestId("project-settings-title-error")).toContainText(
         "Проект уже изменён в другом месте",
       );
       await expect(staleDialog).toBeVisible();
@@ -1227,9 +1313,13 @@ test.describe("канбан в production shell", () => {
       await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(firstTitle);
 
       // Повторная попытка использует актуальную версию и сохраняет ввод.
-      await stalePage.getByTestId("project-rename-submit").click();
-      await expect(staleDialog).toHaveCount(0);
+      await stalePage.getByTestId("project-settings-title-save").click();
+      await expect(stalePage.getByTestId("project-settings-title-notice")).toContainText(
+        "Название проекта сохранено",
+      );
       await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(staleTitle);
+      await stalePage.getByTestId("project-settings-done").click();
+      await expect(staleDialog).toHaveCount(0);
 
       await stalePage.reload();
       await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(staleTitle);
@@ -1796,10 +1886,9 @@ test.describe("канбан в production shell", () => {
 
       const doneId = await addColumn(page, "Done 2", "done");
 
-      await openCardActions(page, taskId);
-      await card(page, taskId)
-        .getByRole("button", { name: "Переместить в Done 2", exact: true })
-        .click();
+      const menu = await openCardActions(page, taskId);
+
+      await menu.getByRole("button", { name: "Переместить в Done 2", exact: true }).click();
       await waitForCardSettled(page, taskId);
       await expect(
         page.locator(`[data-kanban-column-id="${doneId}"]`).getByTestId(`kanban-card-${taskId}`),
@@ -3655,6 +3744,411 @@ test.describe("канбан в production shell", () => {
       expect(values.length).toBeGreaterThan(0);
       expect(values.reduce((sum, value) => sum + value, 0)).toBe(after.total);
     });
+
+    test("настраивает колонки из канбана: rename, reorder и reload", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект настроек колонок канбана");
+      const renamedTitle = uniqueTitle("Колонка A");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      const todoId = await columnIdByTitle(page, "ToDo");
+      const progressId = await columnIdByTitle(page, "In Progress");
+      const doneId = await columnIdByTitle(page, "Done");
+
+      await openSettings(page);
+
+      expect(await settingsColumnIds(page)).toEqual([todoId, progressId, doneId]);
+      await expect(page.getByTestId("kanban-column-form")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Удалить колонку" })).toHaveCount(0);
+      await expect(page.getByRole("combobox")).toHaveCount(0);
+
+      await saveColumnTitle(page, todoId, renamedTitle);
+      await expect(page.getByTestId(`project-settings-column-input-${todoId}`)).toHaveValue(
+        renamedTitle,
+      );
+
+      await page.getByTestId(`project-settings-column-down-${todoId}`).click();
+      await expect.poll(async () => settingsColumnIds(page)).toEqual([progressId, todoId, doneId]);
+
+      // Drag handle в модалке: Done перед In Progress.
+      const handle = page.getByTestId(`project-settings-column-drag-${doneId}`);
+      const target = page.getByTestId(`project-settings-column-${progressId}`);
+      const sourceBox = await handle.boundingBox();
+      const targetBox = await target.boundingBox();
+
+      expect(sourceBox).not.toBeNull();
+      expect(targetBox).not.toBeNull();
+
+      if (sourceBox !== null && targetBox !== null) {
+        await page.mouse.move(
+          sourceBox.x + sourceBox.width / 2,
+          sourceBox.y + sourceBox.height / 2,
+        );
+        await page.mouse.down();
+        await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + 6, {
+          steps: 10,
+        });
+        await page.mouse.up();
+      }
+
+      await expect.poll(async () => settingsColumnIds(page)).toEqual([doneId, progressId, todoId]);
+      await expect(page.getByTestId(`project-settings-column-notice-${doneId}`)).toContainText(
+        "Порядок колонок сохранён",
+      );
+
+      await closeSettings(page);
+
+      await expect.poll(async () => columnIdList(page)).toEqual([doneId, progressId, todoId]);
+      await expect(page.getByTestId("kanban-column-title-todo")).toHaveText(renamedTitle);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect.poll(async () => columnIdList(page)).toEqual([doneId, progressId, todoId]);
+      await expect(page.getByTestId("kanban-column-title-todo")).toHaveText(renamedTitle);
+    });
+
+    test("настраивает колонки из списка и сохраняет порядок после reload", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект настроек колонок списка");
+      const renamedTitle = uniqueTitle("Колонка списка A");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await createTask(page, { projectTitle, title: uniqueTitle("Задача колонки списка") });
+
+      const filter = page.getByTestId("task-filter-column");
+
+      await filter.selectOption({ label: "ToDo" });
+      await expect(page).toHaveURL(/[?&]column=/u);
+      const todoId = new URL(page.url()).searchParams.get("column") ?? "";
+      await filter.selectOption({ label: "In Progress" });
+      await expect.poll(() => new URL(page.url()).searchParams.get("column")).not.toBe(todoId);
+      const progressId = new URL(page.url()).searchParams.get("column") ?? "";
+      await filter.selectOption({ label: "Done" });
+      await expect.poll(() => new URL(page.url()).searchParams.get("column")).not.toBe(progressId);
+      const doneId = new URL(page.url()).searchParams.get("column") ?? "";
+      await filter.selectOption({ label: "Все колонки" });
+      await expect.poll(() => new URL(page.url()).searchParams.get("column")).toBeNull();
+
+      expect(todoId.length).toBeGreaterThan(0);
+      expect(progressId.length).toBeGreaterThan(0);
+      expect(doneId.length).toBeGreaterThan(0);
+
+      await openSettings(page);
+      await saveColumnTitle(page, todoId, renamedTitle);
+
+      await page.getByTestId(`project-settings-column-down-${todoId}`).click();
+      await expect.poll(async () => settingsColumnIds(page)).toEqual([progressId, todoId, doneId]);
+
+      await page.getByTestId(`project-settings-column-down-${todoId}`).click();
+      await expect.poll(async () => settingsColumnIds(page)).toEqual([progressId, doneId, todoId]);
+
+      await closeSettings(page);
+
+      await expect
+        .poll(async () => filter.locator("option").allTextContents())
+        .toEqual(["Все колонки", "In Progress", "Done", renamedTitle]);
+
+      await page.reload();
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+      await expect
+        .poll(async () => filter.locator("option").allTextContents())
+        .toEqual(["Все колонки", "In Progress", "Done", renamedTitle]);
+
+      await openSettings(page);
+      expect(await settingsColumnIds(page)).toEqual([progressId, doneId, todoId]);
+      await expect(page.getByTestId(`project-settings-column-input-${todoId}`)).toHaveValue(
+        renamedTitle,
+      );
+      await closeSettings(page);
+    });
+
+    test("перетаскивает карточку за заголовок, теги и отступ, клик открывает", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект drag за области");
+      const byTitleTitle = uniqueTitle("Карточка заголовка");
+      const byTagTitle = uniqueTitle("Карточка тега");
+      const byPaddingTitle = uniqueTitle("Карточка отступа");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const byTitleId = await createTask(page, {
+        projectTitle,
+        title: byTitleTitle,
+        tags: "release",
+      });
+      const byTagId = await createTask(page, {
+        projectTitle,
+        title: byTagTitle,
+        tags: "backend",
+      });
+      await createTask(page, { projectTitle, title: byPaddingTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      // Клик по заголовку открывает карточку.
+      await page.getByTestId(`kanban-open-${byTitleId}`).click();
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await closeCardModal(page);
+
+      // Drag из заголовка: карточка перемещается, modal не открывается.
+      const titleBox = await page.getByTestId(`kanban-open-${byTitleId}`).boundingBox();
+
+      expect(titleBox).not.toBeNull();
+
+      if (titleBox !== null) {
+        await dragCardFromPoint(
+          page,
+          { x: titleBox.x + titleBox.width / 2, y: titleBox.y + titleBox.height / 2 },
+          "in_progress",
+        );
+      }
+
+      await expectCardInColumn(page, byTitleId, "in_progress");
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+
+      // Drag из тега.
+      const tag = card(page, byTagId).getByText("backend", { exact: true });
+      const tagBox = await tag.boundingBox();
+
+      expect(tagBox).not.toBeNull();
+
+      if (tagBox !== null) {
+        await dragCardFromPoint(
+          page,
+          { x: tagBox.x + tagBox.width / 2, y: tagBox.y + tagBox.height / 2 },
+          "done",
+        );
+      }
+
+      await expectCardInColumn(page, byTagId, "done");
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+
+      // Drag из пустого отступа article (3 px от края, вне кнопок).
+      const cardBox = await card(page, byTitleId).boundingBox();
+
+      expect(cardBox).not.toBeNull();
+
+      if (cardBox !== null) {
+        await dragCardFromPoint(page, { x: cardBox.x + 3, y: cardBox.y + 3 }, "todo");
+      }
+
+      await expectCardInColumn(page, byTitleId, "todo");
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+
+      // После drag обычный клик снова открывает карточку.
+      await page.getByTestId(`kanban-open-${byTitleId}`).click();
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await closeCardModal(page);
+    });
+
+    test("меню не меняет карточку, не обрезается колонкой, clamp и закрытие при scroll", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект меню карточки");
+      const taskTitle = uniqueTitle("Карточка меню");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      const trigger = page.getByTestId(`kanban-menu-${taskId}`);
+      const cardBoxBefore = await card(page, taskId).boundingBox();
+
+      expect(cardBoxBefore).not.toBeNull();
+
+      await trigger.click();
+
+      const menu = page.getByTestId(`kanban-card-menu-${taskId}`);
+
+      await expect(menu).toBeVisible();
+
+      const cardBoxAfter = await card(page, taskId).boundingBox();
+
+      expect(cardBoxAfter).not.toBeNull();
+
+      if (cardBoxBefore !== null && cardBoxAfter !== null) {
+        expect(cardBoxAfter.x).toBeCloseTo(cardBoxBefore.x, 0);
+        expect(cardBoxAfter.y).toBeCloseTo(cardBoxBefore.y, 0);
+        expect(cardBoxAfter.width).toBeCloseTo(cardBoxBefore.width, 0);
+        expect(cardBoxAfter.height).toBeCloseTo(cardBoxBefore.height, 0);
+      }
+
+      const menuBox = await menu.boundingBox();
+
+      expect(menuBox).not.toBeNull();
+
+      if (menuBox !== null) {
+        expect(menuBox.x).toBeGreaterThanOrEqual(0);
+        expect(menuBox.y).toBeGreaterThanOrEqual(0);
+        expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(DESKTOP_VIEWPORT.width + 1);
+        expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(DESKTOP_VIEWPORT.height + 1);
+      }
+
+      expect(
+        await menu.evaluate(
+          (element) => element.closest('[data-testid="kanban-column-scroll-todo"]') !== null,
+        ),
+      ).toBe(false);
+      expect(
+        await menu.evaluate((element) => Number(getComputedStyle(element).zIndex)),
+      ).toBeGreaterThan(0);
+
+      await trigger.press("Escape");
+      await expect(menu).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+
+      // Много карточек: прокрутка колонки уводит кнопку из viewport и меню
+      // закрывается (reposition/close вместо зависания над пустым местом).
+      const quickTrigger = page.getByTestId("kanban-quick-add-todo");
+      const quickInput = page.getByTestId("kanban-quick-add-todo-input");
+
+      await quickTrigger.click();
+
+      for (let index = 1; index <= 14; index += 1) {
+        await quickInput.fill(`Меню карточка ${String(index).padStart(2, "0")}`);
+        await quickInput.press("Enter");
+      }
+
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("15");
+      await quickInput.press("Escape");
+      await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
+
+      await trigger.click();
+      await expect(menu).toBeVisible();
+      await page.getByTestId("kanban-column-scroll-todo").evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      await expect(menu).toHaveCount(0);
+
+      // Низкий viewport: меню раскрывается вверх и остаётся в границах.
+      await page.setViewportSize({ width: 1440, height: 480 });
+      await expect(page.getByTestId("kanban-columns")).toBeVisible();
+      await page.getByTestId("kanban-column-scroll-todo").evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+
+      const lastCard = page.getByTestId("kanban-cards-todo").locator("[data-card-id]").last();
+      const lastId = await lastCard.getAttribute("data-card-id");
+
+      expect(lastId).not.toBeNull();
+      await page.getByTestId(`kanban-menu-${lastId ?? ""}`).click();
+
+      const flipped = page.getByTestId(`kanban-card-menu-${lastId ?? ""}`);
+
+      await expect(flipped).toBeVisible();
+      await expect(flipped).toHaveAttribute("data-placement", "top");
+
+      const flippedBox = await flipped.boundingBox();
+
+      expect(flippedBox).not.toBeNull();
+
+      if (flippedBox !== null) {
+        expect(flippedBox.y).toBeGreaterThanOrEqual(0);
+        expect(flippedBox.y + flippedBox.height).toBeLessThanOrEqual(480);
+        expect(flippedBox.x).toBeGreaterThanOrEqual(0);
+        expect(flippedBox.x + flippedBox.width).toBeLessThanOrEqual(1440);
+      }
+
+      await flipped.press("Escape");
+      await expect(flipped).toHaveCount(0);
+    });
+
+    test("держит desktop-колонки 288 px при resize и не растягивает add-column", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект фиксированной ширины");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      for (let index = 1; index <= 5; index += 1) {
+        await addColumn(page, `Width ${String(index)}`, "open");
+      }
+
+      const readMetrics = async () => {
+        const columns = await page.locator("[data-kanban-column-id]").evaluateAll((elements) =>
+          elements.map((element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+
+            return {
+              width: rect.width,
+              x: rect.x,
+              grow: style.flexGrow,
+              shrink: style.flexShrink,
+              basis: style.flexBasis,
+            };
+          }),
+        );
+        const board = await page.getByTestId("kanban-columns").evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+
+          return {
+            x: rect.x,
+            scrollWidth: element.scrollWidth,
+            clientWidth: element.clientWidth,
+          };
+        });
+
+        return { columns, board };
+      };
+
+      await page.getByTestId("kanban-columns").evaluate((element) => {
+        element.scrollLeft = 0;
+      });
+      await expect
+        .poll(async () =>
+          page.getByTestId("kanban-columns").evaluate((element) => element.scrollLeft),
+        )
+        .toBe(0);
+
+      const initial = await readMetrics();
+
+      expect(initial.columns).toHaveLength(8);
+
+      for (const column of initial.columns) {
+        expect(Math.abs(column.width - 288)).toBeLessThanOrEqual(1);
+        expect(column.grow).toBe("0");
+        expect(column.shrink).toBe("0");
+        expect(column.basis).toBe("288px");
+      }
+
+      expect(Math.abs((initial.columns[0]?.x ?? 0) - initial.board.x)).toBeLessThanOrEqual(2);
+      expect(initial.board.scrollWidth).toBeGreaterThan(initial.board.clientWidth);
+
+      const addColumnBox = await page.getByTestId("kanban-add-column").boundingBox();
+
+      expect(addColumnBox).not.toBeNull();
+      expect(addColumnBox?.width ?? 0).toBeLessThanOrEqual(230);
+
+      await page.setViewportSize({ width: 1920, height: 900 });
+      await expect(page.getByTestId("kanban-columns")).toBeVisible();
+      await expect
+        .poll(async () => {
+          const metrics = await readMetrics();
+
+          return {
+            count: metrics.columns.length,
+            maxWidth: Math.max(...metrics.columns.map((column) => column.width)),
+            minWidth: Math.min(...metrics.columns.map((column) => column.width)),
+            overflow: metrics.board.scrollWidth > metrics.board.clientWidth,
+          };
+        })
+        .toEqual({ count: 8, maxWidth: 288, minWidth: 288, overflow: true });
+
+      const resized = await readMetrics();
+
+      for (const column of resized.columns) {
+        expect(column.grow).toBe("0");
+        expect(column.shrink).toBe("0");
+        expect(column.basis).toBe("288px");
+      }
+    });
   });
 
   test.describe("мобильный viewport", () => {
@@ -3685,6 +4179,12 @@ test.describe("канбан в production shell", () => {
       }));
 
       expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+
+      const mobileColumn = await column(page, "todo").boundingBox();
+
+      expect(mobileColumn).not.toBeNull();
+      expect(mobileColumn?.width ?? 0).toBeGreaterThanOrEqual(MOBILE_VIEWPORT.width * 0.7);
+      expect(mobileColumn?.width ?? 0).toBeLessThanOrEqual(MOBILE_VIEWPORT.width * 0.85 + 1);
 
       // Overlay появляется только на /view/kanban и при выбранной карточке.
       await page.getByTestId(`kanban-open-${taskId}`).click();
@@ -3764,8 +4264,8 @@ test.describe("канбан в production shell", () => {
         .toBe(true);
     });
 
-    test("переименовывает проект на мобильном и обновляет mobile sheet", async ({ page }) => {
-      const projectTitle = uniqueTitle("Проект мобильного переименования");
+    test("настраивает проект на мобильном и обновляет mobile sheet", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект мобильных настроек");
       const renamedTitle = uniqueTitle("Мобильный проект переименован");
 
       await openTaskList(page);
@@ -3778,17 +4278,23 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await expectNoHorizontalOverflow(page);
 
-      const opener = page.getByTestId("project-rename-button");
+      const opener = page.getByTestId("project-settings-button");
 
       await expect(opener).toBeVisible();
       await opener.click();
 
-      const dialog = page.getByTestId("project-rename-dialog");
+      const dialog = page.getByTestId("project-settings-dialog");
 
       await expect(dialog).toBeVisible();
       expect(await dialog.evaluate((element) => element.tagName)).toBe("DIALOG");
-      await page.getByTestId("project-rename-input").fill(renamedTitle);
-      await page.getByTestId("project-rename-submit").click();
+      await expect(page.getByTestId("project-settings-columns")).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+      await page.getByTestId("project-settings-title-input").fill(renamedTitle);
+      await page.getByTestId("project-settings-title-save").click();
+      await expect(page.getByTestId("project-settings-title-notice")).toContainText(
+        "Название проекта сохранено",
+      );
+      await page.getByTestId("project-settings-done").click();
 
       await expect(dialog).toHaveCount(0);
       await expect(page.getByTestId("kanban-board-title")).toHaveText(renamedTitle);
@@ -4039,7 +4545,7 @@ test.describe("канбан в production shell", () => {
       for (const target of [
         page.getByTestId(`kanban-open-${taskId}`),
         page.getByTestId(`kanban-drag-${taskId}`),
-        card.locator("summary"),
+        page.getByTestId(`kanban-menu-${taskId}`),
       ]) {
         const box = await target.boundingBox();
 
@@ -4047,9 +4553,9 @@ test.describe("канбан в production shell", () => {
         expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
       }
 
-      await card.locator("summary").click();
+      await page.getByTestId(`kanban-menu-${taskId}`).click();
 
-      const menu = card.getByRole("group", { name: `Перемещение задачи ${taskTitle}` });
+      const menu = page.getByTestId(`kanban-card-menu-${taskId}`);
       const menuButtons = menu.getByRole("button");
       const buttonCount = await menuButtons.count();
 
@@ -4143,6 +4649,177 @@ test.describe("канбан в production shell", () => {
             ),
         )
         .toBe(true);
+    });
+  });
+
+  test.describe("мобильный touch", () => {
+    test.use({ viewport: MOBILE_VIEWPORT, hasTouch: true, isMobile: true });
+
+    test("long press 220 ms перетаскивает карточку без открытия modal", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект touch drag");
+      const firstTitle = uniqueTitle("Touch первая");
+      const secondTitle = uniqueTitle("Touch вторая");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const firstId = await createTask(page, {
+        projectTitle,
+        title: firstTitle,
+        status: "todo",
+      });
+      const secondId = await createTask(page, {
+        projectTitle,
+        title: secondTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId]);
+
+      const sourceBox = await page.getByTestId(`kanban-open-${secondId}`).boundingBox();
+      const targetBox = await card(page, firstId).boundingBox();
+
+      expect(sourceBox).not.toBeNull();
+      expect(targetBox).not.toBeNull();
+
+      if (sourceBox === null || targetBox === null) {
+        return;
+      }
+
+      const startX = sourceBox.x + sourceBox.width / 2;
+      const startY = sourceBox.y + sourceBox.height / 2;
+      const endX = targetBox.x + targetBox.width / 2;
+      const endY = targetBox.y + 4;
+
+      // Синтетический pointer touch проходит тот же long-press путь, что и
+      // настоящий палец; отдельный тест ниже проверяет реальный touch scroll.
+      await page.getByTestId(`kanban-open-${secondId}`).dispatchEvent("pointerdown", {
+        pointerId: 1,
+        pointerType: "touch",
+        isPrimary: true,
+        button: 0,
+        clientX: startX,
+        clientY: startY,
+        bubbles: true,
+      });
+
+      await page.waitForTimeout(260);
+
+      for (let step = 1; step <= 8; step += 1) {
+        await page.evaluate(
+          ({ x, y }) => {
+            window.dispatchEvent(
+              new PointerEvent("pointermove", {
+                pointerId: 1,
+                pointerType: "touch",
+                isPrimary: true,
+                button: 0,
+                clientX: x,
+                clientY: y,
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+          },
+          {
+            x: startX + ((endX - startX) * step) / 8,
+            y: startY + ((endY - startY) * step) / 8,
+          },
+        );
+      }
+
+      await page.evaluate(
+        ({ x, y }) => {
+          window.dispatchEvent(
+            new PointerEvent("pointerup", {
+              pointerId: 1,
+              pointerType: "touch",
+              isPrimary: true,
+              button: 0,
+              clientX: x,
+              clientY: y,
+              bubbles: true,
+            }),
+          );
+        },
+        { x: endX, y: endY },
+      );
+
+      await expect.poll(async () => await cardTitles(page, "todo")).toEqual([secondId, firstId]);
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+    });
+
+    test("вертикальный touch scroll не запускает drag карточки", async ({ page, context }) => {
+      const projectTitle = uniqueTitle("Проект touch scroll");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const firstId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Touch scroll первая"),
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+
+      const quickTrigger = page.getByTestId("kanban-quick-add-todo");
+      const quickInput = page.getByTestId("kanban-quick-add-todo-input");
+
+      await quickTrigger.click();
+
+      for (let index = 1; index <= 14; index += 1) {
+        await quickInput.fill(`Touch scroll ${String(index).padStart(2, "0")}`);
+        await quickInput.press("Enter");
+      }
+
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("15");
+      await quickInput.press("Escape");
+      await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
+
+      const scroll = page.getByTestId("kanban-column-scroll-todo");
+      const scrollBox = await scroll.boundingBox();
+
+      expect(scrollBox).not.toBeNull();
+      await expect.poll(async () => (await cardTitles(page, "todo"))[0]).toBe(firstId);
+
+      if (scrollBox !== null) {
+        const cdp = await context.newCDPSession(page);
+        const x = scrollBox.x + scrollBox.width / 2;
+        const startY = scrollBox.y + scrollBox.height - 40;
+
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x, y: startY, radiusX: 4, radiusY: 4, force: 1, id: 1 }],
+        });
+
+        for (let step = 1; step <= 10; step += 1) {
+          await cdp.send("Input.dispatchTouchEvent", {
+            type: "touchMove",
+            touchPoints: [
+              {
+                x,
+                y: startY - (step * 180) / 10,
+                radiusX: 4,
+                radiusY: 4,
+                force: 1,
+                id: 1,
+              },
+            ],
+          });
+          await page.waitForTimeout(15);
+        }
+
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await cdp.detach();
+      }
+
+      await expect
+        .poll(async () => scroll.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+      // Порядок не изменился: это была прокрутка, а не drag.
+      await expect.poll(async () => (await cardTitles(page, "todo"))[0]).toBe(firstId);
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
   });
 
