@@ -146,13 +146,17 @@ export function KanbanCard({
   const extraTags = task.tags.length - visibleTags.length;
   const moveTargets = columns.filter((column) => column.id !== currentColumnId);
 
-  const closeMenu = useCallback((returnFocus: boolean): void => {
+  const closeMenu = useCallback((returnFocus: boolean, preventScroll = false): void => {
     focusFirstMenuRef.current = false;
     setMenuOpen(false);
     setMenuPosition(null);
 
     if (returnFocus) {
-      triggerRef.current?.focus();
+      if (preventScroll) {
+        triggerRef.current?.focus({ preventScroll: true });
+      } else {
+        triggerRef.current?.focus();
+      }
     }
   }, []);
 
@@ -240,7 +244,7 @@ export function KanbanCard({
         triggerRect.left > window.innerWidth
       ) {
         focusFirstMenuRef.current = false;
-        closeMenu(true);
+        closeMenu(true, true);
 
         return;
       }

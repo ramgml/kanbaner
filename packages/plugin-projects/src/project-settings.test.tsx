@@ -917,6 +917,115 @@ describe("Настройки доски", () => {
     });
   });
 
+  it("не теряет pending нового column.update после A → B → A с той же колонкой", async () => {
+    const firstProject = makeProject("project-1", "Первый");
+    const secondProject = makeProject("project-2", "Второй");
+    const firstColumn = makeColumn("column-shared", "A");
+    const secondColumn = makeColumn("column-b", "B");
+    let updateCalls = 0;
+    let resolveOld!: (value: UiOperationResult) => void;
+    let resolveNew!: (value: UiOperationResult) => void;
+    const oldSave = new Promise<UiOperationResult>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newSave = new Promise<UiOperationResult>((resolve) => {
+      resolveNew = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({
+          items: [firstProject, secondProject],
+          total: 2,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const values = inputOf(input);
+
+        return ok(
+          columnList(values.projectId === secondProject.id ? [secondColumn] : [firstColumn]),
+        );
+      }
+
+      if (operationId !== "kanbaner.tasks.column.update") {
+        return ok(null);
+      }
+
+      updateCalls += 1;
+
+      return updateCalls === 1 ? oldSave : newSave;
+    };
+
+    const view = render(<ProjectSettingsButton invoke={invoke} project={firstProject} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-input-column-shared"), {
+      target: { value: "Старое" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-save-column-shared"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-save-column-shared")).toBeDisabled();
+    });
+
+    // A → B: project switch принудительно закрывает настройки, не дожидаясь
+    // старой операции. Затем B → A и новое сохранение той же колонки.
+    view.rerender(<ProjectSettingsButton invoke={invoke} project={secondProject} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+    });
+
+    view.rerender(<ProjectSettingsButton invoke={invoke} project={firstProject} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-input-column-shared"), {
+      target: { value: "Новое" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-save-column-shared"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-save-column-shared")).toHaveTextContent(
+        "…",
+      );
+    });
+
+    await act(async () => {
+      resolveOld(
+        ok(
+          columnMutation({
+            ...firstColumn,
+            title: "Старое",
+            version: 2,
+          }),
+        ),
+      );
+      await oldSave;
+    });
+
+    // Старый finally не снимает pending новой операции.
+    expect(screen.getByTestId("project-settings-column-save-column-shared")).toBeDisabled();
+    expect(screen.getByTestId("project-settings-column-save-column-shared")).toHaveTextContent("…");
+
+    await act(async () => {
+      resolveNew(
+        ok(
+          columnMutation({
+            ...firstColumn,
+            title: "Новое",
+            version: 3,
+          }),
+        ),
+      );
+      await newSave;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-notice-column-shared")).toHaveTextContent(
+        "Название колонки сохранено",
+      );
+    });
+    expect(screen.getByTestId("project-settings-column-input-column-shared")).toHaveValue("Новое");
+  });
+
   it("показывает обычную ошибку project.update и сохраняет ввод", async () => {
     const project = makeProject("project-1", "Релиз");
     const invoke: UiOperationInvoker = async (operationId) => {

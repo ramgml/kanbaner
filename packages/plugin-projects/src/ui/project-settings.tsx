@@ -199,6 +199,7 @@ export function ProjectSettingsButton({
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
   const columnOperationRef = useRef<Map<string, number>>(new Map());
+  const columnOperationSequenceRef = useRef(0);
   const reorderOperationRef = useRef(0);
   const reorderPendingRef = useRef(false);
   const movingColumnIdRef = useRef<string | null>(null);
@@ -658,8 +659,9 @@ export function ProjectSettingsButton({
 
     const projectId = project.id;
     const generation = generationRef.current;
-    const operation = (columnOperationRef.current.get(columnId) ?? 0) + 1;
+    const operation = columnOperationSequenceRef.current + 1;
 
+    columnOperationSequenceRef.current = operation;
     columnOperationRef.current.set(columnId, operation);
     setDirtyConfirm(false);
     setColumnPendingValue(columnId, true);
@@ -724,12 +726,12 @@ export function ProjectSettingsButton({
         setColumnError(columnId, errorMessage(commandError));
       }
     } finally {
-      if (columnOperationRef.current.get(columnId) === operation) {
+      if (
+        isCurrent(projectId, generation) &&
+        columnOperationRef.current.get(columnId) === operation
+      ) {
         columnOperationRef.current.delete(columnId);
-
-        if (isCurrent(projectId, generation)) {
-          setColumnPendingValue(columnId, false);
-        }
+        setColumnPendingValue(columnId, false);
       }
     }
   };

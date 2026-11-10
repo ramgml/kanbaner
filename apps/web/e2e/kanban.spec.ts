@@ -4019,10 +4019,20 @@ test.describe("канбан в production shell", () => {
 
       await trigger.click();
       await expect(menu).toBeVisible();
-      await page.getByTestId("kanban-column-scroll-todo").evaluate((element) => {
+
+      const todoScroll = page.getByTestId("kanban-column-scroll-todo");
+
+      await todoScroll.evaluate((element) => {
         element.scrollTop = element.scrollHeight;
       });
+      const scrollAfterMenuClose = await todoScroll.evaluate((element) => element.scrollTop);
+
+      expect(scrollAfterMenuClose).toBeGreaterThan(0);
       await expect(menu).toHaveCount(0);
+      // Focus return при scroll-close не должен отматывать колонку наверх.
+      await expect
+        .poll(async () => todoScroll.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
 
       // Низкий viewport: меню раскрывается вверх и остаётся в границах.
       await page.setViewportSize({ width: 1440, height: 480 });
