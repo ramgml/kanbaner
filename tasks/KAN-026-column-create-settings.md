@@ -1,7 +1,7 @@
 ---
 id: KAN-026
 title: Создание колонок в настройках доски
-status: in_progress
+status: review
 stage: 3
 priority: medium
 owner: worker-kan-026
