@@ -1444,6 +1444,14 @@ describe("TaskOverlay Trello-модал", () => {
       await waitFor(() => {
         expect(tags).toHaveValue("release");
       });
+      await waitFor(() => {
+        expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+      });
+
+      // Сохранение обновляет версию задачи через async reload. Пустой act
+      // детерминированно докатывает passive effects, чтобы ModalDialog
+      // опубликовал актуальный onClose без stale draftDirty.
+      await act(async () => {});
 
       expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
       expect(saveTags).toBeDisabled();
@@ -1463,9 +1471,16 @@ describe("TaskOverlay Trello-модал", () => {
       // quickDirty=false: закрытие не требует подтверждения.
       fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
 
-      await waitFor(() => {
-        expect(screen.queryByTestId("kanban-details")).toBeNull();
-      });
+      // Закрытие проходит через async re-render после bumpKanbanRevision:
+      // под параллельной нагрузкой полного прогона состояние может прийти
+      // позже default 1s. Детерминированно ждём отсутствие dialog, сохраняя
+      // штатный запас 5s только для этого async close.
+      await waitFor(
+        () => {
+          expect(screen.queryByTestId("kanban-details")).toBeNull();
+        },
+        { timeout: 5000 },
+      );
       expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     },
   );

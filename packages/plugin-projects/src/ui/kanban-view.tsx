@@ -12,7 +12,6 @@ import {
   type ProjectMutationOutput,
   type Task,
   type TaskColumn,
-  type TaskColumnType,
   type TaskCreateInput,
   type TaskListInput,
   type TaskListOutput,
@@ -28,7 +27,7 @@ import {
 import { KANBAN_ROUTE } from "../metadata.ts";
 import { KanbanCard, type KanbanReorderKind } from "./kanban-card.tsx";
 import { KanbanColumn } from "./kanban-column.tsx";
-import { KanbanAddColumnForm, KanbanDeleteColumnDialog } from "./kanban-column-forms.tsx";
+import { KanbanDeleteColumnDialog } from "./kanban-column-forms.tsx";
 import { KanbanCreatePanel, type KanbanCreateMode } from "./kanban-create.tsx";
 import { KanbanQuickComposer } from "./kanban-quick-composer.tsx";
 import type { TitleCreateResult } from "./title-composer.tsx";
@@ -338,12 +337,6 @@ export function KanbanView({
     readonly after: boolean;
   } | null>(null);
 
-  const [addColumnOpen, setAddColumnOpen] = useState(false);
-  const [addColumnTitle, setAddColumnTitle] = useState("");
-  const [addColumnType, setAddColumnType] = useState<TaskColumnType>("open");
-  const [addColumnError, setAddColumnError] = useState<string | null>(null);
-  const [addColumnSubmitting, setAddColumnSubmitting] = useState(false);
-
   const [renamingColumnId, setRenamingColumnId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -358,7 +351,6 @@ export function KanbanView({
   const [columnNotice, setColumnNotice] = useState<string | null>(null);
 
   const columnsScrollRef = useRef<HTMLDivElement>(null);
-  const addColumnOpenerRef = useRef<HTMLButtonElement>(null);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const loadedCountsRef = useRef<Record<string, number>>({});
   const filterKeyRef = useRef<string>("\u0000");
@@ -370,7 +362,6 @@ export function KanbanView({
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
   const columnsRef = useRef<KanbanColumns>(columns);
   const submitGuardRef = useRef(false);
-  const columnSubmitGuardRef = useRef(false);
   const renameGuardRef = useRef(false);
   const deleteGuardRef = useRef(false);
   const deleteCountRequestRef = useRef(0);
@@ -796,8 +787,6 @@ export function KanbanView({
     setColumnConflicts(new Set());
     setColumnDraggingId(null);
     setColumnDragOver(null);
-    setAddColumnOpen(false);
-    setAddColumnError(null);
     setRenamingColumnId(null);
     setRenameError(null);
     setDeletingColumnId(null);
@@ -1810,105 +1799,6 @@ export function KanbanView({
     window.addEventListener("pointercancel", onPointerCancel);
   };
 
-  const openAddColumn = (): void => {
-    if (!boardReady) {
-      return;
-    }
-
-    setAddColumnOpen(true);
-    setAddColumnError(null);
-    setAddColumnTitle("");
-    setAddColumnType("open");
-    requestAnimationFrame(() => {
-      const container = columnsScrollRef.current;
-
-      if (container !== null && typeof container.scrollTo === "function") {
-        container.scrollTo({ left: container.scrollWidth, behavior: "smooth" });
-      }
-    });
-  };
-
-  const closeAddColumn = (): void => {
-    if (addColumnSubmitting) {
-      return;
-    }
-
-    setAddColumnOpen(false);
-    setAddColumnError(null);
-    addColumnOpenerRef.current?.focus();
-  };
-
-  const createColumn = async (): Promise<void> => {
-    if (columnSubmitGuardRef.current || addColumnSubmitting || !boardReady) {
-      return;
-    }
-
-    const title = addColumnTitle.trim();
-
-    if (title.length === 0) {
-      setAddColumnError("Укажите название колонки");
-      return;
-    }
-
-    if (effectiveProjectId.length === 0) {
-      setAddColumnError("Выберите проект");
-      return;
-    }
-
-    columnSubmitGuardRef.current = true;
-    setAddColumnSubmitting(true);
-    setAddColumnError(null);
-    setColumnNotice(null);
-
-    const context = operationContext();
-    const projectId = context.projectId;
-
-    try {
-      if (!isOperationCurrent(context)) {
-        return;
-      }
-
-      await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnCreate, {
-        projectId,
-        title,
-        type: addColumnType,
-      } as unknown as JsonValue);
-
-      if (!isOperationCurrent(context)) {
-        return;
-      }
-
-      const refreshed = await refreshProjectColumns(projectId);
-
-      setAddColumnOpen(false);
-      setAddColumnTitle("");
-      setAddColumnType("open");
-
-      if (refreshed !== null && isOperationCurrent(context)) {
-        // Догружаем task.list всех колонок, включая новую: пустое состояние
-        // должно появиться без отдельного внешнего reload.
-        await reloadBoard();
-
-        if (isOperationCurrent(context)) {
-          setColumnNotice("Колонка добавлена");
-        }
-      } else {
-        setError(
-          "Колонка добавлена, но доска не обновлена. Повторите загрузку доски (обновите страницу); создавать колонку повторно не нужно.",
-        );
-      }
-
-      requestAnimationFrame(() => {
-        addColumnOpenerRef.current?.focus();
-      });
-    } catch (commandError) {
-      setAddColumnError(errorMessage(commandError));
-    } finally {
-      columnSubmitGuardRef.current = false;
-      setAddColumnSubmitting(false);
-    }
-  };
-
   const startRenameColumn = (column: TaskColumn): void => {
     if (currentColumn(column.id) === null) {
       return;
@@ -2632,35 +2522,6 @@ export function KanbanView({
                   </KanbanColumn>
                 );
               })}
-
-              {addColumnOpen ? (
-                <KanbanAddColumnForm
-                  title={addColumnTitle}
-                  type={addColumnType}
-                  error={addColumnError}
-                  submitting={addColumnSubmitting}
-                  onTitleChange={(value) => {
-                    setAddColumnTitle(value);
-                    setAddColumnError(null);
-                  }}
-                  onTypeChange={setAddColumnType}
-                  onSubmit={() => {
-                    void createColumn();
-                  }}
-                  onCancel={closeAddColumn}
-                />
-              ) : (
-                <button
-                  ref={addColumnOpenerRef}
-                  type="button"
-                  data-testid="kanban-add-column"
-                  disabled={!boardReady}
-                  onClick={openAddColumn}
-                  className="flex min-h-12 w-[70vw] max-w-[220px] shrink-0 snap-start items-center justify-center rounded-xl border border-dashed border-border bg-background/60 px-3 text-sm font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:w-[220px] md:min-w-[220px] md:max-w-[220px] md:flex-[0_0_220px]"
-                >
-                  + Добавить колонку
-                </button>
-              )}
             </div>
 
             {scrollHints.right ? (

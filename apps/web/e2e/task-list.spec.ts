@@ -70,6 +70,48 @@ async function createProject(page: Page, title: string): Promise<void> {
   await expect(page.getByTestId("create-task-button")).toBeEnabled();
 }
 
+async function openSettings(page: Page): Promise<import("@playwright/test").Locator> {
+  await page.getByTestId("project-settings-button").click();
+
+  const dialog = page.getByTestId("project-settings-dialog");
+
+  await expect(dialog).toBeVisible();
+  await expect(page.getByTestId("project-settings-columns")).toBeVisible();
+
+  return dialog;
+}
+
+async function closeSettings(page: Page): Promise<void> {
+  await page.getByTestId("project-settings-done").click();
+  await expect(page.getByTestId("project-settings-dialog")).toHaveCount(0);
+}
+
+async function settingsColumnIds(page: Page): Promise<string[]> {
+  return page
+    .locator("[data-settings-column-id]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-settings-column-id") ?? ""),
+    );
+}
+
+async function createColumnInSettings(
+  page: Page,
+  title: string,
+  type: "open" | "done",
+): Promise<void> {
+  const before = (await settingsColumnIds(page)).length;
+
+  await page.getByTestId("project-settings-column-create-title").fill(title);
+  await page.getByTestId("project-settings-column-create-type").selectOption(type);
+  await page.getByTestId("project-settings-column-create-submit").click();
+  await expect(page.getByTestId("project-settings-column-create-notice")).toContainText(
+    "Колонка добавлена",
+  );
+  await expect.poll(async () => (await settingsColumnIds(page)).length).toBe(before + 1);
+  await expect(page.getByTestId("project-settings-column-create-title")).toHaveValue("");
+  await expect(page.getByTestId("project-settings-column-create-title")).toBeFocused();
+}
+
 const STATUS_LABELS = {
   backlog: "Backlog",
   todo: "ToDo",
@@ -685,6 +727,57 @@ test.describe("список задач в production shell", () => {
       await page.reload();
       await expect(page.getByTestId("project-board-title")).toHaveText(renamedTitle);
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
+    });
+
+    test("создаёт open и Done-колонки из настроек списка и сохраняет их после reload", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект создания колонок списка");
+      const openTitle = uniqueTitle("Колонка из списка");
+      const doneTitle = uniqueTitle("Done из списка");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      const filter = page.getByTestId("task-filter-column");
+
+      expect(await filter.locator("option").allTextContents()).toEqual([
+        "Все колонки",
+        "ToDo",
+        "In Progress",
+        "Done",
+      ]);
+
+      await openSettings(page);
+      await createColumnInSettings(page, openTitle, "open");
+      await createColumnInSettings(page, doneTitle, "done");
+
+      const createdIds = (await settingsColumnIds(page)).slice(-2);
+
+      expect(createdIds).toHaveLength(2);
+
+      await closeSettings(page);
+
+      await expect
+        .poll(async () => filter.locator("option").allTextContents())
+        .toEqual(["Все колонки", "ToDo", "In Progress", "Done", openTitle, doneTitle]);
+      await expect(page.getByTestId("create-task-button")).toBeEnabled();
+
+      await page.reload();
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+      await expect
+        .poll(async () => filter.locator("option").allTextContents())
+        .toEqual(["Все колонки", "ToDo", "In Progress", "Done", openTitle, doneTitle]);
+
+      await openSettings(page);
+      expect((await settingsColumnIds(page)).slice(-2)).toEqual(createdIds);
+      await expect(page.getByTestId(`project-settings-column-input-${createdIds[0]}`)).toHaveValue(
+        openTitle,
+      );
+      await expect(page.getByTestId(`project-settings-column-input-${createdIds[1]}`)).toHaveValue(
+        doneTitle,
+      );
+      await closeSettings(page);
     });
 
     test("не перезаписывает задачу при VERSION_CONFLICT из второй вкладки", async ({
