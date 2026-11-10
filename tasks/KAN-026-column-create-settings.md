@@ -1,7 +1,7 @@
 ---
 id: KAN-026
 title: Создание колонок в настройках доски
-status: review
+status: done
 stage: 3
 priority: medium
 owner: worker-kan-026
@@ -32,14 +32,14 @@ specs:
 
 ## Объём работ
 
-- [ ] Перенести/повторно использовать форму создания в ProjectSettings.
-- [ ] Сохранить title/type validation, double-submit guard, ошибки без потери
+- [x] Перенести/повторно использовать форму создания в ProjectSettings.
+- [x] Сохранить title/type validation, double-submit guard, ошибки без потери
   ввода, focus/Escape, expected project/generation guards и awaited refresh.
-- [ ] Удалить board add-column UI и неиспользуемый код; меню удаления и тип
+- [x] Удалить board add-column UI и неиспользуемый код; меню удаления и тип
   существующих колонок не менять.
-- [ ] Обновить component/E2E: создание open/Done из обоих представлений,
+- [x] Обновить component/E2E: создание open/Done из обоих представлений,
   persistence, конфликт/refresh error, mobile 360, прежние reorder/rename.
-- [ ] Обновить README и отчёт `tasks/reports/KAN-026.md`.
+- [x] Обновить README и отчёт `tasks/reports/KAN-026.md`.
 
 ## Владение файлами
 
@@ -56,15 +56,15 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Колонки создаются только из настроек доски.
-- [ ] Тип и порядок сохраняются после reload.
-- [ ] Ошибки и race не создают дубликаты.
-- [ ] Все проверки зелёные.
+- [x] Колонки создаются только из настроек доски.
+- [x] Тип и порядок сохраняются после reload.
+- [x] Ошибки и race не создают дубликаты.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Strict install, check:imports, полный `pnpm check`.
-- [ ] Все Playwright и deferred SIGTERM.
+- [x] Strict install, check:imports, полный `pnpm check`.
+- [x] Все Playwright и deferred SIGTERM.
 
 ## Риски
 
@@ -73,8 +73,15 @@ specs:
 
 ## Журнал
 
+- 2026-11-10 — Влита в `dev` merge-коммитом
+  `d51bfd3b44b7228152e6323f4f9bbf2cf7ef8fb0`. Ревью разрешило интеграцию;
+  повторные проверки на ветке и `dev` зелёные.
 - 2026-11-10 — Задача создана по требованию пользователя.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммит: merge `d51bfd3b44b7228152e6323f4f9bbf2cf7ef8fb0`.
+- Ветка: `feat/kan-026-column-create-settings` влита, ветка и worktree удалены.
+- Проверки: 96 файлов / 1330 тестов, 96 production E2E, strict install,
+  check:imports и deferred SIGTERM зелёные.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.
