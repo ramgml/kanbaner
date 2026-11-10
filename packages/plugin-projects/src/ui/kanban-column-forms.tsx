@@ -135,8 +135,9 @@ export function KanbanAddColumnForm({
 export interface KanbanDeleteColumnDialogProps {
   readonly column: TaskColumn;
   readonly columns: readonly TaskColumn[];
-  /** Сколько задач фактически находится в колонке. */
-  readonly taskCount: number;
+  /** Точное число задач из `task.list{columnId}` без tag-фильтра. */
+  readonly taskCount: number | null;
+  readonly taskCountError: string | null;
   readonly targetColumnId: string;
   readonly error: string | null;
   readonly submitting: boolean;
@@ -156,6 +157,7 @@ export function KanbanDeleteColumnDialog({
   column,
   columns,
   taskCount,
+  taskCountError,
   targetColumnId,
   error,
   submitting,
@@ -187,10 +189,22 @@ export function KanbanDeleteColumnDialog({
           data-testid="kanban-column-delete-consequences"
           className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs"
         >
-          <p className="m-0 font-medium text-destructive">
-            Будет перенесено задач:{" "}
-            <span data-testid="kanban-column-delete-moved-count">{taskCount}</span>
-          </p>
+          {taskCountError !== null ? (
+            <p
+              role="alert"
+              data-testid="kanban-column-delete-count-error"
+              className="m-0 font-medium text-destructive"
+            >
+              Не удалось получить точное число задач: {taskCountError}
+            </p>
+          ) : (
+            <p className="m-0 font-medium text-destructive">
+              Будет перенесено задач:{" "}
+              <span data-testid="kanban-column-delete-moved-count">
+                {taskCount === null ? "…" : taskCount}
+              </span>
+            </p>
+          )}
         </div>
 
         {lastOfType ? (
@@ -257,7 +271,13 @@ export function KanbanDeleteColumnDialog({
           <button
             type="button"
             data-testid="kanban-column-delete-confirm"
-            disabled={submitting || lastOfType || target === null}
+            disabled={
+              submitting ||
+              lastOfType ||
+              target === null ||
+              taskCount === null ||
+              taskCountError !== null
+            }
             aria-busy={submitting}
             onClick={onSubmit}
             className="inline-flex min-h-10 items-center rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50 xl:min-h-8"

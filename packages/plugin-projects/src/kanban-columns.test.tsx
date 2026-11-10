@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
@@ -8,7 +8,7 @@ import type { Project, Task, TaskColumn, TaskColumnType } from "@kanbaner/plugin
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
-import { resetKanbanQueryForTests } from "./ui/query-state.ts";
+import { resetKanbanQueryForTests, updateKanbanQuery } from "./ui/query-state.ts";
 
 const TIMESTAMP = "2026-02-01T00:00:00.000Z";
 
@@ -27,10 +27,11 @@ function makeColumn(
   status: TaskColumn["status"],
   position: number,
   version = 1,
+  projectId = "project-1",
 ): TaskColumn {
   return {
     id,
-    projectId: "project-1",
+    projectId,
     title,
     status,
     position,
@@ -78,6 +79,10 @@ type Handler = (input: JsonValue) => UiOperationResult | Promise<UiOperationResu
 
 function ok(data: JsonValue): UiOperationResult {
   return { ok: true, data };
+}
+
+function emptyResult(): UiOperationResult {
+  return ok({ items: [], total: 0, nextOffset: null });
 }
 
 function fail(code: string, message = code): UiOperationResult {
@@ -251,8 +256,10 @@ function createOperations(
     "kanbaner.tasks.task.list": (input) => {
       const values = inputOf(input);
       const columnId = typeof values.columnId === "string" ? values.columnId : null;
+      const tag = typeof values.tag === "string" ? values.tag : null;
       const items = board.tasks
         .filter((task) => columnId === null || task.columnId === columnId)
+        .filter((task) => tag === null || task.tags.includes(tag))
         .sort((left, right) => left.position - right.position);
 
       return ok({ items, total: items.length, nextOffset: null });
@@ -489,8 +496,9 @@ describe("управление колонками в KanbanView", () => {
 
     const dialog = await screen.findByTestId("kanban-column-delete-dialog");
 
-    expect(within(dialog).getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("2");
-
+    await waitFor(() => {
+      expect(within(dialog).getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("2");
+    });
     fireEvent.change(screen.getByTestId("kanban-column-delete-target"), {
       target: { value: done.id },
     });
@@ -536,6 +544,11 @@ describe("управление колонками в KanbanView", () => {
     });
     await openMenu("column-project-1-todo", "todo");
     fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("1");
+    });
+
     fireEvent.change(screen.getByTestId("kanban-column-delete-target"), {
       target: { value: done2.id },
     });
@@ -584,5 +597,443 @@ describe("управление колонками в KanbanView", () => {
     expect(left).toHaveClass("min-h-10");
     expect(right).toHaveClass("min-h-10");
     expect(screen.getByTestId("kanban-column-rename-in_progress")).toBeEnabled();
+  });
+
+  it("не показывает колонки и карточки A после переключения на B до column.list B", async () => {
+    const columnsA = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-a"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-a",
+      ),
+    );
+    const columnsB = defaultColumns().map((column) =>
+      makeColumn(
+        column.id.replace("project-1", "project-b"),
+        column.title,
+        column.status,
+        column.position,
+        1,
+        "project-b",
+      ),
+    );
+    const taskA = makeTask("task-a", columnsA[0] as TaskColumn, 0, "Задача A");
+
+    let resolveB: ((value: UiOperationResult) => void) | null = null;
+    const delayedB = new Promise<UiOperationResult>((settle) => {
+      resolveB = settle;
+    });
+    const projects = [
+      { ...project, id: "project-a", title: "Проект A" },
+      { ...project, id: "project-b", title: "Проект B" },
+    ];
+
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({ items: projects, total: 2, nextOffset: null });
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const projectId = String(inputOf(input).projectId);
+
+        if (projectId === "project-b") {
+          return delayedB;
+        }
+
+        return ok({
+          items: columnsA,
+          total: columnsA.length,
+          nextOffset: null,
+        });
+      }
+
+      if (operationId === "kanbaner.tasks.task.list") {
+        const values = inputOf(input);
+        const projectId = String(values.projectId);
+        const columnId = typeof values.columnId === "string" ? values.columnId : null;
+        const items = projectId === "project-a" && columnId === columnsA[0]?.id ? [taskA] : [];
+
+        return ok({ items, total: items.length, nextOffset: null });
+      }
+
+      return emptyResult();
+    };
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-a");
+    resetKanbanQueryForTests("?project=project-a");
+    render(<KanbanView invoke={invoke} pathname="/view/kanban" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-task-a")).toBeVisible();
+    });
+
+    act(() => {
+      updateKanbanQuery({ projectId: "project-b" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-board-loading")).toBeVisible();
+    });
+    expect(document.querySelectorAll("[data-kanban-column-id]")).toHaveLength(0);
+    expect(screen.queryByTestId("kanban-card-task-a")).toBeNull();
+    expect(screen.getByTestId("kanban-create-task")).toBeDisabled();
+    expect(screen.getByTestId("kanban-add-column")).toBeDisabled();
+
+    await act(async () => {
+      resolveB?.(
+        ok({
+          items: columnsB,
+          total: columnsB.length,
+          nextOffset: null,
+        }),
+      );
+      await delayedB;
+    });
+
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-kanban-column-id="column-project-b-todo"]'),
+      ).not.toBeNull();
+    });
+    expect(document.querySelector('[data-kanban-column-id="column-project-a-todo"]')).toBeNull();
+    expect(screen.queryByTestId("kanban-card-task-a")).toBeNull();
+    expect(screen.getByTestId("kanban-create-task")).toBeEnabled();
+  });
+
+  it("считает задачи для удаления точным запросом без активного tag", async () => {
+    const columns = defaultColumns();
+    const todo = columns[0] as TaskColumn;
+    const board: Board = {
+      columns,
+      tasks: [makeTask("hidden-by-tag", todo, 0, "Скрытая тегом")],
+      nextColumn: 1,
+    };
+
+    window.history.replaceState(null, "", "/view/kanban?project=project-1&tag=release");
+    resetKanbanQueryForTests("?project=project-1&tag=release");
+    renderBoard(board);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-todo")).toHaveTextContent("0");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("1");
+    });
+    expect(screen.getByTestId("kanban-column-delete-confirm")).toBeEnabled();
+  });
+
+  it("блокирует удаление до точного счётчика и показывает ошибку счётчика", async () => {
+    const columns = defaultColumns();
+    const todo = columns[0] as TaskColumn;
+    const board: Board = {
+      columns,
+      tasks: [makeTask("a", todo, 0, "A")],
+      nextColumn: 1,
+    };
+    let resolveCount: ((value: UiOperationResult) => void) | null = null;
+    const delayedCount = new Promise<UiOperationResult>((settle) => {
+      resolveCount = settle;
+    });
+
+    renderBoard(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        const values = inputOf(input);
+
+        if (values.limit === 1 && values.offset === 0 && values.tag === undefined) {
+          return delayedCount;
+        }
+
+        return ok({ items: board.tasks, total: board.tasks.length, nextOffset: null });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-todo")).toHaveTextContent("1");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("…");
+    expect(screen.getByTestId("kanban-column-delete-confirm")).toBeDisabled();
+
+    await act(async () => {
+      resolveCount?.(fail("INTERNAL_ERROR", "Счётчик недоступен"));
+      await delayedCount;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-count-error")).toHaveTextContent(
+        "Счётчик недоступен",
+      );
+    });
+    expect(screen.getByTestId("kanban-column-delete-confirm")).toBeDisabled();
+  });
+
+  it("переименование ждёт refresh, показывает успех только после него", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    const todo = board.columns[0] as TaskColumn;
+    let resolveRefresh: ((value: UiOperationResult) => void) | null = null;
+    const delayedRefresh = new Promise<UiOperationResult>((settle) => {
+      resolveRefresh = settle;
+    });
+    let listCalls = 0;
+
+    renderBoard(board, {
+      "kanbaner.tasks.column.list": () => {
+        listCalls += 1;
+
+        return listCalls === 1
+          ? ok({ items: board.columns, total: board.columns.length, nextOffset: null })
+          : delayedRefresh;
+      },
+      "kanbaner.tasks.column.update": () =>
+        ok({
+          column: { ...todo, title: "Очередь", version: 2 },
+          resource: {},
+          eventId: "event",
+        }),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-rename-todo"));
+    fireEvent.change(screen.getByTestId("kanban-column-rename-input-todo"), {
+      target: { value: "Очередь" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-rename-submit-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-rename-submit-todo")).toBeDisabled();
+    });
+    expect(screen.queryByTestId("kanban-column-notice")).toBeNull();
+
+    await act(async () => {
+      resolveRefresh?.(ok({ items: board.columns, total: board.columns.length, nextOffset: null }));
+      await delayedRefresh;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-notice")).toHaveTextContent("Колонка переименована");
+    });
+  });
+
+  it("при конфликте переименования обновляет версию до повторной отправки", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    let updateCalls = 0;
+    const versions: unknown[] = [];
+
+    renderBoard(board, {
+      "kanbaner.tasks.column.update": (input) => {
+        updateCalls += 1;
+        const values = inputOf(input);
+
+        versions.push(values.expectedVersion);
+
+        if (updateCalls === 1) {
+          board.columns[0] = { ...(board.columns[0] as TaskColumn), version: 2 };
+
+          return fail("VERSION_CONFLICT");
+        }
+
+        return ok({
+          column: {
+            ...(board.columns[0] as TaskColumn),
+            title: String(values.title),
+            version: 3,
+          },
+          resource: {},
+          eventId: "event",
+        });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-rename-todo"));
+    fireEvent.change(screen.getByTestId("kanban-column-rename-input-todo"), {
+      target: { value: "Очередь" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-rename-submit-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-rename-error-todo")).toHaveTextContent(
+        "Версия обновлена",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-column-rename-submit-todo"));
+    await waitFor(() => {
+      expect(updateCalls).toBe(2);
+    });
+    expect(versions).toEqual([1, 2]);
+  });
+
+  it("reorder держит pending до refresh и показывает успех только после него", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    let listCalls = 0;
+    let resolveRefresh: ((value: UiOperationResult) => void) | null = null;
+    const delayedRefresh = new Promise<UiOperationResult>((settle) => {
+      resolveRefresh = settle;
+    });
+
+    renderBoard(board, {
+      "kanbaner.tasks.column.list": () => {
+        listCalls += 1;
+
+        return listCalls === 1
+          ? ok({ items: board.columns, total: board.columns.length, nextOffset: null })
+          : delayedRefresh;
+      },
+      "kanbaner.tasks.column.move": () =>
+        ok({
+          column: board.columns[0] as TaskColumn,
+          resource: {},
+          eventId: "event",
+        }),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-move-right-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-move-right-todo")).toBeDisabled();
+    });
+    expect(screen.queryByTestId("kanban-column-notice")).toBeNull();
+
+    await act(async () => {
+      resolveRefresh?.(ok({ items: board.columns, total: board.columns.length, nextOffset: null }));
+      await delayedRefresh;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-notice")).toHaveTextContent(
+        "Порядок колонок сохранён",
+      );
+    });
+  });
+
+  it("reorder показывает отдельную ошибку refresh и снимает pending", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    let listCalls = 0;
+
+    renderBoard(board, {
+      "kanbaner.tasks.column.list": () => {
+        listCalls += 1;
+
+        return listCalls === 1
+          ? ok({ items: board.columns, total: board.columns.length, nextOffset: null })
+          : fail("INTERNAL_ERROR", "Список колонок недоступен");
+      },
+      "kanbaner.tasks.column.move": () =>
+        ok({
+          column: board.columns[0] as TaskColumn,
+          resource: {},
+          eventId: "event",
+        }),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-move-right-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-error")).toHaveTextContent(
+        "Колонки: Список колонок недоступен",
+      );
+    });
+    expect(screen.getByTestId("kanban-column-move-right-todo")).toBeEnabled();
+    expect(screen.queryByTestId("kanban-column-notice")).toBeNull();
+  });
+
+  it("delete при конфликте обновляет версию и target до повторного confirm", async () => {
+    const columns = defaultColumns();
+    const todo = columns[0] as TaskColumn;
+    const board: Board = {
+      columns,
+      tasks: [makeTask("a", todo, 0, "A")],
+      nextColumn: 1,
+    };
+    let deleteCalls = 0;
+    const payloads: Array<Record<string, unknown>> = [];
+
+    renderBoard(board, {
+      "kanbaner.tasks.column.delete": (input) => {
+        deleteCalls += 1;
+        const values = inputOf(input);
+
+        payloads.push(values);
+
+        if (deleteCalls === 1) {
+          board.columns[0] = { ...(board.columns[0] as TaskColumn), version: 2 };
+          board.columns[1] = makeColumn("column-project-1-next", "Next", "in_progress", 1);
+
+          return fail("VERSION_CONFLICT");
+        }
+
+        board.columns.splice(
+          0,
+          board.columns.length,
+          ...board.columns.filter((column) => column.id !== todo.id),
+        );
+
+        return ok({
+          deleted: true,
+          resource: {},
+          version: 2,
+          eventVersion: 3,
+          targetColumnId: String(values.targetColumnId),
+          movedTasks: [],
+          eventId: "event",
+        });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-todo")).toHaveTextContent("1");
+    });
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-delete-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-moved-count")).toHaveTextContent("1");
+    });
+    fireEvent.click(screen.getByTestId("kanban-column-delete-confirm"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-error")).toHaveTextContent(
+        "Версия обновлена",
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-delete-target")).toHaveValue(
+        "column-project-1-next",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-column-delete-confirm"));
+
+    await waitFor(() => {
+      expect(deleteCalls).toBe(2);
+    });
+    expect(payloads[1]).toMatchObject({
+      id: "column-project-1-todo",
+      expectedVersion: 2,
+      targetColumnId: "column-project-1-next",
+    });
   });
 });

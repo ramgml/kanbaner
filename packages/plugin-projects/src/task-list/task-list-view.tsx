@@ -93,8 +93,9 @@ export function TaskListView({
   const [taskError, setTaskError] = useState<string | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
-  const [columnsLoading, setColumnsLoading] = useState(false);
+  const [columnsProjectId, setColumnsProjectId] = useState("");
   const [columnsError, setColumnsError] = useState<string | null>(null);
+  const [columnsErrorProjectId, setColumnsErrorProjectId] = useState("");
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === query.projectId) ?? null,
@@ -162,6 +163,7 @@ export function TaskListView({
     query.revision,
     query.projectId,
     query.columnId,
+    query.legacyStatus,
     query.priority,
     query.tag,
     query.dueAfter,
@@ -178,25 +180,20 @@ export function TaskListView({
 
     let cancelled = false;
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setColumnsLoading(true);
-
     void (async () => {
       try {
         const loaded = await fetchProjectColumns(invoke, query.projectId);
 
         if (!cancelled) {
           setColumns(loaded);
+          setColumnsProjectId(query.projectId);
           setColumnsError(null);
+          setColumnsErrorProjectId("");
         }
       } catch (error) {
         if (!cancelled) {
-          setColumns([]);
           setColumnsError(errorMessage(error));
-        }
-      } finally {
-        if (!cancelled) {
-          setColumnsLoading(false);
+          setColumnsErrorProjectId(query.projectId);
         }
       }
     })();
@@ -206,16 +203,28 @@ export function TaskListView({
     };
   }, [invoke, query.projectId, query.revision]);
 
-  // Фильтр колонки всегда принадлежит текущему проекту.
+  const columnsLoading =
+    query.projectId.length > 0 &&
+    columnsProjectId !== query.projectId &&
+    columnsErrorProjectId !== query.projectId;
+  const columnsReady =
+    query.projectId.length > 0 &&
+    columnsProjectId === query.projectId &&
+    columnsErrorProjectId !== query.projectId;
+  const activeColumns = useMemo(() => (columnsReady ? columns : []), [columnsReady, columns]);
+
+  // Фильтр колонки валидируется только после успешной загрузки списка именно
+  // текущего проекта. Stale/пустой/ошибочный ответ фильтр не сбрасывает.
   useEffect(() => {
     if (
+      columnsReady &&
+      activeColumns.length > 0 &&
       query.columnId.length > 0 &&
-      !columnsLoading &&
-      !columns.some((column) => column.id === query.columnId)
+      !activeColumns.some((column) => column.id === query.columnId)
     ) {
       updateTaskListQuery({ columnId: "", page: 1 });
     }
-  }, [columns, columnsLoading, query.columnId]);
+  }, [activeColumns, columnsReady, query.columnId]);
 
   const filterValues: TaskFilterValues = {
     projectId: query.projectId,
@@ -230,8 +239,6 @@ export function TaskListView({
   const tasks = taskPage?.items ?? [];
   const total = taskPage?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / TASK_LIST_PAGE_SIZE));
-  const createColumn =
-    columns.find((column) => column.id === defaultCreateColumnId(columns)) ?? null;
   const legacyCreateStatus =
     query.legacyStatus === "backlog" ||
     query.legacyStatus === "todo" ||
@@ -239,6 +246,24 @@ export function TaskListView({
     query.legacyStatus === "done"
       ? query.legacyStatus
       : null;
+  const legacyColumn =
+    legacyCreateStatus === null
+      ? null
+      : (activeColumns.find((column) => column.status === legacyCreateStatus) ?? null);
+  const legacyTitles: Record<NonNullable<typeof legacyCreateStatus>, string> = {
+    backlog: "Backlog",
+    todo: "To do",
+    in_progress: "In progress",
+    done: "Done",
+  };
+  const createColumn =
+    legacyCreateStatus === null
+      ? (activeColumns.find((column) => column.id === defaultCreateColumnId(activeColumns)) ?? null)
+      : legacyColumn;
+  const createColumnTitle =
+    legacyCreateStatus === null
+      ? createColumn?.title
+      : (legacyColumn?.title ?? legacyTitles[legacyCreateStatus]);
 
   const createTask = useCallback(
     async (title: string): Promise<TitleCreateResult> => {
@@ -246,7 +271,7 @@ export function TaskListView({
         return { ok: false, message: "Выберите проект в списке проектов" };
       }
 
-      const columnId = defaultCreateColumnId(columns);
+      const columnId = defaultCreateColumnId(activeColumns);
 
       if (columnId === null && query.legacyStatus.length === 0) {
         return {
@@ -286,7 +311,7 @@ export function TaskListView({
         };
       }
     },
-    [columns, invoke, query.legacyStatus, query.projectId],
+    [activeColumns, invoke, query.legacyStatus, query.projectId],
   );
 
   return (
@@ -309,14 +334,16 @@ export function TaskListView({
               disabled={
                 query.projectId.length === 0 ||
                 columnsLoading ||
-                (columns.length === 0 && legacyCreateStatus === null)
+                (activeColumns.length === 0 && legacyCreateStatus === null)
               }
               title={
                 query.projectId.length === 0
                   ? "Сначала выберите проект в списке проектов"
-                  : columns.length === 0 && legacyCreateStatus === null
-                    ? "В проекте нет доступных колонок"
-                    : "Новая задача"
+                  : columnsLoading
+                    ? "Колонки проекта загружаются"
+                    : activeColumns.length === 0 && legacyCreateStatus === null
+                      ? "В проекте нет доступных колонок"
+                      : "Новая задача"
               }
               onClick={() => {
                 setComposerOpen((current) => !current);
@@ -365,13 +392,11 @@ export function TaskListView({
         <section data-testid="task-list-create-panel" aria-label="Новая задача">
           <TitleComposer
             status={createColumn?.status ?? legacyCreateStatus ?? "todo"}
-            columnTitle={
-              createColumn?.title ??
-              (legacyCreateStatus === null ? undefined : `Legacy ${legacyCreateStatus}`)
-            }
+            columnTitle={createColumnTitle}
             projectId={query.projectId}
             disabled={
-              query.projectId.length === 0 || (columns.length === 0 && legacyCreateStatus === null)
+              query.projectId.length === 0 ||
+              (activeColumns.length === 0 && legacyCreateStatus === null)
             }
             onCreate={createTask}
             onCancel={() => {
@@ -385,7 +410,7 @@ export function TaskListView({
 
       <TaskFilters
         projects={projects}
-        columns={query.projectId.length === 0 ? [] : columns}
+        columns={query.projectId.length === 0 ? [] : activeColumns}
         values={filterValues}
         onChange={(patch) => {
           updateTaskListQuery({ ...patch, page: 1 });
@@ -459,7 +484,7 @@ export function TaskListView({
         <TaskTable
           tasks={tasks}
           projects={projects}
-          columns={query.projectId.length === 0 ? undefined : columns}
+          columns={query.projectId.length === 0 ? undefined : activeColumns}
           selectedTaskId={query.taskId}
           onSelect={(task) => {
             updateTaskListQuery({ taskId: task.id });

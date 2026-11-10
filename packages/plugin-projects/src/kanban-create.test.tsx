@@ -71,20 +71,14 @@ function columnIdFor(projectId: string, status: TaskStatus): string {
   return `column-${projectId}-legacy-${status}`;
 }
 
-function statusOfColumnId(columnId: string): TaskStatus {
-  if (columnId.endsWith("-done")) {
-    return "done";
+function columnStatus(board: FakeBoard, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
   }
 
-  if (columnId.endsWith("-in-progress")) {
-    return "in_progress";
-  }
-
-  if (columnId.endsWith("-todo")) {
-    return "todo";
-  }
-
-  return "backlog";
+  return column.status;
 }
 
 function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
@@ -287,10 +281,7 @@ function createOperations(
         typeof values.columnId === "string"
           ? values.columnId
           : columnIdFor(projectId, (values.status as TaskStatus | undefined) ?? "todo");
-      const status =
-        typeof values.columnId === "string"
-          ? statusOfColumnId(values.columnId)
-          : ((values.status as TaskStatus | undefined) ?? "todo");
+      const status = columnStatus(board, projectId, columnId);
       const id = `task-${String(board.nextTask)}`;
       const task = makeTask(id, {
         projectId,

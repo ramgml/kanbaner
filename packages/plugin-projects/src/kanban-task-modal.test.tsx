@@ -74,20 +74,24 @@ function columnIdFor(projectId: string, status: TaskStatus): string {
   return `column-${projectId}-legacy-${status}`;
 }
 
-function statusOfColumnId(columnId: string): TaskStatus {
-  if (columnId.endsWith("-done")) {
-    return "done";
+function columnStatus(board: FakeBoard, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
   }
 
-  if (columnId.endsWith("-in-progress")) {
-    return "in_progress";
+  return column.status;
+}
+
+function columnForStatus(board: FakeBoard, projectId: string, status: TaskStatus): TaskColumn {
+  const column = boardColumns(board, projectId).find((entry) => entry.status === status);
+
+  if (column === undefined) {
+    throw new Error(`Нет колонки со статусом ${status}`);
   }
 
-  if (columnId.endsWith("-todo")) {
-    return "todo";
-  }
-
-  return "backlog";
+  return column;
 }
 
 function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[] {
@@ -111,8 +115,18 @@ function boardColumns(board: FakeBoard, projectId: string): readonly TaskColumn[
   }));
 }
 
-function statusOfTask(task: Task): TaskStatus {
-  return task.columnId === undefined ? task.status : statusOfColumnId(task.columnId);
+function statusOfTask(board: FakeBoard, task: Task): TaskStatus {
+  const columns = boardColumns(board, task.projectId);
+  const column =
+    task.columnId === undefined
+      ? columns.find((entry) => entry.status === task.status)
+      : columns.find((entry) => entry.id === task.columnId);
+
+  if (column === undefined) {
+    throw new Error(`Задача ${task.id} ссылается на неизвестную колонку`);
+  }
+
+  return column.status;
 }
 
 interface FakeOperations {
@@ -153,7 +167,8 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
     const columnId = filters.columnId;
 
     items = items.filter(
-      (task) => (task.columnId ?? columnIdFor(task.projectId, statusOfTask(task))) === columnId,
+      (task) =>
+        (task.columnId ?? columnIdFor(task.projectId, statusOfTask(board, task))) === columnId,
     );
   }
 
@@ -208,18 +223,20 @@ function createOperations(
     "kanbaner.tasks.task.create": (input) => {
       const values = inputOf(input);
       created += 1;
+      const projectId = String(values.projectId);
       const requestedColumnId = typeof values.columnId === "string" ? values.columnId : undefined;
+      const fallbackStatus = (values.status as TaskStatus | undefined) ?? "todo";
+      const resolvedColumn =
+        requestedColumnId === undefined ? columnForStatus(board, projectId, fallbackStatus) : null;
+      const columnId = requestedColumnId ?? resolvedColumn?.id;
       const task = makeTask(`created-${String(created)}`, {
-        projectId: String(values.projectId),
-        ...(requestedColumnId === undefined ? {} : { columnId: requestedColumnId }),
+        projectId,
+        ...(columnId === undefined ? {} : { columnId }),
         parentTaskId: typeof values.parentTaskId === "string" ? values.parentTaskId : null,
         title: String(values.title),
         descriptionMarkdown:
           typeof values.descriptionMarkdown === "string" ? values.descriptionMarkdown : "",
-        status:
-          requestedColumnId === undefined
-            ? ((values.status as TaskStatus | undefined) ?? "todo")
-            : statusOfColumnId(requestedColumnId),
+        status: columnId === undefined ? fallbackStatus : columnStatus(board, projectId, columnId),
         priority: (values.priority as Task["priority"] | undefined) ?? "medium",
         position: board.tasks.length,
       });
@@ -275,18 +292,26 @@ function createOperations(
         return fail("VERSION_CONFLICT");
       }
 
+      const columnId = typeof values.columnId === "string" ? values.columnId : undefined;
       const status =
-        typeof values.columnId === "string"
-          ? statusOfColumnId(values.columnId)
-          : (values.status as TaskStatus);
+        columnId === undefined
+          ? (values.status as TaskStatus)
+          : columnStatus(board, task.projectId, columnId);
       const updated: Task = {
         ...task,
         status,
-        ...(typeof values.columnId === "string" ? { columnId: values.columnId } : {}),
+        ...(columnId === undefined ? {} : { columnId }),
         completedAt: status === "done" ? (task.completedAt ?? TIMESTAMP) : null,
         version: task.version + 1,
         updatedAt: TIMESTAMP,
       } as Task;
+
+      if (
+        updated.columnId !== undefined &&
+        columnStatus(board, updated.projectId, updated.columnId) !== updated.status
+      ) {
+        throw new Error(`Нарушено зеркало status/columnId для ${updated.id}`);
+      }
 
       board.tasks = board.tasks.map((candidate) =>
         candidate.id === updated.id ? updated : candidate,

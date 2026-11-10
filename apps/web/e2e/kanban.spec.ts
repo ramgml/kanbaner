@@ -429,6 +429,46 @@ async function openColumnMenu(page: Page, columnId: string): Promise<void> {
   await page.locator(`[data-kanban-column-id="${columnId}"] header details summary`).click();
 }
 
+async function dragColumn(
+  page: Page,
+  sourceId: string,
+  targetId: string,
+  side: "left" | "right" | "center",
+): Promise<void> {
+  // Держим обе пользовательские колонки в viewport: иначе Playwright не может
+  // доставить pointer события к правому краю широкой доски.
+  await page.getByTestId("kanban-columns").evaluate((element) => {
+    element.scrollLeft = element.scrollWidth;
+  });
+  await page.waitForTimeout(100);
+
+  const source = await page
+    .locator(
+      `[data-kanban-column-id="${sourceId}"] header button[aria-label^="Перетащить колонку"]`,
+    )
+    .boundingBox();
+  const target = await page.locator(`[data-kanban-column-id="${targetId}"]`).boundingBox();
+
+  expect(source).not.toBeNull();
+  expect(target).not.toBeNull();
+
+  if (source === null || target === null) {
+    return;
+  }
+
+  const x =
+    side === "left"
+      ? target.x + 20
+      : side === "right"
+        ? target.x + target.width - 20
+        : target.x + target.width / 2;
+
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(x, target.y + 24, { steps: 10 });
+  await page.mouse.up();
+}
+
 async function addColumn(page: Page, title: string, type: "open" | "done"): Promise<string> {
   await page.getByTestId("kanban-add-column").click();
   await expect(page.getByTestId("kanban-column-form")).toBeVisible();
@@ -1644,6 +1684,65 @@ test.describe("канбан в production shell", () => {
       expect(order.indexOf(doneId)).toBe(4);
       await expect(page.getByRole("heading", { name: "Проверка 2", exact: true })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Done 2", exact: true })).toBeVisible();
+    });
+
+    test("переставляет колонки pointer DnD до/после/no-op и card drop header не меняет порядок", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект DnD колонок");
+      const taskTitle = uniqueTitle("Карточка DnD колонок");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+
+      await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+      await openKanban(page, projectTitle);
+
+      const columnA = await addColumn(page, "DnD A", "open");
+      const columnB = await addColumn(page, "DnD B", "open");
+      const baseline = await columnIdList(page);
+
+      // Перед A: B встаёт между Done и A.
+      await dragColumn(page, columnB, columnA, "left");
+      await expect
+        .poll(async () => {
+          const ids = await columnIdList(page);
+
+          return ids.indexOf(columnB) === ids.indexOf(columnA) - 1;
+        })
+        .toBe(true);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await filterByProject(page, projectTitle);
+      await expect
+        .poll(async () => {
+          const ids = await columnIdList(page);
+
+          return ids.indexOf(columnB) === ids.indexOf(columnA) - 1;
+        })
+        .toBe(true);
+
+      // После A: исходный порядок.
+      await dragColumn(page, columnB, columnA, "right");
+      await expect.poll(() => columnIdList(page)).toEqual(baseline);
+
+      // No-op: drag на себя не меняет порядок и не отправляет команду.
+      await dragColumn(page, columnB, columnB, "center");
+      await expect.poll(() => columnIdList(page)).toEqual(baseline);
+
+      // Drop карточки на header целевой колонки не переставляет колонки.
+      const taskId = await cardIdByTitle(page, taskTitle);
+
+      await page.getByTestId("kanban-columns").evaluate((element) => {
+        element.scrollLeft = 0;
+      });
+      await page.waitForTimeout(100);
+
+      await dragCard(page, taskId, "in_progress", "top");
+      await waitForCardSettled(page, taskId);
+      await expectCardInColumn(page, taskId, "in_progress");
+      await expect.poll(() => columnIdList(page)).toEqual(baseline);
     });
 
     test("удаляет колонку с переносом задач в выбранный target", async ({ page }) => {

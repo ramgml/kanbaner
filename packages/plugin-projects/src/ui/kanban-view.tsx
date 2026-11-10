@@ -8,6 +8,7 @@ import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
   normalizeTag,
+  type ColumnMutationOutput,
   type ProjectMutationOutput,
   type Task,
   type TaskColumn,
@@ -307,6 +308,7 @@ export function KanbanView({
   const [taskDraftTitle, setTaskDraftTitle] = useState("");
   const [formOpenerSelector, setFormOpenerSelector] = useState<string | undefined>(undefined);
   const [columns, setColumns] = useState<KanbanColumns>(createEmptyColumns);
+  const [loadedProjectId, setLoadedProjectId] = useState("");
   const [placements, setPlacements] = useState<ReadonlyMap<string, Placement>>(() => new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const [conflicts, setConflicts] = useState<ReadonlySet<string>>(() => new Set());
@@ -341,6 +343,9 @@ export function KanbanView({
   const [deleteTargetId, setDeleteTargetId] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [deleteCount, setDeleteCount] = useState<number | null>(null);
+  const [deleteCountError, setDeleteCountError] = useState<string | null>(null);
+  const [columnNotice, setColumnNotice] = useState<string | null>(null);
 
   const columnsScrollRef = useRef<HTMLDivElement>(null);
   const addColumnOpenerRef = useRef<HTMLButtonElement>(null);
@@ -358,10 +363,76 @@ export function KanbanView({
   const columnSubmitGuardRef = useRef(false);
   const renameGuardRef = useRef(false);
   const deleteGuardRef = useRef(false);
+  const deleteCountRequestRef = useRef(0);
 
-  columnsRef.current = columns;
+  const boardReady = effectiveProjectId.length > 0 && loadedProjectId === effectiveProjectId;
+  const boardColumns = boardReady ? columns : createEmptyColumns();
 
-  const columnList = useMemo(() => getColumns(columns).map((column) => column.column), [columns]);
+  columnsRef.current = boardColumns;
+
+  const columnList = useMemo(
+    () => getColumns(boardColumns).map((column) => column.column),
+    [boardColumns],
+  );
+
+  const currentColumn = (columnId: string): TaskColumn | null => {
+    const data = boardColumns.byId[columnId];
+
+    return data !== undefined && data.column.projectId === effectiveProjectId ? data.column : null;
+  };
+
+  const applyColumn = (updated: TaskColumn): void => {
+    setColumns((current) => {
+      const data = current.byId[updated.id];
+
+      if (data === undefined) {
+        return current;
+      }
+
+      return {
+        order: current.order,
+        byId: { ...current.byId, [updated.id]: { ...data, column: updated } },
+      };
+    });
+  };
+
+  const loadDeleteCount = async (projectId: string, columnId: string): Promise<number> => {
+    const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
+      projectId,
+      columnId,
+      limit: 1,
+      offset: 0,
+    } as unknown as JsonValue);
+
+    return data.total;
+  };
+
+  const refreshProjectColumns = async (
+    projectId: string,
+  ): Promise<readonly TaskColumn[] | null> => {
+    if (projectId.length === 0) {
+      return null;
+    }
+
+    try {
+      const fresh = await fetchProjectColumns(invoke, projectId);
+
+      if (filtersRef.current.projectId !== projectId) {
+        return null;
+      }
+
+      setColumns((current) => syncColumns(current, fresh));
+      setLoadedProjectId(projectId);
+
+      return fresh;
+    } catch (refreshError) {
+      if (filtersRef.current.projectId === projectId) {
+        setError(`Колонки: ${errorMessage(refreshError)}`);
+      }
+
+      return null;
+    }
+  };
 
   const closeCreateForm = (): void => {
     setFormMode(null);
@@ -382,9 +453,9 @@ export function KanbanView({
     }
 
     const resolved =
-      columnId !== undefined && columns.byId[columnId] !== undefined
+      columnId !== undefined && currentColumn(columnId) !== null
         ? columnId
-        : (defaultCreateColumnId(getColumns(columns).map((column) => column.column)) ?? "");
+        : (defaultCreateColumnId(columnList) ?? "");
 
     setFormError(
       resolved.length === 0 ? "В проекте нет доступных колонок. Добавьте колонку." : null,
@@ -471,7 +542,7 @@ export function KanbanView({
       return { ok: false, message: "Выберите проект" };
     }
 
-    if (columns.byId[columnId] === undefined) {
+    if (currentColumn(columnId) === null) {
       return { ok: false, message: "Выберите существующую колонку" };
     }
 
@@ -511,6 +582,7 @@ export function KanbanView({
 
     if (filters.projectId.length === 0) {
       setColumns(createEmptyColumns());
+      setLoadedProjectId("");
 
       return;
     }
@@ -529,7 +601,7 @@ export function KanbanView({
       projectColumns = await fetchProjectColumns(invoke, filters.projectId);
     } catch (loadError) {
       if (reloadSequenceRef.current === sequence && filterKeyRef.current === filterKey) {
-        setColumns(createEmptyColumns());
+        setLoadedProjectId("");
         setError(errorMessage(loadError));
       }
 
@@ -548,6 +620,7 @@ export function KanbanView({
 
     loadMoreSequenceRef.current = loadMoreGeneration;
     setColumns((current) => syncColumns(current, projectColumns));
+    setLoadedProjectId(filters.projectId);
 
     const results = await Promise.all(
       projectColumns.map(async (column) => {
@@ -660,8 +733,40 @@ export function KanbanView({
   // проект/фильтр и только затем разрешаем scroll-наблюдателю менять вкладку.
   const initialColumnKeyRef = useRef<string>("");
 
+  // Данные A не должны переезжать в B вместе с оптимистичными состояниями.
   useEffect(() => {
-    if (columns.order.length === 0) {
+    placementsRef.current = new Map();
+    pendingRef.current = new Set();
+    visibilityRef.current.clear();
+    loadedCountsRef.current = {};
+    setPlacements(new Map());
+    setPending(new Set());
+    setConflicts(new Set());
+    setDraggingId(null);
+    setDragOver(null);
+    setColumnPending(new Set());
+    setColumnConflicts(new Set());
+    setColumnDraggingId(null);
+    setColumnDragOver(null);
+    setAddColumnOpen(false);
+    setAddColumnError(null);
+    setRenamingColumnId(null);
+    setRenameError(null);
+    setDeletingColumnId(null);
+    setDeleteError(null);
+    setDeleteCount(null);
+    setDeleteCountError(null);
+    deleteCountRequestRef.current += 1;
+    setColumnNotice(null);
+    setFormMode(null);
+    setFormError(null);
+    setActiveColumnId("");
+    setError(null);
+    initialColumnKeyRef.current = "";
+  }, [effectiveProjectId]);
+
+  useEffect(() => {
+    if (boardColumns.order.length === 0) {
       return;
     }
 
@@ -672,7 +777,7 @@ export function KanbanView({
     }
 
     initialColumnKeyRef.current = key;
-    setActiveColumnId(columns.order[0] ?? "");
+    setActiveColumnId(boardColumns.order[0] ?? "");
 
     const container = columnsScrollRef.current;
 
@@ -688,11 +793,11 @@ export function KanbanView({
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [columns.order, effectiveProjectId, query.tag]);
+  }, [boardColumns.order, effectiveProjectId, query.tag]);
 
   // Активная вкладка всегда указывает на существующую колонку.
   useEffect(() => {
-    if (columns.order.length === 0) {
+    if (boardColumns.order.length === 0) {
       if (activeColumnId !== "") {
         setActiveColumnId("");
       }
@@ -700,14 +805,14 @@ export function KanbanView({
       return;
     }
 
-    if (!columns.order.includes(activeColumnId)) {
-      setActiveColumnId(columns.order[0] ?? "");
+    if (!boardColumns.order.includes(activeColumnId)) {
+      setActiveColumnId(boardColumns.order[0] ?? "");
     }
-  }, [columns.order, activeColumnId]);
+  }, [boardColumns.order, activeColumnId]);
 
   const renderedColumns = useMemo(
-    () => applyPlacements(columns, placements),
-    [columns, placements],
+    () => applyPlacements(boardColumns, placements),
+    [boardColumns, placements],
   );
 
   const renderedColumnList = useMemo(() => getColumns(renderedColumns), [renderedColumns]);
@@ -982,7 +1087,11 @@ export function KanbanView({
     intent: MoveIntent,
     placement: Placement,
   ): Promise<void> => {
-    if (pendingRef.current.has(task.id)) {
+    if (
+      task.projectId !== effectiveProjectId ||
+      currentColumn(columnId) === null ||
+      pendingRef.current.has(task.id)
+    ) {
       return;
     }
 
@@ -1012,9 +1121,7 @@ export function KanbanView({
         id: task.id,
         expectedVersion: task.version,
         columnId,
-        ...(columnsRef.current.byId[columnId] === undefined
-          ? {}
-          : { status: columnsRef.current.byId[columnId]?.column.status }),
+        ...(currentColumn(columnId) === null ? {} : { status: currentColumn(columnId)?.status }),
         position,
       } as unknown as JsonValue);
 
@@ -1041,6 +1148,10 @@ export function KanbanView({
   };
 
   const reorder = (task: Task, kind: KanbanReorderKind): void => {
+    if (task.projectId !== effectiveProjectId) {
+      return;
+    }
+
     const columnId = columnContainingTask(renderedColumns, task.id);
 
     if (columnId === null) {
@@ -1074,7 +1185,11 @@ export function KanbanView({
   };
 
   const loadMore = (columnId: string): void => {
-    const current = getColumn(columns, columnId);
+    if (currentColumn(columnId) === null) {
+      return;
+    }
+
+    const current = getColumn(boardColumns, columnId);
 
     if (current === null) {
       return;
@@ -1257,6 +1372,10 @@ export function KanbanView({
   };
 
   const startDrag = (task: Task, event: ReactPointerEvent<HTMLElement>): void => {
+    if (task.projectId !== effectiveProjectId || !boardReady) {
+      return;
+    }
+
     event.preventDefault();
 
     const startX = event.clientX;
@@ -1335,7 +1454,7 @@ export function KanbanView({
   };
 
   const moveColumnToIndex = async (column: TaskColumn, targetIndex: number): Promise<void> => {
-    if (columnPending.has(column.id)) {
+    if (columnPending.has(column.id) || currentColumn(column.id) === null) {
       return;
     }
 
@@ -1349,6 +1468,7 @@ export function KanbanView({
     setColumns((current) => reorderKanbanColumns(current, column.id, targetIndex));
     setColumnPendingCard(column.id, true);
     setColumnConflict(column.id, false);
+    setColumnNotice(null);
     setError(null);
 
     try {
@@ -1358,17 +1478,24 @@ export function KanbanView({
         position: targetIndex,
       } as unknown as JsonValue);
 
-      bumpKanbanRevision();
+      const refreshed = await refreshProjectColumns(column.projectId);
+
+      if (refreshed !== null) {
+        setColumnNotice("Порядок колонок сохранён");
+      }
     } catch (commandError) {
+      const refreshed = await refreshProjectColumns(column.projectId);
+
       if (isVersionConflict(commandError)) {
         setColumnConflict(column.id, true);
-        setError(COLUMN_VERSION_CONFLICT_MESSAGE);
+        setError(
+          refreshed !== null
+            ? COLUMN_VERSION_CONFLICT_MESSAGE
+            : "Колонка изменена в другом месте, но обновить список не удалось. Проверьте соединение и повторите.",
+        );
       } else {
         setError(errorMessage(commandError));
       }
-
-      // Откат: перечитываем фактический порядок с сервера.
-      bumpKanbanRevision();
     } finally {
       setColumnPendingCard(column.id, false);
     }
@@ -1387,6 +1514,10 @@ export function KanbanView({
   };
 
   const startColumnDrag = (column: TaskColumn, event: ReactPointerEvent<HTMLElement>): void => {
+    if (currentColumn(column.id) === null) {
+      return;
+    }
+
     event.preventDefault();
 
     const startX = event.clientX;
@@ -1467,6 +1598,10 @@ export function KanbanView({
   };
 
   const openAddColumn = (): void => {
+    if (!boardReady) {
+      return;
+    }
+
     setAddColumnOpen(true);
     setAddColumnError(null);
     setAddColumnTitle("");
@@ -1491,7 +1626,7 @@ export function KanbanView({
   };
 
   const createColumn = async (): Promise<void> => {
-    if (columnSubmitGuardRef.current || addColumnSubmitting) {
+    if (columnSubmitGuardRef.current || addColumnSubmitting || !boardReady) {
       return;
     }
 
@@ -1510,18 +1645,31 @@ export function KanbanView({
     columnSubmitGuardRef.current = true;
     setAddColumnSubmitting(true);
     setAddColumnError(null);
+    setColumnNotice(null);
+
+    const projectId = effectiveProjectId;
 
     try {
-      await invokeJson(invoke, TASKS_COMMAND_IDS.columnCreate, {
-        projectId: effectiveProjectId,
+      await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnCreate, {
+        projectId,
         title,
         type: addColumnType,
       } as unknown as JsonValue);
 
+      const refreshed = await refreshProjectColumns(projectId);
+
       setAddColumnOpen(false);
       setAddColumnTitle("");
       setAddColumnType("open");
-      bumpKanbanRevision();
+
+      if (refreshed !== null) {
+        setColumnNotice("Колонка добавлена");
+      } else {
+        setError(
+          "Колонка добавлена, но список колонок не обновлён. Перезагрузите страницу или повторите действие.",
+        );
+      }
+
       requestAnimationFrame(() => {
         addColumnOpenerRef.current?.focus();
       });
@@ -1534,9 +1682,14 @@ export function KanbanView({
   };
 
   const startRenameColumn = (column: TaskColumn): void => {
+    if (currentColumn(column.id) === null) {
+      return;
+    }
+
     setRenamingColumnId(column.id);
     setRenameValue(column.title);
     setRenameError(null);
+    setColumnNotice(null);
   };
 
   const cancelRenameColumn = (): void => {
@@ -1553,9 +1706,9 @@ export function KanbanView({
       return;
     }
 
-    const column = columnsRef.current.byId[renamingColumnId]?.column;
+    const column = currentColumn(renamingColumnId);
 
-    if (column === undefined) {
+    if (column === null) {
       setRenamingColumnId(null);
 
       return;
@@ -1578,23 +1731,38 @@ export function KanbanView({
     renameGuardRef.current = true;
     setRenameSubmitting(true);
     setRenameError(null);
+    setColumnNotice(null);
 
     try {
-      await invokeJson(invoke, TASKS_COMMAND_IDS.columnUpdate, {
+      const data = await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnUpdate, {
         id: column.id,
         expectedVersion: column.version,
         title,
       } as unknown as JsonValue);
 
-      setRenamingColumnId(null);
-      setRenameError(null);
-      bumpKanbanRevision();
+      // Локально фиксируем новую версию сразу: даже если refresh упадёт,
+      // повторная отправка не использует устаревший expectedVersion.
+      applyColumn(data.column);
+      const refreshed = await refreshProjectColumns(column.projectId);
+
+      if (refreshed !== null) {
+        setRenamingColumnId(null);
+        setRenameError(null);
+        setColumnNotice("Колонка переименована");
+      } else {
+        setRenameError(
+          "Колонка переименована, но список не обновлён. Дождитесь обновления и повторите при необходимости.",
+        );
+      }
     } catch (commandError) {
       if (isVersionConflict(commandError)) {
+        const refreshed = await refreshProjectColumns(column.projectId);
+
         setRenameError(
-          "Колонка уже изменена в другом месте. Версия обновлена — проверьте название и повторите.",
+          refreshed !== null
+            ? "Колонка уже изменена в другом месте. Версия обновлена — проверьте название и повторите."
+            : "Колонка изменена в другом месте, но обновить список не удалось. Проверьте соединение и повторите.",
         );
-        bumpKanbanRevision();
       } else {
         setRenameError(errorMessage(commandError));
       }
@@ -1604,12 +1772,47 @@ export function KanbanView({
     }
   };
 
+  const beginDeleteCount = (columnId: string): void => {
+    const column = currentColumn(columnId);
+
+    if (column === null) {
+      return;
+    }
+
+    const request = deleteCountRequestRef.current + 1;
+
+    deleteCountRequestRef.current = request;
+    setDeleteCount(null);
+    setDeleteCountError(null);
+
+    void (async () => {
+      try {
+        const total = await loadDeleteCount(column.projectId, column.id);
+
+        if (deleteCountRequestRef.current === request) {
+          setDeleteCount(total);
+        }
+      } catch (countError) {
+        if (deleteCountRequestRef.current === request) {
+          setDeleteCount(null);
+          setDeleteCountError(errorMessage(countError));
+        }
+      }
+    })();
+  };
+
   const openDeleteColumn = (column: TaskColumn): void => {
+    if (currentColumn(column.id) === null) {
+      return;
+    }
+
     const nextTarget = defaultDeleteTargetColumn(columnList, column.id);
 
     setDeletingColumnId(column.id);
     setDeleteTargetId(nextTarget ?? "");
     setDeleteError(null);
+    setColumnNotice(null);
+    beginDeleteCount(column.id);
   };
 
   const cancelDeleteColumn = (): void => {
@@ -1617,52 +1820,93 @@ export function KanbanView({
       return;
     }
 
+    deleteCountRequestRef.current += 1;
     setDeletingColumnId(null);
     setDeleteError(null);
+    setDeleteCount(null);
+    setDeleteCountError(null);
   };
 
   const confirmDeleteColumn = async (): Promise<void> => {
-    if (deletingColumnId === null || deleteGuardRef.current || deleteSubmitting) {
+    if (
+      deletingColumnId === null ||
+      deleteGuardRef.current ||
+      deleteSubmitting ||
+      deleteCount === null ||
+      deleteCountError !== null
+    ) {
       return;
     }
 
-    const column = columnsRef.current.byId[deletingColumnId]?.column;
+    const column = currentColumn(deletingColumnId);
+    const target = currentColumn(deleteTargetId);
 
-    if (column === undefined) {
+    if (column === null) {
       setDeletingColumnId(null);
 
       return;
     }
 
-    if (deleteTargetId.length === 0) {
-      setDeleteError("Выберите колонку для переноса задач");
+    if (target === null) {
+      setDeleteError("Выберите колонку текущего проекта для переноса задач");
       return;
     }
 
     deleteGuardRef.current = true;
     setDeleteSubmitting(true);
     setDeleteError(null);
+    setColumnNotice(null);
 
     try {
+      // Повторная точная проверка перед разрушительной командой: счётчик не
+      // зависит от активного tag и скрытых фильтром задач.
+      const total = await loadDeleteCount(column.projectId, column.id);
+
+      setDeleteCount(total);
+
       await invokeJson(invoke, TASKS_COMMAND_IDS.columnDelete, {
         id: column.id,
         expectedVersion: column.version,
         confirm: true,
-        targetColumnId: deleteTargetId,
+        targetColumnId: target.id,
       } as unknown as JsonValue);
 
+      const refreshed = await refreshProjectColumns(column.projectId);
+
       if (activeColumnId === column.id) {
-        setActiveColumnId(deleteTargetId);
+        setActiveColumnId(target.id);
       }
 
       setDeletingColumnId(null);
+      setDeleteCount(null);
+      setDeleteCountError(null);
       bumpKanbanRevision();
+
+      if (refreshed !== null) {
+        setColumnNotice("Колонка удалена, задачи перенесены");
+      } else {
+        setError(
+          "Колонка удалена, но список колонок не обновлён. Перезагрузите страницу или повторите действие.",
+        );
+      }
     } catch (commandError) {
       if (isVersionConflict(commandError)) {
+        const refreshed = await refreshProjectColumns(column.projectId);
+
         setDeleteError(
-          "Колонка уже изменена в другом месте. Версия обновлена — проверьте последствия и повторите.",
+          refreshed !== null
+            ? "Колонка уже изменена в другом месте. Версия обновлена — проверьте последствия и повторите."
+            : "Колонка изменена в другом месте, но обновить список не удалось. Проверьте соединение и повторите.",
         );
-        bumpKanbanRevision();
+
+        if (refreshed !== null && refreshed.some((entry) => entry.id === column.id)) {
+          const nextTarget = defaultDeleteTargetColumn(refreshed, column.id);
+
+          setDeleteTargetId(nextTarget ?? "");
+          beginDeleteCount(column.id);
+        }
+      } else if (deleteCountError !== null) {
+        setDeleteError(deleteCountError);
       } else {
         setDeleteError(errorMessage(commandError));
       }
@@ -1675,12 +1919,8 @@ export function KanbanView({
   const showBoard = onKanbanRoute && effectiveProjectId.length > 0;
   const hasFilters = query.tag.length > 0;
   const visibleTotal = renderedColumnList.reduce((sum, column) => sum + column.total, 0);
-  const formColumn =
-    columns.byId[formColumnId] === undefined ? null : (columns.byId[formColumnId]?.column ?? null);
-  const deletingColumn =
-    deletingColumnId === null ? null : (columns.byId[deletingColumnId]?.column ?? null);
-  const deletingColumnData =
-    deletingColumnId === null ? null : getColumn(columns, deletingColumnId);
+  const formColumn = currentColumn(formColumnId);
+  const deletingColumn = deletingColumnId === null ? null : currentColumn(deletingColumnId);
   const headerColumns = renderedColumnList.map(({ column, total }) => ({
     id: column.id,
     title: column.title,
@@ -1709,7 +1949,7 @@ export function KanbanView({
             <button
               type="button"
               data-testid="kanban-create-task"
-              disabled={effectiveProjectId.length === 0}
+              disabled={effectiveProjectId.length === 0 || !boardReady}
               onClick={() => {
                 openTaskComposer();
               }}
@@ -1754,6 +1994,16 @@ export function KanbanView({
           className="m-0 text-xs text-muted-foreground"
         >
           Сводка: {summaryError}
+        </p>
+      )}
+
+      {columnNotice === null ? null : (
+        <p
+          data-testid="kanban-column-notice"
+          role="status"
+          className="m-0 rounded-lg border border-border bg-background/70 px-2.5 py-2 text-xs text-muted-foreground"
+        >
+          {columnNotice}
         </p>
       )}
 
@@ -1803,6 +2053,16 @@ export function KanbanView({
         </div>
       ) : (
         <>
+          {boardReady ? null : (
+            <p
+              role="status"
+              data-testid="kanban-board-loading"
+              className="m-0 text-xs text-muted-foreground"
+            >
+              Загрузка колонок…
+            </p>
+          )}
+
           <div
             data-testid="kanban-mobile-tabs"
             role="tablist"
@@ -2094,6 +2354,7 @@ export function KanbanView({
                   ref={addColumnOpenerRef}
                   type="button"
                   data-testid="kanban-add-column"
+                  disabled={!boardReady}
                   onClick={openAddColumn}
                   className="flex min-h-12 w-[70vw] max-w-[220px] shrink-0 snap-start items-center justify-center rounded-xl border border-dashed border-border bg-background/60 px-3 text-sm font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:min-w-[200px] md:flex-none"
                 >
@@ -2131,7 +2392,8 @@ export function KanbanView({
         <KanbanDeleteColumnDialog
           column={deletingColumn}
           columns={columnList}
-          taskCount={deletingColumnData?.total ?? 0}
+          taskCount={deleteCount}
+          taskCountError={deleteCountError}
           targetColumnId={deleteTargetId}
           error={deleteError}
           submitting={deleteSubmitting}

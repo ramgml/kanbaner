@@ -59,20 +59,14 @@ function columnIdFor(projectId: string, status: TaskStatus): string {
   return `column-${projectId}-legacy-${status}`;
 }
 
-function statusOfColumnId(columnId: string): TaskStatus {
-  if (columnId.endsWith("-done")) {
-    return "done";
+function columnStatus(board: Board, projectId: string, columnId: string): TaskStatus {
+  const column = boardColumns(board, projectId).find((entry) => entry.id === columnId);
+
+  if (column === undefined) {
+    throw new Error(`Неизвестная колонка ${projectId}/${columnId}`);
   }
 
-  if (columnId.endsWith("-in-progress")) {
-    return "in_progress";
-  }
-
-  if (columnId.endsWith("-todo")) {
-    return "todo";
-  }
-
-  return "backlog";
+  return column.status;
 }
 
 function boardColumns(board: Board, projectId: string): readonly TaskColumn[] {
@@ -96,8 +90,18 @@ function boardColumns(board: Board, projectId: string): readonly TaskColumn[] {
   }));
 }
 
-function statusOfTask(task: Task): TaskStatus {
-  return task.columnId === undefined ? task.status : statusOfColumnId(task.columnId);
+function statusOfTask(board: Board, task: Task): TaskStatus {
+  const columns = boardColumns(board, task.projectId);
+  const column =
+    task.columnId === undefined
+      ? columns.find((entry) => entry.status === task.status)
+      : columns.find((entry) => entry.id === task.columnId);
+
+  if (column === undefined) {
+    throw new Error(`Задача ${task.id} ссылается на неизвестную колонку`);
+  }
+
+  return column.status;
 }
 
 function ok(data: JsonValue): UiOperationResult {
@@ -122,7 +126,8 @@ function listTasks(board: Board, input: JsonValue): UiOperationResult {
     const columnId = filters.columnId;
 
     items = items.filter(
-      (task) => (task.columnId ?? columnIdFor(task.projectId, statusOfTask(task))) === columnId,
+      (task) =>
+        (task.columnId ?? columnIdFor(task.projectId, statusOfTask(board, task))) === columnId,
     );
   }
 
@@ -215,14 +220,11 @@ function createOperations(board: Board): {
         typeof values.columnId === "string"
           ? values.columnId
           : columnIdFor(projectId, (values.status as TaskStatus | undefined) ?? "todo");
-      const status =
-        typeof values.columnId === "string"
-          ? statusOfColumnId(values.columnId)
-          : ((values.status as TaskStatus | undefined) ?? "todo");
+      const status = columnStatus(board, projectId, columnId);
       const position = board.tasks.filter(
         (task) =>
           task.projectId === projectId &&
-          (task.columnId ?? columnIdFor(projectId, statusOfTask(task))) === columnId,
+          (task.columnId ?? columnIdFor(projectId, statusOfTask(board, task))) === columnId,
       ).length;
       const task = makeTask(`task-${String(board.nextTask)}`, {
         projectId,
@@ -250,11 +252,12 @@ function createOperations(board: Board): {
         candidate.id === task.id
           ? ({
               ...candidate,
-              status:
-                typeof values.columnId === "string"
-                  ? statusOfColumnId(values.columnId)
-                  : (values.status as TaskStatus),
-              ...(typeof values.columnId === "string" ? { columnId: values.columnId } : {}),
+              ...(typeof values.columnId === "string"
+                ? {
+                    columnId: values.columnId,
+                    status: columnStatus(board, candidate.projectId, values.columnId),
+                  }
+                : { status: values.status as TaskStatus }),
             } as Task)
           : candidate,
       );
