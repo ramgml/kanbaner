@@ -1,14 +1,13 @@
 ---
 id: KAN-024
 title: Управление колонками в интерфейсе
-status: ready
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-023
-branch: null
-worktree: null
+owner: worker-kan-024
+blocked_by: []
+branch: feat/kan-024-project-columns-ui
+worktree: .worktrees/kan-024-project-columns-ui
 created: 2026-11-09
 updated: 2026-11-09
 specs:
