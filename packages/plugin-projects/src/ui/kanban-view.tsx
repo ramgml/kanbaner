@@ -83,6 +83,15 @@ import {
 /** Контракт задачи ограничивает `limit` значением 200. */
 const MAX_LIST_LIMIT = 200;
 
+/** Минимальный сдвиг указателя, после которого начинается drag. */
+const DRAG_THRESHOLD = 7;
+/** Долгое нажатие на мобильном до старта drag. */
+const TOUCH_LONG_PRESS_MS = 220;
+/** Сдвиг до long press, который считается вертикальной прокруткой. */
+const TOUCH_SCROLL_TOLERANCE = 10;
+/** Окно подавления click после завершённого drag. */
+const CLICK_SUPPRESSION_MS = 400;
+
 const COLUMN_VERSION_CONFLICT_MESSAGE =
   "Колонка уже изменена в другом месте. Доска перечитана — проверьте порядок и повторите действие.";
 
@@ -369,6 +378,7 @@ export function KanbanView({
   const projectGenerationRef = useRef(0);
   const effectiveProjectIdRef = useRef(effectiveProjectId);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const dragSuppressRef = useRef<{ readonly taskId: string; readonly until: number } | null>(null);
   const deleteDialogRef = useRef<{
     readonly requestId: number;
     readonly columnId: string;
@@ -769,6 +779,7 @@ export function KanbanView({
     projectGenerationRef.current += 1;
     dragCleanupRef.current?.();
     dragCleanupRef.current = null;
+    dragSuppressRef.current = null;
     deleteDialogRef.current = null;
     deleteDialogRequestRef.current += 1;
     deleteCountRequestRef.current += 1;
@@ -811,6 +822,7 @@ export function KanbanView({
       effectiveProjectIdRef.current = "";
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      dragSuppressRef.current = null;
       deleteDialogRef.current = null;
       deleteDialogRequestRef.current += 1;
       deleteCountRequestRef.current += 1;
@@ -1435,6 +1447,26 @@ export function KanbanView({
     return next === draggedId ? null : { columnId, beforeId: next };
   };
 
+  const consumeDragClickSuppression = (taskId: string): boolean => {
+    const current = dragSuppressRef.current;
+
+    if (current === null || current.taskId !== taskId) {
+      return false;
+    }
+
+    dragSuppressRef.current = null;
+
+    return performance.now() <= current.until;
+  };
+
+  /**
+   * Начинает drag карточки из любой неинтерактивной области.
+   *
+   * Мышь/перо активируются после сдвига на `DRAG_THRESHOLD`; touch требует
+   * long press, чтобы вертикальный scroll колонки оставался рабочим. Никакой
+   * click не подавляется до фактического drag: обычный клик по заголовку
+   * открывает карточку.
+   */
   const startDrag = (task: Task, event: ReactPointerEvent<HTMLElement>): void => {
     if (task.projectId !== effectiveProjectId || !boardReady) {
       return;
@@ -1442,26 +1474,70 @@ export function KanbanView({
 
     dragCleanupRef.current?.();
     dragCleanupRef.current = null;
-    event.preventDefault();
 
+    const isTouch = event.pointerType === "touch";
+    const pointerId = event.pointerId;
+    const captureTarget = event.currentTarget;
     const startX = event.clientX;
     const startY = event.clientY;
     let active = false;
+    let armed = !isTouch;
     let target: DropTarget | null = null;
+    let longPressTimer: number | null = null;
+    let touchMoveBlocker: ((moveEvent: TouchEvent) => void) | null = null;
 
-    setDraggingId(task.id);
-
-    const onPointerMove = (moveEvent: PointerEvent): void => {
-      if (!active && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) {
+    const activate = (): void => {
+      if (active) {
         return;
       }
 
       active = true;
-      target = resolveDropTarget(moveEvent.clientX, moveEvent.clientY, task.id);
-      setDragOver(target);
+      setDraggingId(task.id);
     };
 
+    const armTouch = (): void => {
+      longPressTimer = null;
+
+      if (active) {
+        return;
+      }
+
+      // После long press блокируем прокрутку, пока пользователь не отпустит
+      // палец: иначе браузер начнёт pan и отменит pointer-события.
+      armed = true;
+      activate();
+      touchMoveBlocker = (moveEvent: TouchEvent): void => {
+        if (moveEvent.cancelable) {
+          moveEvent.preventDefault();
+        }
+      };
+      document.addEventListener("touchmove", touchMoveBlocker, { passive: false });
+
+      // После long press удерживаем pointer на карточке, даже если палец
+      // сместился за её границы.
+      try {
+        captureTarget.setPointerCapture(pointerId);
+      } catch {
+        // Браузер может уже снять pointer capture; drag продолжает работать
+        // через window listeners.
+      }
+    };
+
+    if (isTouch) {
+      longPressTimer = window.setTimeout(armTouch, TOUCH_LONG_PRESS_MS);
+    }
+
     const cleanup = (): void => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+
+      if (touchMoveBlocker !== null) {
+        document.removeEventListener("touchmove", touchMoveBlocker);
+        touchMoveBlocker = null;
+      }
+
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
@@ -1475,12 +1551,48 @@ export function KanbanView({
 
     dragCleanupRef.current = cleanup;
 
+    const onPointerMove = (moveEvent: PointerEvent): void => {
+      const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+
+      if (!active) {
+        if (!armed) {
+          // До long press заметный сдвиг — это вертикальный scroll, а не drag.
+          if (distance > TOUCH_SCROLL_TOLERANCE) {
+            cleanup();
+          }
+
+          return;
+        }
+
+        if (distance < DRAG_THRESHOLD) {
+          return;
+        }
+
+        activate();
+      }
+
+      if (moveEvent.cancelable) {
+        moveEvent.preventDefault();
+      }
+
+      target = resolveDropTarget(moveEvent.clientX, moveEvent.clientY, task.id);
+      setDragOver(target);
+    };
+
     const onPointerUp = (): void => {
       const drop = target;
+      const wasActive = active;
 
       cleanup();
 
-      if (active && drop !== null && drop.beforeId !== task.id) {
+      if (wasActive) {
+        dragSuppressRef.current = {
+          taskId: task.id,
+          until: performance.now() + CLICK_SUPPRESSION_MS,
+        };
+      }
+
+      if (wasActive && drop !== null && drop.beforeId !== task.id) {
         const intent: MoveIntent =
           drop.beforeId === null ? { kind: "append" } : { kind: "before", beforeId: drop.beforeId };
 
@@ -2126,7 +2238,8 @@ export function KanbanView({
         search={workspaceSearch}
         fallbackTitle={projects.length === 0 ? "Проекты" : "Выберите проект"}
         invoke={invoke}
-        onProjectRenamed={bumpKanbanRevision}
+        onProjectUpdated={bumpKanbanRevision}
+        onColumnsChanged={bumpKanbanRevision}
         actions={
           onKanbanRoute ? (
             <button
@@ -2507,6 +2620,10 @@ export function KanbanView({
                             onMoveTo={moveToColumn}
                             onReorder={reorder}
                             onDragStart={startDrag}
+                            shouldSuppressClick={() => consumeDragClickSuppression(task.id)}
+                            onCardPointerDown={() => {
+                              dragSuppressRef.current = null;
+                            }}
                           />
                         </li>
                       </Fragment>
@@ -2539,7 +2656,7 @@ export function KanbanView({
                   data-testid="kanban-add-column"
                   disabled={!boardReady}
                   onClick={openAddColumn}
-                  className="flex min-h-12 w-[70vw] max-w-[220px] shrink-0 snap-start items-center justify-center rounded-xl border border-dashed border-border bg-background/60 px-3 text-sm font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:min-w-[200px] md:flex-none"
+                  className="flex min-h-12 w-[70vw] max-w-[220px] shrink-0 snap-start items-center justify-center rounded-xl border border-dashed border-border bg-background/60 px-3 text-sm font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:w-[220px] md:min-w-[220px] md:max-w-[220px] md:flex-[0_0_220px]"
                 >
                   + Добавить колонку
                 </button>

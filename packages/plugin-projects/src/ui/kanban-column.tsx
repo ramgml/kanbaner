@@ -94,7 +94,7 @@ export function KanbanColumn({
       data-column-slug={slug}
       aria-labelledby={`kanban-column-title-${slug}`}
       aria-busy={pending}
-      className="flex max-h-full min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border bg-[#f1f5f9] p-2.5 transition-colors md:w-auto md:max-w-none md:min-w-[272px] md:flex-1 dark:bg-[#263244]"
+      className="flex max-h-full min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border bg-[#f1f5f9] p-2.5 transition-colors md:w-[288px] md:min-w-[288px] md:max-w-[288px] md:flex-[0_0_288px] dark:bg-[#263244]"
       style={{
         ...(dragOver
           ? { background: "color-mix(in oklab, var(--accent) 70%, var(--background))" }

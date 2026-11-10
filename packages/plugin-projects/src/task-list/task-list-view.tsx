@@ -324,7 +324,8 @@ export function TaskListView({
         search={workspaceSearch}
         fallbackTitle="Задачи"
         invoke={invoke}
-        onProjectRenamed={bumpTaskListRevision}
+        onProjectUpdated={bumpTaskListRevision}
+        onColumnsChanged={bumpTaskListRevision}
         actions={
           <>
             <button

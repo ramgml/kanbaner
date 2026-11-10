@@ -1303,13 +1303,9 @@ describe("управление колонками в KanbanView", () => {
       expect(screen.getByTestId("kanban-card-task-a")).toBeVisible();
     });
 
-    const details = screen.getByTestId("kanban-card-task-a").querySelector("details");
+    fireEvent.click(screen.getByTestId("kanban-menu-task-a"));
 
-    if (details !== null) {
-      details.open = true;
-    }
-
-    fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Переместить в In Progress" }));
 
     act(() => {
       updateKanbanQuery({ projectId: "project-b" });
@@ -1406,13 +1402,9 @@ describe("управление колонками в KanbanView", () => {
       expect(screen.getByTestId("kanban-card-a")).toBeVisible();
     });
 
-    const details = screen.getByTestId("kanban-card-a").querySelector("details");
+    fireEvent.click(screen.getByTestId("kanban-menu-a"));
 
-    if (details !== null) {
-      details.open = true;
-    }
-
-    fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Переместить в In Progress" }));
     view.unmount();
 
     await act(async () => {

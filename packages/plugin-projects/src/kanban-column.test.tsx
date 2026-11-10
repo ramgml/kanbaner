@@ -65,6 +65,19 @@ function renderColumn(
 }
 
 describe("KanbanColumn composer", () => {
+  it("имеет фиксированную desktop-ширину 288 px и мобильную 85vw", () => {
+    renderColumn({ column: column("todo"), slug: "todo" }, []);
+
+    const boardColumn = screen.getByTestId("kanban-column-todo");
+
+    expect(boardColumn).toHaveClass("w-[85vw]");
+    expect(boardColumn).toHaveClass("md:flex-[0_0_288px]");
+    expect(boardColumn).toHaveClass("md:w-[288px]");
+    expect(boardColumn).toHaveClass("md:min-w-[288px]");
+    expect(boardColumn).toHaveClass("md:max-w-[288px]");
+    expect(boardColumn).not.toHaveClass("md:flex-1");
+  });
+
   it("ставит composer сразу после header, до ошибки и прокручиваемого списка", () => {
     renderColumn(
       {

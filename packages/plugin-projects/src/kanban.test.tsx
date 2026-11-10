@@ -383,6 +383,20 @@ function cardTitles(status: TaskStatus): string[] {
     .map((button) => button.textContent ?? "");
 }
 
+function openCardMenu(taskId: string): HTMLElement {
+  if (screen.queryByTestId(`kanban-card-menu-${taskId}`) === null) {
+    fireEvent.click(screen.getByTestId(`kanban-menu-${taskId}`));
+  }
+
+  return screen.getByTestId(`kanban-card-menu-${taskId}`);
+}
+
+function clickCardAction(taskId: string, name: string): void {
+  const menu = openCardMenu(taskId);
+
+  fireEvent.click(within(menu).getByRole("menuitem", { name }));
+}
+
 beforeEach(() => {
   window.history.replaceState(null, "", "/view/kanban");
   resetKanbanQueryForTests("");
@@ -459,9 +473,7 @@ describe("KanbanView", () => {
     await screen.findByTestId("kanban-card-a");
     expect(cardTitles("todo")).toEqual(["a", "b", "c"]);
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-a")).getByRole("button", { name: "Ниже" }),
-    );
+    clickCardAction("a", "Ниже");
 
     await waitFor(() => {
       const lastMove = operations.calls
@@ -480,11 +492,7 @@ describe("KanbanView", () => {
       expect(cardTitles("todo")).toEqual(["b", "a", "c"]);
     });
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-c")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("c", "Переместить в Готово");
 
     await waitFor(() => {
       const lastMove = operations.calls
@@ -520,11 +528,7 @@ describe("KanbanView", () => {
     render(<KanbanView invoke={operations.invoke} />);
 
     await screen.findByTestId("kanban-card-a");
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-a")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("a", "Переместить в Готово");
 
     // Карточка сразу в целевой колонке, pending — только на ней.
     expect(
@@ -572,11 +576,7 @@ describe("KanbanView", () => {
     render(<KanbanView invoke={operations.invoke} />);
 
     await screen.findByTestId("kanban-card-a");
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-a")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("a", "Переместить в Готово");
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-error")).toHaveTextContent(
@@ -654,11 +654,7 @@ describe("KanbanView", () => {
     expect(cardTitles("todo")).toEqual(["A", "C"]);
 
     // Видимый список [A, C] дал бы position 1, полный [A, скрытая, C] — 2.
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-visible-a")).getByRole("button", {
-        name: "В конец",
-      }),
-    );
+    clickCardAction("visible-a", "В конец");
 
     await waitFor(() => {
       const lastMove = operations.calls
@@ -728,11 +724,7 @@ describe("KanbanView", () => {
       await screen.findByTestId("kanban-card-visible-a");
       expect(cardTitles("todo")).toEqual(["A", "C"]);
 
-      fireEvent.click(
-        within(screen.getByTestId(`kanban-card-${taskId}`)).getByRole("button", {
-          name: action,
-        }),
-      );
+      clickCardAction(taskId, action);
 
       await waitFor(() => {
         const lastMove = operations.calls
@@ -779,11 +771,7 @@ describe("KanbanView", () => {
       render(<KanbanView invoke={operations.invoke} />);
 
       await screen.findByTestId("kanban-card-mover");
-      fireEvent.click(
-        within(screen.getByTestId("kanban-card-mover")).getByRole("button", {
-          name: "Переместить в Готово",
-        }),
-      );
+      clickCardAction("mover", "Переместить в Готово");
 
       await waitFor(() => {
         expect(screen.getByTestId("kanban-count-done")).toHaveTextContent(
@@ -877,11 +865,7 @@ describe("KanbanView", () => {
       expect(screen.getByTestId("kanban-count-done")).toHaveTextContent("12");
     });
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-mover-a")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("mover-a", "Переместить в Готово");
 
     await waitFor(() => {
       const move = operations.calls
@@ -895,11 +879,7 @@ describe("KanbanView", () => {
       });
     });
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-mover-b")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("mover-b", "Переместить в Готово");
 
     await waitFor(() => {
       const move = operations.calls
@@ -978,9 +958,7 @@ describe("KanbanView", () => {
       expect(cardTitles("backlog")).toHaveLength(12);
     });
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-p00")).getByRole("button", { name: "В конец" }),
-    );
+    clickCardAction("p00", "В конец");
 
     await waitFor(() => {
       expect(cardTitles("backlog").at(-1)).toBe("P00");
@@ -1079,11 +1057,7 @@ describe("KanbanView", () => {
     await screen.findByTestId("kanban-card-visible-a");
     expect(screen.getByTestId("kanban-card-hidden")).toBeInTheDocument();
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-visible-a")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("visible-a", "Переместить в Готово");
 
     await waitFor(() => {
       expect(operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.move")).toBe(
@@ -1152,11 +1126,7 @@ describe("KanbanView", () => {
     });
     fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
 
-    fireEvent.click(
-      within(screen.getByTestId("kanban-card-m00")).getByRole("button", {
-        name: "Переместить в Готово",
-      }),
-    );
+    clickCardAction("m00", "Переместить в Готово");
 
     await waitFor(() => {
       expect(
