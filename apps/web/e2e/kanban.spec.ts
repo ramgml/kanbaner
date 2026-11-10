@@ -4108,6 +4108,14 @@ test.describe("канбан в production shell", () => {
         await addColumn(page, `Width ${String(index)}`, "open");
       }
 
+      // После создания последней колонки её opener получает focus через rAF и
+      // может досрочно прокрутить доску к концу. Дожидаемся этого focus и уже
+      // затем сбрасываем scroll, иначе left alignment измеряется по offscreen
+      // первой колонке.
+      const addColumnButton = page.getByTestId("kanban-add-column");
+
+      await expect(addColumnButton).toBeFocused();
+
       const readMetrics = async () => {
         const columns = await page.locator("[data-kanban-column-id]").evaluateAll((elements) =>
           elements.map((element) => {
@@ -4128,6 +4136,7 @@ test.describe("канбан в production shell", () => {
 
           return {
             x: rect.x,
+            scrollLeft: element.scrollLeft,
             scrollWidth: element.scrollWidth,
             clientWidth: element.clientWidth,
           };
@@ -4137,7 +4146,23 @@ test.describe("канбан в production shell", () => {
       };
 
       await page.getByTestId("kanban-columns").evaluate((element) => {
+        element.style.scrollBehavior = "auto";
         element.scrollLeft = 0;
+      });
+      await expect
+        .poll(async () =>
+          page.getByTestId("kanban-columns").evaluate((element) => element.scrollLeft),
+        )
+        .toBe(0);
+
+      // Даём layout/scroll завершиться после сброса и убеждаемся, что позиция
+      // не была возвращена фокусом или smooth-scroll.
+      await page.evaluate(() => {
+        return new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            resolve();
+          });
+        });
       });
       await expect
         .poll(async () =>
@@ -4148,6 +4173,7 @@ test.describe("канбан в production shell", () => {
       const initial = await readMetrics();
 
       expect(initial.columns).toHaveLength(8);
+      expect(initial.board.scrollLeft).toBe(0);
 
       for (const column of initial.columns) {
         expect(Math.abs(column.width - 288)).toBeLessThanOrEqual(1);
