@@ -758,6 +758,16 @@ describe("Trello-доска", () => {
       expect(screen.getByTestId("kanban-card-a")).toBeInTheDocument();
     });
 
+    // Даём начальному rAF сброса scroll завершиться, чтобы тест проверял
+    // геометрию, а не гонку с восстановлением scroll браузера.
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    });
+
     const container = await screen.findByTestId("kanban-columns");
 
     const scrollWidth = 1200;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 
 import type { Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
@@ -136,6 +136,7 @@ export function KanbanCard({
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const focusFirstMenuRef = useRef(false);
   const menuId = `kanban-card-menu-${task.id}`;
 
   const priorityStyle = PRIORITY_STYLES[task.priority];
@@ -146,6 +147,7 @@ export function KanbanCard({
   const moveTargets = columns.filter((column) => column.id !== currentColumnId);
 
   const closeMenu = useCallback((returnFocus: boolean): void => {
+    focusFirstMenuRef.current = false;
     setMenuOpen(false);
     setMenuPosition(null);
 
@@ -153,6 +155,45 @@ export function KanbanCard({
       triggerRef.current?.focus();
     }
   }, []);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "Tab") {
+      // Меню не ловушка фокуса: Tab закрывает его и возвращает фокус на trigger.
+      event.preventDefault();
+      closeMenu(true);
+
+      return;
+    }
+
+    const items = [
+      ...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ??
+        []),
+    ];
+
+    if (items.length === 0) {
+      return;
+    }
+
+    const active = document.activeElement;
+    const currentIndex = items.findIndex((item) => item === active);
+    let nextIndex = currentIndex;
+
+    if (event.key === "ArrowDown") {
+      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length;
+    } else if (event.key === "ArrowUp") {
+      nextIndex =
+        currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = items.length - 1;
+    } else {
+      return;
+    }
+
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  };
 
   // Одно открытое меню на доску: открытие нового закрывает предыдущее.
   useEffect(() => {
@@ -198,8 +239,8 @@ export function KanbanCard({
         triggerRect.right < 0 ||
         triggerRect.left > window.innerWidth
       ) {
-        setMenuOpen(false);
-        setMenuPosition(null);
+        focusFirstMenuRef.current = false;
+        closeMenu(true);
 
         return;
       }
@@ -222,7 +263,21 @@ export function KanbanCard({
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
     };
-  }, [menuOpen]);
+  }, [closeMenu, menuOpen]);
+
+  // После открытия и вычисления позиции фокус сразу попадает в первое
+  // доступное действие, а не остаётся на trigger.
+  useEffect(() => {
+    if (!menuOpen || menuPosition === null || !focusFirstMenuRef.current) {
+      return;
+    }
+
+    focusFirstMenuRef.current = false;
+
+    const first = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])');
+
+    first?.focus();
+  }, [menuOpen, menuPosition]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -292,11 +347,17 @@ export function KanbanCard({
       return;
     }
 
-    // Не начинаем drag, если пользователь уже выделил текст в карточке.
+    // Блокируем drag только если выделение начато/закончено внутри этой
+    // карточки. Выделение в другом месте страницы не мешает drag.
     const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
 
-    if (selection !== null && !selection.isCollapsed && selection.toString().trim().length > 0) {
-      return;
+    if (selection !== null && !selection.isCollapsed) {
+      const article = event.currentTarget;
+      const insideArticle = (node: Node | null): boolean => node !== null && article.contains(node);
+
+      if (insideArticle(selection.anchorNode) || insideArticle(selection.focusNode)) {
+        return;
+      }
     }
 
     onDragStart(task, event);
@@ -311,11 +372,25 @@ export function KanbanCard({
       <div
         ref={menuRef}
         id={menuId}
-        role="group"
-        aria-label={`Перемещение задачи ${task.title}`}
+        role="menu"
+        aria-label={`Действия задачи ${task.title}`}
         data-testid={`kanban-card-menu-${task.id}`}
         data-card-menu
         data-placement={menuPosition?.placement ?? "bottom"}
+        onKeyDown={onMenuKeyDown}
+        onBlur={(event) => {
+          const next = event.relatedTarget;
+
+          if (
+            next instanceof Node &&
+            (menuRef.current?.contains(next) === true ||
+              triggerRef.current?.contains(next) === true)
+          ) {
+            return;
+          }
+
+          closeMenu(false);
+        }}
         className="fixed flex max-h-[calc(100vh-1rem)] w-[min(15rem,calc(100vw-1rem))] flex-col gap-1 overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
         style={{
           position: "fixed",
@@ -329,6 +404,8 @@ export function KanbanCard({
           <button
             key={column.id}
             type="button"
+            role="menuitem"
+            tabIndex={-1}
             data-testid={`kanban-move-${task.id}-${column.id}`}
             disabled={pending}
             onClick={() => {
@@ -344,6 +421,8 @@ export function KanbanCard({
 
         <button
           type="button"
+          role="menuitem"
+          tabIndex={-1}
           disabled={pending || index === 0}
           onClick={() => {
             closeMenu(true);
@@ -356,6 +435,8 @@ export function KanbanCard({
         </button>
         <button
           type="button"
+          role="menuitem"
+          tabIndex={-1}
           disabled={pending || index >= columnSize - 1}
           onClick={() => {
             closeMenu(true);
@@ -368,6 +449,8 @@ export function KanbanCard({
         </button>
         <button
           type="button"
+          role="menuitem"
+          tabIndex={-1}
           disabled={pending || index === 0}
           onClick={() => {
             closeMenu(true);
@@ -380,6 +463,8 @@ export function KanbanCard({
         </button>
         <button
           type="button"
+          role="menuitem"
+          tabIndex={-1}
           disabled={pending || index >= columnSize - 1}
           onClick={() => {
             closeMenu(true);
@@ -418,7 +503,7 @@ export function KanbanCard({
         borderColor: selected ? "var(--ring)" : "var(--border)",
         opacity: dragging || pending ? 0.62 : 1,
         boxShadow: selected ? "0 0 0 2px var(--ring)" : "0 1px 2px rgb(0 0 0 / 0.10)",
-        touchAction: "pan-y",
+        touchAction: "auto",
         WebkitUserSelect: "none",
         userSelect: "none",
       }}
@@ -451,6 +536,7 @@ export function KanbanCard({
             if (menuOpen) {
               closeMenu(true);
             } else {
+              focusFirstMenuRef.current = true;
               setMenuPosition(null);
               setMenuOpen(true);
             }

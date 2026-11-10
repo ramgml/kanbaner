@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
@@ -219,7 +219,7 @@ describe("KanbanCard", () => {
     fireEvent.click(trigger);
 
     const menu = screen.getByTestId("kanban-card-menu-task-1");
-    const up = within(menu).getByRole("button", { name: "Выше" });
+    const up = within(menu).getByRole("menuitem", { name: "Выше" });
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(up).toBeDisabled();
@@ -239,6 +239,35 @@ describe("KanbanCard", () => {
     expect(card).not.toContainElement(menu);
     expect(card.childElementCount).toBe(childrenBefore);
     expect(menu).toHaveStyle({ position: "fixed" });
+  });
+
+  it("фокусирует первое действие и поддерживает стрелки/Home/End и Tab", async () => {
+    renderCard(makeTask(), { index: 1, columnSize: 3 });
+
+    const trigger = screen.getByTestId("kanban-menu-task-1");
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const menu = screen.getByTestId("kanban-card-menu-task-1");
+
+    expect(menu).toHaveAttribute("role", "menu");
+    await waitFor(() => {
+      expect(within(menu).getByRole("menuitem", { name: "Переместить в Готово" })).toHaveFocus();
+    });
+
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitem", { name: "Выше" })).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(within(menu).getByRole("menuitem", { name: "В конец" })).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(within(menu).getByRole("menuitem", { name: "Переместить в Готово" })).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(screen.queryByTestId("kanban-card-menu-task-1")).toBeNull();
+    expect(trigger).toHaveFocus();
   });
 
   it("закрывает меню по Escape с возвратом фокуса и по клику снаружи", () => {
@@ -327,7 +356,7 @@ describe("KanbanCard", () => {
     fireEvent.click(screen.getByTestId("kanban-menu-task-1"));
 
     fireEvent.pointerDown(
-      within(screen.getByTestId("kanban-card-menu-task-1")).getByRole("button", {
+      within(screen.getByTestId("kanban-card-menu-task-1")).getByRole("menuitem", {
         name: "Переместить в Готово",
       }),
       { clientX: 10, clientY: 10 },
@@ -369,15 +398,17 @@ describe("KanbanCard", () => {
     expect(onDragStart).toHaveBeenCalledTimes(3);
   });
 
-  it("игнорирует drag при выделении текста и вторичной кнопке мыши", () => {
+  it("игнорирует drag только при выделении внутри карточки и вторичной кнопке", () => {
     const onDragStart = vi.fn();
 
     renderCard(makeTask(), { onDragStart });
 
+    const openButton = screen.getByTestId("kanban-open-task-1");
     const selection = vi.spyOn(window, "getSelection").mockReturnValue({
       isCollapsed: false,
-      toString: () => "выделенный текст",
-    } as Selection);
+      anchorNode: openButton,
+      focusNode: openButton,
+    } as unknown as Selection);
 
     fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
       pointerType: "mouse",
@@ -388,6 +419,27 @@ describe("KanbanCard", () => {
     });
 
     expect(onDragStart).not.toHaveBeenCalled();
+
+    // Выделение вне карточки не блокирует её drag.
+    const outside = document.createElement("p");
+
+    document.body.append(outside);
+    selection.mockReturnValue({
+      isCollapsed: false,
+      anchorNode: outside,
+      focusNode: outside,
+    } as unknown as Selection);
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+      clientX: 4,
+      clientY: 4,
+    });
+
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+    outside.remove();
     selection.mockReturnValue(null);
 
     fireEvent.pointerDown(screen.getByTestId("kanban-card-task-1"), {
@@ -398,7 +450,7 @@ describe("KanbanCard", () => {
       clientY: 4,
     });
 
-    expect(onDragStart).not.toHaveBeenCalled();
+    expect(onDragStart).toHaveBeenCalledTimes(1);
   });
 
   it("подавляет click после drag и не мешает обычному открытию", () => {

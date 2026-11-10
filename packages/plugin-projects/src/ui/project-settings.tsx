@@ -35,6 +35,11 @@ const COLUMN_VERSION_CONFLICT_MESSAGE =
 const COLUMN_REFRESH_FAILED_MESSAGE =
   "Команда выполнена, но список колонок не обновлён. Проверьте соединение и повторите загрузку.";
 
+type ColumnsRefreshResult =
+  | { readonly kind: "ok"; readonly columns: readonly TaskColumn[] }
+  | { readonly kind: "stale" }
+  | { readonly kind: "error" };
+
 /** Сколько нужно сдвинуть указатель, чтобы начать перетаскивание строки. */
 const DRAG_THRESHOLD = 8;
 
@@ -177,6 +182,8 @@ export function ProjectSettingsButton({
   const [columnNotices, setColumnNotices] = useState<Readonly<Record<string, string | null>>>({});
 
   const [draggingColumnId, setDraggingColumnId] = useState<string | null>(null);
+  const [reorderPending, setReorderPending] = useState(false);
+  const [movingColumnId, setMovingColumnId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<{
     readonly columnId: string;
     readonly after: boolean;
@@ -187,10 +194,15 @@ export function ProjectSettingsButton({
 
   const projectVersionRef = useRef(project.version);
   const projectGuardRef = useRef(false);
+  const projectOperationRef = useRef(0);
   const projectIdRef = useRef(project.id);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
-  const columnGuardsRef = useRef<Set<string>>(new Set());
+  const columnOperationRef = useRef<Map<string, number>>(new Map());
+  const reorderOperationRef = useRef(0);
+  const reorderPendingRef = useRef(false);
+  const movingColumnIdRef = useRef<string | null>(null);
+  const refreshSequenceRef = useRef(0);
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const doneButtonRef = useRef<HTMLButtonElement>(null);
@@ -266,23 +278,38 @@ export function ProjectSettingsButton({
     projectIdRef.current === projectId &&
     generationRef.current === generation;
 
+  /**
+   * Перечитывает колонки и применяет только самый свежий ответ.
+   *
+   * `column.list` может завершиться в обратном порядке: например, rename и
+   * reorder идут параллельно. Монотонный sequence не даёт старому ответу
+   * перетереть новый порядок/версии. `stale` никогда не превращается в ошибку.
+   */
   const refreshColumns = async (
     projectId: string,
     generation: number,
     options: { readonly resetDrafts?: boolean } = {},
-  ): Promise<readonly TaskColumn[] | null> => {
+  ): Promise<ColumnsRefreshResult> => {
+    const sequence = refreshSequenceRef.current + 1;
+
+    refreshSequenceRef.current = sequence;
+
     try {
       const fresh = await fetchProjectColumns(invoke, projectId);
 
-      if (!isCurrent(projectId, generation)) {
-        return null;
+      if (!isCurrent(projectId, generation) || refreshSequenceRef.current !== sequence) {
+        return { kind: "stale" };
       }
 
       applyColumnsSnapshot(fresh, { resetDrafts: options.resetDrafts ?? false });
 
-      return fresh;
+      return { kind: "ok", columns: fresh };
     } catch {
-      return null;
+      if (!isCurrent(projectId, generation) || refreshSequenceRef.current !== sequence) {
+        return { kind: "stale" };
+      }
+
+      return { kind: "error" };
     }
   };
 
@@ -298,6 +325,9 @@ export function ProjectSettingsButton({
     setDrafts({});
     setColumnPending(new Set());
     pendingRef.current = new Set();
+    setReorderPending(false);
+    setMovingColumnId(null);
+    reorderPendingRef.current = false;
     setColumnErrors({});
     setColumnNotices({});
     setDraggingColumnId(null);
@@ -309,13 +339,17 @@ export function ProjectSettingsButton({
     setLoading(true);
     setLoadError(null);
 
+    const sequence = refreshSequenceRef.current + 1;
+
+    refreshSequenceRef.current = sequence;
+
     try {
       const [freshProject, freshColumns] = await Promise.all([
         loadCurrentProject(invoke, projectId),
         fetchProjectColumns(invoke, projectId),
       ]);
 
-      if (!isCurrent(projectId, generation)) {
+      if (!isCurrent(projectId, generation) || refreshSequenceRef.current !== sequence) {
         return;
       }
 
@@ -330,7 +364,7 @@ export function ProjectSettingsButton({
       applyColumnsSnapshot(freshColumns, { resetDrafts: true });
       setLoading(false);
     } catch (loadFailure) {
-      if (isCurrent(projectId, generation)) {
+      if (isCurrent(projectId, generation) && refreshSequenceRef.current === sequence) {
         setLoadError(errorMessage(loadFailure));
         setLoading(false);
       }
@@ -347,18 +381,25 @@ export function ProjectSettingsButton({
 
   const closeNow = (): void => {
     generationRef.current += 1;
+    refreshSequenceRef.current += 1;
     dragCleanupRef.current?.();
     dragCleanupRef.current = null;
     projectGuardRef.current = false;
-    columnGuardsRef.current.clear();
+    projectOperationRef.current += 1;
+    columnOperationRef.current.clear();
+    reorderOperationRef.current += 1;
+    reorderPendingRef.current = false;
     setOpen(false);
     resetState();
   };
 
+  const isBusy = (): boolean =>
+    projectGuardRef.current || pendingRef.current.size > 0 || reorderPendingRef.current;
+
   const requestClose = (): void => {
     // Пока команда или refresh в полёте, закрытие заблокировано: иначе
     // повторная отправка могла бы уйти со старым expectedVersion.
-    if (projectGuardRef.current || pendingRef.current.size > 0) {
+    if (isBusy()) {
       return;
     }
 
@@ -372,6 +413,15 @@ export function ProjectSettingsButton({
     if (isDirty()) {
       setDirtyConfirm(true);
 
+      return;
+    }
+
+    closeNow();
+  };
+
+  const requestDiscard = (): void => {
+    // «Закрыть без сохранения» проходит тот же общий guard, что и «Готово».
+    if (isBusy()) {
       return;
     }
 
@@ -480,8 +530,11 @@ export function ProjectSettingsButton({
 
     const projectId = project.id;
     const generation = generationRef.current;
+    const operation = projectOperationRef.current + 1;
 
+    projectOperationRef.current = operation;
     projectGuardRef.current = true;
+    setDirtyConfirm(false);
     setProjectSubmitting(true);
     setProjectValidation(null);
     setProjectError(null);
@@ -543,24 +596,32 @@ export function ProjectSettingsButton({
             setProjectError(PROJECT_VERSION_REFRESH_FAILED_MESSAGE);
           }
         } finally {
-          setProjectRefreshing(false);
-          setProjectFocusRequest((current) => current + 1);
+          if (isCurrent(projectId, generation) && projectOperationRef.current === operation) {
+            setProjectRefreshing(false);
+            setProjectFocusRequest((current) => current + 1);
+          }
         }
       } else {
         setProjectError(errorMessage(commandError));
         setProjectFocusRequest((current) => current + 1);
       }
     } finally {
-      projectGuardRef.current = false;
+      if (projectOperationRef.current === operation) {
+        projectGuardRef.current = false;
 
-      if (isCurrent(projectId, generation)) {
-        setProjectSubmitting(false);
+        if (isCurrent(projectId, generation)) {
+          setProjectSubmitting(false);
+        }
       }
     }
   };
 
   const submitColumn = async (columnId: string): Promise<void> => {
-    if (columnGuardsRef.current.has(columnId) || loading) {
+    if (
+      columnOperationRef.current.has(columnId) ||
+      (reorderPendingRef.current && movingColumnIdRef.current === columnId) ||
+      loading
+    ) {
       return;
     }
 
@@ -597,8 +658,10 @@ export function ProjectSettingsButton({
 
     const projectId = project.id;
     const generation = generationRef.current;
+    const operation = (columnOperationRef.current.get(columnId) ?? 0) + 1;
 
-    columnGuardsRef.current.add(columnId);
+    columnOperationRef.current.set(columnId, operation);
+    setDirtyConfirm(false);
     setColumnPendingValue(columnId, true);
     setColumnError(columnId, null);
     setColumnNotice(columnId, null);
@@ -627,15 +690,15 @@ export function ProjectSettingsButton({
       );
       setDrafts((current) => ({ ...current, [columnId]: data.column.title }));
 
-      const fresh = await refreshColumns(projectId, generation);
+      const refreshed = await refreshColumns(projectId, generation);
 
       if (!isCurrent(projectId, generation)) {
         return;
       }
 
-      if (fresh === null) {
+      if (refreshed.kind === "error") {
         setColumnError(columnId, COLUMN_REFRESH_FAILED_MESSAGE);
-      } else {
+      } else if (refreshed.kind === "ok") {
         setColumnNotice(columnId, "Название колонки сохранено");
         onColumnsChanged?.();
       }
@@ -645,7 +708,7 @@ export function ProjectSettingsButton({
       }
 
       if (isVersionConflict(commandError)) {
-        const fresh = await refreshColumns(projectId, generation);
+        const refreshed = await refreshColumns(projectId, generation);
 
         if (!isCurrent(projectId, generation)) {
           return;
@@ -653,7 +716,7 @@ export function ProjectSettingsButton({
 
         setColumnError(
           columnId,
-          fresh === null
+          refreshed.kind === "error"
             ? "Колонка изменена в другом месте, но обновить список не удалось. Проверьте соединение и повторите."
             : COLUMN_VERSION_CONFLICT_MESSAGE,
         );
@@ -661,16 +724,18 @@ export function ProjectSettingsButton({
         setColumnError(columnId, errorMessage(commandError));
       }
     } finally {
-      columnGuardsRef.current.delete(columnId);
+      if (columnOperationRef.current.get(columnId) === operation) {
+        columnOperationRef.current.delete(columnId);
 
-      if (isCurrent(projectId, generationRef.current)) {
-        setColumnPendingValue(columnId, false);
+        if (isCurrent(projectId, generation)) {
+          setColumnPendingValue(columnId, false);
+        }
       }
     }
   };
 
   const applyReorder = async (columnId: string, targetIndex: number): Promise<void> => {
-    if (columnGuardsRef.current.has(columnId) || loading) {
+    if (reorderPendingRef.current || columnOperationRef.current.has(columnId) || loading) {
       return;
     }
 
@@ -690,9 +755,15 @@ export function ProjectSettingsButton({
     const projectId = project.id;
     const generation = generationRef.current;
     const snapshotIds = columns.map((candidate) => candidate.id);
+    const operation = reorderOperationRef.current + 1;
 
+    reorderOperationRef.current = operation;
+    reorderPendingRef.current = true;
+    movingColumnIdRef.current = columnId;
+    setReorderPending(true);
+    setMovingColumnId(columnId);
+    setDirtyConfirm(false);
     setColumns((current) => reorderColumnEntries(current, columnId, clamped));
-    columnGuardsRef.current.add(columnId);
     setColumnPendingValue(columnId, true);
     setColumnError(columnId, null);
     setColumnNotice(columnId, null);
@@ -700,12 +771,10 @@ export function ProjectSettingsButton({
 
     try {
       if (!isCurrent(projectId, generation)) {
-        setColumns((current) => restoreColumnOrderEntries(current, snapshotIds));
-
         return;
       }
 
-      await invokeJson(invoke, TASKS_COMMAND_IDS.columnMove, {
+      const data = await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnMove, {
         id: column.id,
         expectedVersion: column.version,
         position: clamped,
@@ -715,27 +784,36 @@ export function ProjectSettingsButton({
         return;
       }
 
-      const fresh = await refreshColumns(projectId, generation);
+      // Даже если refresh упадёт, версия перемещённой колонки уже свежая.
+      setColumns((current) =>
+        current.map((candidate) =>
+          candidate.id === data.column.id ? { ...candidate, ...data.column } : candidate,
+        ),
+      );
+
+      const refreshed = await refreshColumns(projectId, generation);
 
       if (!isCurrent(projectId, generation)) {
         return;
       }
 
-      if (fresh === null) {
+      if (refreshed.kind === "error") {
         setColumnError(columnId, COLUMN_REFRESH_FAILED_MESSAGE);
-      } else {
+      } else if (refreshed.kind === "ok") {
         setColumnNotice(columnId, "Порядок колонок сохранён");
         onColumnsChanged?.();
       }
     } catch (commandError) {
-      setColumns((current) => restoreColumnOrderEntries(current, snapshotIds));
-
       if (!isCurrent(projectId, generation)) {
         return;
       }
 
+      // Откатываем только порядок этой операции, сохраняя актуальные данные
+      // колонок (включая параллельный rename другой колонки).
+      setColumns((current) => restoreColumnOrderEntries(current, snapshotIds));
+
       if (isVersionConflict(commandError)) {
-        const fresh = await refreshColumns(projectId, generation);
+        const refreshed = await refreshColumns(projectId, generation);
 
         if (!isCurrent(projectId, generation)) {
           return;
@@ -743,7 +821,7 @@ export function ProjectSettingsButton({
 
         setColumnError(
           columnId,
-          fresh === null
+          refreshed.kind === "error"
             ? "Колонка изменена в другом месте, но обновить порядок не удалось. Проверьте соединение и повторите."
             : COLUMN_VERSION_CONFLICT_MESSAGE,
         );
@@ -751,10 +829,15 @@ export function ProjectSettingsButton({
         setColumnError(columnId, errorMessage(commandError));
       }
     } finally {
-      columnGuardsRef.current.delete(columnId);
+      if (reorderOperationRef.current === operation) {
+        reorderPendingRef.current = false;
+        movingColumnIdRef.current = null;
 
-      if (isCurrent(projectId, generationRef.current)) {
-        setColumnPendingValue(columnId, false);
+        if (isCurrent(projectId, generation)) {
+          setReorderPending(false);
+          setMovingColumnId(null);
+          setColumnPendingValue(columnId, false);
+        }
       }
     }
   };
@@ -775,7 +858,7 @@ export function ProjectSettingsButton({
       return;
     }
 
-    if (columnGuardsRef.current.has(columnId)) {
+    if (reorderPendingRef.current || columnOperationRef.current.has(columnId)) {
       return;
     }
 
@@ -866,7 +949,11 @@ export function ProjectSettingsButton({
   };
 
   const busy =
-    projectSubmitting || projectRefreshing || columnPending.size > 0 || draggingColumnId !== null;
+    projectSubmitting ||
+    projectRefreshing ||
+    columnPending.size > 0 ||
+    reorderPending ||
+    draggingColumnId !== null;
 
   return (
     <>
@@ -975,6 +1062,7 @@ export function ProjectSettingsButton({
                           setProjectValidation(null);
                           setProjectError(null);
                           setProjectNotice(null);
+                          setDirtyConfirm(false);
                         }}
                         className={inputClass}
                       />
@@ -1081,6 +1169,7 @@ export function ProjectSettingsButton({
                             aria-label={`Перетащить колонку «${column.title}»`}
                             title="Перетащить колонку"
                             data-testid={`project-settings-column-drag-${column.id}`}
+                            disabled={pending || reorderPending}
                             onPointerDown={(event) => {
                               startColumnDrag(column.id, event);
                             }}
@@ -1096,13 +1185,14 @@ export function ProjectSettingsButton({
                             data-testid={`project-settings-column-input-${column.id}`}
                             value={draft}
                             maxLength={MAX_TITLE_LENGTH}
-                            disabled={pending}
+                            disabled={pending || movingColumnId === column.id}
                             onChange={(event) => {
                               const value = event.target.value;
 
                               setDrafts((current) => ({ ...current, [column.id]: value }));
                               setColumnError(column.id, null);
                               setColumnNotice(column.id, null);
+                              setDirtyConfirm(false);
                             }}
                             onKeyDown={(event) => {
                               if (event.key === "Enter") {
@@ -1118,7 +1208,10 @@ export function ProjectSettingsButton({
                             data-testid={`project-settings-column-save-${column.id}`}
                             aria-label={`Сохранить название колонки «${column.title}»`}
                             disabled={
-                              pending || draft.trim().length === 0 || draft.trim() === column.title
+                              pending ||
+                              movingColumnId === column.id ||
+                              draft.trim().length === 0 ||
+                              draft.trim() === column.title
                             }
                             aria-busy={pending}
                             onClick={() => {
@@ -1135,7 +1228,7 @@ export function ProjectSettingsButton({
                               data-testid={`project-settings-column-up-${column.id}`}
                               aria-label={`Переместить колонку «${column.title}» выше`}
                               title="Выше"
-                              disabled={pending || index === 0}
+                              disabled={pending || reorderPending || index === 0}
                               onClick={() => {
                                 moveColumn(column.id, -1);
                               }}
@@ -1148,7 +1241,7 @@ export function ProjectSettingsButton({
                               data-testid={`project-settings-column-down-${column.id}`}
                               aria-label={`Переместить колонку «${column.title}» ниже`}
                               title="Ниже"
-                              disabled={pending || index === columns.length - 1}
+                              disabled={pending || reorderPending || index === columns.length - 1}
                               onClick={() => {
                                 moveColumn(column.id, 1);
                               }}
@@ -1220,7 +1313,8 @@ export function ProjectSettingsButton({
                       <button
                         type="button"
                         data-testid="project-settings-dirty-discard"
-                        onClick={closeNow}
+                        onClick={requestDiscard}
+                        disabled={busy}
                         className={actionButtonClass}
                       >
                         Закрыть без сохранения

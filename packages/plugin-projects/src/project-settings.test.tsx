@@ -60,6 +60,12 @@ function inputOf(input: JsonValue): Record<string, unknown> {
   return (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
 }
 
+function projectIdOf(input: JsonValue): string {
+  const values = inputOf(input);
+
+  return typeof values.id === "string" ? values.id : "";
+}
+
 function projectMutation(project: Project): ProjectMutationOutput {
   return {
     project,
@@ -638,6 +644,438 @@ describe("Настройки доски", () => {
       );
     });
     expect(expectedVersions).toEqual([1, 2]);
+  });
+
+  it("сериализует column.move и не запускает второй reorder до завершения первого", async () => {
+    const project = makeProject("project-1", "Релиз");
+    let columns = [
+      makeColumn("column-a", "A", { position: 0 }),
+      makeColumn("column-b", "B", { position: 1 }),
+      makeColumn("column-c", "C", { position: 2 }),
+    ];
+    let moveCalls = 0;
+    let resolveFirst!: (value: UiOperationResult) => void;
+    const firstMove = new Promise<UiOperationResult>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList(columns));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.move") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+      const id = String(values.id);
+      const position = Number(values.position);
+      const moved = columns.find((column) => column.id === id) as TaskColumn;
+      const rest = columns.filter((column) => column.id !== id);
+
+      rest.splice(position, 0, { ...moved, version: moved.version + 1 });
+      columns = rest.map((column, index) => ({ ...column, position: index }));
+      moveCalls += 1;
+
+      if (moveCalls === 1) {
+        return firstMove;
+      }
+
+      return ok(columnMutation(columns[position] as TaskColumn));
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.click(screen.getByTestId("project-settings-column-down-column-a"));
+    await waitFor(() => {
+      expect(moveCalls).toBe(1);
+    });
+
+    // Второй reorder (другая колонка) заблокирован на время move.
+    fireEvent.click(screen.getByTestId("project-settings-column-down-column-b"));
+    fireEvent.click(screen.getByTestId("project-settings-column-up-column-c"));
+    expect(moveCalls).toBe(1);
+    expect(screen.getByTestId("project-settings-column-down-column-b")).toBeDisabled();
+
+    await act(async () => {
+      resolveFirst(ok(columnMutation(columns[1] as TaskColumn)));
+      await firstMove;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-down-column-b")).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByTestId("project-settings-column-down-column-b"));
+    await waitFor(() => {
+      expect(moveCalls).toBe(2);
+    });
+  });
+
+  it("игнорирует устаревший refresh, пришедший после более свежего", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const renamed = "A переименована";
+    let columns = [
+      makeColumn("column-a", "A", { position: 0 }),
+      makeColumn("column-b", "B", { position: 1 }),
+      makeColumn("column-c", "C", { position: 2 }),
+    ];
+    let listCalls = 0;
+    let resolveRenameRefresh!: (value: UiOperationResult) => void;
+    let resolveMoveRefresh!: (value: UiOperationResult) => void;
+    const renameRefresh = new Promise<UiOperationResult>((resolve) => {
+      resolveRenameRefresh = resolve;
+    });
+    const moveRefresh = new Promise<UiOperationResult>((resolve) => {
+      resolveMoveRefresh = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(columnList(columns));
+        }
+
+        return listCalls === 2 ? renameRefresh : moveRefresh;
+      }
+
+      if (operationId === "kanbaner.tasks.column.update") {
+        const values = inputOf(input);
+        const id = String(values.id);
+
+        columns = columns.map((column) =>
+          column.id === id
+            ? { ...column, title: String(values.title), version: column.version + 1 }
+            : column,
+        );
+
+        return ok(columnMutation(columns[0] as TaskColumn));
+      }
+
+      if (operationId === "kanbaner.tasks.column.move") {
+        const id = String(inputOf(input).id);
+
+        columns = [
+          columns[0] as TaskColumn,
+          columns[2] as TaskColumn,
+          columns[1] as TaskColumn,
+        ].map((column, index) => ({ ...column, position: index }));
+        columns = columns.map((column) =>
+          column.id === id ? { ...column, version: column.version + 1 } : column,
+        );
+
+        return ok(columnMutation(columns[0] as TaskColumn));
+      }
+
+      return ok(null);
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-input-column-a"), {
+      target: { value: renamed },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-save-column-a"));
+
+    await waitFor(() => {
+      expect(listCalls).toBe(2);
+    });
+
+    // Move другой колонки разрешён параллельно с rename и создаёт более
+    // свежий refresh.
+    fireEvent.click(screen.getByTestId("project-settings-column-up-column-c"));
+    await waitFor(() => {
+      expect(listCalls).toBe(3);
+    });
+
+    const freshColumns = columns.map((column) => ({ ...column }));
+
+    await act(async () => {
+      resolveMoveRefresh(ok(columnList(freshColumns)));
+      await moveRefresh;
+    });
+
+    await act(async () => {
+      resolveRenameRefresh(
+        ok(
+          columnList([
+            makeColumn("column-a", "A", { position: 0, version: 1 }),
+            makeColumn("column-b", "B", { position: 1 }),
+            makeColumn("column-c", "C", { position: 2 }),
+          ]),
+        ),
+      );
+      await renameRefresh;
+    });
+
+    const list = screen.getByTestId("project-settings-columns");
+
+    expect(
+      within(list)
+        .getAllByRole("textbox")
+        .map((input) => (input as HTMLInputElement).value),
+    ).toEqual([renamed, "C", "B"]);
+  });
+
+  it("не снимает pending нового сохранения после close → reopen", async () => {
+    const firstProject = makeProject("project-1", "Первый");
+    const secondProject = makeProject("project-2", "Второй");
+    let resolveOld!: (value: UiOperationResult) => void;
+    let resolveNew!: (value: UiOperationResult) => void;
+    const oldSave = new Promise<UiOperationResult>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newSave = new Promise<UiOperationResult>((resolve) => {
+      resolveNew = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({
+          items: [firstProject, secondProject],
+          total: 2,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId === "kanbaner.tasks.project.update") {
+        return projectIdOf(input) === firstProject.id ? oldSave : newSave;
+      }
+
+      return ok(null);
+    };
+
+    const view = render(<ProjectSettingsButton invoke={invoke} project={firstProject} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-title-input"), {
+      target: { value: "Старое сохранение" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-title-save")).toBeDisabled();
+    });
+
+    view.rerender(<ProjectSettingsButton invoke={invoke} project={secondProject} />);
+
+    await openSettings();
+    fireEvent.change(screen.getByTestId("project-settings-title-input"), {
+      target: { value: "Новое сохранение" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-title-save")).toHaveTextContent("Сохранение…");
+    });
+
+    await act(async () => {
+      resolveOld(
+        ok(
+          projectMutation({
+            ...firstProject,
+            title: "Старое сохранение",
+            version: 2,
+          }) as unknown as JsonValue,
+        ),
+      );
+      await oldSave;
+    });
+
+    expect(screen.getByTestId("project-settings-title-save")).toBeDisabled();
+    expect(screen.getByTestId("project-settings-title-save")).toHaveTextContent("Сохранение…");
+
+    await act(async () => {
+      resolveNew(
+        ok(
+          projectMutation({
+            ...secondProject,
+            title: "Новое сохранение",
+            version: 2,
+          }) as unknown as JsonValue,
+        ),
+      );
+      await newSave;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-title-notice")).toHaveTextContent(
+        "Название проекта сохранено",
+      );
+    });
+  });
+
+  it("показывает обычную ошибку project.update и сохраняет ввод", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId === "kanbaner.tasks.project.update") {
+        return {
+          ok: false,
+          error: { code: "INTERNAL", message: "Сервер недоступен", retryable: true },
+        };
+      }
+
+      return ok(null);
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-title-input"), {
+      target: { value: "Новое название" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+
+    await screen.findByTestId("project-settings-title-error");
+
+    expect(screen.getByTestId("project-settings-title-error")).toHaveTextContent(
+      "Сервер недоступен",
+    );
+    expect(screen.getByTestId("project-settings-title-input")).toHaveValue("Новое название");
+    expect(screen.getByTestId("project-settings-title-save")).toBeEnabled();
+  });
+
+  it("после конфликта показывает отдельную ошибку refresh и сохраняет ввод", async () => {
+    const project = makeProject("project-1", "Релиз");
+    let listCalls = 0;
+    let updateCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(projectList(project));
+        }
+
+        return {
+          ok: false,
+          error: { code: "INTERNAL", message: "Список недоступен", retryable: true },
+        };
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId === "kanbaner.tasks.project.update") {
+        updateCalls += 1;
+
+        return {
+          ok: false,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "Версия проекта устарела",
+            retryable: false,
+          },
+        };
+      }
+
+      return ok(null);
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-title-input"), {
+      target: { value: "Новое название" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+
+    await screen.findByTestId("project-settings-title-error");
+
+    expect(screen.getByTestId("project-settings-title-error")).toHaveTextContent(
+      "Не удалось обновить версию проекта",
+    );
+    expect(screen.getByTestId("project-settings-title-error")).not.toHaveTextContent(
+      "Проект уже изменён",
+    );
+    expect(screen.getByTestId("project-settings-title-input")).toHaveValue("Новое название");
+    expect(screen.getByTestId("project-settings-title-save")).toBeEnabled();
+    expect(updateCalls).toBe(1);
+  });
+
+  it("показывает ошибку refresh колонки и не теряет новую версию", async () => {
+    const project = makeProject("project-1", "Релиз");
+    let columns = [makeColumn("column-1", "ToDo")];
+    let listCalls = 0;
+    const expectedVersions: number[] = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(columnList(columns));
+        }
+
+        return {
+          ok: false,
+          error: { code: "INTERNAL", message: "Список колонок недоступен", retryable: true },
+        };
+      }
+
+      if (operationId !== "kanbaner.tasks.column.update") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+
+      expectedVersions.push(Number(values.expectedVersion));
+      columns = columns.map((column) => ({
+        ...column,
+        title: String(values.title),
+        version: column.version + 1,
+      }));
+
+      return ok(columnMutation(columns[0] as TaskColumn));
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-input-column-1"), {
+      target: { value: "Новая" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-save-column-1"));
+
+    await screen.findByTestId("project-settings-column-error-column-1");
+
+    expect(screen.getByTestId("project-settings-column-error-column-1")).toHaveTextContent(
+      "список колонок не обновлён",
+    );
+    expect(screen.getByTestId("project-settings-column-input-column-1")).toHaveValue("Новая");
+
+    fireEvent.change(screen.getByTestId("project-settings-column-input-column-1"), {
+      target: { value: "Ещё новее" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-save-column-1"));
+
+    await waitFor(() => {
+      expect(expectedVersions).toEqual([1, 2]);
+    });
   });
 
   it("меняет порядок кнопками вверх/вниз через column.move и перечитывает список", async () => {

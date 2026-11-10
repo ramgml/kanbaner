@@ -1476,6 +1476,8 @@ export function KanbanView({
     dragCleanupRef.current = null;
 
     const isTouch = event.pointerType === "touch";
+    const pointerId = event.pointerId;
+    const captureTarget = event.currentTarget;
     const startX = event.clientX;
     const startY = event.clientY;
     let active = false;
@@ -1510,6 +1512,15 @@ export function KanbanView({
         }
       };
       document.addEventListener("touchmove", touchMoveBlocker, { passive: false });
+
+      // После long press удерживаем pointer на карточке, даже если палец
+      // сместился за её границы.
+      try {
+        captureTarget.setPointerCapture(pointerId);
+      } catch {
+        // Браузер может уже снять pointer capture; drag продолжает работать
+        // через window listeners.
+      }
     };
 
     if (isTouch) {

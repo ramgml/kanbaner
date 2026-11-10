@@ -407,7 +407,7 @@ async function moveWithMenu(
   target: keyof typeof STATUS_LABELS,
 ): Promise<void> {
   const menu = await openCardActions(page, taskId);
-  const button = menu.getByRole("button", {
+  const button = menu.getByRole("menuitem", {
     name: `Переместить в ${STATUS_LABELS[target]}`,
   });
 
@@ -423,7 +423,7 @@ async function reorderWithMenu(
   label: "Выше" | "Ниже" | "В начало" | "В конец",
 ): Promise<void> {
   const menu = await openCardActions(page, taskId);
-  const button = menu.getByRole("button", { name: label, exact: true });
+  const button = menu.getByRole("menuitem", { name: label, exact: true });
 
   await expect(button).toBeVisible();
   await button.focus();
@@ -1888,7 +1888,7 @@ test.describe("канбан в production shell", () => {
 
       const menu = await openCardActions(page, taskId);
 
-      await menu.getByRole("button", { name: "Переместить в Done 2", exact: true }).click();
+      await menu.getByRole("menuitem", { name: "Переместить в Done 2", exact: true }).click();
       await waitForCardSettled(page, taskId);
       await expect(
         page.locator(`[data-kanban-column-id="${doneId}"]`).getByTestId(`kanban-card-${taskId}`),
@@ -4057,6 +4057,34 @@ test.describe("канбан в production shell", () => {
       await expect(flipped).toHaveCount(0);
     });
 
+    test("открывает меню с клавиатуры и сразу выполняет первое действие", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект клавиатурного меню");
+      const taskTitle = uniqueTitle("Карточка клавиатурного меню");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      const trigger = page.getByTestId(`kanban-menu-${taskId}`);
+
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+      const menu = page.getByTestId(`kanban-card-menu-${taskId}`);
+      const firstAction = menu.getByRole("menuitem").first();
+
+      await expect(firstAction).toBeFocused();
+      await expect(firstAction).toHaveText("Переместить в In Progress");
+
+      await page.keyboard.press("Enter");
+
+      await expectCardInColumn(page, taskId, "in_progress");
+      await expect(page.getByTestId(`kanban-card-menu-${taskId}`)).toHaveCount(0);
+    });
+
     test("держит desktop-колонки 288 px при resize и не растягивает add-column", async ({
       page,
     }) => {
@@ -4556,13 +4584,13 @@ test.describe("канбан в production shell", () => {
       await page.getByTestId(`kanban-menu-${taskId}`).click();
 
       const menu = page.getByTestId(`kanban-card-menu-${taskId}`);
-      const menuButtons = menu.getByRole("button");
-      const buttonCount = await menuButtons.count();
+      const menuItems = menu.getByRole("menuitem");
+      const buttonCount = await menuItems.count();
 
       expect(buttonCount).toBeGreaterThanOrEqual(6);
 
       for (let index = 0; index < buttonCount; index += 1) {
-        const box = await menuButtons.nth(index).boundingBox();
+        const box = await menuItems.nth(index).boundingBox();
 
         expect(box).not.toBeNull();
         expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
@@ -4655,7 +4683,10 @@ test.describe("канбан в production shell", () => {
   test.describe("мобильный touch", () => {
     test.use({ viewport: MOBILE_VIEWPORT, hasTouch: true, isMobile: true });
 
-    test("long press 220 ms перетаскивает карточку без открытия modal", async ({ page }) => {
+    test("long press 220 ms перетаскивает карточку без открытия modal", async ({
+      page,
+      context,
+    }) => {
       const projectTitle = uniqueTitle("Проект touch drag");
       const firstTitle = uniqueTitle("Touch первая");
       const secondTitle = uniqueTitle("Touch вторая");
@@ -4677,7 +4708,7 @@ test.describe("канбан в production shell", () => {
       await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId]);
 
       const sourceBox = await page.getByTestId(`kanban-open-${secondId}`).boundingBox();
-      const targetBox = await card(page, firstId).boundingBox();
+      const targetBox = await column(page, "todo").locator("header").first().boundingBox();
 
       expect(sourceBox).not.toBeNull();
       expect(targetBox).not.toBeNull();
@@ -4689,61 +4720,35 @@ test.describe("канбан в production shell", () => {
       const startX = sourceBox.x + sourceBox.width / 2;
       const startY = sourceBox.y + sourceBox.height / 2;
       const endX = targetBox.x + targetBox.width / 2;
-      const endY = targetBox.y + 4;
+      const endY = targetBox.y + targetBox.height / 2;
 
-      // Синтетический pointer touch проходит тот же long-press путь, что и
-      // настоящий палец; отдельный тест ниже проверяет реальный touch scroll.
-      await page.getByTestId(`kanban-open-${secondId}`).dispatchEvent("pointerdown", {
-        pointerId: 1,
-        pointerType: "touch",
-        isPrimary: true,
-        button: 0,
-        clientX: startX,
-        clientY: startY,
-        bubbles: true,
-      });
+      const cdp = await context.newCDPSession(page);
+      const touch = async (
+        type: "touchStart" | "touchMove" | "touchEnd",
+        x: number,
+        y: number,
+      ): Promise<void> => {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type,
+          touchPoints:
+            type === "touchEnd" ? [] : [{ x, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }],
+        });
+      };
 
+      await touch("touchStart", startX, startY);
       await page.waitForTimeout(260);
 
-      for (let step = 1; step <= 8; step += 1) {
-        await page.evaluate(
-          ({ x, y }) => {
-            window.dispatchEvent(
-              new PointerEvent("pointermove", {
-                pointerId: 1,
-                pointerType: "touch",
-                isPrimary: true,
-                button: 0,
-                clientX: x,
-                clientY: y,
-                bubbles: true,
-                cancelable: true,
-              }),
-            );
-          },
-          {
-            x: startX + ((endX - startX) * step) / 8,
-            y: startY + ((endY - startY) * step) / 8,
-          },
+      for (let step = 1; step <= 10; step += 1) {
+        await touch(
+          "touchMove",
+          startX + ((endX - startX) * step) / 10,
+          startY + ((endY - startY) * step) / 10,
         );
+        await page.waitForTimeout(15);
       }
 
-      await page.evaluate(
-        ({ x, y }) => {
-          window.dispatchEvent(
-            new PointerEvent("pointerup", {
-              pointerId: 1,
-              pointerType: "touch",
-              isPrimary: true,
-              button: 0,
-              clientX: x,
-              clientY: y,
-              bubbles: true,
-            }),
-          );
-        },
-        { x: endX, y: endY },
-      );
+      await touch("touchEnd", endX, endY);
+      await cdp.detach();
 
       await expect.poll(async () => await cardTitles(page, "todo")).toEqual([secondId, firstId]);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
@@ -4821,6 +4826,75 @@ test.describe("канбан в production shell", () => {
       await expect.poll(async () => (await cardTitles(page, "todo"))[0]).toBe(firstId);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
     });
+
+    test("горизонтальный touch swipe по карточке прокручивает доску без drag", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект touch swipe");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: uniqueTitle("Touch swipe карточка"),
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await addColumn(page, "Swipe 1", "open");
+      await addColumn(page, "Swipe 2", "open");
+      await addColumn(page, "Swipe 3", "open");
+
+      const board = page.getByTestId("kanban-columns");
+
+      await board.evaluate((element) => {
+        element.scrollLeft = 0;
+      });
+      await expect.poll(async () => board.evaluate((element) => element.scrollLeft)).toBe(0);
+
+      const cardBox = await card(page, taskId).boundingBox();
+
+      expect(cardBox).not.toBeNull();
+
+      if (cardBox !== null) {
+        const cdp = await context.newCDPSession(page);
+        const startX = cardBox.x + cardBox.width / 2;
+        const y = cardBox.y + cardBox.height / 2;
+
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x: startX, y, radiusX: 4, radiusY: 4, force: 1, id: 1 }],
+        });
+
+        for (let step = 1; step <= 10; step += 1) {
+          await cdp.send("Input.dispatchTouchEvent", {
+            type: "touchMove",
+            touchPoints: [
+              {
+                x: startX - (step * 220) / 10,
+                y,
+                radiusX: 4,
+                radiusY: 4,
+                force: 1,
+                id: 1,
+              },
+            ],
+          });
+          await page.waitForTimeout(15);
+        }
+
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await cdp.detach();
+      }
+
+      await expect
+        .poll(async () => board.evaluate((element) => element.scrollLeft))
+        .toBeGreaterThan(0);
+      await expect(page.getByTestId(`kanban-card-${taskId}`)).toBeVisible();
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+    });
   });
 
   test.describe("десктопный viewport", () => {
@@ -4845,6 +4919,7 @@ test.describe("канбан в production shell", () => {
 
       expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
       await columns.evaluate((element) => {
+        element.style.scrollBehavior = "auto";
         element.scrollLeft = 0;
       });
       await expect.poll(async () => columns.evaluate((element) => element.scrollLeft)).toBe(0);
@@ -4852,6 +4927,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-scroll-fade")).toHaveCount(1);
 
       await columns.evaluate((element) => {
+        element.style.scrollBehavior = "auto";
         element.scrollLeft = element.scrollWidth;
       });
 
@@ -4862,6 +4938,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-scroll-fade")).toHaveCount(0);
 
       await columns.evaluate((element) => {
+        element.style.scrollBehavior = "auto";
         element.scrollLeft = 0;
       });
       await expect(page.getByTestId("kanban-scroll-hint")).toBeVisible();

@@ -394,7 +394,7 @@ function openCardMenu(taskId: string): HTMLElement {
 function clickCardAction(taskId: string, name: string): void {
   const menu = openCardMenu(taskId);
 
-  fireEvent.click(within(menu).getByRole("button", { name }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name }));
 }
 
 beforeEach(() => {

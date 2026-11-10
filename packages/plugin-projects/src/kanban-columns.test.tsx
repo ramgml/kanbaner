@@ -1305,7 +1305,7 @@ describe("управление колонками в KanbanView", () => {
 
     fireEvent.click(screen.getByTestId("kanban-menu-task-a"));
 
-    fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Переместить в In Progress" }));
 
     act(() => {
       updateKanbanQuery({ projectId: "project-b" });
@@ -1404,7 +1404,7 @@ describe("управление колонками в KanbanView", () => {
 
     fireEvent.click(screen.getByTestId("kanban-menu-a"));
 
-    fireEvent.click(screen.getByRole("button", { name: "Переместить в In Progress" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Переместить в In Progress" }));
     view.unmount();
 
     await act(async () => {
