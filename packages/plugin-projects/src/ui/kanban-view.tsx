@@ -802,6 +802,22 @@ export function KanbanView({
     initialColumnKeyRef.current = "";
   }, [effectiveProjectId]);
 
+  // Размонтирование доски инвалидирует все незавершённые операции и снимает
+  // pointer listeners. effectiveProjectIdRef пуст, поэтому захваченный ранее
+  // project/generation больше не пройдёт проверку перед mutation.
+  useEffect(
+    () => () => {
+      projectGenerationRef.current += 1;
+      effectiveProjectIdRef.current = "";
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+      deleteDialogRef.current = null;
+      deleteDialogRequestRef.current += 1;
+      deleteCountRequestRef.current += 1;
+    },
+    [],
+  );
+
   useEffect(() => {
     if (boardColumns.order.length === 0) {
       return;
@@ -1424,6 +1440,8 @@ export function KanbanView({
       return;
     }
 
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
     event.preventDefault();
 
     const startX = event.clientX;
@@ -1593,6 +1611,8 @@ export function KanbanView({
       return;
     }
 
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
     event.preventDefault();
 
     const startX = event.clientX;

@@ -81,7 +81,10 @@
   mutation-командой после awaited read проверяется
   `effectiveProjectIdRef`/`projectGenerationRef`; при смене проекта команда не
   отправляется, optimistic pending отменяется, активный pointer drag
-  снимается.
+  снимается. Размонтирование `KanbanView` отдельным cleanup увеличивает
+  generation, очищает `effectiveProjectIdRef`, снимает pointer listeners и
+  инвалидирует delete dialog/count requests; поздние ответы не выполняют
+  mutation.
 - `+ Добавить колонку` после последней колонки открывает форму с названием и
   типом `open`/`Done`. Домен по умолчанию дописывает колонку в конец; ошибка и
   двойная отправка не теряют ввод. Карточки создаются под заголовком колонки и
