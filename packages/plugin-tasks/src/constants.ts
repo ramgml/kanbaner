@@ -42,6 +42,20 @@ export const LEGACY_COLUMN_TITLES = Object.freeze({
   done: "Done",
 } as const);
 
+/**
+ * Порядок legacy-статусов для ленивой материализации недостающей колонки.
+ *
+ * Используется только при явном legacy `status` в `task.create`/`task.move`:
+ * Backlog вставляется в начало, остальные — перед первой колонкой с более
+ * поздним legacy-статусом.
+ */
+export const LEGACY_STATUS_ORDER = Object.freeze([
+  "backlog",
+  "todo",
+  "in_progress",
+  "done",
+] as const);
+
 /** Контракт команд задач. */
 export const TASKS_COMMANDS_CONTRACT = "kanbaner.tasks.commands.v1" as const;
 

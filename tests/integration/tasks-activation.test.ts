@@ -502,16 +502,59 @@ describe("активация kanbaner.tasks", () => {
     const harness = await startHarness();
     const project = await createProject(harness);
 
-    // Новый проект не содержит Backlog-колонки: legacy-статус backlog
-    // доступен только в проекте, где такая колонка сохранена.
-    const legacyBacklog = await harness.command(TASKS_COMMAND_IDS.taskCreate, {
-      projectId: project.project.id,
-      title: "Backlog",
-      status: "backlog",
-    });
-    expect(legacyBacklog.ok).toBe(false);
-    if (!legacyBacklog.ok) {
-      expect(legacyBacklog.error.code).toBe("VALIDATION_ERROR");
+    // Новый проект стартует с тремя default-колонками. Явный legacy `status`
+    // без подходящей колонки материализует её в той же транзакции и
+    // синхронизирует columnId/status, чтобы текущий fixed UI продолжал
+    // работать до динамического рендера колонок (KAN-024).
+    harness.events.splice(0);
+    const legacyBacklog = expectOk<TaskMutationOutput>(
+      await harness.command(TASKS_COMMAND_IDS.taskCreate, {
+        projectId: project.project.id,
+        title: "Backlog",
+        status: "backlog",
+      }),
+    );
+
+    {
+      expect(legacyBacklog.task).toMatchObject({
+        status: "backlog",
+        columnId: `column-${project.project.id}-legacy-backlog`,
+        position: 0,
+      });
+
+      const columnsAfterBacklog = await listColumns(harness, project.project.id);
+
+      expect(columnsAfterBacklog.items.map((column) => [column.status, column.position])).toEqual([
+        ["backlog", 0],
+        ["todo", 1],
+        ["in_progress", 2],
+        ["done", 3],
+      ]);
+
+      const backlogEvents = harness.events.filter(
+        (event) => event.type === COLUMN_EVENT_TYPES.created,
+      );
+
+      expect(backlogEvents).toHaveLength(1);
+      expect(backlogEvents[0]?.resource).toBe(
+        formatColumnRef(`column-${project.project.id}-legacy-backlog`),
+      );
+      expect(backlogEvents[0]?.payload).toMatchObject({ status: "backlog", position: 0 });
+
+      // Повторная legacy-операция не создаёт второй Backlog.
+      const repeat = expectOk<TaskMutationOutput>(
+        await harness.command(TASKS_COMMAND_IDS.taskCreate, {
+          projectId: project.project.id,
+          title: "Backlog 2",
+          status: "backlog",
+        }),
+      );
+
+      expect(repeat.task.columnId).toBe(`column-${project.project.id}-legacy-backlog`);
+
+      const columnsAfterRepeat = await listColumns(harness, project.project.id);
+
+      expect(columnsAfterRepeat.items).toHaveLength(4);
     }
 
     const todo = await createTask(harness, project.project.id, { title: "Todo" });
@@ -1391,6 +1434,98 @@ describe("активация kanbaner.tasks", () => {
     }
   });
 
+  it("task.list фильтрует по columnId с точной пагинацией и отклоняет чужой проект", async () => {
+    const harness = await startHarness();
+    const project = await createProject(harness, "Список колонок");
+    const other = await createProject(harness, "Другой проект");
+    const todoId = `column-${project.project.id}-todo`;
+    const inProgressId = `column-${project.project.id}-in-progress`;
+
+    const first = await createTask(harness, project.project.id, {
+      title: "Todo A",
+      status: "todo",
+    });
+    const second = await createTask(harness, project.project.id, {
+      title: "Todo B",
+      status: "todo",
+    });
+    const third = await createTask(harness, project.project.id, {
+      title: "Progress A",
+      status: "in_progress",
+    });
+
+    await createTask(harness, other.project.id, { title: "Чужая задача" });
+
+    type ListOutput = {
+      readonly items: readonly {
+        readonly id: string;
+        readonly columnId?: string;
+        readonly status: string;
+      }[];
+      readonly total: number;
+      readonly nextOffset: number | null;
+    };
+
+    const firstPage = expectOk<ListOutput>(
+      await harness.query(TASKS_QUERY_IDS.taskList, {
+        projectId: project.project.id,
+        columnId: todoId,
+        limit: 1,
+        offset: 0,
+      }),
+    );
+
+    expect(firstPage.total).toBe(2);
+    expect(firstPage.nextOffset).toBe(1);
+    expect(firstPage.items.map((task) => task.id)).toEqual([first.task.id]);
+    expect(firstPage.items[0]).toMatchObject({ columnId: todoId, status: "todo" });
+
+    const secondPage = expectOk<ListOutput>(
+      await harness.query(TASKS_QUERY_IDS.taskList, {
+        projectId: project.project.id,
+        columnId: todoId,
+        limit: 1,
+        offset: 1,
+      }),
+    );
+
+    expect(secondPage.total).toBe(2);
+    expect(secondPage.nextOffset).toBeNull();
+    expect(secondPage.items.map((task) => task.id)).toEqual([second.task.id]);
+
+    const progressPage = expectOk<ListOutput>(
+      await harness.query(TASKS_QUERY_IDS.taskList, {
+        projectId: project.project.id,
+        columnId: inProgressId,
+      }),
+    );
+
+    expect(progressPage.total).toBe(1);
+    expect(progressPage.nextOffset).toBeNull();
+    expect(progressPage.items.map((task) => task.id)).toEqual([third.task.id]);
+    expect(progressPage.items[0]).toMatchObject({ columnId: inProgressId, status: "in_progress" });
+
+    const foreignProject = await harness.query(TASKS_QUERY_IDS.taskList, {
+      projectId: other.project.id,
+      columnId: todoId,
+    });
+
+    expect(foreignProject.ok).toBe(false);
+    if (!foreignProject.ok) {
+      expect(foreignProject.error.code).toBe("VALIDATION_ERROR");
+    }
+
+    const missingColumn = await harness.query(TASKS_QUERY_IDS.taskList, {
+      projectId: project.project.id,
+      columnId: "column-missing",
+    });
+
+    expect(missingColumn.ok).toBe(false);
+    if (!missingColumn.ok) {
+      expect(missingColumn.error.code).toBe("NOT_FOUND");
+    }
+  });
+
   it("публикует column-события после коммита и двигает соседей", async () => {
     const harness = await startHarness();
     const project = await createProject(harness, "События колонок");
@@ -1570,14 +1705,14 @@ describe("активация kanbaner.tasks", () => {
       ].sort(),
     );
 
-    const movedTaskEvents = harness.events.filter(
-      (event) => event.type === TASK_EVENT_TYPES.updated,
-    );
+    const movedTaskEvents = harness.events.filter((event) => event.type === TASK_EVENT_TYPES.moved);
     expect(movedTaskEvents).toHaveLength(1);
     expect(movedTaskEvents[0]?.resource).toBe(formatTaskRef(inReview.task.id));
     expect(movedTaskEvents[0]?.payload).toMatchObject({
-      columnId: todoId,
-      status: "todo",
+      fromColumnId: created.column.id,
+      fromStatus: "in_progress",
+      toColumnId: todoId,
+      toStatus: "todo",
       position: 0,
     });
 
@@ -1687,6 +1822,73 @@ describe("активация kanbaner.tasks", () => {
     expect(moved.task.columnId).toBe(`column-${project.project.id}-legacy-in_progress`);
   });
 
+  it("изолирует сбой backfill одного проекта и продолжает остальные", async () => {
+    const dataDirectory = temporaryDirectory();
+    const first = await startHarness({ dataDirectory, removeOnClose: false });
+    const failing = await createProject(first, "A failing");
+    const healthy = await createProject(first, "B healthy");
+
+    // Имитируем базу до KAN-023: ни у одного проекта нет колонок.
+    await first.provider.withTransaction(async (transaction) => {
+      for (const projectId of [failing.project.id, healthy.project.id]) {
+        const columns = await transaction.documents.query({
+          pluginId: PLUGIN_ID,
+          collection: COLUMN_COLLECTION,
+          indexedFields: { projectId },
+          limit: 100,
+          offset: 0,
+        });
+
+        for (const column of columns) {
+          await transaction.documents.delete(PLUGIN_ID, COLUMN_COLLECTION, column.id, {
+            expectedVersion: column.version,
+          });
+        }
+      }
+    });
+
+    await first.close(false);
+
+    const second = await startHarness({
+      dataDirectory,
+      removeOnClose: false,
+      decorateProvider: (provider) => failColumnWritesFor(provider, failing.project.id),
+    });
+
+    const failedLog = second.logs.find((log) => log.message === "tasks.column_backfill_failed");
+
+    expect(failedLog).toMatchObject({
+      level: "warn",
+      details: { projectId: failing.project.id },
+    });
+
+    const failingColumns = await second.provider.documents.query({
+      pluginId: PLUGIN_ID,
+      collection: COLUMN_COLLECTION,
+      indexedFields: { projectId: failing.project.id },
+      limit: 100,
+      offset: 0,
+    });
+    expect(failingColumns).toEqual([]);
+
+    const healthyColumns = await second.provider.documents.query({
+      pluginId: PLUGIN_ID,
+      collection: COLUMN_COLLECTION,
+      indexedFields: { projectId: healthy.project.id },
+      limit: 100,
+      offset: 0,
+    });
+    expect(healthyColumns).toHaveLength(4);
+
+    const healthyPage = await listColumns(second, healthy.project.id);
+    expect(healthyPage.items.map((column) => column.status)).toEqual([
+      "backlog",
+      "todo",
+      "in_progress",
+      "done",
+    ]);
+  });
+
   it("каскадно удаляет колонки вместе с проектом и публикует их в событии", async () => {
     const harness = await startHarness();
     const project = await createProject(harness, "Каскад");
@@ -1720,6 +1922,33 @@ describe("активация kanbaner.tasks", () => {
         ),
       ),
     );
+
+    const columnDeletedEvents = harness.events.filter(
+      (event) => event.type === COLUMN_EVENT_TYPES.deleted,
+    );
+
+    expect(columnDeletedEvents).toHaveLength(columns.items.length);
+    expect(columnDeletedEvents.map((event) => event.resource).sort()).toEqual(
+      columns.items.map((column) => formatColumnRef(column.id)).sort(),
+    );
+    for (const event of columnDeletedEvents) {
+      expect(event.payload).toMatchObject({
+        projectId: project.project.id,
+        version: 1,
+        eventVersion: 2,
+      });
+    }
+
+    // ResourceRef каждой удалённой колонки перестаёт разрешаться, а событие
+    // даёт подписчику идентификатор для cleanup универсальных ссылок.
+    for (const column of columns.items) {
+      const resolution = await harness.composition.resources.resolve(formatColumnRef(column.id));
+
+      expect(resolution.ok).toBe(false);
+      if (!resolution.ok) {
+        expect(resolution.error.code).toBe("NOT_FOUND");
+      }
+    }
 
     const missing = await harness.query(TASKS_QUERY_IDS.columnList, {
       projectId: project.project.id,
@@ -1820,6 +2049,50 @@ interface ReindexGate {
   readonly entered: Promise<void>;
   readonly decorate: (provider: StorageProvider) => StorageProvider;
   release(): void;
+}
+
+/**
+ * Провайдер, который падает на записи документа колонки указанного проекта.
+ *
+ * Нужен, чтобы проверить изоляцию ошибок per-project backfill: сбой одного
+ * проекта не отменяет материализацию остальных.
+ */
+function failColumnWritesFor(provider: StorageProvider, projectId: string): StorageProvider {
+  return new Proxy(provider, {
+    get(target, property, receiver) {
+      if (property === "withTransaction") {
+        return async (callback: Parameters<StorageProvider["withTransaction"]>[0]) =>
+          target.withTransaction(async (transaction) =>
+            callback({
+              ...transaction,
+              documents: new Proxy(transaction.documents, {
+                get(documents, documentsProperty, documentsReceiver) {
+                  if (documentsProperty === "put") {
+                    return async (
+                      input: Parameters<typeof transaction.documents.put>[0],
+                    ): Promise<unknown> => {
+                      if (input.collection === COLUMN_COLLECTION && input.id.includes(projectId)) {
+                        throw new Error("simulated column backfill failure");
+                      }
+
+                      return transaction.documents.put(input);
+                    };
+                  }
+
+                  const value = Reflect.get(documents, documentsProperty, documentsReceiver);
+
+                  return typeof value === "function" ? value.bind(documents) : value;
+                },
+              }),
+            }),
+          );
+      }
+
+      const value = Reflect.get(target, property, receiver);
+
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 /**

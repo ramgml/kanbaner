@@ -38,6 +38,7 @@ import {
   upsertTaskSearchDocuments,
 } from "./activation/search-index.ts";
 import {
+  createdColumns,
   shiftedColumns,
   shiftedNeighbors,
   snapshotProjectColumns,
@@ -347,8 +348,8 @@ function columnMovedEvent(column: TaskColumn, fromPosition: number, eventId: str
 
 function columnDeletedEvent(
   descriptor: DeletedColumnDescriptor,
-  targetColumnId: string,
-  movedTasks: readonly Task[],
+  targetColumnId?: string,
+  movedTaskIds?: readonly string[],
 ) {
   return domainEvent({
     type: COLUMN_EVENT_TYPES.deleted,
@@ -359,8 +360,8 @@ function columnDeletedEvent(
       projectId: descriptor.projectId,
       version: descriptor.version,
       eventVersion: descriptor.eventVersion,
-      targetColumnId,
-      movedTaskIds: movedTasks.map((task) => task.id),
+      ...(targetColumnId === undefined ? {} : { targetColumnId }),
+      ...(movedTaskIds === undefined ? {} : { movedTaskIds }),
     }),
   });
 }
@@ -654,6 +655,7 @@ const projectDelete: CommandFn = async (input, executionContext, operationId, de
           }),
         }),
         ...deletion.deletedTasks.map((descriptor) => taskDeletedEvent(descriptor, [descriptor])),
+        ...deletion.deletedColumns.map((descriptor) => columnDeletedEvent(descriptor)),
       ];
 
       return {
@@ -816,6 +818,10 @@ const columnDelete: CommandFn = async (input, executionContext, operationId, dep
     normalized,
     async (transaction, now) => {
       const before = await transaction.getColumn(normalized.id);
+      const beforeTasks =
+        before === null
+          ? new Map<string, Task>()
+          : await snapshotProjectTasks(transaction, before.projectId);
       const deletion = await transaction.deleteColumn({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
@@ -839,10 +845,27 @@ const columnDelete: CommandFn = async (input, executionContext, operationId, dep
         eventVersion: deletion.eventVersion,
       };
       const eventId = newEventId();
+      const movedEvents = deletion.movedTasks.map((task) => {
+        const previous = beforeTasks.get(task.id);
+
+        if (previous === undefined || previous.columnId === task.columnId) {
+          return neighborUpdatedEvent(task);
+        }
+
+        return taskMovedEvent(
+          task,
+          { status: previous.status, columnId: previous.columnId },
+          newEventId(),
+        );
+      });
       const events = [
-        columnDeletedEvent(descriptor, deletion.targetColumnId, deletion.movedTasks),
+        columnDeletedEvent(
+          descriptor,
+          deletion.targetColumnId,
+          deletion.movedTasks.map((task) => task.id),
+        ),
         ...deletion.updatedColumns.map((column) => columnUpdatedEvent(column, ["position"])),
-        ...deletion.movedTasks.map((task) => neighborUpdatedEvent(task)),
+        ...movedEvents,
       ];
 
       return {
@@ -891,6 +914,7 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
     normalized,
     async (transaction, now) => {
       const before = await snapshotProjectTasks(transaction, normalized.projectId);
+      const beforeColumns = await snapshotProjectColumns(transaction, normalized.projectId);
       const task = await transaction.createTask({
         id: dependencies.idFactory.nextTaskId(),
         projectId: normalized.projectId,
@@ -907,13 +931,19 @@ const taskCreate: CommandFn = async (input, executionContext, operationId, depen
         ...(normalized.position === undefined ? {} : { position: normalized.position }),
       });
       const after = await snapshotProjectTasks(transaction, normalized.projectId);
+      const afterColumns = await snapshotProjectColumns(transaction, normalized.projectId);
       const neighbors = shiftedNeighbors(before, after, task.id);
+      const materialized = createdColumns(beforeColumns, afterColumns);
       const eventId = newEventId();
 
       return {
         result: { task, resource: formatTaskRef(task.id), eventId },
         effects: effects({
-          events: [taskCreatedEvent(task, eventId), ...neighbors.map(neighborUpdatedEvent)],
+          events: [
+            ...materialized.map((column) => columnCreatedEvent(column, newEventId())),
+            taskCreatedEvent(task, eventId),
+            ...neighbors.map(neighborUpdatedEvent),
+          ],
           searchUpserts: [task, ...neighbors],
         }),
       };
@@ -1004,6 +1034,7 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
       }
 
       const before = await snapshotProjectTasks(transaction, current.projectId);
+      const beforeColumns = await snapshotProjectColumns(transaction, current.projectId);
       const task = await transaction.moveTask({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
@@ -1013,13 +1044,16 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
         updatedAt: now,
       });
       const after = await snapshotProjectTasks(transaction, current.projectId);
+      const afterColumns = await snapshotProjectColumns(transaction, current.projectId);
       const neighbors = shiftedNeighbors(before, after, task.id);
+      const materialized = createdColumns(beforeColumns, afterColumns);
       const eventId = newEventId();
 
       return {
         result: { task, resource: formatTaskRef(task.id), eventId },
         effects: effects({
           events: [
+            ...materialized.map((column) => columnCreatedEvent(column, newEventId())),
             taskMovedEvent(task, { status: current.status, columnId: current.columnId }, eventId),
             ...neighbors.map(neighborUpdatedEvent),
           ],
@@ -1198,6 +1232,7 @@ const taskList: QueryFn = async (input, dependencies) => {
 
   return dependencies.store.listTasks({
     ...(data.projectId === undefined ? {} : { projectId: data.projectId }),
+    ...(data.columnId === undefined ? {} : { columnId: data.columnId }),
     ...(data.status === undefined ? {} : { status: data.status }),
     ...(data.priority === undefined ? {} : { priority: data.priority }),
     ...(data.tag === undefined ? {} : { tag: data.tag }),
@@ -1382,13 +1417,39 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     },
   });
 
-  // Материализация legacy-колонок и полная переиндексация best-effort: не
-  // блокируют активацию, идемпотентны и сериализуются с мутациями через
-  // очередь этой активации. Ошибка не влияет на регистрацию операций.
-  void serialize(async () => {
-    await store.backfillLegacyColumns();
-    await reindexAllTasks(store, context.search, logger);
-  }).catch((error: unknown) => {
+  // Материализация legacy-колонок awaited до завершения активации: после неё
+  // `column.list`/`task.list` не должны видеть пустой набор колонок, а
+  // `columnId` существующего проекта не должен давать NOT_FOUND. Каждый проект
+  // обрабатывается в отдельной транзакции; сбой одного проекта логируется и не
+  // отменяет остальные.
+  await serialize(async () => {
+    let offset = 0;
+
+    for (;;) {
+      const page = await store.listProjects({ limit: 200, offset });
+
+      for (const project of page.items) {
+        try {
+          await store.backfillLegacyProject(project.id);
+        } catch (error) {
+          logger.warn("tasks.column_backfill_failed", {
+            projectId: project.id,
+            errorName: error instanceof Error ? error.name : "UnknownError",
+          });
+        }
+      }
+
+      if (page.nextOffset === null) {
+        return;
+      }
+
+      offset = page.nextOffset;
+    }
+  });
+
+  // Переиндексация остаётся независимой best-effort: её ошибка не влияет ни
+  // на активацию, ни на уже выполненный backfill.
+  void serialize(() => reindexAllTasks(store, context.search, logger)).catch((error: unknown) => {
     logger.warn("tasks.search_reindex_failed", {
       errorName: error instanceof Error ? error.name : "UnknownError",
     });

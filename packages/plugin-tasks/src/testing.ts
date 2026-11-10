@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import type { UtcTimestamp } from "@kanbaner/plugin-sdk";
+import type { JsonValue, UtcTimestamp } from "@kanbaner/plugin-sdk";
 
 import { COLUMN_COLLECTION, PLUGIN_ID, PROJECT_COLLECTION, TASK_COLLECTION } from "./constants.ts";
 import {
@@ -2186,6 +2186,106 @@ export function createTasksStoreConformanceSuite(
       },
     },
     {
+      name: "column: delete добавляет задачи после max(position), а не count, без дублей",
+      async run() {
+        await withStore(async (store) => {
+          const context = createContext();
+          const project = await createProject(store, context);
+          const todoId = `column-${project.id}-todo`;
+          const inProgressId = `column-${project.id}-in-progress`;
+          const first = await createTask(store, context, {
+            id: "task-sparse-first",
+            projectId: project.id,
+            columnId: inProgressId,
+            title: "First",
+          });
+          const second = await createTask(store, context, {
+            id: "task-sparse-second",
+            projectId: project.id,
+            columnId: inProgressId,
+            title: "Second",
+            createdAtOffset: 1,
+          });
+          const source = await createTask(store, context, {
+            id: "task-sparse-source",
+            projectId: project.id,
+            title: "Source",
+            createdAtOffset: 2,
+          });
+
+          // Store не требует непрерывности, поэтому разреженные позиции
+          // 5 и 10 допустимы. Меняем документы напрямую, как это могло
+          // возникнуть после прошлых операций.
+          await store.withTransaction(async (transaction) => {
+            for (const [task, position] of [
+              [first, 5],
+              [second, 10],
+            ] as const) {
+              const document = await transaction.documents.get(PLUGIN_ID, TASK_COLLECTION, task.id);
+
+              assert.notEqual(document, null);
+
+              if (document === null) {
+                continue;
+              }
+
+              await transaction.documents.put({
+                pluginId: PLUGIN_ID,
+                collection: TASK_COLLECTION,
+                id: task.id,
+                data: {
+                  ...(document.data as Record<string, JsonValue>),
+                  position,
+                  version: task.version + 1,
+                },
+                indexedFields: {
+                  projectId: project.id,
+                  columnId: task.columnId as JsonValue,
+                  status: task.status as JsonValue,
+                  priority: task.priority as JsonValue,
+                  parentTaskId: task.parentTaskId as JsonValue,
+                },
+                expectedVersion: document.version,
+              });
+            }
+          });
+
+          const deletion = await store.deleteColumn({
+            id: todoId,
+            expectedVersion: 1,
+            targetColumnId: inProgressId,
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(deletion.deleted, true);
+
+          if (!deletion.deleted) {
+            assert.fail("deleteColumn должен вернуть deleted=true");
+          }
+
+          assert.equal(deletion.movedTasks.length, 1);
+
+          const moved = deletion.movedTasks[0] as Task;
+
+          assert.equal(moved.id, source.id);
+          assert.equal(moved.columnId, inProgressId);
+          assert.equal(moved.position, 11);
+
+          const scope = await listColumnScope(store, project.id, inProgressId);
+
+          assert.deepEqual(
+            scope.map((task) => [task.id, task.position]),
+            [
+              [first.id, 5],
+              [second.id, 10],
+              [source.id, 11],
+            ],
+          );
+          assert.equal(new Set(scope.map((task) => task.position)).size, scope.length);
+        });
+      },
+    },
+    {
       name: "column: delete отклоняет last/self/чужой target",
       async run() {
         await withStore(async (store) => {
@@ -2219,20 +2319,11 @@ export function createTasksStoreConformanceSuite(
             "target из другого проекта",
           );
 
-          const deletedDone = await store.deleteColumn({
-            id: doneId,
-            expectedVersion: 1,
-            targetColumnId: todoId,
-            updatedAt: context.at(1),
-          });
-
-          assert.equal(deletedDone.deleted, true);
-
           const deletedProgress = await store.deleteColumn({
             id: inProgressId,
             expectedVersion: 1,
             targetColumnId: todoId,
-            updatedAt: context.at(2),
+            updatedAt: context.at(1),
           });
 
           assert.equal(deletedProgress.deleted, true);
@@ -2241,11 +2332,11 @@ export function createTasksStoreConformanceSuite(
             store.deleteColumn({
               id: todoId,
               expectedVersion: 1,
-              targetColumnId: "column-missing",
-              updatedAt: context.at(3),
+              targetColumnId: doneId,
+              updatedAt: context.at(2),
             }),
-            "COLUMN_LAST",
-            "удаление последней колонки",
+            "COLUMN_LAST_OPEN",
+            "удаление последней открытой колонки",
           );
 
           const remaining = await store.listColumns({
@@ -2256,7 +2347,51 @@ export function createTasksStoreConformanceSuite(
 
           assert.deepEqual(
             remaining.items.map((column) => column.id),
-            [todoId],
+            [todoId, doneId],
+          );
+
+          // Отдельный проект: нельзя удалить и последнюю Done-колонку, даже
+          // если открытые колонки ещё остаются.
+          const doneProject = await createProject(store, context, { title: "Done only" });
+          const doneProjectTodo = `column-${doneProject.id}-todo`;
+          const doneProjectDone = `column-${doneProject.id}-done`;
+
+          const extraDone = await store.createColumn({
+            id: "column-extra-done-last",
+            projectId: doneProject.id,
+            title: "Second Done",
+            type: "done",
+            createdAt: context.at(4),
+            expectedVersion: 0,
+          });
+
+          await store.deleteColumn({
+            id: doneProjectDone,
+            expectedVersion: 1,
+            targetColumnId: doneProjectTodo,
+            updatedAt: context.at(5),
+          });
+
+          await rejectsCode(
+            store.deleteColumn({
+              id: extraDone.id,
+              expectedVersion: 2,
+              targetColumnId: doneProjectTodo,
+              updatedAt: context.at(6),
+            }),
+            "COLUMN_LAST_DONE",
+            "удаление последней Done-колонки",
+          );
+
+          const doneProjectColumns = await store.listColumns({
+            projectId: doneProject.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            doneProjectColumns.items.map((column) => column.id),
+            [doneProjectTodo, `column-${doneProject.id}-in-progress`, extraDone.id],
           );
         });
       },
@@ -2360,23 +2495,82 @@ export function createTasksStoreConformanceSuite(
           assert.equal(movedByStatus.status, "todo");
           assert.equal(movedByStatus.position, 0);
 
-          await rejectsCode(
-            store.createTask({
-              id: "task-backlog-new-project",
-              projectId: project.id,
-              parentTaskId: null,
-              title: "Backlog",
-              descriptionMarkdown: "",
-              status: "backlog",
-              priority: "medium",
-              dueAt: null,
-              tags: [],
-              createdAt: context.at(4),
-              expectedVersion: 0,
-            }),
-            "COLUMN_NOT_FOUND",
-            "новый проект не имеет Backlog-колонки",
+          const backlog = await store.createTask({
+            id: "task-backlog-new-project",
+            projectId: project.id,
+            parentTaskId: null,
+            title: "Backlog",
+            descriptionMarkdown: "",
+            status: "backlog",
+            priority: "medium",
+            dueAt: null,
+            tags: [],
+            createdAt: context.at(4),
+            expectedVersion: 0,
+          });
+          const backlogColumnId = `column-${project.id}-legacy-backlog`;
+
+          assert.equal(backlog.columnId, backlogColumnId);
+          assert.equal(backlog.status, "backlog");
+          assert.equal(backlog.position, 0);
+
+          // Default-набор не потерян, Backlog встал в начало, остальные
+          // legacy-позиции сдвинулись.
+          const afterBacklog = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.deepEqual(
+            afterBacklog.items.map((column) => [column.id, column.position]),
+            [
+              [backlogColumnId, 0],
+              [todoId, 1],
+              [inProgressId, 2],
+              [doneId, 3],
+              ["column-extra-done", 4],
+            ],
           );
+
+          // Повторная legacy-операция использует уже созданную колонку.
+          const repeatedBacklog = await store.createTask({
+            id: "task-backlog-new-project-repeat",
+            projectId: project.id,
+            parentTaskId: null,
+            title: "Backlog 2",
+            descriptionMarkdown: "",
+            status: "backlog",
+            priority: "medium",
+            dueAt: null,
+            tags: [],
+            createdAt: context.at(5),
+            expectedVersion: 0,
+          });
+
+          assert.equal(repeatedBacklog.columnId, backlogColumnId);
+          assert.equal(repeatedBacklog.position, 1);
+
+          const afterRepeat = await store.listColumns({
+            projectId: project.id,
+            limit: 200,
+            offset: 0,
+          });
+
+          assert.equal(afterRepeat.items.length, 5);
+
+          // Legacy move по отсутствующему статусу также материализует колонку.
+          const movedToBacklog = await store.moveTask({
+            id: plain.id,
+            expectedVersion: completed.version,
+            status: "backlog",
+            position: 2,
+            updatedAt: context.at(6),
+          });
+
+          assert.equal(movedToBacklog.columnId, backlogColumnId);
+          assert.equal(movedToBacklog.status, "backlog");
+          assert.equal(movedToBacklog.position, 2);
         });
       },
     },

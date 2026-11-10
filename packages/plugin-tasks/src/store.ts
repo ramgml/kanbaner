@@ -377,6 +377,14 @@ export interface TasksStore {
   updateColumn(input: UpdateColumnStoreInput): Promise<TaskColumn>;
   moveColumn(input: MoveColumnStoreInput): Promise<TaskColumn>;
   deleteColumn(input: DeleteColumnStoreInput): Promise<ColumnDeleteStoreResult>;
+  /**
+   * Материализует legacy-колонки и `columnId` одного проекта.
+   *
+   * Root-метод открывает собственную транзакцию. Activation вызывает его
+   * отдельно для каждого проекта, чтобы сбой одного проекта не откатывал
+   * остальные.
+   */
+  backfillLegacyProject(projectId: string): Promise<LegacyColumnBackfillResult>;
 
   /**
    * Материализует исходные колонки и `task.columnId` для legacy-проектов без

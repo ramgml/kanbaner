@@ -33,7 +33,10 @@ export const TASKS_VALIDATION_CODES = [
   "COLUMN_STATUS_MISMATCH",
   "COLUMN_TARGET_SELF",
   "COLUMN_TARGET_OTHER_PROJECT",
+  /** Устаревший общий код; новые вызовы используют `COLUMN_LAST_OPEN`/`COLUMN_LAST_DONE`. */
   "COLUMN_LAST",
+  "COLUMN_LAST_OPEN",
+  "COLUMN_LAST_DONE",
   "DONE_COLUMN_NOT_FOUND",
 ] as const;
 
@@ -415,12 +418,22 @@ export function validateCompletionInvariant(
 }
 
 /**
+ * Возвращает legacy-ключ области позиции `(projectId, status)`.
+ *
+ * Сохранён для совместимости экспортированного API. Новые операции с
+ * пользовательскими колонками используют `taskColumnPositionScopeKey`.
+ */
+export function taskPositionScopeKey(projectId: string, status: TaskStatus): string {
+  return `${projectId}:${status}`;
+}
+
+/**
  * Возвращает ключ области уникальности позиции `(projectId, columnId)`.
  *
  * `parentTaskId` намеренно не входит в область: подзадачи и корневые задачи
  * одной колонки упорядочиваются вместе. Непрерывность `0…N-1` не требуется.
  */
-export function taskPositionScopeKey(projectId: string, columnId: string): string {
+export function taskColumnPositionScopeKey(projectId: string, columnId: string): string {
   return `${projectId}:${columnId}`;
 }
 

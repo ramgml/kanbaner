@@ -359,7 +359,11 @@ completedAt
 - `parentTaskId` допускает только один уровень вложенности;
 - `position` задачи уникальна и определяет порядок в области
   `(projectId, columnId)`; `parentTaskId` на область не влияет, непрерывность
-  `0…N-1` не требуется;
+  `0…N-1` не требуется; append использует `max(position) + 1`, поэтому
+  разреженные позиции не приводят к дублям;
+- `task.list` фильтрует по `projectId`, `columnId`, `status`, `priority`, `tag`,
+  `parentTaskId`, `text`, `dueBefore`, `dueAfter`; `columnId` вместе с чужим
+  `projectId` отвергается как `COLUMN_TARGET_OTHER_PROJECT`;
 - `position` колонки уникальна и определяет порядок в области `projectId`;
 - теги нормализуются и ограничены по количеству и длине; входные команды
   принимают сырые теги, а сохранённая задача содержит уникальные
@@ -387,6 +391,15 @@ completedAt
   `column-<projectId>-todo|in-progress|done`;
 - проект без документов колонок считается legacy: при активации и перед
   мутацией материализуются `Backlog`, `To do`, `In progress`, `Done`;
+- backfill выполняется отдельной транзакцией на проект и awaited до завершения
+  активации; сбой одного проекта логируется как `tasks.column_backfill_failed`
+  и не отменяет остальные, а `column.list`/`task.list` дополнительно
+  гарантируют материализацию перед чтением;
+- явный legacy `status` в `task.create`/`task.move`, для которого в проекте
+  нет колонки, лениво материализует недостающую колонку в той же транзакции:
+  Backlog встаёт в позицию 0, остальные — по порядку legacy-статусов; после
+  коммита публикуется `column.created`, а `task.columnId`/`status`
+  синхронизируются. Новый проект при этом сохраняет три default-колонки;
 - технический backfill проставляет `task.columnId` без изменения публичных
   `task.version` и `task.updatedAt`; ревизия документа при этом может вырасти.
   Инвариант `document.version === task.version` ослаблен до
@@ -397,16 +410,23 @@ completedAt
   требуют `expectedVersion` (создание — `0`) и выполняются в транзакции
   плагина; reorder повышает версии и `updatedAt` фактически сдвинутых соседей;
 - `column.delete` разрушительная: требует `confirm: true` и `targetColumnId`;
-  запрещены удаление последней колонки, target, совпадающий с удаляемой, и
-  target другого проекта; задачи переносятся в target атомарно с обновлением
-  `columnId`, `status`, `position`, `completedAt` и версий;
+  запрещены удаление последней открытой колонки (`COLUMN_LAST_OPEN`) и
+  последней Done-колонки (`COLUMN_LAST_DONE`), target, совпадающий с
+  удаляемой, и target другого проекта; инвариант — в проекте всегда остаётся
+  хотя бы одна открытая и хотя бы одна Done-колонка, поэтому `task.create` и
+  `task.complete` не попадают в невозможное состояние; задачи переносятся в
+  target атомарно с обновлением `columnId`, `status`, `position`,
+  `completedAt` и версий, append идёт после `max(position) + 1`, а не после
+  `count`;
 - `task.complete` переводит задачу в первую Done-колонку проекта; отсутствие
   Done-колонки — доменная ошибка;
 - `project.delete` каскадно удаляет задачи и колонки и возвращает дескрипторы
   `deletedColumns` вместе с `deletedTasks`; delete-событие проекта включает
-  `deletedColumns` в payload;
-- activation публикует `column.created|updated|moved|deleted` после коммита и
-  `task.updated` для сдвинутых или перенесённых задач; доставка best-effort.
+  `deletedColumns` в payload и публикует отдельный `column.deleted` для каждой
+  колонки, чтобы подписчики очистили универсальные ссылки;
+- activation публикует `column.created|updated|moved|deleted` после коммита,
+  `task.moved` для задач, сменивших колонку при `column.delete`, и
+  `task.updated` для фактически сдвинутых соседей; доставка best-effort.
 
 ### 8.6. Плагин заметок
 

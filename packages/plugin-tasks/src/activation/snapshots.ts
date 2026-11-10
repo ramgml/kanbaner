@@ -117,6 +117,27 @@ export function shiftedColumns(
   return changed;
 }
 
+/**
+ * Колонки, которых не было в первом снимке.
+ *
+ * Используется, чтобы опубликовать `column.created`, когда Store лениво
+ * материализовал legacy-колонку внутри `task.create`/`task.move`.
+ */
+export function createdColumns(
+  before: ReadonlyMap<string, TaskColumn>,
+  after: ReadonlyMap<string, TaskColumn>,
+): readonly TaskColumn[] {
+  const created: TaskColumn[] = [];
+
+  for (const [id, column] of after) {
+    if (!before.has(id)) {
+      created.push(column);
+    }
+  }
+
+  return created;
+}
+
 /** Снимок задач проекта по ID. */
 export async function snapshotProjectTasks(
   store: Pick<TasksStore, "listTasks">,

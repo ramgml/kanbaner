@@ -68,8 +68,10 @@ KANBANER_PLUGIN_DIRS=packages pnpm dev
 - регистрирует все команды и запросы KAN-010 с `exposure.ui: true`,
   `http: false`, `mcp: false`;
 - регистрирует типы ресурсов `project`, `task-column` и `task` с `resolve`;
-- материализует legacy-колонки и `task.columnId` для проектов без колонок;
-- запускает best-effort полную переиндексацию задач;
+- материализует legacy-колонки и `task.columnId` для проектов без колонок:
+  отдельной транзакцией на проект, awaited до завершения активации; сбой
+  одного проекта даёт `tasks.column_backfill_failed` и не отменяет остальные;
+- запускает best-effort полную переиндексацию задач независимо от backfill;
 - создаёт собственную последовательную очередь, которая сериализует backfill,
   доменные транзакции, поисковые эффекты и переиндексацию, чтобы reindex не
   пересёкся с create/update/delete.
@@ -184,15 +186,28 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   `To do`, `In progress`, `Done` с ID
   `column-<projectId>-legacy-<status>`; `task.columnId` проставляется
   техническим backfill без изменения публичных `version`/`updatedAt`.
+  Backfill идёт отдельной транзакцией на проект и awaited до завершения
+  активации; сбой одного проекта логируется как
+  `tasks.column_backfill_failed` и не отменяет остальные. `column.list` и
+  `task.list` дополнительно материализуют колонки проекта перед чтением.
+- Явный legacy `status` в `task.create`/`task.move`, для которого в проекте нет
+  колонки, лениво создаёт её в той же транзакции: Backlog встаёт в позицию 0,
+  остальные — по порядку legacy-статусов. После коммита публикуется
+  `column.created`, а `columnId`/`status` задачи синхронизируются. Три
+  default-колонки нового проекта при этом сохраняются.
 - `column.create` вставляет колонку и повышает версии сдвинутых соседей;
   `position === undefined` означает append. `column.update` меняет только
   заголовок. `column.move` выполняет транзакционный reorder.
 - `column.delete` требует `confirm: true`, `expectedVersion` и
-  `targetColumnId`. Запрещены удаление последней колонки (`COLUMN_LAST`),
-  target, равный удаляемой (`COLUMN_TARGET_SELF`), и target другого проекта
-  (`COLUMN_TARGET_OTHER_PROJECT`). Задачи переносятся в target в той же
+  `targetColumnId`. Запрещены удаление последней открытой колонки
+  (`COLUMN_LAST_OPEN`), последней Done-колонки (`COLUMN_LAST_DONE`), target,
+  равный удаляемой (`COLUMN_TARGET_SELF`), и target другого проекта
+  (`COLUMN_TARGET_OTHER_PROJECT`). В проекте всегда остаётся минимум одна
+  открытая и одна Done-колонка. Задачи переносятся в target в той же
   транзакции с обновлением `columnId`, `status`, `position`, `completedAt` и
-  версий; результат содержит `movedTasks` и сдвинутые `updatedColumns`.
+  версий; позиция — `max(position) + 1` по target, а не `count`, поэтому
+  разреженные позиции не дают дублей. Результат содержит `movedTasks` и
+  сдвинутые `updatedColumns`.
 - `task.complete` выбирает первую Done-колонку по `position`; если её нет —
   `DONE_COLUMN_NOT_FOUND`.
 - `task.create`/`task.move` принимают `columnId` и/или legacy `status`.
@@ -301,9 +316,13 @@ kanbaner.tasks.task.created|updated|moved|completed|deleted
 Payload содержит минимальные идентификаторы и версию; полное состояние
 получается запросом. События `column.*` содержат `columnId`, `projectId`,
 `version`; `column.moved` добавляет `fromPosition`/`toPosition`,
-`column.updated` — `changed`, `column.deleted` — `targetColumnId` и
-`movedTaskIds`. Перенесённые и сдвинутые задачи получают `task.updated` с
-`columnId`/`status`/`position`. События `project.deleted` и `task.deleted`
+`column.updated` — `changed`. `column.deleted` для `column.delete` содержит
+`targetColumnId` и `movedTaskIds`; при каскадном `project.delete` эти поля
+отсутствуют, а на каждую удалённую колонку публикуется отдельный
+`column.deleted`, чтобы подписчики очистили универсальные ссылки.
+Перенесённые при `column.delete` задачи получают `task.moved` с
+`fromColumnId`/`toColumnId` и `fromStatus`/`toStatus`; сдвинутые соседи —
+`task.updated` с `position`. События `project.deleted` и `task.deleted`
 несут `version` последней сохранённой корневой сущности, `eventVersion` и
 `deletedTasks` с дескрипторами `{ id, projectId, resourceRef, version,
 eventVersion }`; `project.deleted` дополнительно содержит `deletedColumns`.
@@ -317,7 +336,7 @@ update(v3) → delete event(v4). У каждой задачи и колонки 
 `task.updated` со своей новой `position` и `resourceVersion`; основная задача
 операции в этот список не попадает. Для `column.create/move/delete` так же
 сравниваются снимки колонок: сдвинутые колонки получают `column.updated`, а
-задачи, перенесённые при `column.delete`, — `task.updated`. Для `task.delete`
+задачи, перенесённые при `column.delete`, — `task.moved`; для `task.delete`
 события удалённых задач публикуются отдельно от `task.updated` оставшихся
 соседей.
 
@@ -426,12 +445,13 @@ const store = createTasksStore({
 `createTasksStoreConformanceSuite({ createStore })` экспортируется из
 `@kanbaner/plugin-tasks/testing` и не импортирует backend. Драйвер
 `tests/integration/tasks-store-conformance.test.ts` запускает его на четырёх
-вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite из 36
+вариантах: in-memory, delayed in-memory, SQLite и delayed SQLite. Suite из 37
 case проверяет CAS, rollback rejected Promise, вложенную транзакцию, scoped
 `documents`, конкурентные create/complete/move и backfill, уникальность
 позиций, подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию,
 UTC/application IDs, default/legacy-колонки, CRUD/reorder/delete-transfer
-колонок, multi-Done и `columnId`/`status`-совместимость.
+колонок, разреженные позиции при delete, multi-Done и
+`columnId`/`status`-совместимость.
 
 ### Транзакции и idempotency
 

@@ -1195,7 +1195,7 @@ test.describe("канбан в production shell", () => {
       const moverId = await createTask(page, {
         projectTitle,
         title: moverTitle,
-        status: "in_progress",
+        status: "backlog",
       });
 
       await openKanban(page, projectTitle);
@@ -1483,14 +1483,20 @@ test.describe("канбан в production shell", () => {
         .toBeCloseTo(heightBeforePanel);
     });
 
-    test("показывает проект и задачи в трёх default-колонках", async ({ page }) => {
+    test("показывает проект и задачи в четырёх фиксированных колонках", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект доски");
+      const backlogTitle = uniqueTitle("Бэклог задача");
       const todoTitle = uniqueTitle("Туду задача");
       const progressTitle = uniqueTitle("В работе задача");
       const doneTitle = uniqueTitle("Готовая задача");
 
       await openTaskList(page);
       await createProject(page, projectTitle);
+      const backlogId = await createTask(page, {
+        projectTitle,
+        title: backlogTitle,
+        status: "backlog",
+      });
       const todoId = await createTask(page, {
         projectTitle,
         title: todoTitle,
@@ -1520,12 +1526,14 @@ test.describe("канбан в production shell", () => {
 
       await openKanban(page, projectTitle);
 
+      await expect(column(page, "backlog").getByTestId(`kanban-card-${backlogId}`)).toBeVisible();
       await expect(column(page, "todo").getByTestId(`kanban-card-${todoId}`)).toBeVisible();
       await expect(
         column(page, "in_progress").getByTestId(`kanban-card-${progressId}`),
       ).toBeVisible();
       await expect(column(page, "done").getByTestId(`kanban-card-${doneId}`)).toBeVisible();
       await expect(column(page, "todo").locator('[data-testid^="kanban-card-"]')).toHaveCount(2);
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("1");
       await expect(page.getByTestId("kanban-count-todo")).toHaveText("2");
       await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("1");
       await expect(page.getByTestId("kanban-count-done")).toHaveText("1");
@@ -1537,7 +1545,7 @@ test.describe("канбан в production shell", () => {
       await expect(todoCard).toContainText("10.01.2030");
       await expect(todoCard).toContainText("release");
       await expect(page.getByTestId(`kanban-subtasks-${todoId}`)).toHaveText("Подзадачи: 1");
-      await expect(page.getByTestId(`kanban-subtasks-${progressId}`)).toHaveText("Подзадачи: 0");
+      await expect(page.getByTestId(`kanban-subtasks-${backlogId}`)).toHaveText("Подзадачи: 0");
 
       // Колонки и задачи переживают полную перезагрузку страницы.
       await page.reload();
@@ -1752,7 +1760,7 @@ test.describe("канбан в production shell", () => {
           await createTask(page, {
             projectTitle,
             title: `P${String(index + 1).padStart(2, "0")} ${projectTitle}`,
-            status: "in_progress",
+            status: "backlog",
           }),
         );
       }
@@ -1762,30 +1770,30 @@ test.describe("канбан в production shell", () => {
       const domOrder = [...ids].reverse();
 
       await openKanban(page, projectTitle);
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText(String(total));
-      await expect(
-        column(page, "in_progress").locator('[data-testid^="kanban-card-"]'),
-      ).toHaveCount(10);
-      await expect(page.getByTestId("kanban-load-more-in_progress")).toBeVisible();
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText(String(total));
+      await expect(column(page, "backlog").locator('[data-testid^="kanban-card-"]')).toHaveCount(
+        10,
+      );
+      await expect(page.getByTestId("kanban-load-more-backlog")).toBeVisible();
 
-      await page.getByTestId("kanban-load-more-in_progress").click();
-      await expect(
-        column(page, "in_progress").locator('[data-testid^="kanban-card-"]'),
-      ).toHaveCount(total);
-      await expect(page.getByTestId("kanban-load-more-in_progress")).toHaveCount(0);
-      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual(domOrder);
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expect(column(page, "backlog").locator('[data-testid^="kanban-card-"]')).toHaveCount(
+        total,
+      );
+      await expect(page.getByTestId("kanban-load-more-backlog")).toHaveCount(0);
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(domOrder);
 
       // Повторный reload начинает колонку с первой страницы и не дублирует
       // уже загруженные карточки.
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
-      await expect(
-        column(page, "in_progress").locator('[data-testid^="kanban-card-"]'),
-      ).toHaveCount(10);
-      await page.getByTestId("kanban-load-more-in_progress").click();
-      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual(domOrder);
-      expect(new Set(await cardTitles(page, "in_progress")).size).toBe(total);
+      await expect(column(page, "backlog").locator('[data-testid^="kanban-card-"]')).toHaveCount(
+        10,
+      );
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(domOrder);
+      expect(new Set(await cardTitles(page, "backlog")).size).toBe(total);
 
       // «В конец» после догрузки считается по полному scope и не теряет
       // карточку за границей первой страницы.
@@ -1793,14 +1801,14 @@ test.describe("канбан в production shell", () => {
       const rotated = [...domOrder.slice(1), firstCard];
 
       await reorderWithMenu(page, firstCard, "В конец");
-      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual(rotated);
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(rotated);
 
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
-      await page.getByTestId("kanban-load-more-in_progress").click();
-      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual(rotated);
-      expect(new Set(await cardTitles(page, "in_progress")).size).toBe(total);
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expect.poll(async () => cardTitles(page, "backlog")).toEqual(rotated);
+      expect(new Set(await cardTitles(page, "backlog")).size).toBe(total);
     });
 
     test("переставляет filtered-карточку по полному scope, не теряя скрытого соседа", async ({
@@ -2087,12 +2095,12 @@ test.describe("канбан в production shell", () => {
       const parentId = await createTaskOnBoard(page, {
         projectTitle,
         title: parentTitle,
-        status: "in_progress",
+        status: "backlog",
         tags: "release",
         expectPrefilledStatus: true,
       });
 
-      await expectCardInColumn(page, parentId, "in_progress");
+      await expectCardInColumn(page, parentId, "backlog");
 
       // Активный фильтр тега не мешает созданию: новая задача получает тег.
       // Фильтр нормализуется через normalizeTag, поэтому Release == release.
@@ -2142,7 +2150,7 @@ test.describe("канбан в production shell", () => {
       await expectCardInColumn(page, visibleId, "todo");
     });
 
-    test("создаёт задачи кнопками всех default-колонок", async ({ page }) => {
+    test("создаёт задачи кнопками всех четырёх колонок", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект колонок создания");
       const created: Array<{
         readonly status: keyof typeof STATUS_LABELS;
@@ -2153,7 +2161,7 @@ test.describe("канбан в production shell", () => {
       await createProjectOnBoard(page, projectTitle);
       await filterByProject(page, projectTitle);
 
-      for (const status of ["todo", "in_progress", "done"] as const) {
+      for (const status of ["backlog", "todo", "in_progress", "done"] as const) {
         const title = uniqueTitle(`Создано в ${STATUS_LABELS[status]}`);
 
         created.push({ status, title });
@@ -2215,23 +2223,23 @@ test.describe("канбан в production shell", () => {
         await createTask(page, {
           projectTitle,
           title: `Старая ${String(index)} ${projectTitle}`,
-          status: "in_progress",
+          status: "backlog",
         });
       }
 
       await openKanban(page, projectTitle);
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("10");
-      await expect(column(page, "in_progress").locator("[data-card-id]")).toHaveCount(10);
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("10");
+      await expect(column(page, "backlog").locator("[data-card-id]")).toHaveCount(10);
 
-      await page.getByTestId("kanban-quick-add-in_progress").click();
+      await page.getByTestId("kanban-quick-add-backlog").click();
 
-      const form = page.getByTestId("kanban-quick-add-in_progress-form");
-      const input = page.getByTestId("kanban-quick-add-in_progress-input");
+      const form = page.getByTestId("kanban-quick-add-backlog-form");
+      const input = page.getByTestId("kanban-quick-add-backlog-input");
 
-      await expect(form).toHaveAttribute("aria-label", /В работе/u);
+      await expect(form).toHaveAttribute("aria-label", /Бэклог/u);
       await input.fill(createdTitle);
 
-      const submit = page.getByTestId("kanban-quick-add-in_progress-submit");
+      const submit = page.getByTestId("kanban-quick-add-backlog-submit");
 
       // Два клика до завершения команды: UI обязан отправить только один.
       await submit.evaluate((button) => {
@@ -2240,12 +2248,12 @@ test.describe("канбан в production shell", () => {
       });
 
       await expect(input).toHaveValue("");
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("11");
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("11");
 
       await page.keyboard.press("Escape");
       await expect(form).toHaveCount(0);
 
-      const card = column(page, "in_progress").locator("[data-card-id]").filter({
+      const card = column(page, "backlog").locator("[data-card-id]").filter({
         hasText: createdTitle,
       });
 
@@ -2253,18 +2261,18 @@ test.describe("канбан в production shell", () => {
       const id = await card.getAttribute("data-card-id");
 
       expect(id).not.toBeNull();
-      await expectCardInColumn(page, id as string, "in_progress");
+      await expectCardInColumn(page, id as string, "backlog");
 
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("11");
-      await expect(page.getByTestId("kanban-load-more-in_progress")).toBeVisible();
-      await page.getByTestId("kanban-load-more-in_progress").click();
-      await expectCardInColumn(page, id as string, "in_progress");
-      await expect(column(page, "in_progress").locator("[data-card-id]")).toHaveCount(11);
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("11");
+      await expect(page.getByTestId("kanban-load-more-backlog")).toBeVisible();
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expectCardInColumn(page, id as string, "backlog");
+      await expect(column(page, "backlog").locator("[data-card-id]")).toHaveCount(11);
 
-      await expectTaskInList(page, projectTitle, id as string, createdTitle, "in_progress");
+      await expectTaskInList(page, projectTitle, id as string, createdTitle, "backlog");
     });
 
     test("быстрый composer создаёт несколько задач подряд и закрывается по Escape", async ({
@@ -2388,9 +2396,9 @@ test.describe("канбан в production shell", () => {
       await openTaskList(page);
       await createProject(page, projectTitle);
       await openKanban(page, projectTitle);
-      await page.getByTestId("kanban-quick-add-in_progress").click();
+      await page.getByTestId("kanban-quick-add-backlog").click();
 
-      const input = page.getByTestId("kanban-quick-add-in_progress-input");
+      const input = page.getByTestId("kanban-quick-add-backlog-input");
 
       for (let index = 0; index < 10; index += 1) {
         await input.fill(`Быстрая ${String(index + 1).padStart(2, "0")} ${projectTitle}`);
@@ -2398,12 +2406,12 @@ test.describe("канбан в production shell", () => {
         await expect(input).toHaveValue("");
       }
 
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("10");
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("10");
       await input.fill(boundaryTitle);
       await input.press("Enter");
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("11");
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("11");
       await expect(
-        column(page, "in_progress").locator("[data-card-id]").filter({ hasText: boundaryTitle }),
+        column(page, "backlog").locator("[data-card-id]").filter({ hasText: boundaryTitle }),
       ).toHaveCount(1);
 
       const id = await cardIdByTitle(page, boundaryTitle);
@@ -2411,12 +2419,12 @@ test.describe("канбан в production shell", () => {
       await page.reload();
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await filterByProject(page, projectTitle);
-      await expect(page.getByTestId("kanban-load-more-in_progress")).toBeVisible();
-      await page.getByTestId("kanban-load-more-in_progress").click();
-      await expectCardInColumn(page, id, "in_progress");
-      await expect(column(page, "in_progress").locator("[data-card-id]")).toHaveCount(11);
+      await expect(page.getByTestId("kanban-load-more-backlog")).toBeVisible();
+      await page.getByTestId("kanban-load-more-backlog").click();
+      await expectCardInColumn(page, id, "backlog");
+      await expect(column(page, "backlog").locator("[data-card-id]")).toHaveCount(11);
 
-      await expectTaskInList(page, projectTitle, id, boundaryTitle, "in_progress");
+      await expectTaskInList(page, projectTitle, id, boundaryTitle, "backlog");
     });
 
     test("без выбранного проекта доска предлагает выбрать проект и не создаёт карточку", async ({
@@ -2437,7 +2445,7 @@ test.describe("канбан в production shell", () => {
       await page.goto("/view/kanban");
 
       await expect(page.getByTestId("kanban-project-picker")).toBeVisible();
-      await expect(page.getByTestId("kanban-quick-add-in_progress")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-quick-add-backlog")).toHaveCount(0);
       await expect(page.getByTestId("kanban-columns")).toHaveCount(0);
 
       // Проект выбирается в боковой панели, после чего доска доступна.
@@ -2451,12 +2459,12 @@ test.describe("канбан в production shell", () => {
       const id = await createTaskOnBoard(page, {
         projectTitle,
         title,
-        status: "in_progress",
+        status: "backlog",
         expectPrefilledStatus: true,
       });
 
       await expect(
-        column(page, "in_progress").locator("[data-card-id]").filter({ hasText: title }),
+        column(page, "backlog").locator("[data-card-id]").filter({ hasText: title }),
       ).toHaveCount(1);
       // Бейджа проекта на карточке нет: доска показывает один проект.
       await expect(page.locator('[data-testid^="kanban-project-badge-"]')).toHaveCount(0);
@@ -2465,7 +2473,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-view")).toBeVisible();
       await expect(page.getByTestId(`kanban-card-${id}`)).toBeVisible();
 
-      await expectTaskInList(page, projectTitle, id, title, "in_progress");
+      await expectTaskInList(page, projectTitle, id, title, "backlog");
     });
 
     test("быстрый composer создаёт только название, полная форма доступна при редактировании", async ({
@@ -2533,7 +2541,7 @@ test.describe("канбан в production shell", () => {
     }) => {
       const projectTitle = uniqueTitle("Проект двух composer");
       const todoDraft = uniqueTitle("Черновик todo");
-      const in_progressDraft = uniqueTitle("Черновик in_progress");
+      const backlogDraft = uniqueTitle("Черновик backlog");
 
       await openTaskList(page);
       await createProject(page, projectTitle);
@@ -2543,27 +2551,25 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-quick-add-todo-input")).toBeFocused();
       await page.keyboard.type(todoDraft);
 
-      await page.getByTestId("kanban-quick-add-in_progress").click();
-      await expect(page.getByTestId("kanban-quick-add-in_progress-input")).toBeFocused();
-      await page.keyboard.type(in_progressDraft);
+      await page.getByTestId("kanban-quick-add-backlog").click();
+      await expect(page.getByTestId("kanban-quick-add-backlog-input")).toBeFocused();
+      await page.keyboard.type(backlogDraft);
 
       await page
         .getByTestId("kanban-quick-add-todo-form")
         .getByRole("button", { name: "Закрыть добавление карточки" })
         .click();
 
-      // Закрытие todo не теряет независимый черновик in_progress.
+      // Закрытие todo не теряет независимый черновик backlog.
       await expect(page.getByTestId("kanban-quick-add-todo-form")).toHaveCount(0);
-      await expect(page.getByTestId("kanban-quick-add-in_progress-input")).toHaveValue(
-        in_progressDraft,
-      );
-      await expect(page.getByTestId("kanban-quick-add-in_progress-form")).toBeVisible();
+      await expect(page.getByTestId("kanban-quick-add-backlog-input")).toHaveValue(backlogDraft);
+      await expect(page.getByTestId("kanban-quick-add-backlog-form")).toBeVisible();
 
-      await page.getByTestId("kanban-quick-add-in_progress-input").focus();
+      await page.getByTestId("kanban-quick-add-backlog-input").focus();
       await page.keyboard.press("Enter");
-      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("1");
+      await expect(page.getByTestId("kanban-count-backlog")).toHaveText("1");
       await expect(
-        column(page, "in_progress").locator("[data-card-id]").filter({ hasText: in_progressDraft }),
+        column(page, "backlog").locator("[data-card-id]").filter({ hasText: backlogDraft }),
       ).toHaveCount(1);
     });
 
@@ -3087,7 +3093,7 @@ test.describe("канбан в production shell", () => {
     }) => {
       const projectTitle = uniqueTitle("Проект карточек");
       const description = uniqueTitle("Описание проекта");
-      const progressTitle = uniqueTitle("В работе карточек");
+      const backlogTitle = uniqueTitle("Бэклог карточек");
       const overdueTitle = uniqueTitle("Просроченная карточка");
       const doneTitle = uniqueTitle("Готовая карточка");
 
@@ -3101,7 +3107,7 @@ test.describe("канбан в production shell", () => {
         .getByTestId("task-filters")
         .getByRole("combobox", { name: "Проект", exact: true })
         .selectOption({ label: projectTitle });
-      await createTask(page, { projectTitle, title: progressTitle, status: "in_progress" });
+      await createTask(page, { projectTitle, title: backlogTitle, status: "backlog" });
       await createTask(page, {
         projectTitle,
         title: overdueTitle,
@@ -3119,7 +3125,7 @@ test.describe("канбан в production shell", () => {
 
       await expectBoardSummary(page, {
         total: 3,
-        counts: { backlog: 0, todo: 1, in_progress: 1, done: 1 },
+        counts: { backlog: 1, todo: 1, in_progress: 0, done: 1 },
         overdue: 1,
       });
 
@@ -3133,7 +3139,7 @@ test.describe("канбан в production shell", () => {
       await expectProjectCounts(
         page,
         projectId,
-        { backlog: 0, todo: 1, in_progress: 1, done: 1 },
+        { backlog: 1, todo: 1, in_progress: 0, done: 1 },
         1,
       );
 
@@ -3171,8 +3177,8 @@ test.describe("канбан в production shell", () => {
       });
 
       // create
-      await page.getByTestId("kanban-quick-add-in_progress").click();
-      const input = page.getByTestId("kanban-quick-add-in_progress-input");
+      await page.getByTestId("kanban-quick-add-backlog").click();
+      const input = page.getByTestId("kanban-quick-add-backlog-input");
 
       await input.fill(taskTitle);
       await input.press("Enter");
@@ -3180,15 +3186,15 @@ test.describe("канбан в production shell", () => {
 
       await expectBoardSummary(page, {
         total: 1,
-        counts: { backlog: 0, todo: 0, in_progress: 1, done: 0 },
+        counts: { backlog: 1, todo: 0, in_progress: 0, done: 0 },
         overdue: 0,
       });
 
       // move
-      await moveWithMenu(page, taskId, "todo");
+      await moveWithMenu(page, taskId, "in_progress");
       await expectBoardSummary(page, {
         total: 1,
-        counts: { backlog: 0, todo: 1, in_progress: 0, done: 0 },
+        counts: { backlog: 0, todo: 0, in_progress: 1, done: 0 },
         overdue: 0,
       });
 

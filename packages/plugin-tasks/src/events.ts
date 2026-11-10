@@ -70,15 +70,17 @@ export interface ColumnMovedEventPayload extends ColumnEventPayload {
 /**
  * Payload `kanbaner.tasks.column.deleted`.
  *
- * `movedTasks` — полные задачи после атомарного переноса в `targetColumnId`.
+ * `targetColumnId` и `movedTaskIds` заданы для `column.delete`, когда задачи
+ * переносятся в выбранную колонку. При каскадном `project.delete` обе части
+ * отсутствуют: целевой колонки нет.
  */
 export interface ColumnDeletedEventPayload {
   readonly columnId: string;
   readonly projectId: string;
   readonly version: number;
   readonly eventVersion: number;
-  readonly targetColumnId: string;
-  readonly movedTaskIds: readonly string[];
+  readonly targetColumnId?: string;
+  readonly movedTaskIds?: readonly string[];
 }
 
 /** Общие поля события задачи. */
