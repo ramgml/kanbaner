@@ -1,7 +1,7 @@
 ---
 id: KAN-024
 title: Управление колонками в интерфейсе
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-024
@@ -35,14 +35,14 @@ specs:
 
 ## Объём работ
 
-- [ ] Динамические колонки, загрузка и пагинация задач по `columnId`.
-- [ ] Add/rename/reorder/delete UI с confirm target и ошибками без потери ввода.
-- [ ] DnD колонок + доступная альтернатива, optimistic update/rollback/conflict.
-- [ ] DnD карточек и `task.move` по `columnId`; сохранить top/between/append.
-- [ ] Обновить task list, details/modal, quick status и фильтры колонок.
-- [ ] Сохранить defaults для новых проектов и Backlog у существующих.
-- [ ] Component/integration/E2E desktop/mobile, reload, conflict, keyboard.
-- [ ] Обновить README и отчёт `tasks/reports/KAN-024.md`.
+- [x] Динамические колонки, загрузка и пагинация задач по `columnId`.
+- [x] Add/rename/reorder/delete UI с confirm target и ошибками без потери ввода.
+- [x] DnD колонок + доступная альтернатива, optimistic update/rollback/conflict.
+- [x] DnD карточек и `task.move` по `columnId`; сохранить top/between/append.
+- [x] Обновить task list, details/modal, quick status и фильтры колонок.
+- [x] Сохранить defaults для новых проектов и Backlog у существующих.
+- [x] Component/integration/E2E desktop/mobile, reload, conflict, keyboard.
+- [x] Обновить README и отчёт `tasks/reports/KAN-024.md`.
 
 ## Владение файлами
 
@@ -65,16 +65,16 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Все действия колонок доступны на desktop и 360 px.
-- [ ] Порядок колонок и задач сохраняется после reload/restart.
-- [ ] Удаление переносит задачи и корректно обновляет completedAt.
-- [ ] Старые Backlog и данные видны.
-- [ ] Все проверки зелёные.
+- [x] Все действия колонок доступны на desktop и 360 px.
+- [x] Порядок колонок и задач сохраняется после reload/restart.
+- [x] Удаление переносит задачи и корректно обновляет completedAt.
+- [x] Старые Backlog и данные видны.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Strict install, check:imports, полный `pnpm check`.
-- [ ] Все Playwright и deferred SIGTERM.
+- [x] Strict install, check:imports, полный `pnpm check`.
+- [x] Все Playwright и deferred SIGTERM.
 
 ## Риски
 
@@ -83,8 +83,16 @@ specs:
 
 ## Журнал
 
+- 2026-11-10 — Влита в `dev` merge-коммитом
+  `0626d699ecc0dc4fbda89b5781717c6dc08d1ad6`. Финальное ревью разрешило
+  интеграцию; все проверки зелёные на ветке после rebase и `dev`.
 - 2026-11-09 — Задача создана после согласования пользовательских колонок.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммит: merge `0626d699ecc0dc4fbda89b5781717c6dc08d1ad6`.
+- Ветка: `feat/kan-024-project-columns-ui` влита, ветка и worktree удалены.
+- Проверки: 95 файлов / 1297 тестов, 83 production E2E, strict install,
+  check:imports и deferred SIGTERM зелёные.
+- Остаточные риски: обзор проектов использует derived legacy status counts;
+  события best-effort; Windows и браузеры кроме Chromium не проверялись.
