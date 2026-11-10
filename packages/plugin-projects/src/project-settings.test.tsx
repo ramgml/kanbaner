@@ -1638,6 +1638,227 @@ describe("Настройки доски", () => {
     expect(onColumnsChanged).toHaveBeenCalledTimes(1);
   });
 
+  it("не закрывает настройки во время deferred retry и применяет поздний список", async () => {
+    const project = makeProject("project-1", "Релиз");
+    const created = makeColumn("column-new", "Новая", { position: 0 });
+    let columns: TaskColumn[] = [];
+    let listCalls = 0;
+    let createCalls = 0;
+    let resolveRetry!: (value: UiOperationResult) => void;
+    const retryResult = new Promise<UiOperationResult>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const onColumnsChanged = vi.fn();
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(columnList(columns));
+        }
+
+        if (listCalls === 2) {
+          return {
+            ok: false,
+            error: { code: "INTERNAL", message: "Список недоступен", retryable: true },
+          };
+        }
+
+        if (listCalls === 3) {
+          return retryResult;
+        }
+
+        return ok(columnList(columns));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      createCalls += 1;
+      columns = [created];
+
+      return ok(columnMutation(created));
+    };
+
+    render(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={project}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Новая" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
+
+    await screen.findByTestId("project-settings-columns-refresh-error");
+
+    // Черновик делает dirty-confirm доступным во время retry.
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Черновик" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-done"));
+    expect(screen.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("project-settings-columns-retry"));
+
+    const dialog = screen.getByTestId("project-settings-dialog");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-close")).toBeDisabled();
+    });
+
+    expect(screen.getByTestId("project-settings-dirty-discard")).toBeDisabled();
+    expect(screen.getByTestId("project-settings-done")).toBeDisabled();
+
+    // Escape, backdrop и discard не закрывают настройки до завершения retry.
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByTestId("project-settings-dirty-confirm")).toBeVisible();
+
+    fireEvent.click(dialog);
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("project-settings-dirty-discard"));
+    expect(dialog).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRetry(ok(columnList(columns)));
+      await retryResult;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-column-create-notice")).toHaveTextContent(
+        "Список колонок обновлён",
+      );
+    });
+
+    expect(screen.getByTestId("project-settings-column-input-column-new")).toHaveValue("Новая");
+    expect(screen.queryByTestId("project-settings-columns-refresh-error")).toBeNull();
+    expect(onColumnsChanged).toHaveBeenCalledTimes(1);
+    expect(createCalls).toBe(1);
+
+    // Guard снят только после captured finally: закрытие снова доступно.
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-dirty-discard")).toBeEnabled();
+    });
+    fireEvent.click(screen.getByTestId("project-settings-dirty-discard"));
+    expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+  });
+
+  it("не применяет поздний retry после смены проекта", async () => {
+    const firstProject = makeProject("project-1", "Первый");
+    const secondProject = makeProject("project-2", "Второй");
+    const secondColumn = makeColumn("column-b", "B", { projectId: "project-2" });
+    let firstColumns: TaskColumn[] = [];
+    let firstListCalls = 0;
+    let resolveRetry!: (value: UiOperationResult) => void;
+    const retryResult = new Promise<UiOperationResult>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const onColumnsChanged = vi.fn();
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({
+          items: [firstProject, secondProject],
+          total: 2,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        const values = inputOf(input);
+
+        if (values.projectId === secondProject.id) {
+          return ok(columnList([secondColumn]));
+        }
+
+        firstListCalls += 1;
+
+        if (firstListCalls === 1) {
+          return ok(columnList(firstColumns));
+        }
+
+        if (firstListCalls === 2) {
+          return {
+            ok: false,
+            error: { code: "INTERNAL", message: "Список недоступен", retryable: true },
+          };
+        }
+
+        if (firstListCalls === 3) {
+          return retryResult;
+        }
+
+        return ok(columnList(firstColumns));
+      }
+
+      if (operationId !== "kanbaner.tasks.column.create") {
+        return ok(null);
+      }
+
+      const created = makeColumn("column-a", "Из первого");
+
+      firstColumns = [created];
+
+      return ok(columnMutation(created));
+    };
+
+    const view = render(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={firstProject}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+    await openSettings();
+
+    fireEvent.change(screen.getByTestId("project-settings-column-create-title"), {
+      target: { value: "Из первого" },
+    });
+    fireEvent.click(screen.getByTestId("project-settings-column-create-submit"));
+
+    await screen.findByTestId("project-settings-columns-refresh-error");
+
+    fireEvent.click(screen.getByTestId("project-settings-columns-retry"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-close")).toBeDisabled();
+    });
+
+    // Смена проекта принудительно закрывает старую модалку.
+    view.rerender(
+      <ProjectSettingsButton
+        invoke={invoke}
+        project={secondProject}
+        onColumnsChanged={onColumnsChanged}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+    });
+
+    await act(async () => {
+      resolveRetry(ok(columnList(firstColumns)));
+      await retryResult;
+    });
+
+    expect(onColumnsChanged).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+
+    await openSettings();
+    expect(screen.getByTestId("project-settings-column-input-column-b")).toHaveValue("B");
+    expect(screen.queryByTestId("project-settings-column-input-column-a")).toBeNull();
+  });
+
   it("не отправляет создание колонки после смены проекта", async () => {
     const firstProject = makeProject("project-1", "Первый");
     const secondProject = makeProject("project-2", "Второй");

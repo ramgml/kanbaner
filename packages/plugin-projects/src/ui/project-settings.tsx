@@ -196,7 +196,6 @@ export function ProjectSettingsButton({
   const [columnsRefreshError, setColumnsRefreshError] = useState<string | null>(null);
   const [columnsRefreshing, setColumnsRefreshing] = useState(false);
   const [createFocusRequest, setCreateFocusRequest] = useState(0);
-
   const [draggingColumnId, setDraggingColumnId] = useState<string | null>(null);
   const [reorderPending, setReorderPending] = useState(false);
   const [movingColumnId, setMovingColumnId] = useState<string | null>(null);
@@ -220,6 +219,9 @@ export function ProjectSettingsButton({
   const reorderPendingRef = useRef(false);
   const movingColumnIdRef = useRef<string | null>(null);
   const refreshSequenceRef = useRef(0);
+  const columnsRefreshGuardRef = useRef(false);
+  const columnsRefreshOperationsRef = useRef<Set<number>>(new Set());
+  const columnsRefreshOperationSequenceRef = useRef(0);
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const doneButtonRef = useRef<HTMLButtonElement>(null);
@@ -304,6 +306,12 @@ export function ProjectSettingsButton({
    * `column.list` может завершиться в обратном порядке: например, rename и
    * reorder идут параллельно. Монотонный sequence не даёт старому ответу
    * перетереть новый порядок/версии. `stale` никогда не превращается в ошибку.
+   *
+   * Синхронный guard выставляется до первого await: пока чтение в полёте,
+   * настройки нельзя закрыть Escape, backdrop или discard. Несколько
+   * параллельных refresh учитываются captured operation token: guard снимается
+   * только после завершения последнего, поэтому поздний ответ не открывает
+   * окно для закрытия раньше времени.
    */
   const refreshColumns = async (
     projectId: string,
@@ -311,8 +319,12 @@ export function ProjectSettingsButton({
     options: { readonly resetDrafts?: boolean } = {},
   ): Promise<ColumnsRefreshResult> => {
     const sequence = refreshSequenceRef.current + 1;
+    const operation = columnsRefreshOperationSequenceRef.current + 1;
 
     refreshSequenceRef.current = sequence;
+    columnsRefreshOperationSequenceRef.current = operation;
+    columnsRefreshOperationsRef.current.add(operation);
+    columnsRefreshGuardRef.current = true;
 
     try {
       const fresh = await fetchProjectColumns(invoke, projectId);
@@ -330,6 +342,12 @@ export function ProjectSettingsButton({
       }
 
       return { kind: "error" };
+    } finally {
+      columnsRefreshOperationsRef.current.delete(operation);
+
+      if (columnsRefreshOperationsRef.current.size === 0) {
+        columnsRefreshGuardRef.current = false;
+      }
     }
   };
 
@@ -360,6 +378,8 @@ export function ProjectSettingsButton({
     setColumnsRefreshing(false);
     createGuardRef.current = false;
     createOperationRef.current += 1;
+    columnsRefreshGuardRef.current = false;
+    columnsRefreshOperationsRef.current.clear();
     setDraggingColumnId(null);
     setDragOver(null);
     setDirtyConfirm(false);
@@ -432,6 +452,7 @@ export function ProjectSettingsButton({
   const isBusy = (): boolean =>
     projectGuardRef.current ||
     createGuardRef.current ||
+    columnsRefreshGuardRef.current ||
     pendingRef.current.size > 0 ||
     reorderPendingRef.current;
 
