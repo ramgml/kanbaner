@@ -246,28 +246,34 @@ async function createSubtask(page: Page, seed: TaskSeed): Promise<string> {
 
   if (seed.tags !== undefined || seed.dueAt !== undefined || seed.priority !== undefined) {
     await page.getByTestId(`kanban-subtask-${taskId}`).click();
-    await page.getByTestId("kanban-modal-edit").click();
-
-    const form = page.getByTestId("task-form-edit");
-
-    await expect(form).toBeVisible();
 
     if (seed.priority !== undefined) {
-      await form
-        .getByRole("combobox", { name: "Приоритет", exact: true })
-        .selectOption(seed.priority);
+      const priority = page.getByTestId("kanban-modal-priority");
+
+      await priority.selectOption(seed.priority);
+      await expect(priority).toHaveValue(seed.priority);
+      await expect(priority).toBeEnabled();
     }
 
     if (seed.dueAt !== undefined) {
-      await form.getByLabel("Срок", { exact: true }).fill(seed.dueAt);
+      const due = page.getByTestId("kanban-modal-due");
+      const saveDue = page.getByTestId("kanban-modal-due-save");
+
+      await due.fill(seed.dueAt);
+      await saveDue.click();
+      await expect(due).toBeEnabled();
+      await expect(saveDue).toBeDisabled();
     }
 
     if (seed.tags !== undefined) {
-      await form.getByLabel("Теги через запятую", { exact: true }).fill(seed.tags);
-    }
+      const tags = page.getByTestId("kanban-modal-tags");
+      const saveTags = page.getByTestId("kanban-modal-tags-save");
 
-    await form.getByRole("button", { name: "Сохранить задачу" }).click();
-    await expect(form).toHaveCount(0);
+      await tags.fill(seed.tags);
+      await saveTags.click();
+      await expect(tags).toBeEnabled();
+      await expect(saveTags).toBeDisabled();
+    }
   }
 
   if ((await page.getByTestId("kanban-details").count()) > 0) {
@@ -555,7 +561,9 @@ test.describe("список задач в production shell", () => {
         .toBe(`Открыть карточку задачи ${taskTitle}`);
     });
 
-    test("переключает вид внутри мобильного модала кликом и клавиатурой", async ({ page }) => {
+    test("закрывает мобильный канбан-модал и переключает вид из шапки кликом и клавиатурой", async ({
+      page,
+    }) => {
       const projectTitle = uniqueTitle("Проект modal toggle");
       const taskTitle = uniqueTitle("Задача modal toggle");
 
@@ -584,14 +592,28 @@ test.describe("список задач в production shell", () => {
       await expect(page).toHaveURL(/\/view\/kanban\?[^#]*[?&]task=/u);
       await expect(page.getByTestId("kanban-details")).toBeVisible();
 
-      // Обратно — клавиатурой по переключателю внутри уже канбан-модала.
-      const back = page.getByTestId("project-view-modal-list");
+      // В канбан-модале переключателя больше нет.
+      await expect(page.getByTestId("project-view-modal-list")).toHaveCount(0);
+      await expect(page.getByTestId("project-view-modal-kanban")).toHaveCount(0);
+
+      // Закрываем модал и возвращаемся в список через переключатель шапки.
+      await page.getByTestId("kanban-details-close").click();
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+
+      const back = page.getByTestId("project-view-list");
 
       await back.focus();
       await page.keyboard.press("Enter");
 
-      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*[?&]task=/u);
+      await expect(page).toHaveURL(/\/view\/tasks/u);
+      await expect(page.getByTestId("task-list-view")).toBeVisible();
+
+      await filterTaskListByProject(page, projectTitle);
+      await mobileCard(page, taskTitle).click();
+
       await expect(page.getByTestId("task-details-mobile")).toBeVisible();
+      await expect(page.getByTestId("task-details-mobile")).toContainText(taskTitle);
     });
   });
 
@@ -949,11 +971,23 @@ test.describe("список задач в production shell", () => {
         ),
       );
       await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(page.getByTestId("project-view-modal-list")).toHaveCount(0);
 
-      // Обратно в список тем же доступным переключателем внутри модала.
-      await page.getByTestId("project-view-modal-list").click();
+      // Модал канбана больше не содержит переключателя: закрываем его и
+      // возвращаемся в список через шапку, затем переоткрываем задачу.
+      await page.getByTestId("kanban-details-close").click();
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
 
-      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*tag=release[^#]*task=/u);
+      await page.getByTestId("project-view-list").click();
+
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*tag=release/u);
+      await expect(page).not.toHaveURL(/[?&]task=/u);
+
+      await desktopRow(page, taskId)
+        .getByRole("button", { name: `Открыть задачу ${taskTitle}` })
+        .click();
+      await expect(page).toHaveURL(new RegExp(`[?&]task=${taskId}`, "u"));
       await expect(page.getByTestId("task-details-desktop")).toContainText(taskTitle);
 
       // Смена проекта в sidebar сохраняет тег, но осознанно снимает task:

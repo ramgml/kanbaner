@@ -25,14 +25,11 @@ import {
   ErrorState,
   LoadingState,
   ModalDialog,
-  createTaskFormValues,
   dateInputToDueAt,
   dueAtToDateInput,
   parseTagsInput,
   tagsToInput,
-  taskToFormValues,
   useMediaQuery,
-  type TaskFormValues,
   type UiOperationInvoker,
 } from "@kanbaner/task-ui";
 
@@ -48,17 +45,17 @@ import {
 import {
   bumpKanbanRevision,
   registerKanbanSearchWriter,
-  serializeKanbanQuery,
   updateKanbanQuery,
   useKanbanQuery,
 } from "./query-state.ts";
 import {
   TaskModal,
+  type InlineEditSession,
+  type InlineField,
   type QuickDraftField,
   type SubtaskDraft,
   type SubtaskFormDraft,
 } from "./task-modal.tsx";
-import { ViewToggle } from "./view-toggle.tsx";
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
 
@@ -110,10 +107,15 @@ interface QuickState {
   readonly conflicts: readonly QuickDraftField[];
 }
 
-/** Сессия редактирования: версия фиксируется в момент открытия формы. */
-interface EditSession {
-  readonly taskId: string;
-  readonly expectedVersion: number;
+/**
+ * Токен асинхронной операции: выбранная задача и монотонная генерация.
+ *
+ * Поздний ответ операции A после A→B (или A→B→A) не должен менять состояние
+ * B: все побочные эффекты проверяют captured generation.
+ */
+interface OperationToken {
+  readonly generation: number;
+  readonly taskId: string | null;
 }
 
 function baselineOf(task: Task, columns: readonly TaskColumn[]): QuickBaseline {
@@ -164,6 +166,12 @@ function sameTagsValue(value: string, serverTags: readonly string[]): boolean {
 
 function sameDueValue(value: string, dueAt: string | null): boolean {
   return dueAtToDateInput(dueAt) === value;
+}
+
+function inlineValueChanged(session: InlineEditSession): boolean {
+  return session.field === "title"
+    ? session.draft.trim() !== session.initial
+    : session.draft !== session.initial;
 }
 
 /** Поле всё ещё отличается от серверного значения. */
@@ -262,23 +270,6 @@ function syncQuickState(
   return { draft: next, conflicts: [...conflicts] };
 }
 
-function sameValues(left: TaskFormValues | null, right: TaskFormValues | null): boolean {
-  if (left === null || right === null) {
-    return left === right;
-  }
-
-  return (
-    left.projectId === right.projectId &&
-    left.title === right.title &&
-    left.descriptionMarkdown === right.descriptionMarkdown &&
-    left.status === right.status &&
-    left.priority === right.priority &&
-    left.dueAt === right.dueAt &&
-    left.tags === right.tags &&
-    left.parentTaskId === right.parentTaskId
-  );
-}
-
 /**
  * Читает все подзадачи задачи.
  *
@@ -344,13 +335,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
   const [parentTask, setParentTask] = useState<Task | null>(null);
   const [subtasks, setSubtasks] = useState<SubtasksState>(EMPTY_SUBTASKS);
-  const [rootTasks, setRootTasks] = useState<readonly Task[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [editSession, setEditSession] = useState<EditSession | null>(null);
-  const [editValues, setEditValues] = useState<TaskFormValues | null>(null);
-  const [editInitial, setEditInitial] = useState<TaskFormValues | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [inlineSession, setInlineSession] = useState<InlineEditSession | null>(null);
+  const [inlineError, setInlineError] = useState<string | null>(null);
   const [quickState, setQuickState] = useState<QuickState | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [conflictState, setConflictState] = useState<{
@@ -359,25 +348,25 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const generationRef = useRef(0);
+  const activeOperationRef = useRef<OperationToken | null>(null);
   const quickBaselineRef = useRef<QuickBaseline | null>(null);
 
   // Данные от предыдущей задачи (A) не должны показываться или выполнять
   // команды, пока не загрузилась выбранная задача (B).
   const currentTask = task !== null && task.id === taskId ? task : null;
-  const editing =
-    editingTaskId !== null &&
-    editingTaskId === taskId &&
+  const activeInlineSession =
+    currentTask !== null && inlineSession !== null && inlineSession.taskId === currentTask.id
+      ? inlineSession
+      : null;
+  const inlineDirty = activeInlineSession !== null && inlineValueChanged(activeInlineSession);
+  const inlineStale =
     currentTask !== null &&
-    editValues !== null;
-  const editDirty = editing && !sameValues(editValues, editInitial);
-  const editOutdated =
-    editing &&
-    currentTask !== null &&
-    editSession !== null &&
-    editSession.taskId === currentTask.id &&
-    editSession.expectedVersion !== currentTask.version;
+    activeInlineSession !== null &&
+    activeInlineSession.expectedVersion !== currentTask.version;
   const conflict =
     conflictState !== null && conflictState.taskId === taskId ? conflictState.message : null;
+  const visibleError = loadError ?? commandError ?? conflict;
   const visibleSubtasks =
     currentTask !== null && subtasks.taskId === currentTask.id ? subtasks : EMPTY_SUBTASKS;
   const activeQuickState =
@@ -399,7 +388,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       !sameDueValue(activeQuickDraft.dueValue, currentTask.dueAt) ||
       !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags) ||
       (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
-  const draftDirty = editDirty || quickDirty;
+  const draftDirty = inlineDirty || quickDirty;
 
   useEffect(() => {
     if (taskId === null || !onKanbanRoute) {
@@ -472,13 +461,14 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             syncQuickState(current, loadedTask, previousBaseline, projectColumns),
           );
           quickBaselineRef.current = baselineOf(loadedTask, projectColumns);
-          setError(null);
+          // Refresh очищает только ошибку чтения, не командную ошибку.
+          setLoadError(null);
         }
       } catch (loadError) {
         if (!cancelled) {
           setTask(null);
           setSubtasks(EMPTY_SUBTASKS);
-          setError(errorMessage(loadError));
+          setLoadError(errorMessage(loadError));
         }
       } finally {
         if (!cancelled) {
@@ -495,56 +485,29 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   // Смена выбранной карточки всегда начинает новую сессию: черновики и
   // подтверждение закрытия от предыдущей задачи не переносятся.
   useEffect(() => {
+    // Новая выбранная задача — новая генерация. Поздние ответы прежней
+    // операции не применяются, а busy снимается сразу: B не ждёт A.
+    generationRef.current += 1;
+    activeOperationRef.current = null;
+    busyRef.current = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setEditingTaskId(null);
-    setEditSession(null);
-    setEditValues(null);
-    setEditInitial(null);
+    setBusy(false);
+    setInlineSession(null);
+    setInlineError(null);
     setCloseConfirm(false);
+    setLoadError(null);
+    setCommandError(null);
+    setConflictState(null);
   }, [taskId]);
-
-  useEffect(() => {
-    if (!editing || currentTask === null || !onKanbanRoute) {
-      return;
-    }
-
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const data = await invokeJson<TaskListOutput>(invoke, TASKS_QUERY_IDS.taskList, {
-          projectId: currentTask.projectId,
-          parentTaskId: null,
-          limit: MAX_LIST_LIMIT,
-          offset: 0,
-          sort: { field: "title", direction: "asc" },
-        } as unknown as JsonValue);
-
-        if (!cancelled) {
-          setRootTasks(data.items);
-        }
-      } catch {
-        // Список родителей необязателен: форма работает и без него.
-        if (!cancelled) {
-          setRootTasks([]);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [invoke, editing, currentTask, query.revision, onKanbanRoute]);
 
   const closeNow = useCallback((): void => {
     setCloseConfirm(false);
-    setEditingTaskId(null);
-    setEditSession(null);
-    setEditValues(null);
-    setEditInitial(null);
+    setInlineSession(null);
+    setInlineError(null);
     setQuickState(null);
     quickBaselineRef.current = null;
-    setError(null);
+    setLoadError(null);
+    setCommandError(null);
     setConflictState(null);
     updateKanbanQuery({ taskId: null });
   }, []);
@@ -562,40 +525,70 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     return null;
   }
 
-  const runCommand = async (command: () => Promise<void>): Promise<boolean> => {
+  const runCommand = async (
+    command: (token: OperationToken) => Promise<void>,
+    options: { readonly conflictInlineTaskId?: string } = {},
+  ): Promise<boolean> => {
     if (busyRef.current) {
       return false;
     }
 
+    const token: OperationToken = { generation: generationRef.current, taskId };
+
+    activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
-    setError(null);
+    // Новая операция той же generation снимает прежнюю командную ошибку.
+    setCommandError(null);
     setConflictState(null);
 
     try {
-      await command();
+      await command(token);
+
+      // Данные инвалидируются всегда: даже поздний success A после A→B или
+      // закрытия должен обновить доску и убрать призрачные карточки.
       bumpKanbanRevision();
 
-      return true;
+      // UI-ownership текущей задачи остаётся за generation.
+      return generationRef.current === token.generation;
     } catch (commandError) {
+      const ownsCurrentTask = generationRef.current === token.generation;
+
       if (isVersionConflict(commandError)) {
-        if (taskId !== null) {
-          setConflictState({ taskId, message: VERSION_CONFLICT_MESSAGE });
+        if (ownsCurrentTask) {
+          if (token.taskId !== null) {
+            setConflictState({ taskId: token.taskId, message: VERSION_CONFLICT_MESSAGE });
+          }
+
+          // Конфликт quick-команды не трогает независимый inline-черновик.
+          // Очищается только сессия, из которой пришёл inline-save.
+          if (options.conflictInlineTaskId !== undefined) {
+            setInlineSession((current) =>
+              current !== null && current.taskId === options.conflictInlineTaskId ? null : current,
+            );
+            setInlineError(null);
+          }
         }
 
-        setEditingTaskId(null);
-        setEditSession(null);
-        setEditValues(null);
-        setEditInitial(null);
+        // Серверные данные могли измениться в другой вкладке: refresh нужен
+        // независимо от того, какая задача сейчас выбрана.
         bumpKanbanRevision();
-      } else {
-        setError(errorMessage(commandError));
+      } else if (ownsCurrentTask) {
+        setCommandError(errorMessage(commandError));
       }
 
       return false;
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      // Только владелец токена снимает busy; late finally старой операции не
+      // сбрасывает состояние новой.
+      if (activeOperationRef.current === token) {
+        activeOperationRef.current = null;
+        busyRef.current = false;
+
+        if (generationRef.current === token.generation) {
+          setBusy(false);
+        }
+      }
     }
   };
 
@@ -657,59 +650,108 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setQuickState((current) => (current === null ? current : { ...current, conflicts: [] }));
   };
 
-  const startEdit = (): void => {
-    if (currentTask === null) {
+  const startInlineEdit = (field: InlineField): void => {
+    if (currentTask === null || busyRef.current) {
       return;
     }
 
-    const initial = createTaskFormValues(
-      project === null ? [] : [project],
-      taskToFormValues(currentTask),
-    );
+    if (activeInlineSession !== null) {
+      if (activeInlineSession.field === field) {
+        return;
+      }
 
-    setError(null);
+      // Второй редактор не должен молча выбросить изменённый черновик.
+      if (inlineValueChanged(activeInlineSession)) {
+        setInlineError("Сначала сохраните или отмените изменение в текущем поле.");
+        return;
+      }
+    }
+
+    const initial = field === "title" ? currentTask.title : currentTask.descriptionMarkdown;
+
+    setInlineError(null);
+    setCommandError(null);
     setConflictState(null);
     setCloseConfirm(false);
-    setEditSession({ taskId: currentTask.id, expectedVersion: currentTask.version });
-    setEditInitial(initial);
-    setEditValues(initial);
-    setEditingTaskId(currentTask.id);
+    setInlineSession({
+      field,
+      taskId: currentTask.id,
+      initial,
+      draft: initial,
+      expectedVersion: currentTask.version,
+    });
   };
 
-  const cancelEdit = (): void => {
-    setEditingTaskId(null);
-    setEditSession(null);
-    setEditValues(null);
-    setEditInitial(null);
+  const changeInlineEdit = (value: string): void => {
+    setInlineSession((current) => {
+      if (current === null || currentTask === null || current.taskId !== currentTask.id) {
+        return current;
+      }
+
+      return { ...current, draft: value };
+    });
+    setInlineError(null);
+  };
+
+  const cancelInlineEdit = (): void => {
+    setInlineSession(null);
+    setInlineError(null);
     setCloseConfirm(false);
-    setError(null);
   };
 
-  const save = async (values: TaskFormValues): Promise<void> => {
-    if (currentTask === null || editSession === null || editSession.taskId !== currentTask.id) {
+  const saveInlineEdit = async (): Promise<void> => {
+    if (currentTask === null || activeInlineSession === null) {
       return;
     }
 
-    // expectedVersion фиксируется при открытии формы: даже если карточка
-    // успела перечитаться, сохранение устаревшего черновика обязано получить
-    // VERSION_CONFLICT, а не тихо перезаписать чужую правку.
-    const input: TaskUpdateInput = {
-      id: editSession.taskId,
-      expectedVersion: editSession.expectedVersion,
-      title: values.title,
-      descriptionMarkdown: values.descriptionMarkdown,
-      priority: values.priority,
-      dueAt: dateInputToDueAt(values.dueAt, "start"),
-      tags: parseTagsInput(values.tags),
-    };
+    const session = activeInlineSession;
+    let input: TaskUpdateInput;
 
-    const saved = await runCommand(async () => {
-      await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
-      setEditingTaskId(null);
-      setEditSession(null);
-      setEditValues(null);
-      setEditInitial(null);
-    });
+    if (session.field === "title") {
+      const title = session.draft.trim();
+
+      if (title.length === 0) {
+        setInlineError("Укажите название задачи");
+        return;
+      }
+
+      if (title === session.initial) {
+        setInlineSession(null);
+        setInlineError(null);
+        return;
+      }
+
+      // Строго partial-команда: только изменённое поле, id и зафиксированная
+      // при открытии редактора версия. Остальные поля не отправляются.
+      input = { id: session.taskId, expectedVersion: session.expectedVersion, title };
+    } else {
+      if (session.draft === session.initial) {
+        setInlineSession(null);
+        setInlineError(null);
+        return;
+      }
+
+      input = {
+        id: session.taskId,
+        expectedVersion: session.expectedVersion,
+        descriptionMarkdown: session.draft,
+      };
+    }
+
+    setInlineError(null);
+
+    const saved = await runCommand(
+      async (token) => {
+        await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
+
+        if (generationRef.current === token.generation) {
+          setInlineSession((current) =>
+            current !== null && current.taskId === session.taskId ? null : current,
+          );
+        }
+      },
+      { conflictInlineTaskId: session.taskId },
+    );
 
     if (saved) {
       setCloseConfirm(false);
@@ -787,18 +829,19 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       confirm: true,
     };
 
-    void runCommand(async () => {
+    void runCommand(async (token) => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskDelete, input as unknown as JsonValue);
-      closeNow();
+
+      if (generationRef.current === token.generation) {
+        closeNow();
+      }
     });
   };
 
   const openTask = (nextTaskId: string): void => {
     setCloseConfirm(false);
-    setEditingTaskId(null);
-    setEditSession(null);
-    setEditValues(null);
-    setEditInitial(null);
+    setInlineSession(null);
+    setInlineError(null);
     setQuickState(null);
     quickBaselineRef.current = null;
     updateKanbanQuery({ taskId: nextTaskId });
@@ -816,7 +859,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     }
 
     if (draft.columnId.length === 0 || !columns.some((column) => column.id === draft.columnId)) {
-      setError("Выберите существующую колонку для подзадачи");
+      setCommandError("Выберите существующую колонку для подзадачи");
 
       return false;
     }
@@ -832,9 +875,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       tags: [],
     };
 
+    const token: OperationToken = { generation: generationRef.current, taskId };
+
+    activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
-    setError(null);
+    setCommandError(null);
     setConflictState(null);
 
     try {
@@ -843,29 +889,43 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         TASKS_COMMAND_IDS.taskCreate,
         input as unknown as JsonValue,
       );
-      setQuickState((current) =>
-        current !== null && current.draft.taskId === currentTask.id
-          ? {
-              draft: {
-                ...current.draft,
-                subtaskOpen: false,
-                subtaskTitle: "",
-                subtaskColumnId: defaultCreateColumnId(columns) ?? "",
-              },
-              conflicts: current.conflicts,
-            }
-          : current,
-      );
+
+      if (generationRef.current === token.generation) {
+        setQuickState((current) =>
+          current !== null && current.draft.taskId === currentTask.id
+            ? {
+                draft: {
+                  ...current.draft,
+                  subtaskOpen: false,
+                  subtaskTitle: "",
+                  subtaskColumnId: defaultCreateColumnId(columns) ?? "",
+                },
+                conflicts: current.conflicts,
+              }
+            : current,
+        );
+      }
+
+      // Поздний create тоже инвалидирует данные, но не трогает quick draft
+      // новой выбранной задачи.
       bumpKanbanRevision();
 
-      return true;
+      return generationRef.current === token.generation;
     } catch (commandError) {
-      setError(errorMessage(commandError));
+      if (generationRef.current === token.generation) {
+        setCommandError(errorMessage(commandError));
+      }
 
       return false;
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      if (activeOperationRef.current === token) {
+        activeOperationRef.current = null;
+        busyRef.current = false;
+
+        if (generationRef.current === token.generation) {
+          setBusy(false);
+        }
+      }
     }
   };
 
@@ -876,7 +936,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       </div>
     ) : currentTask === null ? (
       <div className="p-4">
-        <ErrorState message={error ?? "Задача не найдена"} onRetry={bumpKanbanRevision} />
+        <ErrorState message={loadError ?? "Задача не найдена"} onRetry={bumpKanbanRevision} />
       </div>
     ) : (
       <TaskModal
@@ -889,13 +949,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         subtasksLoading={visibleSubtasks.loading}
         subtasksError={visibleSubtasks.error}
         busy={busy || loading}
-        error={error ?? conflict}
-        editing={editing}
-        editOutdated={editOutdated}
-        editValues={editValues}
-        editRootTasks={rootTasks}
+        error={visibleError}
+        inlineSession={activeInlineSession}
+        inlineError={inlineError}
+        inlineStale={inlineStale}
         closeConfirm={closeConfirm}
-        draftDirty={draftDirty}
         quickConflicts={quickConflicts}
         columns={columns}
         currentColumnId={currentColumnId}
@@ -909,13 +967,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             columnId: activeQuickDraft?.subtaskColumnId ?? "",
           } satisfies SubtaskFormDraft
         }
-        onChangeEditValues={setEditValues}
-        onStartEdit={startEdit}
-        onCancelEdit={cancelEdit}
-        onCancelStaleEdit={cancelEdit}
-        onSubmitEdit={(values) => {
-          void save(values);
+        onStartInline={startInlineEdit}
+        onChangeInline={changeInlineEdit}
+        onSaveInline={() => {
+          void saveInlineEdit();
         }}
+        onCancelInline={cancelInlineEdit}
         onClose={requestClose}
         onOpenTask={openTask}
         onCreateSubtask={createSubtask}
@@ -947,14 +1004,6 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         onKeepEditing={() => {
           setCloseConfirm(false);
         }}
-        viewSwitch={
-          <ViewToggle
-            route={KANBAN_ROUTE}
-            search={serializeKanbanQuery(query)}
-            testIdPrefix="project-view-modal"
-            label="Представление проекта в карточке"
-          />
-        }
       />
     );
 
