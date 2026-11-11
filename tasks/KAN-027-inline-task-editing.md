@@ -1,7 +1,7 @@
 ---
 id: KAN-027
 title: Inline-редактирование карточки канбана
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-027
