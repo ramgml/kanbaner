@@ -1520,7 +1520,7 @@ export function ProjectSettingsButton({
                 >
                   <p className="m-0 text-xs font-medium">Новая колонка</p>
 
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-[minmax(0,1fr)_8rem]">
                     <label
                       className="flex min-w-0 flex-1 flex-col gap-1 text-xs font-medium text-muted-foreground"
                       htmlFor="project-settings-column-create-title"
@@ -1576,7 +1576,7 @@ export function ProjectSettingsButton({
                       data-testid="project-settings-column-create-submit"
                       disabled={createSubmitting || createTitle.trim().length === 0}
                       aria-busy={createSubmitting}
-                      className={`${primaryButtonClass} shrink-0`}
+                      className={`${primaryButtonClass} w-full min-[420px]:col-span-2`}
                     >
                       {createSubmitting ? "Добавление…" : "Добавить колонку"}
                     </button>
