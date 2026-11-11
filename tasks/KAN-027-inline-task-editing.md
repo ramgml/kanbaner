@@ -80,12 +80,14 @@ specs:
 - `packages/plugin-projects/src/ui/task-overlay.tsx`;
 - связанные тесты `packages/plugin-projects/**`;
 - `apps/web/e2e/kanban.spec.ts`;
+- `apps/web/e2e/task-list.spec.ts` — только адаптация сценариев, которые
+  переключаются в изменённую модалку канбана;
 - `packages/plugin-projects/README.md`;
 - `tasks/reports/KAN-027.md`.
 
 Запрещено:
 
-- `packages/plugin-projects/src/task-list/**` и `apps/web/e2e/task-list.spec.ts`;
+- `packages/plugin-projects/src/task-list/**`;
 - `packages/task-ui/**`, домен `plugin-tasks`, kernel, SDK, storage;
 - спецификации, другие задачи, зависимости и публичные контракты.
 
