@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -110,6 +111,13 @@ interface VisibilityRequirement {
 interface DropTarget {
   readonly columnId: string;
   readonly beforeId: string | null;
+}
+
+interface DragPreview {
+  readonly html: string;
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
 }
 
 function normalizeFilterTag(value: string): string {
@@ -324,6 +332,7 @@ export function KanbanView({
   const [subtaskCounts, setSubtaskCounts] = useState<Readonly<Record<string, number | null>>>({});
   const [error, setError] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
   const [dragOver, setDragOver] = useState<DropTarget | null>(null);
   const [activeColumnId, setActiveColumnId] = useState("");
   const [scrollHints, setScrollHints] = useState({ left: false, right: false });
@@ -370,6 +379,7 @@ export function KanbanView({
   const effectiveProjectIdRef = useRef(effectiveProjectId);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const dragSuppressRef = useRef<{ readonly taskId: string; readonly until: number } | null>(null);
+  const dragPreviewOffsetRef = useRef({ x: 0, y: 0 });
   const deleteDialogRef = useRef<{
     readonly requestId: number;
     readonly columnId: string;
@@ -1416,7 +1426,21 @@ export function KanbanView({
     }
 
     if (card === null || cardId === null) {
-      return { columnId, beforeId: null };
+      const candidates = [
+        ...(columnElement?.querySelectorAll<HTMLElement>("[data-card-id]") ?? []),
+      ].filter((candidate) => candidate.getAttribute("data-card-id") !== draggedId);
+      const next = candidates.find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+
+        return clientY < rect.top + rect.height / 2;
+      });
+
+      // Промежуток между карточками — не append: выбираем ближайшую границу
+      // по геометрии исходных карточек, не меняя их положение индикатором.
+      return {
+        columnId,
+        beforeId: next?.getAttribute("data-card-id") ?? null,
+      };
     }
 
     if (cardId === draggedId) {
@@ -1469,19 +1493,53 @@ export function KanbanView({
     const captureTarget = event.currentTarget;
     const startX = event.clientX;
     const startY = event.clientY;
+    const sourceRect = captureTarget.getBoundingClientRect();
+
+    dragPreviewOffsetRef.current = {
+      x: startX - sourceRect.left,
+      y: startY - sourceRect.top,
+    };
+
     let active = false;
     let armed = !isTouch;
     let target: DropTarget | null = null;
     let longPressTimer: number | null = null;
     let touchMoveBlocker: ((moveEvent: TouchEvent) => void) | null = null;
 
-    const activate = (): void => {
+    const activate = (clientX = startX, clientY = startY): void => {
       if (active) {
         return;
       }
 
       active = true;
       setDraggingId(task.id);
+
+      const clone = captureTarget.cloneNode(true) as HTMLElement;
+      const clonedElements = [
+        clone,
+        ...clone.querySelectorAll<HTMLElement>("[data-testid], [data-card-id], [id]"),
+      ];
+
+      for (const element of clonedElements) {
+        element.removeAttribute("data-testid");
+        element.removeAttribute("data-card-id");
+        element.removeAttribute("id");
+      }
+
+      for (const interactive of clone.querySelectorAll<HTMLElement>("button, a, input, textarea")) {
+        interactive.tabIndex = -1;
+      }
+
+      clone.style.opacity = "1";
+      clone.style.boxShadow = "0 16px 36px rgb(15 23 42 / 0.28)";
+      clone.style.cursor = "grabbing";
+
+      setDragPreview({
+        html: clone.outerHTML,
+        left: clientX - dragPreviewOffsetRef.current.x,
+        top: clientY - dragPreviewOffsetRef.current.y,
+        width: sourceRect.width,
+      });
     };
 
     const armTouch = (): void => {
@@ -1531,6 +1589,7 @@ export function KanbanView({
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
       setDraggingId(null);
+      setDragPreview(null);
       setDragOver(null);
 
       if (dragCleanupRef.current === cleanup) {
@@ -1557,15 +1616,37 @@ export function KanbanView({
           return;
         }
 
-        activate();
+        activate(moveEvent.clientX, moveEvent.clientY);
       }
 
       if (moveEvent.cancelable) {
         moveEvent.preventDefault();
       }
 
+      setDragPreview((current) =>
+        current === null
+          ? null
+          : {
+              ...current,
+              left: moveEvent.clientX - dragPreviewOffsetRef.current.x,
+              top: moveEvent.clientY - dragPreviewOffsetRef.current.y,
+            },
+      );
       target = resolveDropTarget(moveEvent.clientX, moveEvent.clientY, task.id);
       setDragOver(target);
+    };
+
+    const isOriginalPlacement = (drop: DropTarget): boolean => {
+      const currentColumnId = columnContainingTask(columnsRef.current, task.id);
+
+      if (currentColumnId !== drop.columnId) {
+        return false;
+      }
+
+      const items = getColumn(columnsRef.current, currentColumnId)?.items ?? [];
+      const currentIndex = items.findIndex((candidate) => candidate.id === task.id);
+
+      return currentIndex >= 0 && drop.beforeId === (items[currentIndex + 1]?.id ?? null);
     };
 
     const onPointerUp = (): void => {
@@ -1581,7 +1662,7 @@ export function KanbanView({
         };
       }
 
-      if (wasActive && drop !== null && drop.beforeId !== task.id) {
+      if (wasActive && drop !== null && drop.beforeId !== task.id && !isOriginalPlacement(drop)) {
         const intent: MoveIntent =
           drop.beforeId === null ? { kind: "append" } : { kind: "before", beforeId: drop.beforeId };
 
@@ -2407,12 +2488,14 @@ export function KanbanView({
                         return found === -1 ? items.length : found;
                       })()
                   : -1;
-                const placeholder = (
-                  <li
-                    key={`kanban-drop-${column.id}`}
+                const dropIndicator = (position: "before" | "after", first = false) => (
+                  <span
                     data-testid="kanban-drop-placeholder"
+                    data-drop-position={position}
                     aria-hidden="true"
-                    className="pointer-events-none h-12 rounded-lg border-2 border-dashed border-ring bg-ring/10"
+                    className={`pointer-events-none absolute right-0 left-0 z-20 block h-1 rounded-full bg-ring shadow-[0_0_0_2px_var(--background)] ${
+                      position === "after" ? "-bottom-[5px]" : first ? "top-0" : "-top-[5px]"
+                    }`}
                   />
                 );
                 const index = renderedColumns.order.indexOf(column.id);
@@ -2488,37 +2571,45 @@ export function KanbanView({
                     }
                   >
                     {items.map((task, cardIndex) => (
-                      <Fragment key={task.id}>
-                        {cardIndex === insertion ? placeholder : null}
-                        <li>
-                          <KanbanCard
-                            task={task}
-                            index={cardIndex}
-                            columnSize={items.length}
-                            columns={columnList}
-                            currentColumnId={column.id}
-                            subtaskCount={
-                              task.parentTaskId === null ? (subtaskCounts[task.id] ?? null) : 0
-                            }
-                            selected={query.taskId === task.id}
-                            pending={pending.has(task.id)}
-                            conflict={conflicts.has(task.id)}
-                            dragging={draggingId === task.id}
-                            onOpen={(openedTask) => {
-                              updateKanbanQuery({ taskId: openedTask.id });
-                            }}
-                            onMoveTo={moveToColumn}
-                            onReorder={reorder}
-                            onDragStart={startDrag}
-                            shouldSuppressClick={() => consumeDragClickSuppression(task.id)}
-                            onCardPointerDown={() => {
-                              dragSuppressRef.current = null;
-                            }}
-                          />
-                        </li>
-                      </Fragment>
+                      <li key={task.id} className="relative">
+                        {cardIndex === insertion ? dropIndicator("before", cardIndex === 0) : null}
+                        {insertion === items.length && cardIndex === items.length - 1
+                          ? dropIndicator("after")
+                          : null}
+                        <KanbanCard
+                          task={task}
+                          index={cardIndex}
+                          columnSize={items.length}
+                          columns={columnList}
+                          currentColumnId={column.id}
+                          subtaskCount={
+                            task.parentTaskId === null ? (subtaskCounts[task.id] ?? null) : 0
+                          }
+                          selected={query.taskId === task.id}
+                          pending={pending.has(task.id)}
+                          conflict={conflicts.has(task.id)}
+                          dragging={draggingId === task.id}
+                          onOpen={(openedTask) => {
+                            updateKanbanQuery({ taskId: openedTask.id });
+                          }}
+                          onMoveTo={moveToColumn}
+                          onReorder={reorder}
+                          onDragStart={startDrag}
+                          shouldSuppressClick={() => consumeDragClickSuppression(task.id)}
+                          onCardPointerDown={() => {
+                            dragSuppressRef.current = null;
+                          }}
+                        />
+                      </li>
                     ))}
-                    {insertion === items.length ? placeholder : null}
+                    {insertion === 0 && items.length === 0 ? (
+                      <li
+                        data-testid="kanban-drop-placeholder"
+                        data-drop-position="empty"
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-x-0 top-0 h-12 rounded-lg border-2 border-dashed border-ring bg-ring/10"
+                      />
+                    ) : null}
                   </KanbanColumn>
                 );
               })}
@@ -2548,6 +2639,26 @@ export function KanbanView({
           Проект не выбран
         </span>
       ) : null}
+
+      {dragPreview === null
+        ? null
+        : createPortal(
+            <div
+              data-testid="kanban-drag-preview"
+              aria-hidden="true"
+              className="pointer-events-none fixed z-[100]"
+              style={{
+                left: dragPreview.left,
+                top: dragPreview.top,
+                width: dragPreview.width,
+                transform: "rotate(1.5deg)",
+                transformOrigin: "center",
+              }}
+            >
+              <div dangerouslySetInnerHTML={{ __html: dragPreview.html }} />
+            </div>,
+            document.body,
+          )}
 
       {deletingColumn === null ? null : (
         <KanbanDeleteColumnDialog

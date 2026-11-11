@@ -584,7 +584,7 @@ describe("TaskOverlay Trello-модал", () => {
     fireEvent.click(screen.getByTestId("kanban-subtask-cancel"));
 
     // Inline-редактор заголовка открывается поверх быстрых полей.
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -600,7 +600,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
 
     // X при dirty inline-черновике показывает подтверждение.
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const dirtyTitle = await screen.findByTestId("kanban-title-input");
 
@@ -616,6 +616,36 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
     expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(headerToggle).toBeInTheDocument();
+  });
+
+  it("открывает редактор одинарным кликом, но не после выделения текста", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+
+    renderOverlay(createOperations(board));
+    await openTask("a");
+
+    const title = screen.getByTestId("kanban-modal-title");
+    const selection = vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      anchorNode: title.firstChild,
+      focusNode: title.firstChild,
+    } as Selection);
+
+    fireEvent.click(title);
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+
+    selection.mockReturnValue({
+      isCollapsed: true,
+      anchorNode: null,
+      focusNode: null,
+    } as Selection);
+    fireEvent.click(title);
+    expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
+    selection.mockRestore();
   });
 
   it("при переходе A→B не показывает устаревшую задачу и не выполняет её команды", async () => {
@@ -788,7 +818,7 @@ describe("TaskOverlay Trello-модал", () => {
 
     // X при dirty inline-черновике открывает confirm; Keep Editing
     // возвращает фокус в активное поле и сохраняет ввод.
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const dirtyInput = await screen.findByTestId("kanban-title-input");
 
@@ -828,7 +858,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -847,7 +877,7 @@ describe("TaskOverlay Trello-модал", () => {
     });
     expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-title"));
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+    fireEvent.click(screen.getByTestId("kanban-modal-description"));
 
     const descriptionInput = await screen.findByTestId("kanban-description-input");
 
@@ -880,7 +910,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(board.tasks.find((task) => task.id === "a")?.version).toBe(3);
 
     // Описание можно очистить до пустого значения.
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+    fireEvent.click(screen.getByTestId("kanban-modal-description"));
 
     const emptyInput = await screen.findByTestId("kanban-description-input");
 
@@ -921,7 +951,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -994,7 +1024,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const title = await screen.findByTestId("kanban-title-input");
 
@@ -1543,7 +1573,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -1578,7 +1608,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -1611,12 +1641,12 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Черновик заголовка" } });
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+    fireEvent.click(screen.getByTestId("kanban-modal-description"));
 
     expect(screen.queryByTestId("kanban-description-input")).toBeNull();
     expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
@@ -1625,7 +1655,7 @@ describe("TaskOverlay Trello-модал", () => {
     );
 
     fireEvent.click(screen.getByTestId("kanban-title-cancel"));
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+    fireEvent.click(screen.getByTestId("kanban-modal-description"));
 
     expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
   });
@@ -1783,7 +1813,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -1796,11 +1826,11 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const description = screen.getByTestId("kanban-modal-description");
 
-    fireEvent.doubleClick(description);
+    fireEvent.click(description);
 
     const descriptionInput = await screen.findByTestId("kanban-description-input");
 
@@ -1841,7 +1871,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -1984,7 +2014,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2052,7 +2082,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2270,7 +2300,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2334,7 +2364,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2486,7 +2516,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2573,7 +2603,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2626,7 +2656,7 @@ describe("TaskOverlay Trello-модал", () => {
       target: { value: "Черновик подзадачи" },
     });
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2671,7 +2701,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2713,7 +2743,7 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
@@ -2730,7 +2760,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.queryByTestId("kanban-inline-stale")).toBeNull();
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
 
-    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     expect(await screen.findByTestId("kanban-title-input")).toHaveValue("Задача B");
   });

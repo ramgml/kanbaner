@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
@@ -218,6 +219,7 @@ export function TaskModal({
     invalid: boolean;
   } | null>(null);
   const cancelInlineRef = useRef(onCancelInline);
+  const lastPointerTypeRef = useRef<string | null>(null);
   const previousInlineFieldRef = useRef<InlineField | null>(null);
   const previousTaskIdRef = useRef(task.id);
   const inlineField = inlineSession?.field ?? null;
@@ -436,6 +438,8 @@ export function TaskModal({
     event.nativeEvent.isComposing || event.keyCode === 229;
 
   const startTouchTap = (event: ReactPointerEvent<HTMLElement>): void => {
+    lastPointerTypeRef.current = event.pointerType;
+
     if (event.pointerType !== "touch") {
       return;
     }
@@ -508,6 +512,34 @@ export function TaskModal({
     }
   };
 
+  const openInlineOnClick =
+    (field: InlineField) =>
+    (event: ReactMouseEvent<HTMLElement>): void => {
+      const pointerType = lastPointerTypeRef.current;
+
+      lastPointerTypeRef.current = null;
+
+      // Touch-тап уже обработан на pointerup; compatibility click после него,
+      // включая отменённый жест, не должен открывать редактор повторно.
+      if (pointerType === "touch") {
+        return;
+      }
+
+      const selection = window.getSelection();
+
+      // Одиночный клик не должен превращать выделение текста мышью в редактор.
+      if (
+        selection !== null &&
+        !selection.isCollapsed &&
+        (event.currentTarget.contains(selection.anchorNode) ||
+          event.currentTarget.contains(selection.focusNode))
+      ) {
+        return;
+      }
+
+      onStartInline(field);
+    };
+
   const openInlineOnKey = (field: InlineField) => (event: ReactKeyboardEvent<HTMLElement>) => {
     if ((event.key === "Enter" || event.key === "F2") && !isComposing(event)) {
       event.preventDefault();
@@ -532,7 +564,7 @@ export function TaskModal({
   const inlineEditorClass =
     "w-full rounded-md border bg-background px-2 py-1.5 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50";
 
-  const inlineHint = "Двойной клик или Enter — редактировать";
+  const inlineHint = "Клик или Enter — редактировать";
 
   return (
     <div
@@ -544,7 +576,7 @@ export function TaskModal({
       }`}
     >
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-5">
-        <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
           {inlineSession?.field === "title" ? (
             <div
               ref={editorRef}
@@ -604,9 +636,7 @@ export function TaskModal({
               tabIndex={0}
               title={inlineHint}
               aria-label={`Название задачи: ${task.title}. ${inlineHint}`}
-              onDoubleClick={() => {
-                onStartInline("title");
-              }}
+              onClick={openInlineOnClick("title")}
               onPointerDown={startTouchTap}
               onPointerMove={trackTouchTap}
               onPointerUp={finishTouchTap("title")}
@@ -837,9 +867,7 @@ export function TaskModal({
                   tabIndex={0}
                   title={inlineHint}
                   aria-label={`Описание задачи. ${inlineHint}`}
-                  onDoubleClick={() => {
-                    onStartInline("description");
-                  }}
+                  onClick={openInlineOnClick("description")}
                   onPointerDown={startTouchTap}
                   onPointerMove={trackTouchTap}
                   onPointerUp={finishTouchTap("description")}

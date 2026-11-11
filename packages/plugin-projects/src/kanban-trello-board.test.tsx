@@ -501,8 +501,10 @@ describe("Trello-доска", () => {
 
     const placeholder = await screen.findByTestId("kanban-drop-placeholder");
 
-    // Placeholder стоит перед первой карточкой, а не в конце списка.
-    expect(screen.getByTestId("kanban-cards-todo").firstElementChild).toBe(placeholder);
+    // Абсолютный индикатор стоит перед первой карточкой и не входит в flow.
+    expect(placeholder).toHaveAttribute("data-drop-position", "before");
+    expect(placeholder.parentElement).toBe(first.parentElement);
+    expect(screen.getByTestId("kanban-cards-todo").firstElementChild).toBe(first.parentElement);
 
     fireEvent.pointerUp(window);
 
@@ -581,7 +583,7 @@ describe("Trello-доска", () => {
       expect(screen.getByTestId("kanban-card-a")).toBeInTheDocument();
     });
 
-    const target = screen.getByTestId("kanban-card-b");
+    const target = screen.getByTestId("kanban-card-a");
 
     vi.spyOn(target, "getBoundingClientRect").mockReturnValue({
       top: 0,
@@ -599,19 +601,30 @@ describe("Trello-доска", () => {
       value: () => target,
     });
 
-    const handle = screen.getByTestId("kanban-drag-a");
+    const handle = screen.getByTestId("kanban-drag-b");
 
     fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY: 20 });
 
     const placeholder = await screen.findByTestId("kanban-drop-placeholder");
+    const preview = await screen.findByTestId("kanban-drag-preview");
 
     expect(placeholder).toHaveAttribute("aria-hidden", "true");
+    expect(placeholder).toHaveAttribute("data-drop-position", "before");
+    expect(placeholder.parentElement).toBe(target.parentElement);
+    expect(preview).toHaveAttribute("aria-hidden", "true");
+    expect(preview).toHaveClass("pointer-events-none");
+    expect(preview).toHaveTextContent("B");
+    expect(preview.querySelector("[data-card-id]")).toBeNull();
+    expect(preview.querySelector("[data-testid]")).toBeNull();
+    expect(preview.querySelector("[id]")).toBeNull();
+    expect(preview.querySelector("button")?.tabIndex).toBe(-1);
     expect((screen.getByTestId("kanban-column-todo") as HTMLElement).style.boxShadow).toContain(
       "var(--ring)",
     );
 
     fireEvent.pointerUp(window);
+    expect(screen.queryByTestId("kanban-drag-preview")).toBeNull();
 
     await waitFor(() => {
       expect(operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.move")).toBe(
@@ -621,10 +634,129 @@ describe("Trello-доска", () => {
     const move = operations.calls.find((call) => call.operationId === "kanbaner.tasks.task.move");
 
     expect(inputOf(move?.input ?? {})).toMatchObject({
-      id: "a",
+      id: "b",
       status: "todo",
       position: 0,
     });
+  });
+
+  it("не превращает промежуток между карточками в append", async () => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [
+        makeTask("a", { title: "A", status: "todo", position: 0 }),
+        makeTask("b", { title: "B", status: "todo", position: 1 }),
+        makeTask("c", { title: "C", status: "todo", position: 2 }),
+      ],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+    await screen.findByTestId("kanban-card-a");
+
+    const rect = (top: number): DOMRect =>
+      ({
+        top,
+        bottom: top + 100,
+        left: 0,
+        right: 200,
+        width: 200,
+        height: 100,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    vi.spyOn(screen.getByTestId("kanban-card-b"), "getBoundingClientRect").mockReturnValue(rect(0));
+    vi.spyOn(screen.getByTestId("kanban-card-c"), "getBoundingClientRect").mockReturnValue(
+      rect(108),
+    );
+
+    const list = screen.getByTestId("kanban-cards-todo");
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => list,
+    });
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-drag-a"), { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 20, clientY: 104 });
+
+    const placeholder = await screen.findByTestId("kanban-drop-placeholder");
+    const target = screen.getByTestId("kanban-card-c");
+
+    expect(placeholder).toHaveAttribute("data-drop-position", "before");
+    expect(placeholder.parentElement).toBe(target.parentElement);
+    expect(placeholder).toHaveClass("absolute");
+
+    fireEvent.pointerUp(window);
+
+    await waitFor(() => {
+      const move = operations.calls.find((call) => call.operationId === "kanbaner.tasks.task.move");
+
+      expect(inputOf(move?.input ?? {})).toMatchObject({ id: "a", status: "todo", position: 1 });
+    });
+  });
+
+  it.each([
+    { id: "a", clientY: -4, label: "первой" },
+    { id: "b", clientY: 104, label: "средней" },
+    { id: "c", clientY: 212, label: "последней" },
+  ])("не отправляет move для исходного промежутка $label карточки", async ({ id, clientY }) => {
+    const board: Board = {
+      projects: [makeProject("project-1")],
+      tasks: [
+        makeTask("a", { title: "A", status: "todo", position: 0 }),
+        makeTask("b", { title: "B", status: "todo", position: 1 }),
+        makeTask("c", { title: "C", status: "todo", position: 2 }),
+      ],
+      nextTask: 1,
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} pathname="/view/kanban" />);
+    await screen.findByTestId(`kanban-card-${id}`);
+
+    for (const [index, cardId] of ["a", "b", "c"].entries()) {
+      const top = index * 108;
+
+      vi.spyOn(
+        screen.getByTestId(`kanban-card-${cardId}`),
+        "getBoundingClientRect",
+      ).mockReturnValue({
+        top,
+        bottom: top + 100,
+        left: 0,
+        right: 200,
+        width: 200,
+        height: 100,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      } as DOMRect);
+    }
+
+    const list = screen.getByTestId("kanban-cards-todo");
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => list,
+    });
+
+    fireEvent.pointerDown(screen.getByTestId(`kanban-drag-${id}`), { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 20, clientY });
+    await screen.findByTestId("kanban-drop-placeholder");
+    fireEvent.pointerUp(window);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(operations.calls.some((call) => call.operationId === "kanbaner.tasks.task.move")).toBe(
+      false,
+    );
+    expect(screen.queryByTestId("kanban-drag-preview")).toBeNull();
   });
 
   it("переключает мобильные вкладки статусов и прокручивает к колонке", async () => {

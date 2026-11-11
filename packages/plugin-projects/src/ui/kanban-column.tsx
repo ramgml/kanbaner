@@ -322,8 +322,13 @@ export function KanbanColumn({
 
         <ol
           data-testid={`kanban-cards-${slug}`}
-          className="flex flex-col gap-2"
-          style={{ margin: 0, padding: 0, listStyle: "none" }}
+          className="relative flex flex-col gap-2"
+          style={{
+            margin: 0,
+            padding: 0,
+            listStyle: "none",
+            minHeight: dropActive && total === 0 ? "3rem" : undefined,
+          }}
         >
           {children}
         </ol>

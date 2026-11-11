@@ -2966,7 +2966,7 @@ test.describe("канбан в production shell", () => {
 
       // Описание добавляется inline.
       await page.getByTestId(`kanban-open-${taskId}`).click();
-      await page.getByTestId("kanban-modal-description").dblclick();
+      await page.getByTestId("kanban-modal-description").click();
 
       const descriptionInput = page.getByTestId("kanban-description-input");
 
@@ -3052,13 +3052,16 @@ test.describe("канбан в production shell", () => {
 
       const handle = page.getByTestId(`kanban-drag-${secondId}`);
       const target = page.getByTestId(`kanban-card-${firstId}`);
+      const sourceCard = page.getByTestId(`kanban-card-${secondId}`);
       const source = await handle.boundingBox();
+      const sourceCardBox = await sourceCard.boundingBox();
       const destination = await target.boundingBox();
 
       expect(source).not.toBeNull();
+      expect(sourceCardBox).not.toBeNull();
       expect(destination).not.toBeNull();
 
-      if (source === null || destination === null) {
+      if (source === null || sourceCardBox === null || destination === null) {
         return;
       }
 
@@ -3069,19 +3072,55 @@ test.describe("канбан в production shell", () => {
       const placeholder = page.getByTestId("kanban-drop-placeholder");
 
       await expect(placeholder).toBeVisible();
+
+      const preview = page.getByTestId("kanban-drag-preview");
+
+      await expect(preview).toBeVisible();
+      await expect(preview).toHaveCSS("pointer-events", "none");
+      await expect(preview).toContainText(secondTitle);
+      await expect(preview.locator("[data-card-id]")).toHaveCount(0);
+
+      const previewGeometry = await preview.evaluate((element) => ({
+        left: Number.parseFloat(element.style.left),
+        top: Number.parseFloat(element.style.top),
+        width: Number.parseFloat(element.style.width),
+      }));
+      const pointerX = destination.x + destination.width / 2;
+      const pointerY = destination.y + 6;
+      const startX = source.x + source.width / 2;
+      const startY = source.y + source.height / 2;
+
+      expect(previewGeometry.left).toBeCloseTo(pointerX - (startX - sourceCardBox.x), 1);
+      expect(previewGeometry.top).toBeCloseTo(pointerY - (startY - sourceCardBox.y), 1);
+      expect(previewGeometry.width).toBeCloseTo(sourceCardBox.width, 1);
+
       const placeholderBox = await placeholder.boundingBox();
       const firstBox = await target.boundingBox();
+      const scrollBox = await page.getByTestId("kanban-column-scroll-todo").boundingBox();
 
       expect(placeholderBox).not.toBeNull();
       expect(firstBox).not.toBeNull();
+      expect(scrollBox).not.toBeNull();
 
-      if (placeholderBox !== null && firstBox !== null) {
+      if (placeholderBox !== null && firstBox !== null && scrollBox !== null) {
         expect(placeholderBox.y).toBeLessThanOrEqual(firstBox.y + 1);
+        expect(placeholderBox.y).toBeGreaterThanOrEqual(scrollBox.y);
+        expect(placeholderBox.y + placeholderBox.height).toBeLessThanOrEqual(
+          scrollBox.y + scrollBox.height,
+        );
+
+        // Движение внутри одной зоны не меняет геометрию соседних карточек.
+        for (const offset of [4, 10, 6]) {
+          await page.mouse.move(destination.x + destination.width / 2, destination.y + offset);
+          await expect(placeholder).toHaveAttribute("data-drop-position", "before");
+          expect((await target.boundingBox())?.y).toBeCloseTo(firstBox.y, 1);
+        }
       }
 
       await page.mouse.up();
       await expect.poll(async () => cardTitles(page, "todo")).toEqual([secondId, firstId]);
       await expect(placeholder).toHaveCount(0);
+      await expect(preview).toHaveCount(0);
     });
 
     test("открывает карточку Trello-модалом и сохраняет title/description inline", async ({
@@ -3128,18 +3167,23 @@ test.describe("канбан в production shell", () => {
         expect(Math.abs(box.x - (DESKTOP_VIEWPORT.width - box.width) / 2)).toBeLessThanOrEqual(2);
       }
 
-      // Заголовок: double click, Enter, partial task.update.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      // Заголовок: одинарный click, Enter, partial task.update.
+      await page.getByTestId("kanban-modal-title").click();
 
       const titleInput = page.getByTestId("kanban-title-input");
 
       await expect(titleInput).toBeFocused();
+
+      const titleInputBox = await titleInput.boundingBox();
+
+      // Inline-редактор занимает свободную ширину шапки, а не intrinsic-width input.
+      expect(titleInputBox?.width).toBeGreaterThan(600);
       await titleInput.fill(updatedTitle);
       await page.keyboard.press("Enter");
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(updatedTitle);
 
-      // Описание: double click, явная кнопка сохранения.
-      await page.getByTestId("kanban-modal-description").dblclick();
+      // Описание: одинарный click, явная кнопка сохранения.
+      await page.getByTestId("kanban-modal-description").click();
 
       const descriptionInput = page.getByTestId("kanban-description-input");
 
@@ -3239,7 +3283,7 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await openCardModal(page, taskId, taskTitle);
 
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
 
       const titleInput = page.getByTestId("kanban-title-input");
 
@@ -3253,7 +3297,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
 
       // Escape при фокусе на Save тоже отменяет только редактор.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
       await page.getByTestId("kanban-title-input").fill(draftTitle);
       await page.getByTestId("kanban-title-save").focus();
       await page.keyboard.press("Escape");
@@ -3263,7 +3307,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
 
       // И на Cancel редактора описания.
-      await page.getByTestId("kanban-modal-description").dblclick();
+      await page.getByTestId("kanban-modal-description").click();
       await page.getByTestId("kanban-description-input").fill("Черновик описания");
       await page.getByTestId("kanban-description-cancel").focus();
       await page.keyboard.press("Escape");
@@ -3273,7 +3317,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-modal-description")).toHaveText("Добавить описание…");
 
       // Повторно открываем и проверяем закрытие модала.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
 
       const dirtyInput = page.getByTestId("kanban-title-input");
 
@@ -3347,7 +3391,7 @@ test.describe("канбан в production shell", () => {
       }
 
       // Черновик заголовка: фокус уходит в alertdialog и не покидает его.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
 
       const titleInput = page.getByTestId("kanban-title-input");
 
@@ -3435,7 +3479,7 @@ test.describe("канбан в production shell", () => {
       await nextStatus.selectOption({ label: "In Progress" });
 
       // Inline-сессия живёт в overlay и переживает breakpoint remount.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
       await page.getByTestId("kanban-title-input").fill("Черновик inline");
       await page.setViewportSize(MOBILE_VIEWPORT);
       await expect(page.getByTestId("kanban-details")).toHaveAttribute("data-variant", "mobile");
@@ -3553,13 +3597,13 @@ test.describe("канбан в production shell", () => {
       await openCardModal(stalePage, taskId, taskTitle);
 
       // Свежая вкладка сохраняет заголовок inline.
-      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-modal-title").click();
       await page.getByTestId("kanban-title-input").fill(serverTitle);
       await page.getByTestId("kanban-title-input").press("Enter");
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(serverTitle);
 
       // Устаревшая вкладка пытается перезаписать чужую правку.
-      await stalePage.getByTestId("kanban-modal-title").dblclick();
+      await stalePage.getByTestId("kanban-modal-title").click();
       await stalePage.getByTestId("kanban-title-input").fill(staleTitle);
       await stalePage.getByTestId("kanban-title-save").click();
 
