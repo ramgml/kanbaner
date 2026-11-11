@@ -483,6 +483,42 @@ describe("TaskOverlay Trello-модал", () => {
     expect(window.location.search).not.toContain("task=");
   });
 
+  it("очищает ошибку чтения после retry, не смешивая её с командной", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let failGet = true;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.get": (input) => {
+        if (failGet) {
+          return fail("INTERNAL", "Ошибка чтения");
+        }
+
+        const found = getTask(board, String(inputOf(input).id));
+
+        return found === undefined ? fail("NOT_FOUND") : ok({ task: found });
+      },
+    });
+
+    renderOverlay(operations);
+    act(() => {
+      updateKanbanQuery({ taskId: "a" });
+    });
+
+    expect(await screen.findByTestId("task-ui-error")).toHaveTextContent("Ошибка чтения");
+
+    failGet = false;
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    });
+    expect(screen.queryByTestId("task-ui-error")).toBeNull();
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
   it("не показывает переключатель внутри модала, оставляя его в шапке", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
@@ -2379,6 +2415,190 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
     expect(board.tasks.some((task) => task.id === "late-sub")).toBe(true);
     expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
+  it("поздний success A не стирает INTERNAL ошибку B и сохраняет draft B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    let bUpdates = 0;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        const values = inputOf(input);
+        const id = String(values.id);
+
+        if (id === "a") {
+          return new Promise<UiOperationResult>((resolve) => {
+            releaseA = () => {
+              const task = getTask(board, "a") as Task;
+              const updated: Task = { ...task, priority: "high", version: 2 } as Task;
+
+              board.tasks = board.tasks.map((candidate) =>
+                candidate.id === updated.id ? updated : candidate,
+              );
+              resolve(ok({ task: updated, resource: {}, eventId: "event" }));
+            };
+          });
+        }
+
+        bUpdates += 1;
+
+        if (bUpdates === 1) {
+          return fail("INTERNAL", "Ошибка B");
+        }
+
+        const task = getTask(board, id) as Task;
+        const updated: Task = {
+          ...task,
+          priority: values.priority as Task["priority"],
+          version: task.version + 1,
+        } as Task;
+
+        board.tasks = board.tasks.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
+        );
+
+        return ok({ task: updated, resource: {}, eventId: "event" });
+      },
+    });
+    const listCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.list").length;
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик B" } });
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("task-details-error")).toHaveTextContent("Ошибка B");
+    });
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+
+    const before = listCalls();
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(listCalls()).toBeGreaterThan(before);
+    });
+    expect(screen.getByTestId("task-details-error")).toHaveTextContent("Ошибка B");
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+    expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
+
+    // Новая операция той же generation снимает прежнюю командную ошибку.
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "low" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("low");
+    });
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+  });
+
+  it("поздний VERSION_CONFLICT A не стирает INTERNAL ошибку B и draft B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        const values = inputOf(input);
+        const id = String(values.id);
+
+        if (id === "a") {
+          return new Promise<UiOperationResult>((resolve) => {
+            releaseA = () => {
+              board.tasks = board.tasks.map((task) =>
+                task.id === "a" ? { ...task, priority: "high", version: 2 } : task,
+              );
+              resolve(fail("VERSION_CONFLICT"));
+            };
+          });
+        }
+
+        return fail("INTERNAL", "Ошибка B");
+      },
+    });
+    const listCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.list").length;
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик B" } });
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("task-details-error")).toHaveTextContent("Ошибка B");
+    });
+
+    const before = listCalls();
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(listCalls()).toBeGreaterThan(before);
+    });
+    expect(screen.getByTestId("task-details-error")).toHaveTextContent("Ошибка B");
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+    expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
+    expect(screen.queryByTestId("kanban-inline-stale")).toBeNull();
   });
 
   it("сохраняет быстрые черновики при inline save и refresh", async () => {

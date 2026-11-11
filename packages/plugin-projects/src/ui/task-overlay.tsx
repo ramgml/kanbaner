@@ -336,7 +336,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const [parentTask, setParentTask] = useState<Task | null>(null);
   const [subtasks, setSubtasks] = useState<SubtasksState>(EMPTY_SUBTASKS);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
   const [inlineSession, setInlineSession] = useState<InlineEditSession | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [quickState, setQuickState] = useState<QuickState | null>(null);
@@ -365,6 +366,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     activeInlineSession.expectedVersion !== currentTask.version;
   const conflict =
     conflictState !== null && conflictState.taskId === taskId ? conflictState.message : null;
+  const visibleError = loadError ?? commandError ?? conflict;
   const visibleSubtasks =
     currentTask !== null && subtasks.taskId === currentTask.id ? subtasks : EMPTY_SUBTASKS;
   const activeQuickState =
@@ -459,13 +461,14 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
             syncQuickState(current, loadedTask, previousBaseline, projectColumns),
           );
           quickBaselineRef.current = baselineOf(loadedTask, projectColumns);
-          setError(null);
+          // Refresh очищает только ошибку чтения, не командную ошибку.
+          setLoadError(null);
         }
       } catch (loadError) {
         if (!cancelled) {
           setTask(null);
           setSubtasks(EMPTY_SUBTASKS);
-          setError(errorMessage(loadError));
+          setLoadError(errorMessage(loadError));
         }
       } finally {
         if (!cancelled) {
@@ -492,6 +495,9 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setInlineSession(null);
     setInlineError(null);
     setCloseConfirm(false);
+    setLoadError(null);
+    setCommandError(null);
+    setConflictState(null);
   }, [taskId]);
 
   const closeNow = useCallback((): void => {
@@ -500,7 +506,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setInlineError(null);
     setQuickState(null);
     quickBaselineRef.current = null;
-    setError(null);
+    setLoadError(null);
+    setCommandError(null);
     setConflictState(null);
     updateKanbanQuery({ taskId: null });
   }, []);
@@ -531,7 +538,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
-    setError(null);
+    // Новая операция той же generation снимает прежнюю командную ошибку.
+    setCommandError(null);
     setConflictState(null);
 
     try {
@@ -566,7 +574,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         // независимо от того, какая задача сейчас выбрана.
         bumpKanbanRevision();
       } else if (ownsCurrentTask) {
-        setError(errorMessage(commandError));
+        setCommandError(errorMessage(commandError));
       }
 
       return false;
@@ -662,7 +670,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     const initial = field === "title" ? currentTask.title : currentTask.descriptionMarkdown;
 
     setInlineError(null);
-    setError(null);
+    setCommandError(null);
     setConflictState(null);
     setCloseConfirm(false);
     setInlineSession({
@@ -851,7 +859,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     }
 
     if (draft.columnId.length === 0 || !columns.some((column) => column.id === draft.columnId)) {
-      setError("Выберите существующую колонку для подзадачи");
+      setCommandError("Выберите существующую колонку для подзадачи");
 
       return false;
     }
@@ -872,7 +880,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
-    setError(null);
+    setCommandError(null);
     setConflictState(null);
 
     try {
@@ -905,7 +913,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       return generationRef.current === token.generation;
     } catch (commandError) {
       if (generationRef.current === token.generation) {
-        setError(errorMessage(commandError));
+        setCommandError(errorMessage(commandError));
       }
 
       return false;
@@ -928,7 +936,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       </div>
     ) : currentTask === null ? (
       <div className="p-4">
-        <ErrorState message={error ?? "Задача не найдена"} onRetry={bumpKanbanRevision} />
+        <ErrorState message={loadError ?? "Задача не найдена"} onRetry={bumpKanbanRevision} />
       </div>
     ) : (
       <TaskModal
@@ -941,7 +949,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         subtasksLoading={visibleSubtasks.loading}
         subtasksError={visibleSubtasks.error}
         busy={busy || loading}
-        error={error ?? conflict}
+        error={visibleError}
         inlineSession={activeInlineSession}
         inlineError={inlineError}
         inlineStale={inlineStale}
