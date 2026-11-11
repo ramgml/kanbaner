@@ -466,7 +466,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(window.location.search).not.toContain("task=");
   });
 
-  it("показывает внутри модала переключатель с сохранением task", async () => {
+  it("не показывает переключатель внутри модала, оставляя его в шапке", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -477,18 +477,14 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    const list = screen.getByTestId("project-view-modal-list");
-    const kanban = screen.getByTestId("project-view-modal-kanban");
-
-    expect(list.tagName).toBe("A");
-    expect(kanban.tagName).toBe("A");
-    expect(kanban).toHaveAttribute("href", "/view/kanban?project=project-1&task=a");
-    expect(list).toHaveAttribute("href", "/view/tasks?project=project-1&task=a");
-    expect(kanban).toHaveAttribute("aria-pressed", "true");
-    expect(list).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(screen.queryByTestId("project-view-modal-kanban")).toBeNull();
+    expect(screen.queryByTestId("kanban-modal-edit")).toBeNull();
+    expect(screen.getByTestId("project-view-list")).toBeInTheDocument();
+    expect(screen.getByTestId("project-view-kanban")).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("скрывает переключатель при quick draft и полном редактировании, не теряя ввод", async () => {
+  it("не теряет quick draft и inline draft, переключатель остаётся только в шапке", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -499,51 +495,31 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
+    const headerToggle = screen.getByTestId("project-view-list");
 
-    // Быстрый статус: переключатель исчезает, выбранное значение остаётся.
+    expect(headerToggle).toBeInTheDocument();
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+
     const move = screen.getByTestId("kanban-modal-move-field");
 
     fireEvent.change(move, { target: { value: "column-project-1-legacy-in_progress" } });
-    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(move).toHaveValue("column-project-1-legacy-in_progress");
 
-    fireEvent.change(move, { target: { value: "column-project-1-legacy-todo" } });
-    await waitFor(() => {
-      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
-    });
-
-    // Быстрый срок.
     const due = screen.getByTestId("kanban-modal-due");
 
     fireEvent.change(due, { target: { value: "2030-05-05" } });
-    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(due).toHaveValue("2030-05-05");
 
-    fireEvent.change(due, { target: { value: "" } });
-    await waitFor(() => {
-      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
-    });
-
-    // Быстрые теги.
     const tags = screen.getByTestId("kanban-modal-tags");
 
     fireEvent.change(tags, { target: { value: "release" } });
-    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(tags).toHaveValue("release");
 
-    fireEvent.change(tags, { target: { value: "" } });
-    await waitFor(() => {
-      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
-    });
-
-    // Черновик подзадачи.
     fireEvent.click(screen.getByTestId("kanban-subtask-create"));
 
     const subtaskTitle = screen.getByTestId("kanban-subtask-input");
 
     fireEvent.change(subtaskTitle, { target: { value: "Новая подзадача" } });
-    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(subtaskTitle).toHaveValue("Новая подзадача");
 
     // Закрытие с этим черновиком требует подтверждения, а не теряет ввод.
@@ -553,20 +529,40 @@ describe("TaskOverlay Trello-модал", () => {
     fireEvent.click(screen.getByTestId("kanban-draft-keep"));
 
     fireEvent.click(screen.getByTestId("kanban-subtask-cancel"));
-    await waitFor(() => {
-      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
-    });
 
-    // Полное редактирование: переключатель скрыт даже без изменений, отмена
-    // возвращает обычный режим без регрессии.
-    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    // Inline-редактор заголовка открывается поверх быстрых полей.
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Новый заголовок" } });
     expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
-    fireEvent.click(
-      within(screen.getByTestId("task-form-edit")).getByRole("button", { name: "Отмена" }),
-    );
-    await waitFor(() => {
-      expect(screen.getByTestId("project-view-modal-list")).toBeInTheDocument();
-    });
+    expect(headerToggle).toBeInTheDocument();
+
+    // Escape внутри редактора отменяет только его, а не модал.
+    fireEvent.keyDown(titleInput, { key: "Escape" });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
+
+    // X при dirty inline-черновике показывает подтверждение.
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const dirtyTitle = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(dirtyTitle, { target: { value: "Черновик заголовка" } });
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
+    expect(document.activeElement).toBe(screen.getByTestId("kanban-title-input"));
+
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
+    expect(headerToggle).toBeInTheDocument();
   });
 
   it("при переходе A→B не показывает устаревшую задачу и не выполняет её команды", async () => {
@@ -704,7 +700,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-subtask-create")).toBeInTheDocument();
   });
 
-  it("не теряет черновик при Escape и закрывает только после явного подтверждения", async () => {
+  it("Escape отменяет только inline-редактор, а X с dirty-черновиком требует подтверждения", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -715,26 +711,46 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    const display = screen.getByTestId("kanban-modal-title");
 
-    const form = await screen.findByTestId("task-form-edit");
-    const title = within(form).getByLabelText("Название");
+    // Клавиатурный путь: Tab на заголовок, Enter открывает редактор.
+    display.focus();
+    expect(document.activeElement).toBe(display);
+    fireEvent.keyDown(display, { key: "Enter" });
 
-    fireEvent.change(title, { target: { value: "Новый заголовок" } });
-    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+    const titleInput = await screen.findByTestId("kanban-title-input");
 
-    const confirm = await screen.findByTestId("kanban-draft-confirm");
+    expect(document.activeElement).toBe(titleInput);
+    fireEvent.change(titleInput, { target: { value: "Новый заголовок" } });
 
-    expect(confirm).toHaveTextContent("несохранённые изменения");
+    // Escape — только отмена редактора: native dialog не закрывается и
+    // подтверждение закрытия не появляется.
+    fireEvent.keyDown(titleInput, { key: "Escape" });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
-    expect(within(form).getByLabelText("Название")).toHaveValue("Новый заголовок");
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-title"));
     expect(window.location.search).toContain("task=a");
+
+    // X при dirty inline-черновике открывает confirm; Keep Editing
+    // возвращает фокус в активное поле и сохраняет ввод.
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const dirtyInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(dirtyInput, { target: { value: "Черновик заголовка" } });
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
 
     fireEvent.click(screen.getByTestId("kanban-draft-keep"));
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
-    expect(within(form).getByLabelText("Название")).toHaveValue("Новый заголовок");
+    expect(document.activeElement).toBe(screen.getByTestId("kanban-title-input"));
 
-    fireEvent.keyDown(screen.getByTestId("kanban-details"), { key: "Escape" });
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
     fireEvent.click(await screen.findByTestId("kanban-draft-discard"));
 
     await waitFor(() => {
@@ -746,47 +762,90 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
   });
 
-  it("сохраняет редактирование через expectedVersion и перечитывает задачу", async () => {
+  it("сохраняет title и description строго partial и возвращает фокус", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
       tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
     };
     const operations = createOperations(board);
+    const updateCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update");
 
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
 
-    const form = await screen.findByTestId("task-form-edit");
+    const titleInput = await screen.findByTestId("kanban-title-input");
 
-    fireEvent.change(within(form).getByLabelText("Название"), {
-      target: { value: "Обновлённая задача" },
-    });
-    fireEvent.change(form.querySelector('textarea[name="descriptionMarkdown"]') as Element, {
-      target: { value: "Новое описание" },
-    });
-    fireEvent.click(within(form).getByRole("button", { name: "Сохранить задачу" }));
+    fireEvent.change(titleInput, { target: { value: "  Обновлённая задача  " } });
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     await waitFor(() => {
-      const update = operations.calls
-        .filter((call) => call.operationId === "kanbaner.tasks.task.update")
-        .at(-1);
-
-      expect(inputOf(update?.input ?? {})).toMatchObject({
+      expect(inputOf(updateCalls().at(-1)?.input ?? {})).toEqual({
         id: "a",
         expectedVersion: 1,
         title: "Обновлённая задача",
-        descriptionMarkdown: "Новое описание",
       });
     });
-
     await waitFor(() => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Обновлённая задача");
     });
-    expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent("Новое описание");
-    expect(board.tasks.find((task) => task.id === "a")?.version).toBe(2);
+    expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-title"));
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+
+    const descriptionInput = await screen.findByTestId("kanban-description-input");
+
+    expect(document.activeElement).toBe(descriptionInput);
+    fireEvent.change(descriptionInput, {
+      target: { value: "Новое описание\nвторая строка" },
+    });
+    fireEvent.keyDown(descriptionInput, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(inputOf(updateCalls().at(-1)?.input ?? {})).toEqual({
+        id: "a",
+        expectedVersion: 2,
+        descriptionMarkdown: "Новое описание\nвторая строка",
+      });
+    });
+
+    // В команде нет ни одного незатронутого поля.
+    expect(Object.keys(inputOf(updateCalls().at(-1)?.input ?? {})).sort()).toEqual([
+      "descriptionMarkdown",
+      "expectedVersion",
+      "id",
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent("Новое описание");
+    });
+    expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent("вторая строка");
+    expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-description"));
+    expect(board.tasks.find((task) => task.id === "a")?.version).toBe(3);
+
+    // Описание можно очистить до пустого значения.
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+
+    const emptyInput = await screen.findByTestId("kanban-description-input");
+
+    fireEvent.change(emptyInput, { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("kanban-description-save"));
+
+    await waitFor(() => {
+      expect(inputOf(updateCalls().at(-1)?.input ?? {})).toEqual({
+        id: "a",
+        expectedVersion: 3,
+        descriptionMarkdown: "",
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent(
+        "Добавить описание…",
+      );
+    });
   });
 
   it("при VERSION_CONFLICT показывает сообщение и перечитывает серверную версию", async () => {
@@ -809,14 +868,12 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
 
-    const form = await screen.findByTestId("task-form-edit");
+    const titleInput = await screen.findByTestId("kanban-title-input");
 
-    fireEvent.change(within(form).getByLabelText("Название"), {
-      target: { value: "Локальная правка" },
-    });
-    fireEvent.click(within(form).getByRole("button", { name: "Сохранить задачу" }));
+    fireEvent.change(titleInput, { target: { value: "Локальная правка" } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
 
     await waitFor(() => {
       expect(screen.getByTestId("task-details-error")).toHaveTextContent(
@@ -826,6 +883,7 @@ describe("TaskOverlay Trello-модал", () => {
     await waitFor(() => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Серверная версия");
     });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
     expect(
       operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update"),
     ).toHaveLength(1);
@@ -872,7 +930,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(board.tasks.some((task) => task.id === "a")).toBe(false);
   });
 
-  it("фиксирует expectedVersion в edit-session и не перезаписывает серверную правку", async () => {
+  it("сохраняет draft при stale refresh и не перезаписывает серверную правку", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -883,10 +941,9 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.click(screen.getByTestId("kanban-modal-edit"));
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
 
-    const form = await screen.findByTestId("task-form-edit");
-    const title = within(form).getByLabelText("Название");
+    const title = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(title, { target: { value: "Локальная правка" } });
 
@@ -899,20 +956,21 @@ describe("TaskOverlay Trello-модал", () => {
       bumpKanbanRevision();
     });
 
-    const stale = await screen.findByTestId("kanban-edit-stale");
+    const stale = await screen.findByTestId("kanban-inline-stale");
 
     expect(stale).toBeInTheDocument();
     expect(title).toHaveValue("Локальная правка");
     expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    expect(screen.queryByTestId("kanban-modal-title")).toBeNull();
 
-    fireEvent.click(within(form).getByRole("button", { name: "Сохранить задачу" }));
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
 
     await waitFor(() => {
       const update = operations.calls
         .filter((call) => call.operationId === "kanbaner.tasks.task.update")
         .at(-1);
 
-      expect(inputOf(update?.input ?? {})).toMatchObject({
+      expect(inputOf(update?.input ?? {})).toEqual({
         id: "a",
         expectedVersion: 1,
         title: "Локальная правка",
@@ -928,7 +986,7 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Серверная версия");
     });
 
-    expect(screen.queryByTestId("task-form-edit")).toBeNull();
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
     expect(board.tasks.find((task) => task.id === "a")).toMatchObject({
       title: "Серверная версия",
       version: 2,
@@ -1417,6 +1475,273 @@ describe("TaskOverlay Trello-модал", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("kanban-details")).toBeNull();
     });
+  });
+
+  it("валидирует пустое название и закрывает unchanged без команды", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+    const updateCount = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update").length;
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "   " } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
+
+    expect(screen.getByTestId("kanban-inline-error")).toHaveTextContent("Укажите название задачи");
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("   ");
+    expect(updateCount()).toBe(0);
+    expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
+
+    // trim делает значение неизменённым: команда не отправляется.
+    fireEvent.change(titleInput, { target: { value: "  Задача A  " } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
+
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(updateCount()).toBe(0);
+    expect(board.tasks.find((task) => task.id === "a")?.version).toBe(1);
+  });
+
+  it("при обычной ошибке сохранения сохраняет ввод и не теряет редактор", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () => fail("INTERNAL", "Сервер недоступен"),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Несохранённый заголовок" } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("task-details-error")).toHaveTextContent("Сервер недоступен");
+    });
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Несохранённый заголовок");
+    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
+    expect(board.tasks.find((task) => task.id === "a")?.version).toBe(1);
+
+    // Dirty draft по-прежнему участвует в close guard.
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+  });
+
+  it("не даёт второму редактору молча выбросить dirty draft", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик заголовка" } });
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+
+    expect(screen.queryByTestId("kanban-description-input")).toBeNull();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
+    expect(screen.getByTestId("kanban-inline-error")).toHaveTextContent(
+      "Сначала сохраните или отмените изменение",
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-description"));
+
+    expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
+  });
+
+  it("открывает оба редактора touch-тапом и клавишей F2", async () => {
+    setDesktopViewport(false);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.pointerUp(screen.getByTestId("kanban-modal-title"), { pointerType: "touch" });
+    expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+
+    fireEvent.pointerUp(screen.getByTestId("kanban-modal-description"), { pointerType: "touch" });
+    expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-description-cancel"));
+
+    const description = screen.getByTestId("kanban-modal-description");
+
+    description.focus();
+    fireEvent.keyDown(description, { key: "F2" });
+    expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("kanban-description-cancel"));
+
+    const title = screen.getByTestId("kanban-modal-title");
+
+    title.focus();
+    fireEvent.keyDown(title, { key: "F2" });
+    expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
+  });
+
+  it("сохраняет быстрые черновики при inline save и refresh", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-move-field"), {
+      target: { value: "column-project-1-legacy-in_progress" },
+    });
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+    fireEvent.change(screen.getByTestId("kanban-modal-tags"), {
+      target: { value: "alpha, beta" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-subtask-create"));
+    fireEvent.change(screen.getByTestId("kanban-subtask-input"), {
+      target: { value: "Черновик подзадачи" },
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Заголовок с inline" } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Заголовок с inline");
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+    expect(screen.getByTestId("kanban-modal-tags")).toHaveValue("alpha, beta");
+    expect(screen.getByTestId("kanban-modal-move-field")).toHaveValue(
+      "column-project-1-legacy-in_progress",
+    );
+    expect(screen.getByTestId("kanban-subtask-input")).toHaveValue("Черновик подзадачи");
+    expect(screen.queryByTestId("kanban-quick-conflict")).toBeNull();
+  });
+
+  it("блокирует double-submit inline-сохранения", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            const task = getTask(board, "a") as Task;
+            const updated: Task = { ...task, title: "Один раз", version: 2 } as Task;
+
+            board.tasks = board.tasks.map((candidate) =>
+              candidate.id === updated.id ? updated : candidate,
+            );
+            resolve(ok({ task: updated, resource: {}, eventId: "event" }));
+          };
+        }),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Один раз" } });
+
+    const saveButton = screen.getByTestId("kanban-title-save");
+
+    fireEvent.click(saveButton);
+    fireEvent.click(saveButton);
+
+    expect(
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update"),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Один раз");
+    });
+    expect(
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update"),
+    ).toHaveLength(1);
+  });
+
+  it("при переходе A→B сбрасывает inline-сессию и поздний ответ", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик A" } });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+    expect(screen.queryByTestId("kanban-inline-stale")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    expect(await screen.findByTestId("kanban-title-input")).toHaveValue("Задача B");
   });
 
   it.each(["Release", " release ", "release, release"])(

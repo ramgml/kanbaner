@@ -1,17 +1,21 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
 import type { Project, Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
 import {
-  TaskForm,
   dueAtToDateInput,
   formatDueAt,
   tagsToInput,
   taskPriorities,
   taskPriorityLabel,
   taskStatusLabel,
-  type TaskFormValues,
 } from "@kanbaner/task-ui";
 
 export interface SubtaskDraft {
@@ -27,6 +31,24 @@ export interface SubtaskFormDraft extends SubtaskDraft {
 /** Быстрые поля, для которых возможен конфликт локального и серверного значения. */
 export type QuickDraftField = "column" | "due" | "tags";
 
+/** Поле карточки с inline-редактором. */
+export type InlineField = "title" | "description";
+
+/**
+ * Сессия inline-редактирования.
+ *
+ * `expectedVersion` фиксируется в момент открытия редактора, а `initial`
+ * хранит серверное значение на этот момент. Благодаря этому поздний refresh
+ * не затирает ввод, а сохранение устаревшего черновика получает конфликт.
+ */
+export interface InlineEditSession {
+  readonly field: InlineField;
+  readonly taskId: string;
+  readonly initial: string;
+  readonly draft: string;
+  readonly expectedVersion: number;
+}
+
 export interface TaskModalProps {
   readonly variant: "desktop" | "mobile";
   readonly task: Task;
@@ -37,13 +59,12 @@ export interface TaskModalProps {
   readonly subtasksError: string | null;
   readonly busy: boolean;
   readonly error: string | null;
-  readonly editing: boolean;
-  readonly editOutdated: boolean;
-  readonly editValues: TaskFormValues | null;
-  readonly editRootTasks: readonly Task[];
+  readonly inlineSession: InlineEditSession | null;
+  readonly inlineError: string | null;
+  /** Версия задачи изменилась после открытия редактора. */
+  readonly inlineStale: boolean;
   readonly closeConfirm: boolean;
-  /** Есть несохранённый ввод (полная форма или быстрые поля). */
-  readonly draftDirty: boolean;
+  /** Есть несохранённый ввод (inline-редактор или быстрые поля). */
   readonly quickConflicts: readonly QuickDraftField[];
   readonly columns: readonly TaskColumn[];
   readonly currentColumnId: string;
@@ -51,11 +72,10 @@ export interface TaskModalProps {
   readonly dueValue: string;
   readonly tagsValue: string;
   readonly subtaskDraft: SubtaskFormDraft;
-  readonly onChangeEditValues: (values: TaskFormValues) => void;
-  readonly onStartEdit: () => void;
-  readonly onCancelEdit: () => void;
-  readonly onCancelStaleEdit: () => void;
-  readonly onSubmitEdit: (values: TaskFormValues) => void;
+  readonly onStartInline: (field: InlineField) => void;
+  readonly onChangeInline: (value: string) => void;
+  readonly onSaveInline: () => void;
+  readonly onCancelInline: () => void;
   readonly onClose: () => void;
   readonly onOpenTask: (taskId: string) => void;
   readonly onCreateSubtask: (draft: SubtaskDraft) => Promise<boolean>;
@@ -73,8 +93,6 @@ export interface TaskModalProps {
   readonly onDelete: () => void;
   readonly onDiscardDraft: () => void;
   readonly onKeepEditing: () => void;
-  /** Доступный переключатель представления внутри inert-модала. */
-  readonly viewSwitch?: React.ReactNode;
 }
 
 const actionClass =
@@ -136,9 +154,10 @@ function completedLabel(value: string | null): string | null {
  * контент используется desktop- и mobile-вариантами общего `ModalDialog`;
  * раскладка переходит в одну колонку ниже breakpoint-а `xl`.
  *
- * Черновики быстрых действий (статус, срок, теги, форма подзадачи) хранятся
- * снаружи, в `TaskOverlay`, поэтому успешная команда по другому полю и смена
- * layout не стирают несохранённые значения.
+ * Черновики inline-полей (название, описание) и быстрых действий (статус, срок,
+ * теги, форма подзадачи) хранятся снаружи, в `TaskOverlay`. Поэтому успешная
+ * команда по другому полю, поздний refresh и смена layout не стирают
+ * несохранённые значения.
  */
 export function TaskModal({
   variant,
@@ -150,12 +169,10 @@ export function TaskModal({
   subtasksError,
   busy,
   error,
-  editing,
-  editOutdated,
-  editValues,
-  editRootTasks,
+  inlineSession,
+  inlineError,
+  inlineStale,
   closeConfirm,
-  draftDirty,
   quickConflicts,
   columns,
   currentColumnId,
@@ -163,11 +180,10 @@ export function TaskModal({
   dueValue,
   tagsValue,
   subtaskDraft,
-  onChangeEditValues,
-  onStartEdit,
-  onCancelEdit,
-  onCancelStaleEdit,
-  onSubmitEdit,
+  onStartInline,
+  onChangeInline,
+  onSaveInline,
+  onCancelInline,
   onClose,
   onOpenTask,
   onCreateSubtask,
@@ -185,12 +201,23 @@ export function TaskModal({
   onDelete,
   onDiscardDraft,
   onKeepEditing,
-  viewSwitch,
 }: TaskModalProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [subtaskError, setSubtaskError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLDivElement | null>(null);
+  const titleDisplayRef = useRef<HTMLHeadingElement | null>(null);
+  const descriptionDisplayRef = useRef<HTMLDivElement | null>(null);
+  const editorRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const cancelInlineRef = useRef(onCancelInline);
+  const previousInlineFieldRef = useRef<InlineField | null>(null);
+  const previousTaskIdRef = useRef(task.id);
+  const inlineField = inlineSession?.field ?? null;
+  const inlineTaskId = inlineSession?.taskId ?? null;
+
+  useEffect(() => {
+    cancelInlineRef.current = onCancelInline;
+  }, [onCancelInline]);
 
   const canCreateSubtask = task.parentTaskId === null;
   const completed = completedLabel(task.completedAt);
@@ -260,6 +287,55 @@ export function TaskModal({
     };
   }, [closeConfirm]);
 
+  // Нативный <dialog> слушает Escape на bubble-фазе. Перехватываем Escape в
+  // capture на самом редакторе, поэтому отмена поля не закрывает карточку и
+  // не открывает подтверждение закрытия.
+  useEffect(() => {
+    const editor = editorRef.current;
+
+    if (editor === null || inlineField === null) {
+      return;
+    }
+
+    const onKeyDownCapture = (event: Event): void => {
+      if (!(event instanceof KeyboardEvent) || event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      cancelInlineRef.current();
+    };
+
+    editor.addEventListener("keydown", onKeyDownCapture, true);
+
+    return () => {
+      editor.removeEventListener("keydown", onKeyDownCapture, true);
+    };
+  }, [inlineField, inlineTaskId]);
+
+  // После сохранения или отмены возвращаем фокус на заголовок/область
+  // описания. При смене задачи A→B фокус не переносится.
+  useEffect(() => {
+    const field = inlineSession?.field ?? null;
+    const taskChanged = previousTaskIdRef.current !== task.id;
+
+    if (taskChanged) {
+      previousTaskIdRef.current = task.id;
+    }
+
+    if (!taskChanged && previousInlineFieldRef.current !== null && field === null) {
+      const target =
+        previousInlineFieldRef.current === "title"
+          ? titleDisplayRef.current
+          : descriptionDisplayRef.current;
+
+      target?.focus();
+    }
+
+    previousInlineFieldRef.current = field;
+  }, [inlineSession?.field, task.id]);
+
   const focusDraftOrigin = (): void => {
     const root = rootRef.current;
 
@@ -267,10 +343,17 @@ export function TaskModal({
       return;
     }
 
-    const form = root.querySelector<HTMLElement>('[data-testid="task-form-edit"]');
+    const inlineEditor =
+      inlineSession === null
+        ? null
+        : root.querySelector<HTMLElement>(
+            inlineSession.field === "title"
+              ? '[data-testid="kanban-title-input"]'
+              : '[data-testid="kanban-description-input"]',
+          );
 
-    if (form !== null) {
-      form.querySelector<HTMLElement>('input[name="title"]')?.focus();
+    if (inlineEditor !== null) {
+      inlineEditor.focus();
 
       return;
     }
@@ -300,6 +383,42 @@ export function TaskModal({
     await onCreateSubtask({ title, columnId: subtaskDraft.columnId });
   };
 
+  const isComposing = (event: ReactKeyboardEvent<HTMLElement>): boolean =>
+    event.nativeEvent.isComposing || event.keyCode === 229;
+
+  const openInlineOnTouch = (field: InlineField) => (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.pointerType === "touch" && !busy) {
+      event.preventDefault();
+      onStartInline(field);
+    }
+  };
+
+  const openInlineOnKey = (field: InlineField) => (event: ReactKeyboardEvent<HTMLElement>) => {
+    if ((event.key === "Enter" || event.key === "F2") && !isComposing(event)) {
+      event.preventDefault();
+      onStartInline(field);
+    }
+  };
+
+  const saveTitleOnKey = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === "Enter" && !isComposing(event)) {
+      event.preventDefault();
+      onSaveInline();
+    }
+  };
+
+  const saveDescriptionOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !isComposing(event)) {
+      event.preventDefault();
+      onSaveInline();
+    }
+  };
+
+  const inlineEditorClass =
+    "w-full rounded-md border bg-background px-2 py-1.5 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50";
+
+  const inlineHint = "Двойной клик или Enter — редактировать";
+
   return (
     <div
       ref={rootRef}
@@ -311,12 +430,74 @@ export function TaskModal({
     >
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-5">
         <div className="flex min-w-0 flex-col gap-1">
-          <h2
-            data-testid="kanban-modal-title"
-            className="m-0 text-lg leading-tight font-semibold break-words sm:text-xl"
-          >
-            {task.title}
-          </h2>
+          {inlineSession?.field === "title" ? (
+            <div data-testid="kanban-title-editor" className="flex min-w-0 flex-col gap-2">
+              <input
+                ref={(node) => {
+                  editorRef.current = node;
+                }}
+                data-testid="kanban-title-input"
+                name="title"
+                aria-label="Название задачи"
+                aria-invalid={inlineError === null ? undefined : true}
+                value={inlineSession.draft}
+                maxLength={200}
+                autoFocus
+                disabled={busy}
+                onChange={(event) => {
+                  onChangeInline(event.target.value);
+                }}
+                onKeyDown={saveTitleOnKey}
+                className={`${inlineEditorClass} text-lg font-semibold sm:text-xl`}
+              />
+              {inlineError === null ? null : (
+                <p
+                  role="alert"
+                  data-testid="kanban-inline-error"
+                  className="m-0 text-xs text-destructive"
+                >
+                  {inlineError}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  data-testid="kanban-title-save"
+                  disabled={busy}
+                  onClick={onSaveInline}
+                  className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                >
+                  Сохранить
+                </button>
+                <button
+                  type="button"
+                  data-testid="kanban-title-cancel"
+                  disabled={busy}
+                  onClick={onCancelInline}
+                  className={actionClass}
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          ) : (
+            <h2
+              ref={titleDisplayRef}
+              data-testid="kanban-modal-title"
+              role="button"
+              tabIndex={0}
+              title={inlineHint}
+              aria-label={`Название задачи: ${task.title}. ${inlineHint}`}
+              onDoubleClick={() => {
+                onStartInline("title");
+              }}
+              onPointerUp={openInlineOnTouch("title")}
+              onKeyDown={openInlineOnKey("title")}
+              className="m-0 cursor-text rounded-sm text-lg leading-tight font-semibold break-words hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:text-xl"
+            >
+              {task.title}
+            </h2>
+          )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span data-testid="kanban-modal-project">{project?.title ?? "—"}</span>
             <span
@@ -345,7 +526,6 @@ export function TaskModal({
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-          {editing || closeConfirm || draftDirty ? null : viewSwitch}
           <button
             type="button"
             data-testid="kanban-details-close"
@@ -398,10 +578,10 @@ export function TaskModal({
         </div>
       ) : null}
 
-      {editing && editOutdated ? (
+      {inlineStale && inlineSession !== null ? (
         <div
           role="alert"
-          data-testid="kanban-edit-stale"
+          data-testid="kanban-inline-stale"
           className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive sm:mx-5"
         >
           <span>
@@ -410,9 +590,9 @@ export function TaskModal({
           </span>
           <button
             type="button"
-            data-testid="kanban-edit-stale-cancel"
+            data-testid="kanban-inline-stale-cancel"
             disabled={busy}
-            onClick={onCancelStaleEdit}
+            onClick={onCancelInline}
             className={actionClass}
           >
             Отменить правки
@@ -465,372 +645,416 @@ export function TaskModal({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {editing && editValues !== null ? (
-          <div className="p-4 sm:p-5">
-            <TaskForm
-              key={`edit-${task.id}`}
-              mode="edit"
-              projects={project === null ? [] : [project]}
-              rootTasks={editRootTasks}
-              values={editValues}
-              onValuesChange={onChangeEditValues}
-              excludeTaskId={task.id}
-              lockParent
-              submitting={busy}
-              error={null}
-              onSubmit={onSubmitEdit}
-              onCancel={onCancelEdit}
-            />
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_270px]">
-            <div className="flex min-w-0 flex-col gap-4">
-              <section aria-label="Описание задачи" className={sectionClass}>
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                    Описание (Markdown)
-                  </h3>
-                  <button
-                    type="button"
-                    data-testid="kanban-modal-edit"
+        <div className="grid grid-cols-1 gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_270px]">
+          <div className="flex min-w-0 flex-col gap-4">
+            <section aria-label="Описание задачи" className={sectionClass}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                  Описание (Markdown)
+                </h3>
+                {inlineSession?.field === "description" ? null : (
+                  <span className="text-[11px] text-muted-foreground">{inlineHint}</span>
+                )}
+              </div>
+              {inlineSession?.field === "description" ? (
+                <div data-testid="kanban-description-editor" className="mt-2 flex flex-col gap-2">
+                  <textarea
+                    ref={(node) => {
+                      editorRef.current = node;
+                    }}
+                    data-testid="kanban-description-input"
+                    name="descriptionMarkdown"
+                    aria-label="Описание (Markdown)"
+                    aria-invalid={inlineError === null ? undefined : true}
+                    value={inlineSession.draft}
+                    maxLength={100_000}
+                    autoFocus
                     disabled={busy}
-                    onClick={onStartEdit}
-                    className={actionClass}
-                  >
-                    Редактировать
-                  </button>
-                </div>
-                <p
-                  data-testid="kanban-modal-description"
-                  className="mt-2 m-0 text-sm whitespace-pre-wrap break-words"
-                >
-                  {task.descriptionMarkdown.length === 0
-                    ? "Без описания"
-                    : task.descriptionMarkdown}
-                </p>
-              </section>
-
-              <section aria-label="Подзадачи" className={sectionClass}>
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                    Подзадачи
-                  </h3>
-                  {canCreateSubtask ? (
+                    onChange={(event) => {
+                      onChangeInline(event.target.value);
+                    }}
+                    onKeyDown={saveDescriptionOnKey}
+                    className={`${inlineEditorClass} min-h-32`}
+                  />
+                  {inlineError === null ? null : (
+                    <p
+                      role="alert"
+                      data-testid="kanban-inline-error"
+                      className="m-0 text-xs text-destructive"
+                    >
+                      {inlineError}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      data-testid="kanban-subtask-create"
+                      data-testid="kanban-description-save"
                       disabled={busy}
-                      onClick={() => {
-                        onSubtaskDraftChange({ open: !subtaskDraft.open });
-                        setSubtaskError(null);
-                      }}
+                      onClick={onSaveInline}
+                      className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                    >
+                      Сохранить
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="kanban-description-cancel"
+                      disabled={busy}
+                      onClick={onCancelInline}
                       className={actionClass}
                     >
-                      {subtaskDraft.open ? "Скрыть форму" : "Добавить подзадачу"}
+                      Отмена
                     </button>
-                  ) : null}
+                  </div>
+                  <p className="m-0 text-[11px] text-muted-foreground">
+                    Ctrl/Cmd+Enter — сохранить, Escape — отменить. Markdown сохраняется как текст.
+                  </p>
                 </div>
-
-                {canCreateSubtask && subtaskDraft.open ? (
-                  <form
-                    data-testid="kanban-subtask-form"
-                    aria-label="Создание подзадачи"
-                    className="mt-2 flex flex-col gap-2 rounded-md border border-border/70 bg-background p-2"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void submitSubtask();
-                    }}
-                  >
-                    <label className={labelClass}>
-                      Название подзадачи
-                      <input
-                        data-testid="kanban-subtask-input"
-                        name="title"
-                        value={subtaskDraft.title}
-                        maxLength={200}
-                        disabled={busy}
-                        onChange={(event) => {
-                          onSubtaskDraftChange({ title: event.target.value });
-                        }}
-                        className={inputClass}
-                      />
-                    </label>
-                    <label className={labelClass}>
-                      Колонка подзадачи
-                      <select
-                        name="columnId"
-                        value={subtaskDraft.columnId}
-                        disabled={busy || columns.length === 0}
-                        onChange={(event) => {
-                          onSubtaskDraftChange({ columnId: event.target.value });
-                        }}
-                        className={inputClass}
-                      >
-                        {columns.length === 0 ? (
-                          <option value="">Нет доступных колонок</option>
-                        ) : (
-                          columns.map((column) => (
-                            <option key={column.id} value={column.id}>
-                              {column.title}
-                            </option>
-                          ))
-                        )}
-                      </select>
-                    </label>
-                    {subtaskError === null ? null : (
-                      <p role="alert" className="m-0 text-xs text-destructive">
-                        {subtaskError}
-                      </p>
-                    )}
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="submit"
-                        data-testid="kanban-subtask-submit"
-                        disabled={
-                          busy || subtaskDraft.title.trim().length === 0 || subtaskColumn === null
-                        }
-                        className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-                      >
-                        Создать подзадачу
-                      </button>
-                      <button
-                        type="button"
-                        data-testid="kanban-subtask-cancel"
-                        disabled={busy}
-                        onClick={() => {
-                          onSubtaskDraftChange({ open: false });
-                          setSubtaskError(null);
-                        }}
-                        className={actionClass}
-                      >
-                        Отмена
-                      </button>
-                    </div>
-                  </form>
-                ) : null}
-
-                {subtasksError === null ? null : (
-                  <p role="alert" className="mt-2 m-0 text-xs text-destructive">
-                    Подзадачи: {subtasksError}
-                  </p>
-                )}
-
-                {subtasksLoading && subtasks.length === 0 ? (
-                  <p className="mt-2 m-0 text-xs text-muted-foreground">Загрузка подзадач…</p>
-                ) : subtasks.length === 0 ? (
-                  <p
-                    data-testid="kanban-subtasks-empty"
-                    className="mt-2 m-0 text-xs text-muted-foreground"
-                  >
-                    {canCreateSubtask ? "Подзадач пока нет" : "Это подзадача"}
-                  </p>
-                ) : (
-                  <ul
-                    data-testid="kanban-modal-subtasks"
-                    className="mt-2 m-0 flex list-none flex-col gap-1 p-0"
-                  >
-                    {subtasks.map((subtask) => (
-                      <li key={subtask.id}>
-                        <button
-                          type="button"
-                          data-testid={`kanban-subtask-${subtask.id}`}
-                          disabled={busy}
-                          onClick={() => {
-                            onOpenTask(subtask.id);
-                          }}
-                          className="flex w-full items-center justify-between gap-2 rounded-md border border-border/70 bg-background px-2 py-1.5 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-                        >
-                          <span className="min-w-0 break-words">{subtask.title}</span>
-                          <span className="shrink-0 rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-secondary-foreground">
-                            {columnTitleOf(subtask) ?? taskStatusLabel(subtask.status)}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            </div>
-
-            <aside aria-label="Действия с задачей" className="flex min-w-0 flex-col gap-3">
-              <section className={sectionClass}>
-                <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                  Колонка и перемещение
-                </h3>
-                <label className={`${labelClass} mt-2`}>
-                  Переместить в
-                  <select
-                    data-testid="kanban-modal-move-field"
-                    value={nextColumnId}
-                    disabled={busy || columns.length === 0}
-                    onChange={(event) => {
-                      onNextColumnChange(event.target.value);
-                    }}
-                    className={inputClass}
-                  >
-                    {columns.length === 0 ? (
-                      <option value="">Нет доступных колонок</option>
-                    ) : (
-                      columns.map((column) => (
-                        <option key={column.id} value={column.id}>
-                          {column.title}
-                          {column.status === "done" ? " (Done)" : ""}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  data-testid="kanban-modal-move"
-                  disabled={busy || nextColumnId.length === 0 || nextColumnId === currentColumnId}
-                  onClick={() => {
-                    onMove(nextColumnId);
+              ) : (
+                <div
+                  ref={descriptionDisplayRef}
+                  data-testid="kanban-modal-description"
+                  role="button"
+                  tabIndex={0}
+                  title={inlineHint}
+                  aria-label={`Описание задачи. ${inlineHint}`}
+                  onDoubleClick={() => {
+                    onStartInline("description");
                   }}
-                  className={`${actionClass} mt-2 w-full`}
+                  onPointerUp={openInlineOnTouch("description")}
+                  onKeyDown={openInlineOnKey("description")}
+                  className="mt-2 min-h-16 cursor-text rounded-sm text-sm hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 >
-                  Переместить
-                </button>
-                {currentColumnDone ? null : (
+                  {task.descriptionMarkdown.length === 0 ? (
+                    <span className="text-muted-foreground">Добавить описание…</span>
+                  ) : (
+                    <p className="m-0 whitespace-pre-wrap break-words">
+                      {task.descriptionMarkdown}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section aria-label="Подзадачи" className={sectionClass}>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                  Подзадачи
+                </h3>
+                {canCreateSubtask ? (
                   <button
                     type="button"
-                    data-testid="kanban-modal-complete"
+                    data-testid="kanban-subtask-create"
                     disabled={busy}
-                    onClick={onComplete}
-                    className="mt-2 w-full rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                    onClick={() => {
+                      onSubtaskDraftChange({ open: !subtaskDraft.open });
+                      setSubtaskError(null);
+                    }}
+                    className={actionClass}
                   >
-                    Завершить
+                    {subtaskDraft.open ? "Скрыть форму" : "Добавить подзадачу"}
                   </button>
-                )}
-              </section>
+                ) : null}
+              </div>
 
-              <section className={sectionClass}>
-                <label className={labelClass}>
-                  Приоритет
-                  <select
-                    data-testid="kanban-modal-priority"
-                    value={task.priority}
-                    disabled={busy}
-                    onChange={(event) => {
-                      onPriority(event.target.value as TaskPriority);
-                    }}
-                    className={inputClass}
-                  >
-                    {taskPriorities().map((priority) => (
-                      <option key={priority} value={priority}>
-                        {taskPriorityLabel(priority)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </section>
-
-              <section className={sectionClass}>
-                <label className={labelClass}>
-                  Срок
-                  <input
-                    data-testid="kanban-modal-due"
-                    type="date"
-                    value={dueValue}
-                    disabled={busy}
-                    onChange={(event) => {
-                      onDueValueChange(event.target.value);
-                    }}
-                    className={inputClass}
-                  />
-                </label>
-                <button
-                  type="button"
-                  data-testid="kanban-modal-due-save"
-                  disabled={busy || !dueDirty}
-                  onClick={() => {
-                    onDue(dueValue);
+              {canCreateSubtask && subtaskDraft.open ? (
+                <form
+                  data-testid="kanban-subtask-form"
+                  aria-label="Создание подзадачи"
+                  className="mt-2 flex flex-col gap-2 rounded-md border border-border/70 bg-background p-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitSubtask();
                   }}
-                  className={`${actionClass} mt-2 w-full`}
                 >
-                  Сохранить срок
-                </button>
-                <p className="mt-1 m-0 text-[11px] text-muted-foreground">
-                  Сейчас: {formatDueAt(task.dueAt)}
-                </p>
-              </section>
-
-              <section className={sectionClass}>
-                <label className={labelClass}>
-                  Теги через запятую
-                  <input
-                    data-testid="kanban-modal-tags"
-                    value={tagsValue}
-                    disabled={busy}
-                    placeholder="release, backend"
-                    onChange={(event) => {
-                      onTagsValueChange(event.target.value);
-                    }}
-                    className={inputClass}
-                  />
-                </label>
-                <button
-                  type="button"
-                  data-testid="kanban-modal-tags-save"
-                  disabled={busy || !tagsDirty}
-                  onClick={() => {
-                    onTags(tagsValue);
-                  }}
-                  className={`${actionClass} mt-2 w-full`}
-                >
-                  Сохранить теги
-                </button>
-              </section>
-
-              <section className="rounded-lg border border-destructive/30 p-3">
-                {confirmingDelete ? (
-                  <div
-                    role="group"
-                    aria-label="Подтверждение удаления задачи"
-                    data-testid="task-delete-confirm-panel"
-                    className="flex flex-col gap-2"
-                  >
-                    <p className="m-0 text-xs text-destructive">
-                      Удалить задачу «{task.title}» безвозвратно? Действие нельзя отменить.
-                    </p>
-                    <button
-                      type="button"
-                      data-testid="task-delete-confirm"
+                  <label className={labelClass}>
+                    Название подзадачи
+                    <input
+                      data-testid="kanban-subtask-input"
+                      name="title"
+                      value={subtaskDraft.title}
+                      maxLength={200}
                       disabled={busy}
-                      onClick={onDelete}
-                      className="rounded-md bg-destructive px-2.5 py-1.5 text-xs font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50"
+                      onChange={(event) => {
+                        onSubtaskDraftChange({ title: event.target.value });
+                      }}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className={labelClass}>
+                    Колонка подзадачи
+                    <select
+                      name="columnId"
+                      value={subtaskDraft.columnId}
+                      disabled={busy || columns.length === 0}
+                      onChange={(event) => {
+                        onSubtaskDraftChange({ columnId: event.target.value });
+                      }}
+                      className={inputClass}
                     >
-                      Удалить задачу
+                      {columns.length === 0 ? (
+                        <option value="">Нет доступных колонок</option>
+                      ) : (
+                        columns.map((column) => (
+                          <option key={column.id} value={column.id}>
+                            {column.title}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  {subtaskError === null ? null : (
+                    <p role="alert" className="m-0 text-xs text-destructive">
+                      {subtaskError}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="submit"
+                      data-testid="kanban-subtask-submit"
+                      disabled={
+                        busy || subtaskDraft.title.trim().length === 0 || subtaskColumn === null
+                      }
+                      className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                    >
+                      Создать подзадачу
                     </button>
                     <button
                       type="button"
-                      data-testid="task-delete-cancel"
+                      data-testid="kanban-subtask-cancel"
                       disabled={busy}
                       onClick={() => {
-                        setConfirmingDelete(false);
+                        onSubtaskDraftChange({ open: false });
+                        setSubtaskError(null);
                       }}
                       className={actionClass}
                     >
                       Отмена
                     </button>
                   </div>
-                ) : (
+                </form>
+              ) : null}
+
+              {subtasksError === null ? null : (
+                <p role="alert" className="mt-2 m-0 text-xs text-destructive">
+                  Подзадачи: {subtasksError}
+                </p>
+              )}
+
+              {subtasksLoading && subtasks.length === 0 ? (
+                <p className="mt-2 m-0 text-xs text-muted-foreground">Загрузка подзадач…</p>
+              ) : subtasks.length === 0 ? (
+                <p
+                  data-testid="kanban-subtasks-empty"
+                  className="mt-2 m-0 text-xs text-muted-foreground"
+                >
+                  {canCreateSubtask ? "Подзадач пока нет" : "Это подзадача"}
+                </p>
+              ) : (
+                <ul
+                  data-testid="kanban-modal-subtasks"
+                  className="mt-2 m-0 flex list-none flex-col gap-1 p-0"
+                >
+                  {subtasks.map((subtask) => (
+                    <li key={subtask.id}>
+                      <button
+                        type="button"
+                        data-testid={`kanban-subtask-${subtask.id}`}
+                        disabled={busy}
+                        onClick={() => {
+                          onOpenTask(subtask.id);
+                        }}
+                        className="flex w-full items-center justify-between gap-2 rounded-md border border-border/70 bg-background px-2 py-1.5 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                      >
+                        <span className="min-w-0 break-words">{subtask.title}</span>
+                        <span className="shrink-0 rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-secondary-foreground">
+                          {columnTitleOf(subtask) ?? taskStatusLabel(subtask.status)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+
+          <aside aria-label="Действия с задачей" className="flex min-w-0 flex-col gap-3">
+            <section className={sectionClass}>
+              <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                Колонка и перемещение
+              </h3>
+              <label className={`${labelClass} mt-2`}>
+                Переместить в
+                <select
+                  data-testid="kanban-modal-move-field"
+                  value={nextColumnId}
+                  disabled={busy || columns.length === 0}
+                  onChange={(event) => {
+                    onNextColumnChange(event.target.value);
+                  }}
+                  className={inputClass}
+                >
+                  {columns.length === 0 ? (
+                    <option value="">Нет доступных колонок</option>
+                  ) : (
+                    columns.map((column) => (
+                      <option key={column.id} value={column.id}>
+                        {column.title}
+                        {column.status === "done" ? " (Done)" : ""}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                data-testid="kanban-modal-move"
+                disabled={busy || nextColumnId.length === 0 || nextColumnId === currentColumnId}
+                onClick={() => {
+                  onMove(nextColumnId);
+                }}
+                className={`${actionClass} mt-2 w-full`}
+              >
+                Переместить
+              </button>
+              {currentColumnDone ? null : (
+                <button
+                  type="button"
+                  data-testid="kanban-modal-complete"
+                  disabled={busy}
+                  onClick={onComplete}
+                  className="mt-2 w-full rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                >
+                  Завершить
+                </button>
+              )}
+            </section>
+
+            <section className={sectionClass}>
+              <label className={labelClass}>
+                Приоритет
+                <select
+                  data-testid="kanban-modal-priority"
+                  value={task.priority}
+                  disabled={busy}
+                  onChange={(event) => {
+                    onPriority(event.target.value as TaskPriority);
+                  }}
+                  className={inputClass}
+                >
+                  {taskPriorities().map((priority) => (
+                    <option key={priority} value={priority}>
+                      {taskPriorityLabel(priority)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </section>
+
+            <section className={sectionClass}>
+              <label className={labelClass}>
+                Срок
+                <input
+                  data-testid="kanban-modal-due"
+                  type="date"
+                  value={dueValue}
+                  disabled={busy}
+                  onChange={(event) => {
+                    onDueValueChange(event.target.value);
+                  }}
+                  className={inputClass}
+                />
+              </label>
+              <button
+                type="button"
+                data-testid="kanban-modal-due-save"
+                disabled={busy || !dueDirty}
+                onClick={() => {
+                  onDue(dueValue);
+                }}
+                className={`${actionClass} mt-2 w-full`}
+              >
+                Сохранить срок
+              </button>
+              <p className="mt-1 m-0 text-[11px] text-muted-foreground">
+                Сейчас: {formatDueAt(task.dueAt)}
+              </p>
+            </section>
+
+            <section className={sectionClass}>
+              <label className={labelClass}>
+                Теги через запятую
+                <input
+                  data-testid="kanban-modal-tags"
+                  value={tagsValue}
+                  disabled={busy}
+                  placeholder="release, backend"
+                  onChange={(event) => {
+                    onTagsValueChange(event.target.value);
+                  }}
+                  className={inputClass}
+                />
+              </label>
+              <button
+                type="button"
+                data-testid="kanban-modal-tags-save"
+                disabled={busy || !tagsDirty}
+                onClick={() => {
+                  onTags(tagsValue);
+                }}
+                className={`${actionClass} mt-2 w-full`}
+              >
+                Сохранить теги
+              </button>
+            </section>
+
+            <section className="rounded-lg border border-destructive/30 p-3">
+              {confirmingDelete ? (
+                <div
+                  role="group"
+                  aria-label="Подтверждение удаления задачи"
+                  data-testid="task-delete-confirm-panel"
+                  className="flex flex-col gap-2"
+                >
+                  <p className="m-0 text-xs text-destructive">
+                    Удалить задачу «{task.title}» безвозвратно? Действие нельзя отменить.
+                  </p>
                   <button
                     type="button"
-                    data-testid="task-delete"
+                    data-testid="task-delete-confirm"
+                    disabled={busy}
+                    onClick={onDelete}
+                    className="rounded-md bg-destructive px-2.5 py-1.5 text-xs font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50"
+                  >
+                    Удалить задачу
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="task-delete-cancel"
                     disabled={busy}
                     onClick={() => {
-                      setConfirmingDelete(true);
+                      setConfirmingDelete(false);
                     }}
-                    className={`${DESTRUCTIVE_BUTTON} w-full`}
+                    className={actionClass}
                   >
-                    Удалить
+                    Отмена
                   </button>
-                )}
-              </section>
-            </aside>
-          </div>
-        )}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="task-delete"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirmingDelete(true);
+                  }}
+                  className={`${DESTRUCTIVE_BUTTON} w-full`}
+                >
+                  Удалить
+                </button>
+              )}
+            </section>
+          </aside>
+        </div>
       </div>
     </div>
   );
