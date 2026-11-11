@@ -80,9 +80,15 @@
   Очистка по конфликту выполняется только для сессии, из которой пришёл сам
   inline-save. Каждая асинхронная операция привязана к task ID и монотонной
   generation: поздний success/error/conflict A после A→B или A→B→A не меняет
-  состояние B и не оставляет его заблокированным. Активный inline-черновик
-  входит в общий dirty-close guard; «Продолжить редактирование» возвращает
-  фокус в активное поле.
+  UI-состояние B и не оставляет его заблокированным. При этом успешная
+  серверная команда (priority/complete/delete/inline save/subtask create) и
+  `VERSION_CONFLICT` всегда инвалидируют данные через revision refresh,
+  независимо от generation: поздний delete не оставляет призрачную карточку, а
+  ABA-success обновляет текущую A, сохраняя её новый inline draft со stale.
+  Generation ограничивает только ownership UI: очистку сессии, closeNow,
+  ошибки/конфликты, quick cleanup и возврат saved для текущей задачи. Активный
+  inline-черновик входит в общий dirty-close guard; «Продолжить редактирование»
+  возвращает фокус в активное поле.
 - Task-list пишет query через router-aware `replaceSearch`, поэтому заголовок
   строит ссылки из актуального `workspaceSearch`, а не из устаревшего
   router-состояния. Внутри одного проекта toggle сохраняет `project`, `tag` и

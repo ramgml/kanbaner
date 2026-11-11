@@ -2085,6 +2085,302 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("medium");
   });
 
+  it("поздний success priority после закрытия модала обновляет доску", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            const task = getTask(board, "a") as Task;
+            const updated: Task = { ...task, priority: "high", version: 2 } as Task;
+
+            board.tasks = board.tasks.map((candidate) =>
+              candidate.id === updated.id ? updated : candidate,
+            );
+            resolve(ok({ task: updated, resource: {}, eventId: "event" }));
+          };
+        }),
+    });
+    const listCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.list").length;
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+
+    const before = listCalls();
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(listCalls()).toBeGreaterThan(before);
+    });
+    expect(board.tasks.find((task) => task.id === "a")?.priority).toBe("high");
+  });
+
+  it("поздний delete после A→B обновляет доску и убирает карточку", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.delete": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            board.tasks = board.tasks.filter((task) => task.id !== "a");
+            resolve(ok(null));
+          };
+        }),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.click(screen.getByTestId("task-delete"));
+    fireEvent.click(screen.getByTestId("task-delete-confirm"));
+    await waitFor(() => {
+      expect(screen.getByTestId("task-delete-confirm")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-card-a")).toBeNull();
+    });
+    expect(board.tasks.some((task) => task.id === "a")).toBe(false);
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
+  it("ABA late success обновляет текущую A и сохраняет новый draft со stale", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            const task = getTask(board, "a") as Task;
+            const updated: Task = { ...task, priority: "high", version: 2 } as Task;
+
+            board.tasks = board.tasks.map((candidate) =>
+              candidate.id === updated.id ? updated : candidate,
+            );
+            resolve(ok({ task: updated, resource: {}, eventId: "event" }));
+          };
+        }),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "a" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Новый draft A" } });
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+    expect(screen.getByTestId("kanban-inline-stale")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Новый draft A");
+    expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("high");
+  });
+
+  it("ABA late conflict обновляет данные без старого сообщения и cleanup", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            board.tasks = board.tasks.map((task) =>
+              task.id === "a" ? { ...task, priority: "high", version: 2 } : task,
+            );
+            resolve(fail("VERSION_CONFLICT"));
+          };
+        }),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "a" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Новый draft A" } });
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+    expect(screen.getByTestId("kanban-inline-stale")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Новый draft A");
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
+  it("поздний subtask create обновляет данные и не чистит quick draft B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "todo", position: 1 }),
+      ],
+    };
+    let release: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.create": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          release = () => {
+            const created = makeTask("late-sub", {
+              title: "Поздняя подзадача",
+              status: "todo",
+              parentTaskId: "a",
+              position: 2,
+            });
+
+            board.tasks = [...board.tasks, created];
+            resolve(ok({ task: created, resource: {}, eventId: "event" }));
+          };
+        }),
+    });
+    const listCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.list").length;
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.click(screen.getByTestId("kanban-subtask-create"));
+    fireEvent.change(screen.getByTestId("kanban-subtask-input"), {
+      target: { value: "Поздняя подзадача" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-subtask-submit"));
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+
+    const before = listCalls();
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(listCalls()).toBeGreaterThan(before);
+    });
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+    expect(board.tasks.some((task) => task.id === "late-sub")).toBe(true);
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
   it("сохраняет быстрые черновики при inline save и refresh", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {

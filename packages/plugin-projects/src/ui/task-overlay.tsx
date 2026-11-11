@@ -537,36 +537,35 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     try {
       await command(token);
 
-      if (generationRef.current === token.generation) {
-        bumpKanbanRevision();
+      // Данные инвалидируются всегда: даже поздний success A после A→B или
+      // закрытия должен обновить доску и убрать призрачные карточки.
+      bumpKanbanRevision();
 
-        return true;
-      }
-
-      // Поздний success уже не принадлежит выбранной задаче.
-      return false;
+      // UI-ownership текущей задачи остаётся за generation.
+      return generationRef.current === token.generation;
     } catch (commandError) {
-      // Поздний ответ прежней задачи не показывает ошибку/конфликт на B.
-      if (generationRef.current !== token.generation) {
-        return false;
-      }
+      const ownsCurrentTask = generationRef.current === token.generation;
 
       if (isVersionConflict(commandError)) {
-        if (token.taskId !== null) {
-          setConflictState({ taskId: token.taskId, message: VERSION_CONFLICT_MESSAGE });
+        if (ownsCurrentTask) {
+          if (token.taskId !== null) {
+            setConflictState({ taskId: token.taskId, message: VERSION_CONFLICT_MESSAGE });
+          }
+
+          // Конфликт quick-команды не трогает независимый inline-черновик.
+          // Очищается только сессия, из которой пришёл inline-save.
+          if (options.conflictInlineTaskId !== undefined) {
+            setInlineSession((current) =>
+              current !== null && current.taskId === options.conflictInlineTaskId ? null : current,
+            );
+            setInlineError(null);
+          }
         }
 
-        // Конфликт quick-команды не трогает независимый inline-черновик.
-        // Очищается только сессия, из которой пришёл inline-save.
-        if (options.conflictInlineTaskId !== undefined) {
-          setInlineSession((current) =>
-            current !== null && current.taskId === options.conflictInlineTaskId ? null : current,
-          );
-          setInlineError(null);
-        }
-
+        // Серверные данные могли измениться в другой вкладке: refresh нужен
+        // независимо от того, какая задача сейчас выбрана.
         bumpKanbanRevision();
-      } else {
+      } else if (ownsCurrentTask) {
         setError(errorMessage(commandError));
       }
 
@@ -897,10 +896,13 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
               }
             : current,
         );
-        bumpKanbanRevision();
       }
 
-      return true;
+      // Поздний create тоже инвалидирует данные, но не трогает quick draft
+      // новой выбранной задачи.
+      bumpKanbanRevision();
+
+      return generationRef.current === token.generation;
     } catch (commandError) {
       if (generationRef.current === token.generation) {
         setError(errorMessage(commandError));
