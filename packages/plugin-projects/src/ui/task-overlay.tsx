@@ -107,6 +107,17 @@ interface QuickState {
   readonly conflicts: readonly QuickDraftField[];
 }
 
+/**
+ * Токен асинхронной операции: выбранная задача и монотонная генерация.
+ *
+ * Поздний ответ операции A после A→B (или A→B→A) не должен менять состояние
+ * B: все побочные эффекты проверяют captured generation.
+ */
+interface OperationToken {
+  readonly generation: number;
+  readonly taskId: string | null;
+}
+
 function baselineOf(task: Task, columns: readonly TaskColumn[]): QuickBaseline {
   return {
     taskId: task.id,
@@ -336,6 +347,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const generationRef = useRef(0);
+  const activeOperationRef = useRef<OperationToken | null>(null);
   const quickBaselineRef = useRef<QuickBaseline | null>(null);
 
   // Данные от предыдущей задачи (A) не должны показываться или выполнять
@@ -469,7 +482,13 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   // Смена выбранной карточки всегда начинает новую сессию: черновики и
   // подтверждение закрытия от предыдущей задачи не переносятся.
   useEffect(() => {
+    // Новая выбранная задача — новая генерация. Поздние ответы прежней
+    // операции не применяются, а busy снимается сразу: B не ждёт A.
+    generationRef.current += 1;
+    activeOperationRef.current = null;
+    busyRef.current = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBusy(false);
     setInlineSession(null);
     setInlineError(null);
     setCloseConfirm(false);
@@ -499,29 +518,53 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     return null;
   }
 
-  const runCommand = async (command: () => Promise<void>): Promise<boolean> => {
+  const runCommand = async (
+    command: (token: OperationToken) => Promise<void>,
+    options: { readonly conflictInlineTaskId?: string } = {},
+  ): Promise<boolean> => {
     if (busyRef.current) {
       return false;
     }
 
+    const token: OperationToken = { generation: generationRef.current, taskId };
+
+    activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
     setError(null);
     setConflictState(null);
 
     try {
-      await command();
-      bumpKanbanRevision();
+      await command(token);
 
-      return true;
+      if (generationRef.current === token.generation) {
+        bumpKanbanRevision();
+
+        return true;
+      }
+
+      // Поздний success уже не принадлежит выбранной задаче.
+      return false;
     } catch (commandError) {
+      // Поздний ответ прежней задачи не показывает ошибку/конфликт на B.
+      if (generationRef.current !== token.generation) {
+        return false;
+      }
+
       if (isVersionConflict(commandError)) {
-        if (taskId !== null) {
-          setConflictState({ taskId, message: VERSION_CONFLICT_MESSAGE });
+        if (token.taskId !== null) {
+          setConflictState({ taskId: token.taskId, message: VERSION_CONFLICT_MESSAGE });
         }
 
-        setInlineSession(null);
-        setInlineError(null);
+        // Конфликт quick-команды не трогает независимый inline-черновик.
+        // Очищается только сессия, из которой пришёл inline-save.
+        if (options.conflictInlineTaskId !== undefined) {
+          setInlineSession((current) =>
+            current !== null && current.taskId === options.conflictInlineTaskId ? null : current,
+          );
+          setInlineError(null);
+        }
+
         bumpKanbanRevision();
       } else {
         setError(errorMessage(commandError));
@@ -529,8 +572,16 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
       return false;
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      // Только владелец токена снимает busy; late finally старой операции не
+      // сбрасывает состояние новой.
+      if (activeOperationRef.current === token) {
+        activeOperationRef.current = null;
+        busyRef.current = false;
+
+        if (generationRef.current === token.generation) {
+          setBusy(false);
+        }
+      }
     }
   };
 
@@ -682,10 +733,18 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
     setInlineError(null);
 
-    const saved = await runCommand(async () => {
-      await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
-      setInlineSession(null);
-    });
+    const saved = await runCommand(
+      async (token) => {
+        await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
+
+        if (generationRef.current === token.generation) {
+          setInlineSession((current) =>
+            current !== null && current.taskId === session.taskId ? null : current,
+          );
+        }
+      },
+      { conflictInlineTaskId: session.taskId },
+    );
 
     if (saved) {
       setCloseConfirm(false);
@@ -763,9 +822,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       confirm: true,
     };
 
-    void runCommand(async () => {
+    void runCommand(async (token) => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskDelete, input as unknown as JsonValue);
-      closeNow();
+
+      if (generationRef.current === token.generation) {
+        closeNow();
+      }
     });
   };
 
@@ -806,6 +868,9 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       tags: [],
     };
 
+    const token: OperationToken = { generation: generationRef.current, taskId };
+
+    activeOperationRef.current = token;
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -817,29 +882,40 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         TASKS_COMMAND_IDS.taskCreate,
         input as unknown as JsonValue,
       );
-      setQuickState((current) =>
-        current !== null && current.draft.taskId === currentTask.id
-          ? {
-              draft: {
-                ...current.draft,
-                subtaskOpen: false,
-                subtaskTitle: "",
-                subtaskColumnId: defaultCreateColumnId(columns) ?? "",
-              },
-              conflicts: current.conflicts,
-            }
-          : current,
-      );
-      bumpKanbanRevision();
+
+      if (generationRef.current === token.generation) {
+        setQuickState((current) =>
+          current !== null && current.draft.taskId === currentTask.id
+            ? {
+                draft: {
+                  ...current.draft,
+                  subtaskOpen: false,
+                  subtaskTitle: "",
+                  subtaskColumnId: defaultCreateColumnId(columns) ?? "",
+                },
+                conflicts: current.conflicts,
+              }
+            : current,
+        );
+        bumpKanbanRevision();
+      }
 
       return true;
     } catch (commandError) {
-      setError(errorMessage(commandError));
+      if (generationRef.current === token.generation) {
+        setError(errorMessage(commandError));
+      }
 
       return false;
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      if (activeOperationRef.current === token) {
+        activeOperationRef.current = null;
+        busyRef.current = false;
+
+        if (generationRef.current === token.generation) {
+          setBusy(false);
+        }
+      }
     }
   };
 

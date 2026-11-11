@@ -3252,6 +3252,26 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
 
+      // Escape при фокусе на Save тоже отменяет только редактор.
+      await page.getByTestId("kanban-modal-title").dblclick();
+      await page.getByTestId("kanban-title-input").fill(draftTitle);
+      await page.getByTestId("kanban-title-save").focus();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
+
+      // И на Cancel редактора описания.
+      await page.getByTestId("kanban-modal-description").dblclick();
+      await page.getByTestId("kanban-description-input").fill("Черновик описания");
+      await page.getByTestId("kanban-description-cancel").focus();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("kanban-description-editor")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(page.getByTestId("kanban-modal-description")).toHaveText("Добавить описание…");
+
       // Повторно открываем и проверяем закрытие модала.
       await page.getByTestId("kanban-modal-title").dblclick();
 
@@ -5235,6 +5255,118 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(updatedTitle);
       await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
       await expectNoHorizontalOverflow(page);
+    });
+    test("CDP touch: tap открывает, а drag/scroll/long press/второй палец — нет", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект touch gestures");
+      const taskTitle = uniqueTitle("Задача touch gestures");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId(`kanban-open-${taskId}`).tap();
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+
+      const cdp = await context.newCDPSession(page);
+
+      const dispatch = async (
+        type: "touchStart" | "touchMove" | "touchEnd",
+        points: Array<{ x: number; y: number; id: number }>,
+      ): Promise<void> => {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type,
+          touchPoints: points.map((point) => ({
+            x: point.x,
+            y: point.y,
+            radiusX: 4,
+            radiusY: 4,
+            force: 1,
+            id: point.id,
+          })),
+        });
+      };
+      const title = page.getByTestId("kanban-modal-title");
+      const titleBox = await title.boundingBox();
+
+      expect(titleBox).not.toBeNull();
+
+      if (titleBox === null) {
+        await cdp.detach();
+        return;
+      }
+
+      const titleX = titleBox.x + titleBox.width / 2;
+      const titleY = titleBox.y + titleBox.height / 2;
+
+      // Положительный tap открывает ровно один редактор.
+      await dispatch("touchStart", [{ x: titleX, y: titleY, id: 1 }]);
+      await dispatch("touchEnd", []);
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(1);
+      await expect(page.getByTestId("kanban-title-input")).toHaveValue(taskTitle);
+      await page.getByTestId("kanban-title-cancel").tap();
+
+      // Drag больше порога не открывает редактор.
+      await dispatch("touchStart", [{ x: titleX, y: titleY, id: 1 }]);
+      await dispatch("touchMove", [{ x: titleX + 50, y: titleY + 30, id: 1 }]);
+      await dispatch("touchEnd", []);
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
+
+      // Long press (выделение) не открывает редактор.
+      await dispatch("touchStart", [{ x: titleX, y: titleY, id: 1 }]);
+      await page.waitForTimeout(650);
+      await dispatch("touchEnd", []);
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
+
+      // Второй палец отменяет tap.
+      await dispatch("touchStart", [
+        { x: titleX, y: titleY, id: 1 },
+        { x: titleX + 40, y: titleY + 40, id: 2 },
+      ]);
+      await dispatch("touchEnd", []);
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
+
+      // Vertical scroll по области описания не открывает textarea.
+      const description = page.getByTestId("kanban-modal-description");
+      const descriptionBox = await description.boundingBox();
+
+      expect(descriptionBox).not.toBeNull();
+
+      if (descriptionBox !== null) {
+        const x = descriptionBox.x + descriptionBox.width / 2;
+        const y = descriptionBox.y + descriptionBox.height / 2;
+
+        await dispatch("touchStart", [{ x, y, id: 1 }]);
+
+        for (let step = 1; step <= 6; step += 1) {
+          await dispatch("touchMove", [{ x, y: y - step * 20, id: 1 }]);
+          await page.waitForTimeout(15);
+        }
+
+        await dispatch("touchEnd", []);
+      }
+
+      await expect(page.getByTestId("kanban-description-editor")).toHaveCount(0);
+
+      // После негативных жестов обычный tap по описанию снова работает.
+      await description.scrollIntoViewIfNeeded();
+      const freshDescriptionBox = await description.boundingBox();
+
+      expect(freshDescriptionBox).not.toBeNull();
+
+      if (freshDescriptionBox !== null) {
+        const x = freshDescriptionBox.x + freshDescriptionBox.width / 2;
+        const y = freshDescriptionBox.y + freshDescriptionBox.height / 2;
+
+        await dispatch("touchStart", [{ x, y, id: 1 }]);
+        await dispatch("touchEnd", []);
+      }
+
+      await expect(page.getByTestId("kanban-description-editor")).toHaveCount(1);
+      await cdp.detach();
     });
   });
 

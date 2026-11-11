@@ -381,6 +381,23 @@ function setDesktopViewport(desktop: boolean): void {
   });
 }
 
+function touchTap(element: HTMLElement, x = 12, y = 12): void {
+  fireEvent.pointerDown(element, {
+    pointerType: "touch",
+    pointerId: 1,
+    isPrimary: true,
+    clientX: x,
+    clientY: y,
+  });
+  fireEvent.pointerUp(element, {
+    pointerType: "touch",
+    pointerId: 1,
+    isPrimary: true,
+    clientX: x,
+    clientY: y,
+  });
+}
+
 function renderOverlay(operations: FakeOperations) {
   return render(
     <>
@@ -1588,11 +1605,11 @@ describe("TaskOverlay Trello-модал", () => {
     renderOverlay(operations);
     await openTask("a");
 
-    fireEvent.pointerUp(screen.getByTestId("kanban-modal-title"), { pointerType: "touch" });
+    touchTap(screen.getByTestId("kanban-modal-title"));
     expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("kanban-title-cancel"));
 
-    fireEvent.pointerUp(screen.getByTestId("kanban-modal-description"), { pointerType: "touch" });
+    touchTap(screen.getByTestId("kanban-modal-description"));
     expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("kanban-description-cancel"));
 
@@ -1608,6 +1625,464 @@ describe("TaskOverlay Trello-модал", () => {
     title.focus();
     fireEvent.keyDown(title, { key: "F2" });
     expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
+  });
+
+  it("не открывает редактор после touch drag, второго пальца и pointercancel", async () => {
+    setDesktopViewport(false);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    const title = screen.getByTestId("kanban-modal-title");
+
+    // Сдвиг больше порога — это drag, а не tap.
+    fireEvent.pointerDown(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 40,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 40,
+      clientY: 40,
+    });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+
+    // Второй палец отменяет tap.
+    fireEvent.pointerDown(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerDown(title, {
+      pointerType: "touch",
+      pointerId: 2,
+      isPrimary: false,
+      clientX: 30,
+      clientY: 30,
+    });
+    fireEvent.pointerUp(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+
+    // pointercancel (например, native scroll) сбрасывает tap.
+    fireEvent.pointerDown(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerCancel(title, { pointerType: "touch", pointerId: 1, isPrimary: true });
+    fireEvent.pointerUp(title, {
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+    });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+
+    // Долгое удержание (выделение) тоже не считается tap.
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+
+    try {
+      fireEvent.pointerDown(title, {
+        pointerType: "touch",
+        pointerId: 1,
+        isPrimary: true,
+        clientX: 10,
+        clientY: 10,
+      });
+      now.mockReturnValue(1_600);
+      fireEvent.pointerUp(title, {
+        pointerType: "touch",
+        pointerId: 1,
+        isPrimary: true,
+        clientX: 10,
+        clientY: 10,
+      });
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
+
+    // После неудачных жестов обычный tap снова работает.
+    touchTap(title);
+    expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
+  });
+
+  it("Escape на Save/Cancel завершает только редактор, не закрывая dialog", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик" } });
+    screen.getByTestId("kanban-title-save").focus();
+    fireEvent.keyDown(screen.getByTestId("kanban-title-save"), { key: "Escape" });
+
+    expect(screen.queryByTestId("kanban-title-editor")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const description = screen.getByTestId("kanban-modal-description");
+
+    fireEvent.doubleClick(description);
+
+    const descriptionInput = await screen.findByTestId("kanban-description-input");
+
+    fireEvent.change(descriptionInput, { target: { value: "Черновик описания" } });
+    screen.getByTestId("kanban-description-cancel").focus();
+    fireEvent.keyDown(screen.getByTestId("kanban-description-cancel"), { key: "Escape" });
+
+    expect(screen.queryByTestId("kanban-description-editor")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent("Добавить описание…");
+  });
+
+  it("конфликт quick priority не удаляет независимый inline draft", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        const values = inputOf(input);
+
+        if (values.priority !== undefined) {
+          board.tasks = board.tasks.map((task) =>
+            task.id === "a"
+              ? { ...task, title: "Серверная версия", priority: "high", version: 2 }
+              : task,
+          );
+
+          return fail("VERSION_CONFLICT");
+        }
+
+        return fail("UNEXPECTED");
+      },
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Локальный черновик" } });
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+    expect(screen.getByTestId("kanban-inline-stale")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Локальный черновик");
+    expect(screen.getByTestId("task-details-error")).toHaveTextContent(
+      "Задача уже изменена в другом месте",
+    );
+
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Серверная версия");
+  });
+
+  it("поздняя ошибка A после A→B не показывается на B и не блокирует B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        const values = inputOf(input);
+        const id = String(values.id);
+
+        if (id === "a") {
+          return new Promise<UiOperationResult>((resolve) => {
+            releaseA = () => {
+              resolve(fail("INTERNAL", "Поздняя ошибка A"));
+            };
+          });
+        }
+
+        const task = getTask(board, id) as Task;
+        const updated: Task = {
+          ...task,
+          priority: values.priority as Task["priority"],
+          version: task.version + 1,
+        } as Task;
+
+        board.tasks = board.tasks.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
+        );
+
+        return ok({ task: updated, resource: {}, eventId: "event" });
+      },
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeEnabled();
+    });
+
+    // B не ждёт A: новая команда проходит, пока ответ A ещё не пришёл.
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "low" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("low");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
+    });
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("low");
+  });
+
+  it("поздний VERSION_CONFLICT A не очищает inline draft и не показывает конфликт на B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        if (String(inputOf(input).id) !== "a") {
+          return fail("UNEXPECTED");
+        }
+
+        return new Promise<UiOperationResult>((resolve) => {
+          releaseA = () => {
+            resolve(fail("VERSION_CONFLICT"));
+          };
+        });
+      },
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик B" } });
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+    expect(screen.queryByTestId("kanban-inline-stale")).toBeNull();
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+    expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
+    expect(screen.queryByTestId("kanban-modal-title")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+  });
+
+  it("поздний success A не очищает inline draft и состояние B", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": (input) => {
+        if (String(inputOf(input).id) !== "a") {
+          return fail("UNEXPECTED");
+        }
+
+        return new Promise<UiOperationResult>((resolve) => {
+          releaseA = () => {
+            const task = getTask(board, "a") as Task;
+            const updated: Task = { ...task, priority: "high", version: 2 } as Task;
+
+            board.tasks = board.tasks.map((candidate) =>
+              candidate.id === updated.id ? updated : candidate,
+            );
+            resolve(ok({ task: updated, resource: {}, eventId: "event" }));
+          };
+        });
+      },
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    fireEvent.doubleClick(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик B" } });
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик B");
+    expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+  });
+
+  it("поздняя ошибка A после A→B→A не применяется (без ABA)", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Задача A", status: "todo" }),
+        makeTask("b", { title: "Задача B", status: "in_progress", position: 0 }),
+      ],
+    };
+    let releaseA: (() => void) | null = null;
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () =>
+        new Promise<UiOperationResult>((resolve) => {
+          releaseA = () => {
+            resolve(fail("INTERNAL", "Поздняя ошибка A"));
+          };
+        }),
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-priority"), {
+      target: { value: "high" },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-priority")).toBeDisabled();
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "b" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
+    });
+
+    act(() => {
+      updateKanbanQuery({ taskId: "a" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    });
+
+    await act(async () => {
+      releaseA?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("task-details-error")).toBeNull();
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(screen.getByTestId("kanban-modal-priority")).toHaveValue("medium");
   });
 
   it("сохраняет быстрые черновики при inline save и refresh", async () => {

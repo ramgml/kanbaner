@@ -208,7 +208,15 @@ export function TaskModal({
   const confirmRef = useRef<HTMLDivElement | null>(null);
   const titleDisplayRef = useRef<HTMLHeadingElement | null>(null);
   const descriptionDisplayRef = useRef<HTMLDivElement | null>(null);
-  const editorRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const touchTapRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startedAt: number;
+    moved: boolean;
+    invalid: boolean;
+  } | null>(null);
   const cancelInlineRef = useRef(onCancelInline);
   const previousInlineFieldRef = useRef<InlineField | null>(null);
   const previousTaskIdRef = useRef(task.id);
@@ -336,6 +344,47 @@ export function TaskModal({
     previousInlineFieldRef.current = field;
   }, [inlineSession?.field, task.id]);
 
+  // Второй палец или движение вне контейнера тоже отменяют tap. Слушаем
+  // документ, потому что touch-события второго пальца не обязаны всплывать
+  // через область заголовка/описания.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent): void => {
+      const tap = touchTapRef.current;
+
+      if (tap !== null && event.pointerType === "touch" && event.pointerId !== tap.pointerId) {
+        tap.invalid = true;
+      }
+    };
+    const onPointerMove = (event: PointerEvent): void => {
+      const tap = touchTapRef.current;
+
+      if (
+        tap !== null &&
+        event.pointerType === "touch" &&
+        event.pointerId === tap.pointerId &&
+        Math.hypot(event.clientX - tap.startX, event.clientY - tap.startY) > 8
+      ) {
+        tap.moved = true;
+      }
+    };
+    const onPointerCancel = (event: PointerEvent): void => {
+      const tap = touchTapRef.current;
+
+      if (tap !== null && event.pointerId === tap.pointerId) {
+        touchTapRef.current = null;
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointercancel", onPointerCancel, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("pointercancel", onPointerCancel, true);
+    };
+  }, []);
+
   const focusDraftOrigin = (): void => {
     const root = rootRef.current;
 
@@ -386,10 +435,76 @@ export function TaskModal({
   const isComposing = (event: ReactKeyboardEvent<HTMLElement>): boolean =>
     event.nativeEvent.isComposing || event.keyCode === 229;
 
-  const openInlineOnTouch = (field: InlineField) => (event: ReactPointerEvent<HTMLElement>) => {
-    if (event.pointerType === "touch" && !busy) {
-      event.preventDefault();
-      onStartInline(field);
+  const startTouchTap = (event: ReactPointerEvent<HTMLElement>): void => {
+    if (event.pointerType !== "touch") {
+      return;
+    }
+
+    const active = touchTapRef.current;
+
+    if (active !== null) {
+      // Второй палец или повторное нажатие отменяют tap. Новый primary с
+      // другим pointerId — это скорее потерянный pointerup прошлого жеста.
+      if (!event.isPrimary || event.pointerId === active.pointerId) {
+        active.invalid = true;
+        return;
+      }
+
+      touchTapRef.current = null;
+    }
+
+    if (!event.isPrimary) {
+      return;
+    }
+
+    touchTapRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startedAt: Date.now(),
+      moved: false,
+      invalid: false,
+    };
+  };
+
+  const trackTouchTap = (event: ReactPointerEvent<HTMLElement>): void => {
+    const tap = touchTapRef.current;
+
+    if (tap === null || event.pointerType !== "touch" || event.pointerId !== tap.pointerId) {
+      return;
+    }
+
+    if (Math.hypot(event.clientX - tap.startX, event.clientY - tap.startY) > 8) {
+      tap.moved = true;
+    }
+  };
+
+  const finishTouchTap =
+    (field: InlineField) =>
+    (event: ReactPointerEvent<HTMLElement>): void => {
+      const tap = touchTapRef.current;
+
+      if (tap === null || event.pointerType !== "touch" || event.pointerId !== tap.pointerId) {
+        return;
+      }
+
+      // Долгое удержание (выделение текста) — не tap.
+      const confirmed =
+        event.isPrimary && !tap.moved && !tap.invalid && Date.now() - tap.startedAt < 500;
+
+      touchTapRef.current = null;
+
+      if (confirmed && !busy) {
+        event.preventDefault();
+        onStartInline(field);
+      }
+    };
+
+  const cancelTouchTap = (event: ReactPointerEvent<HTMLElement>): void => {
+    const tap = touchTapRef.current;
+
+    if (tap !== null && event.pointerId === tap.pointerId) {
+      touchTapRef.current = null;
     }
   };
 
@@ -431,11 +546,12 @@ export function TaskModal({
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-5">
         <div className="flex min-w-0 flex-col gap-1">
           {inlineSession?.field === "title" ? (
-            <div data-testid="kanban-title-editor" className="flex min-w-0 flex-col gap-2">
+            <div
+              ref={editorRef}
+              data-testid="kanban-title-editor"
+              className="flex min-w-0 flex-col gap-2"
+            >
               <input
-                ref={(node) => {
-                  editorRef.current = node;
-                }}
                 data-testid="kanban-title-input"
                 name="title"
                 aria-label="Название задачи"
@@ -491,7 +607,10 @@ export function TaskModal({
               onDoubleClick={() => {
                 onStartInline("title");
               }}
-              onPointerUp={openInlineOnTouch("title")}
+              onPointerDown={startTouchTap}
+              onPointerMove={trackTouchTap}
+              onPointerUp={finishTouchTap("title")}
+              onPointerCancel={cancelTouchTap}
               onKeyDown={openInlineOnKey("title")}
               className="m-0 cursor-text rounded-sm text-lg leading-tight font-semibold break-words hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:text-xl"
             >
@@ -657,11 +776,12 @@ export function TaskModal({
                 )}
               </div>
               {inlineSession?.field === "description" ? (
-                <div data-testid="kanban-description-editor" className="mt-2 flex flex-col gap-2">
+                <div
+                  ref={editorRef}
+                  data-testid="kanban-description-editor"
+                  className="mt-2 flex flex-col gap-2"
+                >
                   <textarea
-                    ref={(node) => {
-                      editorRef.current = node;
-                    }}
                     data-testid="kanban-description-input"
                     name="descriptionMarkdown"
                     aria-label="Описание (Markdown)"
@@ -720,7 +840,10 @@ export function TaskModal({
                   onDoubleClick={() => {
                     onStartInline("description");
                   }}
-                  onPointerUp={openInlineOnTouch("description")}
+                  onPointerDown={startTouchTap}
+                  onPointerMove={trackTouchTap}
+                  onPointerUp={finishTouchTap("description")}
+                  onPointerCancel={cancelTouchTap}
                   onKeyDown={openInlineOnKey("description")}
                   className="mt-2 min-h-16 cursor-text rounded-sm text-sm hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 >
