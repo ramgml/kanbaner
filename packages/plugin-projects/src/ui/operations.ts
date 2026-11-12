@@ -1,22 +1,5 @@
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import { TASKS_COMMAND_IDS } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationError, UiOperationInvoker } from "@kanbaner/task-ui";
-
-/**
- * Массовые команды KAN-028 появятся в контракте домена после merge.
- *
- * Сначала читается `TASKS_COMMAND_IDS`, поэтому после слияния используется
- * фактический ID контракта. Fallback нужен только для isolated-сборки UI до
- * merge.
- */
-export const BULK_TASK_COMMAND_IDS = {
-  taskMoveMany:
-    (TASKS_COMMAND_IDS as Readonly<Record<string, string | undefined>>).taskMoveMany ??
-    "kanbaner.tasks.task.moveMany",
-  taskDeleteMany:
-    (TASKS_COMMAND_IDS as Readonly<Record<string, string | undefined>>).taskDeleteMany ??
-    "kanbaner.tasks.task.deleteMany",
-} as const;
 
 /** Ошибка публичной операции, которую можно показать пользователю. */
 export class KanbanOperationError extends Error {

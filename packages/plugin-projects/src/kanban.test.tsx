@@ -4,11 +4,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
-import type { Project, Task, TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import {
+  TASKS_COMMAND_IDS,
+  type Project,
+  type Task,
+  type TaskColumn,
+  type TaskStatus,
+} from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationInvoker, UiOperationResult } from "@kanbaner/task-ui";
 
 import { KanbanView } from "./ui/kanban-view.tsx";
-import { BULK_TASK_COMMAND_IDS } from "./ui/operations.ts";
 import { TaskOverlay } from "./ui/task-overlay.tsx";
 import {
   bumpKanbanRevision,
@@ -445,8 +450,8 @@ function createOperations(
 
       return result.ok ? ok({ task: result.task }) : fail(result.code);
     },
-    [BULK_TASK_COMMAND_IDS.taskMoveMany]: (input) => applyBulkMove(board, input),
-    [BULK_TASK_COMMAND_IDS.taskDeleteMany]: (input) => applyBulkDelete(board, input),
+    [TASKS_COMMAND_IDS.taskMoveMany]: (input) => applyBulkMove(board, input),
+    [TASKS_COMMAND_IDS.taskDeleteMany]: (input) => applyBulkDelete(board, input),
     "kanbaner.tasks.task.delete": (input) => {
       const id = String(inputOf(input).id);
 
@@ -1596,6 +1601,10 @@ describe("массовые действия с карточками", () => {
   let operationsWithCalls: FakeOperations["calls"] = [];
 
   function renderBoard(board: FakeBoard, overrides: Record<string, Handler> = {}): FakeOperations {
+    // Без alias/fallback: UI обязан использовать ровно эти ключи контракта.
+    expect(TASKS_COMMAND_IDS.taskMoveMany).toBe("kanbaner.tasks.task.moveMany");
+    expect(TASKS_COMMAND_IDS.taskDeleteMany).toBe("kanbaner.tasks.task.deleteMany");
+
     const operations = createOperations(board, overrides);
 
     operationsWithCalls = operations.calls;
@@ -1634,9 +1643,9 @@ describe("массовые действия с карточками", () => {
       expect(bulkBar()).toBeNull();
     });
 
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskMoveMany)).toBe(1);
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
     expect(operations.counts.get("kanbaner.tasks.task.move")).toBeUndefined();
-    expect(bulkCalls(BULK_TASK_COMMAND_IDS.taskMoveMany)).toEqual([
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany)).toEqual([
       {
         items: [
           { id: "b", expectedVersion: 1 },
@@ -1690,7 +1699,7 @@ describe("массовые действия с карточками", () => {
       tasks: [makeTask("a", { status: "todo" }), makeTask("b", { status: "todo", position: 1 })],
     };
     const operations = renderBoard(board, {
-      [BULK_TASK_COMMAND_IDS.taskMoveMany]: () => fail("INTERNAL", "Домен недоступен"),
+      [TASKS_COMMAND_IDS.taskMoveMany]: () => fail("INTERNAL", "Домен недоступен"),
     });
 
     await screen.findByTestId("kanban-card-a");
@@ -1706,7 +1715,7 @@ describe("массовые действия с карточками", () => {
     expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 2");
     expect(screen.getByTestId("kanban-bulk-check-a")).toBeChecked();
     expect(screen.getByTestId("kanban-bulk-check-b")).toBeChecked();
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskMoveMany)).toBe(1);
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
   });
 
   it("при VERSION_CONFLICT обновляет версии, убирает исчезнувшие задачи и повторяет по свежим", async () => {
@@ -1716,7 +1725,7 @@ describe("массовые действия с карточками", () => {
     };
     let firstAttempt = true;
     const operations = renderBoard(board, {
-      [BULK_TASK_COMMAND_IDS.taskMoveMany]: (input) => {
+      [TASKS_COMMAND_IDS.taskMoveMany]: (input) => {
         if (firstAttempt) {
           firstAttempt = false;
           board.tasks = board.tasks
@@ -1752,7 +1761,7 @@ describe("массовые действия с карточками", () => {
       expect(bulkBar()).toBeNull();
     });
 
-    expect(bulkCalls(BULK_TASK_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
       items: [{ id: "a", expectedVersion: 2 }],
       columnId: columnIdFor("project-1", "backlog"),
     });
@@ -1781,7 +1790,7 @@ describe("массовые действия с карточками", () => {
     expect(dialog).toBeVisible();
     expect(within(dialog).getByTestId("kanban-bulk-delete-count")).toHaveTextContent("2");
     expect(dialog).toHaveTextContent("подзадачами");
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskDeleteMany)).toBeUndefined();
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskDeleteMany)).toBeUndefined();
 
     fireEvent.click(screen.getByTestId("kanban-bulk-delete-confirm"));
 
@@ -1789,9 +1798,9 @@ describe("массовые действия с карточками", () => {
       expect(screen.queryByTestId("kanban-bulk-delete-dialog")).toBeNull();
     });
 
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskDeleteMany)).toBe(1);
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskDeleteMany)).toBe(1);
     expect(operations.counts.get("kanbaner.tasks.task.delete")).toBeUndefined();
-    expect(bulkCalls(BULK_TASK_COMMAND_IDS.taskDeleteMany)).toEqual([
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskDeleteMany)).toEqual([
       {
         items: [
           { id: "parent", expectedVersion: 1 },
@@ -1816,7 +1825,7 @@ describe("массовые действия с карточками", () => {
     };
     const deletion = deferred<UiOperationResult>();
     const operations = renderBoard(board, {
-      [BULK_TASK_COMMAND_IDS.taskDeleteMany]: () => deletion.promise,
+      [TASKS_COMMAND_IDS.taskDeleteMany]: () => deletion.promise,
     });
 
     await screen.findByTestId("kanban-card-a");
@@ -1831,12 +1840,14 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(confirm).toBeDisabled();
     });
+    expect(screen.getByTestId("kanban-bulk-move")).toHaveTextContent("Переместить");
+    expect(screen.getByTestId("kanban-bulk-delete")).toBeDisabled();
 
     fireEvent.click(screen.getByTestId("kanban-bulk-delete-cancel"));
     fireEvent.keyDown(screen.getByTestId("kanban-bulk-delete-dialog"), { key: "Escape" });
 
     expect(screen.getByTestId("kanban-bulk-delete-dialog")).toBeVisible();
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskDeleteMany)).toBe(1);
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskDeleteMany)).toBe(1);
 
     await act(async () => {
       deletion.resolve(ok({ deleted: 1 }));
@@ -1856,7 +1867,7 @@ describe("массовые действия с карточками", () => {
     };
     let firstAttempt = true;
     renderBoard(board, {
-      [BULK_TASK_COMMAND_IDS.taskDeleteMany]: (input) => {
+      [TASKS_COMMAND_IDS.taskDeleteMany]: (input) => {
         if (firstAttempt) {
           firstAttempt = false;
           board.tasks = board.tasks
@@ -1887,7 +1898,7 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("kanban-bulk-delete-dialog")).toBeNull();
     });
-    expect(bulkCalls(BULK_TASK_COMMAND_IDS.taskDeleteMany).at(-1)).toEqual({
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskDeleteMany).at(-1)).toEqual({
       items: [{ id: "a", expectedVersion: 3 }],
       confirm: true,
     });
@@ -1991,7 +2002,7 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
     });
-    expect(bulkCalls(BULK_TASK_COMMAND_IDS.taskMoveMany)).toEqual([
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany)).toEqual([
       {
         items: [{ id: "a", expectedVersion: 4 }],
         columnId: columnIdFor("project-1", "backlog"),
@@ -2006,7 +2017,7 @@ describe("массовые действия с карточками", () => {
     };
     const move = deferred<UiOperationResult>();
     const operations = renderBoard(board, {
-      [BULK_TASK_COMMAND_IDS.taskMoveMany]: () => move.promise,
+      [TASKS_COMMAND_IDS.taskMoveMany]: () => move.promise,
     });
 
     await screen.findByTestId("kanban-card-a");
@@ -2020,7 +2031,8 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(button).toBeDisabled();
     });
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskMoveMany)).toBe(1);
+    expect(screen.getByTestId("kanban-bulk-delete")).toBeDisabled();
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
 
     await act(async () => {
       move.resolve(ok({ tasks: [] }));
@@ -2030,7 +2042,7 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
     });
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskMoveMany)).toBe(1);
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
   });
 
   it("снимает выбор кнопкой и не отправляет операцию", async () => {
@@ -2046,8 +2058,8 @@ describe("массовые действия с карточками", () => {
 
     expect(screen.queryByTestId("kanban-bulk-bar")).toBeNull();
     expect(screen.getByTestId("kanban-bulk-check-a")).not.toBeChecked();
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskMoveMany)).toBeUndefined();
-    expect(operations.counts.get(BULK_TASK_COMMAND_IDS.taskDeleteMany)).toBeUndefined();
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBeUndefined();
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskDeleteMany)).toBeUndefined();
   });
 });
 

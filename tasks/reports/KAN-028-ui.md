@@ -3,138 +3,96 @@
 - Задача: `tasks/KAN-028-bulk-card-actions.md`
 - Ветка: `feat/kan-028-bulk-ui`
 - Worktree: `.worktrees/kan-028-bulk-ui`
-- Домен: `feat/kan-028-bulk-domain`, коммит `2e5df62`
-- Коммит UI: `d3205ee` — `feat(projects): добавить массовые действия с карточками`
+- Домен в HEAD: `2e5df62`, `0ae279a` (контракт `task.moveMany`/`task.deleteMany`)
+- UI-коммиты:
+  - `21507e4` — `feat(projects): добавить массовые действия с карточками`;
+  - `1152e51`, `d379096` — отчёт;
+  - финальный fix-коммит — tip ветки:
+    `fix(projects): укрепить массовый выбор карточек`.
 
-## Что сделано
+## Итог
+
+UI массовых действий завершён. Fallback-контракта нет: используются ровно
+`TASKS_COMMAND_IDS.taskMoveMany` и `TASKS_COMMAND_IDS.taskDeleteMany`
+(`kanbaner.tasks.task.moveMany` / `kanbaner.tasks.task.deleteMany`).
+
+## Что реализовано
 
 ### Карточка
 
-- Сохранена и дополнена незакоммиченная верстка пользователя: drag-ручки нет,
-  меню `⋯` находится в верхней строке справа, заголовок занимает отдельную
-  строку во всю ширину.
-- В верхней строке слева добавлен чекбокс массового выбора:
+- Верхняя строка: checkbox слева, меню `⋯` справа; заголовок — отдельной
+  full-width строкой; drag-ручки нет.
+- Checkbox:
   - accessible name `Выбрать задачу …`;
-  - hit target 40×40 px (`label` с `min-h-10 min-w-10`);
-  - `input` и `label` исключены из drag;
-  - клик не открывает карточку и не запускает drag/ghost;
-  - pending массовой операции блокирует изменение выбора.
-- Whole-card drag, drag за заголовок, ghost, меню, keyboard-навигация и
-  подавление click после drag не изменены.
+  - hit target 40×40 px;
+  - исключён из drag;
+  - клик не открывает карточку.
+- Whole-card drag, drag за заголовок, ghost, меню, keyboard и подавление click
+  после drag сохранены.
 
-### Selection и панель
+### Selection
 
-- Выбор хранится как `Map<id, Task>` в порядке кликов; snapshot используется
-  для `expectedVersion`.
+- `Map<id, Task>` в порядке выбора, snapshot для `expectedVersion`.
 - Смена `projectId` очищает выбор и target.
-- Смена tag сразу снимает из выбора задачи, которых нет в новом фильтре.
-- `reloadBoard` обновляет версии выбранных задач из актуальных items. Если
-  задача не попала на загруженную страницу, выполняется `task.get`:
-  - `NOT_FOUND` удаляет задачу из выбора;
-  - временная ошибка сохраняет прежний snapshot;
-  - обычный refresh/resize не теряет существующие задачи.
-- Панель при `count > 0`:
-  - `Выбрано N`;
-  - select фактических колонок текущего проекта;
-  - «Переместить», «Удалить», «Снять выбор»;
-  - `aria-label`, текстовые подписи и 40 px высота контролов;
-  - desktop и mobile 360 без горизонтального overflow.
-- Pending блокирует повторную отправку; ошибка не очищает выбор.
+- Смена tag сразу снимает скрытые фильтром задачи.
+- `reloadBoard` обновляет версии выбранных задач.
+- Для задач вне загруженной страницы выполняется `task.get`:
+  - `NOT_FOUND` удаляет из выбора;
+  - временная ошибка сохраняет snapshot;
+  - задача другого проекта не попадает в selection.
+- Обычный refresh/resize не теряет существующие задачи.
 
-### Move
+### Панель и операции
 
-- Одна команда `task.moveMany` с `items` в порядке выбора и `columnId`.
-- Успех: очистка выбора, awaited `reloadBoard()`, затем
-  `bumpKanbanRevision()`; счётчики колонок и сводка обновляются.
-- Ошибка: awaited reload, выбор сохраняется, повтор использует свежие версии.
-- `VERSION_CONFLICT` показывает сообщение про выбранные задачи.
-
-### Delete
-
-- Отдельный destructive `ModalDialog` (`kanban-bulk-delete-dialog`):
-  - число задач;
-  - предупреждение о безвозвратном удалении и каскаде подзадач;
-  - pending блокирует закрытие, Escape, «Отмена» и повтор.
-- Одна команда `task.deleteMany` с `confirm: true`.
-- Успех: закрытие диалога, очистка выбора, awaited reload и bump revision.
-- Ошибка/конфликт: reload, сохранение существующего выбора с актуальными
-  версиями; исчезнувшие задачи удаляются из выбора; повтор использует свежие
-  `expectedVersion`.
-- Последовательных single-команд `task.delete`/`task.move` для массовых
-  действий нет.
-
-### Контракт
-
-Используются строковые ID из `TASKS_COMMAND_IDS`:
-
-- `kanbaner.tasks.task.moveMany`;
-- `kanbaner.tasks.task.deleteMany`.
-
-В isolated-сборке до merge домена `operations.ts` содержит те же строки как
-fallback. После merge фактическим источником остаётся `TASKS_COMMAND_IDS`.
-
-## Тесты
-
-### Component
-
-- `kanban-card.test.tsx`:
-  - layout: checkbox слева, меню справа, title full width, drag-ручки нет;
-  - accessible checkbox, hit target, click не открывает, drag не стартует.
-- `kanban.test.tsx`, 12 новых сценариев:
-  - move одной командой, порядок payload и append;
-  - ошибка сохраняет выбор;
-  - conflict обновляет версии, убирает исчезнувшие и повторяет по свежим;
-  - delete после подтверждения, parent+child без дублей;
-  - pending delete блокирует закрытие/повтор;
-  - ошибка delete сохраняет выбор;
-  - смена tag убирает скрытые;
-  - смена проекта очищает;
-  - обычный refresh сохраняет выбор и обновляет версии;
-  - pending move блокирует повтор;
-  - «Снять выбор» не отправляет команду.
-
-### E2E
-
-Добавлены сценарии в `apps/web/e2e/kanban.spec.ts`:
-
-- desktop move 2 карточек в порядке выбора, summary и persistence после reload;
-- delete parent+child одним подтверждением, persistence, независимая задача
-  остаётся;
-- conflict второй вкладки: ошибка, сохранение выбора, повтор со свежей версией,
-  persistence;
-- mobile 360: hit target, панель, move без overflow;
-- обновлён layout/hit-target тест карточки.
+- Панель `Выбрано N`, select фактических колонок, «Переместить», «Удалить»,
+  «Снять выбор»; desktop/mobile 360 без overflow, keyboard labels.
+- Pending разделён на `"move" | "delete"`; подписи и `aria-busy` не смешиваются.
+- `bulkRequestRef` не даёт устаревшему `finally` снять pending новой операции
+  после смены проекта/unmount.
+- Move: одна `task.moveMany`, порядок выбора, awaited reload + bump revision.
+- Delete: отдельный destructive `ModalDialog` с числом задач и каскадом,
+  pending guard, одна `task.deleteMany`, clear + reload + bump.
+- Ошибки и конфликты: reload, сохранение существующего выбора с актуальными
+  версиями, повтор по свежим `expectedVersion`.
+- Лимит 200 проверяется и для move, и для delete.
+- Последовательных single-команд для массовых действий нет.
 
 ## Проверки
 
+Выполнено на HEAD с доменом `0ae279a`:
+
 - `pnpm install --frozen-lockfile --strict-peer-dependencies` — успешно.
-- `pnpm check` — успешно:
-  - `format:check`;
-  - `lint`;
-  - `typecheck` всех пакетов и `apps/web`;
-  - `vitest`: **1371 passed / 96 files**;
-  - `build` (включая production Next.js).
+- `pnpm build:packages` — успешно.
+- `pnpm --filter @kanbaner/plugin-projects typecheck` — успешно.
+- Focused bulk:
+  `vitest run packages/plugin-projects/src/kanban.test.tsx -t "массовые действия"`
+  — **12 passed**.
+- `vitest run packages/plugin-projects` — **268 passed / 18 files**.
 - `pnpm check:imports` — успешно.
 - `node scripts/check-import-boundaries.mjs --self-test` — успешно
   (22 ожидаемых нарушения).
-- E2E в UI-only worktree (без домена): **97 passed**, 5 failed. Четыре
-  bulk-сценария падают с `Операция недоступна для UI`, потому что команд ещё
-  нет в контракте этой ветки; один нестабильный сценарий
-  «создаёт через общую кнопку…» прошёл при отдельном повторе и в
-  интеграционном прогоне.
-- Интеграционный E2E в временном combined checkout
-  (`UI + domain 2e5df62`, без merge/rebase рабочих веток):
-  **102 passed (3.1m)**, включая все 4 массовых сценария и mobile 360.
-  Проверены move persistence + summary, delete parent+child, conflict второй
-  вкладки и отсутствие overflow.
+- `pnpm check` — успешно:
+  - `format:check`;
+  - `lint`;
+  - typecheck всех пакетов и `apps/web`;
+  - **1391 passed / 98 files**;
+  - production `build`.
+- `pnpm --filter @kanbaner/web test:e2e` — **102 passed (2.8m)**.
+  Playwright использовал реальные `task.moveMany`/`task.deleteMany`.
+  Покрыто:
+  - move 2 карточек в порядке выбора, summary и persistence после reload;
+  - delete parent+child одним подтверждением и persistence;
+  - conflict второй вкладки, сохранение выбора и повтор со свежей версией;
+  - mobile 360: checkbox, bulk bar, move без overflow;
+  - прежние DnD, card layout и hit targets.
+- Deferred SIGTERM: `stop accepting requests, active=0`, `shutdown complete`.
+- Prettier и `git diff --check` — чисто.
+- Красного хвоста проверок нет.
 
-## Ограничения и риски
+## Остаточные риски
 
-- Полный E2E массовых действий имеет смысл только после merge домена; в
-  UI-only worktree команды не экспортированы.
-- Домен и UI должны быть смержены вместе: UI ссылается на
-  `task.moveMany`/`task.deleteMany`.
-- После неуспешного `task.get` выбор сохраняется консервативно; следующая
-  успешная перезагрузка уберёт действительно удалённые задачи.
-- При 1…200 выбранных задач UI проверяет лимит; сам лимит окончательно
-  валидирует домен.
+- При временной ошибке `task.get` задача консервативно остаётся в выборе до
+  следующего успешного refresh.
+- Смена tag во время pending снимает скрытые задачи, но не отменяет уже
+  отправленную команду; успешный ответ очищает выбор.
+- Лимит 200 окончательно валидирует домен; UI проверяет его заранее.
