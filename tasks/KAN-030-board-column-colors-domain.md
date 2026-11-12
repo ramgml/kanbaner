@@ -7,7 +7,7 @@ priority: high
 owner: worker-kan-030
 blocked_by: []
 branch: feat/kan-030-board-column-colors-domain
-worktree: .worktrees/kan-030-board-column-colors-domain
+worktree: /home/aero/.herdr/worktrees/kanbaner/feat-kan-030-board-column-colors-domain
 created: 2026-11-12
 updated: 2026-11-12
 specs:

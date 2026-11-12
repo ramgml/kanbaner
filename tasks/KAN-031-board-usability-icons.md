@@ -7,7 +7,7 @@ priority: high
 owner: worker-kan-031
 blocked_by: []
 branch: feat/kan-031-board-usability-icons
-worktree: .worktrees/kan-031-board-usability-icons
+worktree: /home/aero/.herdr/worktrees/kanbaner/feat-kan-031-board-usability-icons
 created: 2026-11-12
 updated: 2026-11-12
 specs:
