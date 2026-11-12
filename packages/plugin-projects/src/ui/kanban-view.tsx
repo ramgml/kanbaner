@@ -927,7 +927,7 @@ export function KanbanView({
         setBulkDeleteError(null);
       }
 
-      return "applied";
+      return refreshComplete ? "applied" : "failed";
     };
 
     const promise = run();
@@ -1509,6 +1509,36 @@ export function KanbanView({
     setBulkDeleteError(null);
   };
 
+  /**
+   * Единая точка применения результата перечитки для массовых операций.
+   *
+   * Selection мог опустеть во время refresh (tag/удаление) — тогда скрытая
+   * блокировка без payload недопустима, даже если refresh завершился ошибкой.
+   */
+  const settleBulkRefresh = (outcome: ReloadOutcome): "cleared" | "applied" | "blocked" => {
+    if (bulkSelectionRef.current.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+      setBulkError(null);
+      setBulkDeleteError(null);
+      setBulkDeleteOpen(false);
+
+      return "cleared";
+    }
+
+    if (outcome === "applied") {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+
+      return "applied";
+    }
+
+    bulkNeedsRefreshRef.current = true;
+    setBulkNeedsRefresh(true);
+
+    return "blocked";
+  };
+
   const bulkMove = async (): Promise<void> => {
     if (
       bulkGuardRef.current ||
@@ -1607,23 +1637,21 @@ export function KanbanView({
         return;
       }
 
-      if (refreshed !== "applied") {
-        bulkNeedsRefreshRef.current = true;
-        setBulkNeedsRefresh(true);
-        setBulkError(
-          isVersionConflict(commandError)
+      const status = settleBulkRefresh(refreshed);
+
+      if (status === "cleared") {
+        return;
+      }
+
+      setBulkError(
+        status === "blocked"
+          ? isVersionConflict(commandError)
             ? BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE
-            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`,
-        );
-      } else {
-        bulkNeedsRefreshRef.current = false;
-        setBulkNeedsRefresh(false);
-        setBulkError(
-          isVersionConflict(commandError)
+            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`
+          : isVersionConflict(commandError)
             ? BULK_VERSION_CONFLICT_MESSAGE
             : errorMessage(commandError),
-        );
-      }
+      );
     } finally {
       if (bulkRequestRef.current === request) {
         bulkGuardRef.current = false;
@@ -1652,17 +1680,19 @@ export function KanbanView({
         return;
       }
 
-      if (refreshed !== "applied") {
-        bulkNeedsRefreshRef.current = true;
-        setBulkNeedsRefresh(true);
+      const status = settleBulkRefresh(refreshed);
+
+      if (status === "cleared") {
+        return;
+      }
+
+      if (status === "blocked") {
         setBulkError(BULK_REFRESH_FAILED_MESSAGE);
         setBulkDeleteError(BULK_REFRESH_FAILED_MESSAGE);
 
         return;
       }
 
-      bulkNeedsRefreshRef.current = false;
-      setBulkNeedsRefresh(false);
       setBulkError(null);
       setBulkDeleteError(null);
     } finally {
@@ -1757,33 +1787,21 @@ export function KanbanView({
         return;
       }
 
-      if (bulkSelectionRef.current.size === 0) {
-        // Повторять нечего: выбранные задачи уже удалены или скрыты.
-        bulkNeedsRefreshRef.current = false;
-        setBulkNeedsRefresh(false);
-        setBulkDeleteOpen(false);
-        setBulkDeleteError(null);
+      const status = settleBulkRefresh(refreshed);
 
+      if (status === "cleared") {
         return;
       }
 
-      if (refreshed !== "applied") {
-        bulkNeedsRefreshRef.current = true;
-        setBulkNeedsRefresh(true);
-        setBulkDeleteError(
-          isVersionConflict(commandError)
+      setBulkDeleteError(
+        status === "blocked"
+          ? isVersionConflict(commandError)
             ? BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE
-            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`,
-        );
-      } else {
-        bulkNeedsRefreshRef.current = false;
-        setBulkNeedsRefresh(false);
-        setBulkDeleteError(
-          isVersionConflict(commandError)
+            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`
+          : isVersionConflict(commandError)
             ? BULK_VERSION_CONFLICT_MESSAGE
             : errorMessage(commandError),
-        );
-      }
+      );
     } finally {
       if (bulkRequestRef.current === request) {
         bulkGuardRef.current = false;

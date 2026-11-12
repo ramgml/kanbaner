@@ -9,74 +9,67 @@
   - `1152e51`, `d379096` — отчёт;
   - `2d9ced7` — `fix(projects): укрепить массовый выбор карточек`;
   - `f04367d` — `fix(projects): синхронизировать массовый выбор после обновления`;
+  - `cc69d5e` — `fix(projects): завершить синхронизацию массовых операций`;
   - финальный fix-коммит — tip ветки:
-    `fix(projects): завершить синхронизацию массовых операций`.
+    `fix(projects): завершить обработку ошибок обновления доски`.
 
 ## Итог
 
-Все findings повторного ревью исправлены. Fallback-контракта нет: используются
-ровно `TASKS_COMMAND_IDS.taskMoveMany` и `TASKS_COMMAND_IDS.taskDeleteMany`
+Все findings ревью исправлены. Fallback-контракта нет: используются ровно
+`TASKS_COMMAND_IDS.taskMoveMany` и `TASKS_COMMAND_IDS.taskDeleteMany`
 (`kanbaner.tasks.task.moveMany` / `kanbaner.tasks.task.deleteMany`).
 
-## Повторное ревью
+## Финальные Medium
 
-### HIGH: pending close и независимые черновики
+### applied только при полном refresh
 
-`busy` больше не является общим bypass dirty-guard. Для каждой операции
-запоминается отправляемое поле (`inline`, `quick-column`, `quick-due`,
-`quick-tags`, `subtask`). При закрытии:
+`reloadBoard()` возвращает `"applied"` только при `refreshComplete === true`:
 
-- собственный pending-черновик не считается независимым;
-- inline/quick/subtask-черновики других полей требуют подтверждения;
-- pending без дополнительных черновиков закрывает карточку без ложного
-  confirm, а поздний success обновляет доску.
+- ошибка `task.list` любой колонки → `failed`;
+- временная ошибка `task.get` при reconciliation → `failed`;
+- `bulkNeedsRefresh` остаётся, stale payload заблокирован до полного refresh.
 
-Покрыто deferred-тестами:
+Добавлены отдельные тесты:
 
-- pending inline save + quick-draft → confirm, оба черновика сохранены;
-- dirty inline + pending quick save → confirm, черновик сохранён;
-- pending quick save без других черновиков → закрытие без confirm.
+- `task.list` failure → блокировка, затем успешный refresh и retry с новыми
+  версиями;
+- temporary `task.get` failure → блокировка, затем успешный refresh и retry с
+  новыми версиями.
 
-### MEDIUM: пустой выбор снимает refresh-блокировку
+### Пустой selection во время refresh
 
-Если после неудачной перечитки selection становится пустым (все задачи
-удалены или перестали соответствовать активному tag), `bulkNeedsRefresh`
-сбрасывается вместе с ошибками и диалогом. Скрытой блокировки без payload нет.
-Смена tag, оставившая выбор пустым, делает то же. `toggleBulkSelection`
-проверяет и `bulkNeedsRefreshRef`, и `bulkGuardRef`.
+Общий `settleBulkRefresh(outcome)` используется в move/delete/retry. После
+каждого `await reloadBoard()` сначала проверяется
+`bulkSelectionRef.current.size === 0`:
 
-Покрыто тестом conflict → failed reload → tag mismatch/empty selection:
-checkbox снова enabled, можно выбрать задачу и открыть панель.
+- при пустом выборе блокировка, ошибки и диалог сбрасываются;
+- `blocked` ставится только при непустом selection и неуспешном refresh;
+- `cleared` не возвращает hidden block и не оставляет stale payload.
 
-### MEDIUM: superseded reload
+Deferred-тест: tag очищает selection во время R1, R2 падает по `column.list`,
+continuation не блокирует checkbox; после R3 checkbox доступны.
 
-`reloadBoard()` возвращает `"applied" | "failed" | "superseded"` и хранит
-promise последней перечитки. Устаревшая R1 при sequence/filter mismatch ждёт
-результат более новой R2, а не выставляет блокировку по своему late-ответу.
-Успешная R2 не перезаписывается. Deferred-тест R1/R2 подтверждает отсутствие
-ложной блокировки и повтор с версией, полученной R2.
+### applied / superseded / latestOutcome
 
-### MEDIUM: visibility и текущий tag
-
-При `task.moveMany` `loadedCountsRef`/`visibilityRef` регистрируются только
-для moved-задач, соответствующих текущим `projectId` и
-`normalizeFilterTag(activeTag)`. Если tag сменился во время pending, лишние ID
-не остаются required, нет полной догрузки/повторного сканирования; подходящие
-задачи сохраняются. Deferred-тест проверяет последнюю страницу target: 6, а не
-7 при ошибочной регистрации скрытой задачи.
+Сохранены прежние guards: устаревшая R1 ждёт результат более новой R2 через
+`latestOutcome` и не перезаписывает успех/блокировку. `refreshComplete`
+учитывает все колонки и временные ошибки `task.get`.
 
 ## Ранее исправленное
 
+- Pending close: busy не обходит dirty-guard целиком; независимые
+  inline/quick/subtask-черновики требуют confirm, pending без них закрывается
+  без ложного confirm.
 - `task.get` в reconcile принимает задачу только при совпадении `projectId`
-  и активного tag; conflict + удалённый tag снимает задачу с выбора.
-- `TaskMoveManyOutput` используется для фактических positions, append за
-  границей страницы и same-column append сразу показывают карточки.
+  и активного tag; conflict + потерянный tag снимает задачу с выбора.
+- `TaskMoveManyOutput` даёт фактические positions; visibility регистрируется
+  только для moved-задач текущего project/tag, append за страницей и
+  same-column append сразу видны.
 - Неудачная перечитка после конфликта не заявляет обновление версий и
   блокирует повтор до успешного refresh с кнопкой «Обновить доску».
-- Диалог удаления: `Выбрано задач: N`, каскадные подзадачи в число не входят.
+- Диалог удаления: `Выбрано задач: N`, подзадачи в число не входят.
 - Стабильное закрытие карточки во время pending quick-команды.
-- Лимит 200 проверяется и для move, и для delete.
-- Последовательных single-команд для массовых действий нет.
+- Лимит 200 для move/delete; массовые действия не используют single-команды.
 
 ## Проверки
 
@@ -87,8 +80,8 @@ promise последней перечитки. Устаревшая R1 при se
 - `pnpm --filter @kanbaner/plugin-projects typecheck` — успешно.
 - Focused bulk:
   `vitest run packages/plugin-projects/src/kanban.test.tsx -t "массовые действия"`
-  — **19 passed**.
-- `vitest run packages/plugin-projects` — **278 passed / 18 files**.
+  — **22 passed**.
+- `vitest run packages/plugin-projects` — **281 passed / 18 files**.
 - `pnpm check:imports` — успешно.
 - `node scripts/check-import-boundaries.mjs --self-test` — успешно
   (22 ожидаемых нарушения).
@@ -96,7 +89,7 @@ promise последней перечитки. Устаревшая R1 при se
   - `format:check`;
   - `lint`;
   - typecheck всех пакетов и `apps/web`;
-  - **1401 passed / 98 files**;
+  - **1404 passed / 98 files**;
   - production `build`.
 - `pnpm --filter @kanbaner/web test:e2e` — **103 passed (2.8m)**.
   Playwright использовал реальные `task.moveMany`/`task.deleteMany`.
@@ -114,5 +107,5 @@ promise последней перечитки. Устаревшая R1 при se
 ## Остаточные риски
 
 - При временной ошибке `task.get` задача консервативно остаётся в выборе до
-  следующего успешного refresh.
+  следующего успешного refresh; повтор при этом заблокирован.
 - Лимит 200 окончательно валидирует домен; UI проверяет его заранее.
