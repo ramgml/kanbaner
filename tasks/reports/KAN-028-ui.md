@@ -4,7 +4,7 @@
 - Ветка: `feat/kan-028-bulk-ui`
 - Worktree: `.worktrees/kan-028-bulk-ui`
 - Домен: `feat/kan-028-bulk-domain`, коммит `2e5df62`
-- Коммит UI: заполняется после `git commit`
+- Коммит UI: `d3205ee` — `feat(projects): добавить массовые действия с карточками`
 
 ## Что сделано
 
