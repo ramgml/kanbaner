@@ -1,7 +1,7 @@
 ---
 id: KAN-032
 title: Цвета доски, колонок и приоритетов в интерфейсе
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-032
@@ -33,19 +33,19 @@ specs:
 
 ## Объём работ
 
-- [ ] Использовать `BoardColor` и optional `color` из KAN-030 без дублирования
+- [x] Использовать `BoardColor` и optional `color` из KAN-030 без дублирования
   доменных значений в UI.
-- [ ] Добавить общую client-safe таблицу представления палитры с доступными
+- [x] Добавить общую client-safe таблицу представления палитры с доступными
   русскими названиями и стилями для light/dark.
-- [ ] Добавить выбор `project.color` в настройки проекта через `project.update`
+- [x] Добавить выбор `project.color` в настройки проекта через `project.update`
   с `expectedVersion`, ошибками и dirty/pending state.
-- [ ] Добавить выбор `column.color` в меню колонки через color-only
+- [x] Добавить выбор `column.color` в меню колонки через color-only
   `column.update`; title не отправлять.
-- [ ] Применить мягкий фон доски и более заметный фон колонок; `default`/absent
+- [x] Применить мягкий фон доски и более заметный фон колонок; `default`/absent
   сохраняет текущее оформление.
-- [ ] Добавить карточкам цветную левую полосу и Lucide-акцент приоритета:
+- [x] Добавить карточкам цветную левую полосу и Lucide-акцент приоритета:
   high — red, medium — amber, low — green; не заливать всю карточку.
-- [ ] Обновить refresh после команд, component/E2E и README.
+- [x] Обновить refresh после команд, component/E2E и README.
 
 ## Владение файлами
 
@@ -70,18 +70,18 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Выбранные цвета доски/колонки сохраняются после reload.
-- [ ] Color-only column update не меняет название и обрабатывает конфликт.
-- [ ] Приоритеты имеют различимые акценты без ухудшения контраста текста.
-- [ ] Palette доступна с клавиатуры, имеет текстовые имена и mobile 360 overflow
+- [x] Выбранные цвета доски/колонки сохраняются после reload.
+- [x] Color-only column update не меняет название и обрабатывает конфликт.
+- [x] Приоритеты имеют различимые акценты без ухудшения контраста текста.
+- [x] Palette доступна с клавиатуры, имеет текстовые имена и mobile 360 overflow
   отсутствует.
-- [ ] Все проверки зелёные.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Focused component tests и typecheck.
-- [ ] Полный `pnpm check` и все Playwright.
-- [ ] Проверка computed styles в light/dark Chromium.
+- [x] Focused component tests и typecheck.
+- [x] Полный `pnpm check` и все Playwright.
+- [x] Проверка computed styles в light/dark Chromium.
 
 ## Риски
 
@@ -96,4 +96,12 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммиты: `453c29a`, `43d527a`; merge `a39e4be`.
+- Проверки на `dev`: полный `pnpm check` (101 файл / 1456 тестов),
+  `check:imports` и 111 Playwright E2E — зелёные.
+- Независимое ревью: три Medium по race conditions и замечание landscape
+  устранены; повторное ревью подтвердило закрытие всех findings.
+- Палитры проекта/колонок и акценты приоритетов работают в light/dark,
+  цветовые операции синхронизированы с rename/move/DnD.
+- Worktree и ветка удалены. Push не выполнялся: remote не настроен.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.
