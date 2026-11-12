@@ -168,6 +168,7 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
         "src/listing.ts",
         "src/model.ts",
         "src/resources.ts",
+        "src/schemas/board-color.ts",
         "src/schemas/column.ts",
         "src/schemas/common.ts",
         "src/schemas/project.ts",
@@ -236,6 +237,17 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     expect(contract.TaskDeleteManyOutputSchema).toBeTypeOf("object");
     expect(contract.ProjectSummaryInputSchema).toBeTypeOf("object");
     expect(contract.ProjectSummaryOutputSchema).toBeTypeOf("object");
+    expect(contract.BOARD_COLORS).toEqual([
+      "default",
+      "slate",
+      "blue",
+      "green",
+      "yellow",
+      "orange",
+      "red",
+      "purple",
+    ]);
+    expect(contract.BoardColorSchema).toBeTypeOf("object");
     expect(contract.ColumnCreateInputSchema).toBeTypeOf("object");
     expect(contract.ColumnListOutputSchema).toBeTypeOf("object");
     expect(contract.COLUMN_EVENT_TYPES).toMatchObject({

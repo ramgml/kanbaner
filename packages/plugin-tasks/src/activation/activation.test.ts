@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { changedColumnFields, changedProjectFields, isSameColorOnlyPatch } from "../activation.ts";
 import { TasksNotFoundError, TasksVersionConflictError } from "../store/index.ts";
 import { TasksValidationError } from "../validation.ts";
 import { mapTasksError } from "./errors.ts";
@@ -10,7 +11,7 @@ import {
   sha256Hex,
 } from "./idempotency.ts";
 import { shiftedNeighbors } from "./snapshots.ts";
-import type { Task } from "../model.ts";
+import type { Project, Task, TaskColumn } from "../model.ts";
 
 function task(overrides: Partial<Task> & Pick<Task, "id">): Task {
   return {
@@ -66,6 +67,52 @@ describe("activation: чистые помощники", () => {
 
     expect(shiftedNeighbors(before, after, "new").map((item) => item.id)).toEqual(["b", "c"]);
     expect(shiftedNeighbors(before, after, "b").map((item) => item.id)).toEqual(["c"]);
+  });
+
+  it("вычисляет changed-поля цвета стабильно для событий проекта и колонки", () => {
+    const project: Project = {
+      id: "project-1",
+      title: "Проект",
+      descriptionMarkdown: "",
+      color: "blue",
+      version: 2,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+    const column: TaskColumn = {
+      id: "column-1",
+      projectId: project.id,
+      title: "Review",
+      status: "in_progress",
+      color: "blue",
+      position: 1,
+      version: 2,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+
+    expect(changedProjectFields(project, { ...project, color: "green" })).toEqual(["color"]);
+    expect(changedProjectFields(project, { ...project, title: "Новый" })).toEqual(["title"]);
+    expect(changedProjectFields(project, project)).toEqual([]);
+    expect(changedColumnFields(column, { ...column, color: "green" })).toEqual(["color"]);
+    expect(changedColumnFields(column, { ...column, title: "Code Review" })).toEqual(["title"]);
+    expect(
+      changedColumnFields(column, { ...column, title: "Code Review", color: "green" }),
+    ).toEqual(["title", "color"]);
+    expect(changedColumnFields(column, column)).toEqual([]);
+  });
+
+  it("распознаёт color-only no-op и сохраняет семантику title-only update", () => {
+    const current = { color: "blue" as const };
+
+    expect(isSameColorOnlyPatch({ color: "blue" }, current)).toBe(true);
+    expect(isSameColorOnlyPatch({ color: "green" }, current)).toBe(false);
+    expect(isSameColorOnlyPatch({ color: "blue", title: "Review" }, current)).toBe(false);
+    expect(isSameColorOnlyPatch({ title: "Review" }, current)).toBe(false);
+    expect(isSameColorOnlyPatch({ color: "blue", descriptionMarkdown: "Описание" }, current)).toBe(
+      false,
+    );
+    expect(isSameColorOnlyPatch({ color: "blue" }, { color: undefined })).toBe(false);
   });
 
   it("маппит доменные ошибки в стабильные коды Plugin Contract", () => {

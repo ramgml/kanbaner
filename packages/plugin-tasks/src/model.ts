@@ -10,6 +10,7 @@ import {
   TagsSchema,
   TitleSchema,
 } from "./schemas/common.ts";
+import { BoardColorSchema } from "./schemas/board-color.ts";
 
 /** Фиксированные статусы задачи. */
 export const TASK_STATUSES = ["backlog", "todo", "in_progress", "done"] as const;
@@ -65,6 +66,7 @@ export const ProjectSchema = Type.Object(
     id: EntityIdSchema,
     title: TitleSchema,
     descriptionMarkdown: DescriptionMarkdownSchema,
+    color: Type.Optional(BoardColorSchema),
     version: Type.Integer({ minimum: 1 }),
     createdAt: UtcTimestampSchema,
     updatedAt: UtcTimestampSchema,
@@ -113,6 +115,7 @@ export const TaskColumnSchema = Type.Object(
     projectId: EntityIdSchema,
     title: TitleSchema,
     status: TaskStatusSchema,
+    color: Type.Optional(BoardColorSchema),
     position: PositionSchema,
     version: Type.Integer({ minimum: 1 }),
     createdAt: UtcTimestampSchema,

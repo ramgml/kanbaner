@@ -16,6 +16,7 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from "./model.ts";
+import type { BoardColor } from "./schemas/board-color.ts";
 import {
   TasksNestedTransactionError,
   type CreateTaskStoreInput,
@@ -128,6 +129,7 @@ async function createProject(
   context: TasksStoreConformanceContext,
   options: {
     readonly title?: string;
+    readonly color?: BoardColor;
     readonly createdAtOffset?: number;
     readonly id?: string;
   } = {},
@@ -136,6 +138,7 @@ async function createProject(
     id: options.id ?? context.nextId("project"),
     title: options.title ?? "Project",
     descriptionMarkdown: "",
+    ...(options.color === undefined ? {} : { color: options.color }),
     createdAt: context.at(options.createdAtOffset ?? 0),
     expectedVersion: 0,
   });
@@ -377,6 +380,7 @@ export function createTasksStoreConformanceSuite(
           const context = createContext();
           const later = await createProject(store, context, {
             title: "Later",
+            color: "blue",
             createdAtOffset: 10,
           });
           const earlier = await createProject(store, context, {
@@ -385,9 +389,12 @@ export function createTasksStoreConformanceSuite(
           });
 
           assert.equal(later.version, 1);
+          assert.equal(later.color, "blue");
           assert.equal(later.createdAt, context.at(10));
           assert.equal(later.updatedAt, context.at(10));
+          assert.equal(earlier.color, undefined);
           assert.deepEqual(await store.getProject(later.id), later);
+          assert.deepEqual(await store.getProject(earlier.id), earlier);
 
           const page = await store.listProjects({ limit: 10, offset: 0 });
 
@@ -415,29 +422,56 @@ export function createTasksStoreConformanceSuite(
 
           assert.equal(updated.version, 2);
           assert.equal(updated.title, "Updated");
+          assert.equal(updated.color, undefined);
+
+          // Color-only update не меняет заголовок и повышает версию.
+          const recolored = await store.updateProject({
+            id: project.id,
+            expectedVersion: 2,
+            color: "green",
+            updatedAt: context.at(2),
+          });
+
+          assert.equal(recolored.title, "Updated");
+          assert.equal(recolored.color, "green");
+          assert.equal(recolored.version, 3);
+
+          // Color-only update с тем же цветом — no-op: версия и updatedAt
+          // остаются прежними.
+          const reasserted = await store.updateProject({
+            id: project.id,
+            expectedVersion: 3,
+            color: "green",
+            updatedAt: context.at(3),
+          });
+
+          assert.equal(reasserted.version, 3);
+          assert.equal(reasserted.updatedAt, recolored.updatedAt);
+          assert.equal(reasserted.color, "green");
 
           await rejectsVersionConflict(
             store.updateProject({
               id: project.id,
               expectedVersion: 1,
               title: "Stale",
-              updatedAt: context.at(2),
+              updatedAt: context.at(3),
             }),
             1,
-            2,
+            3,
             "устаревший update проекта",
           );
           await rejectsVersionConflict(
             store.deleteProject({ id: project.id, expectedVersion: 1 }),
             1,
-            2,
+            3,
             "устаревший delete проекта",
           );
 
           const reread = await store.getProject(project.id);
 
           assert.equal(reread?.title, "Updated");
-          assert.equal(reread?.version, 2);
+          assert.equal(reread?.color, "green");
+          assert.equal(reread?.version, 3);
         });
       },
     },
@@ -1801,6 +1835,12 @@ export function createTasksStoreConformanceSuite(
 
           assert.equal(page.total, 3);
           assert.equal(page.nextOffset, null);
+          // Документы без color остаются валидными; стандартное оформление
+          // вычисляет представление, а не Store.
+          assert.equal(
+            page.items.every((column) => column.color === undefined),
+            true,
+          );
           assert.deepEqual(
             page.items.map((column) => ({
               id: column.id,
@@ -1874,6 +1914,7 @@ export function createTasksStoreConformanceSuite(
               id: column.id,
               title: column.title,
               status: column.status,
+              color: column.color,
               position: column.position,
             })),
             [
@@ -1881,24 +1922,28 @@ export function createTasksStoreConformanceSuite(
                 id: `column-${project.id}-legacy-backlog`,
                 title: "Backlog",
                 status: "backlog",
+                color: undefined,
                 position: 0,
               },
               {
                 id: `column-${project.id}-legacy-todo`,
                 title: "To do",
                 status: "todo",
+                color: undefined,
                 position: 1,
               },
               {
                 id: `column-${project.id}-legacy-in_progress`,
                 title: "In progress",
                 status: "in_progress",
+                color: undefined,
                 position: 2,
               },
               {
                 id: `column-${project.id}-legacy-done`,
                 title: "Done",
                 status: "done",
+                color: undefined,
                 position: 3,
               },
             ],
@@ -2008,6 +2053,7 @@ export function createTasksStoreConformanceSuite(
             projectId: project.id,
             title: "Review",
             type: "open",
+            color: "blue",
             position: 1,
             createdAt: context.at(1),
             expectedVersion: 0,
@@ -2015,6 +2061,7 @@ export function createTasksStoreConformanceSuite(
 
           assert.equal(review.position, 1);
           assert.equal(review.status, "in_progress");
+          assert.equal(review.color, "blue");
           assert.equal(review.version, 1);
 
           let columns = await store.listColumns({
@@ -2041,18 +2088,61 @@ export function createTasksStoreConformanceSuite(
           });
 
           assert.equal(updated.title, "Code Review");
+          assert.equal(updated.color, "blue");
           assert.equal(updated.version, 2);
           assert.equal(updated.updatedAt, context.at(2));
 
-          const moved = await store.moveColumn({
+          // Color-only update сохраняет title и повышает версию. Пустой patch
+          // отклоняется до записи и не меняет сохранённую колонку.
+          const recolored = await store.updateColumn({
             id: review.id,
             expectedVersion: 2,
-            position: 0,
+            color: "green",
             updatedAt: context.at(3),
           });
 
+          assert.equal(recolored.title, "Code Review");
+          assert.equal(recolored.color, "green");
+          assert.equal(recolored.version, 3);
+
+          // Color-only update с тем же цветом не создаёт новую версию.
+          const reasserted = await store.updateColumn({
+            id: review.id,
+            expectedVersion: 3,
+            color: "green",
+            updatedAt: context.at(4),
+          });
+
+          assert.equal(reasserted.version, 3);
+          assert.equal(reasserted.updatedAt, recolored.updatedAt);
+          assert.equal(reasserted.title, "Code Review");
+
+          await rejectsCode(
+            store.updateColumn({
+              id: review.id,
+              expectedVersion: 3,
+              updatedAt: context.at(5),
+            }),
+            "INVALID_COLUMN_PATCH",
+            "column.update без title и color",
+          );
+
+          const afterRejectedPatch = await store.getColumn(review.id);
+
+          assert.equal(afterRejectedPatch?.title, "Code Review");
+          assert.equal(afterRejectedPatch?.color, "green");
+          assert.equal(afterRejectedPatch?.version, 3);
+
+          const moved = await store.moveColumn({
+            id: review.id,
+            expectedVersion: 3,
+            position: 0,
+            updatedAt: context.at(6),
+          });
+
           assert.equal(moved.position, 0);
-          assert.equal(moved.version, 3);
+          assert.equal(moved.color, "green");
+          assert.equal(moved.version, 4);
 
           columns = await store.listColumns({
             projectId: project.id,
@@ -2063,7 +2153,7 @@ export function createTasksStoreConformanceSuite(
           assert.deepEqual(
             columns.items.map((column) => [column.id, column.position, column.version]),
             [
-              ["column-review", 0, 3],
+              ["column-review", 0, 4],
               [`column-${project.id}-todo`, 1, 2],
               [`column-${project.id}-in-progress`, 2, 2],
               [`column-${project.id}-done`, 3, 2],
@@ -2075,7 +2165,7 @@ export function createTasksStoreConformanceSuite(
               id: `column-${project.id}-todo`,
               expectedVersion: 1,
               position: 0,
-              updatedAt: context.at(4),
+              updatedAt: context.at(7),
             }),
             1,
             2,

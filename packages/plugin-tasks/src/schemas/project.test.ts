@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
 import { MAX_TITLE_LENGTH } from "../constants.ts";
+import { ProjectSchema } from "../model.ts";
+import { BOARD_COLORS } from "./board-color.ts";
 import {
   ProjectCreateInputSchema,
   ProjectDeleteInputSchema,
@@ -48,6 +50,40 @@ describe("project schemas", () => {
     expect(
       validateWithSchema(ProjectCreateInputSchema, { title: "Проект", expectedVersion: 1 }).ok,
     ).toBe(false);
+  });
+
+  it("принимает все цвета палитры при создании и обновлении проекта", () => {
+    for (const color of BOARD_COLORS) {
+      expect(validateWithSchema(ProjectCreateInputSchema, { title: "Проект", color }).ok).toBe(
+        true,
+      );
+      expect(
+        validateWithSchema(ProjectUpdateInputSchema, {
+          id: "project-1",
+          expectedVersion: 1,
+          color,
+        }).ok,
+      ).toBe(true);
+    }
+  });
+
+  it("отклоняет произвольный цвет проекта до записи", () => {
+    expect(
+      validateWithSchema(ProjectCreateInputSchema, { title: "Проект", color: "#ff0000" }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ProjectUpdateInputSchema, {
+        id: "project-1",
+        expectedVersion: 1,
+        color: "pink",
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("читает документы прежней схемы без color и сохраняет выбранный цвет", () => {
+    expect(validateWithSchema(ProjectSchema, project).ok).toBe(true);
+    expect(validateWithSchema(ProjectSchema, { ...project, color: "purple" }).ok).toBe(true);
+    expect(validateWithSchema(ProjectSchema, { ...project, color: "pink" }).ok).toBe(false);
   });
 
   it("требует id и expectedVersion для project.update", () => {
@@ -100,6 +136,13 @@ describe("project schemas", () => {
     expect(
       validateWithSchema(ProjectMutationOutputSchema, {
         project,
+        resource: "kanbaner.tasks:project:project-1",
+        eventId: "event-1",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ProjectMutationOutputSchema, {
+        project: { ...project, color: "blue" },
         resource: "kanbaner.tasks:project:project-1",
         eventId: "event-1",
       }).ok,

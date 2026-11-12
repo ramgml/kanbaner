@@ -3,6 +3,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { DRAFT_2020_12, ResourceRefSchema } from "@kanbaner/plugin-sdk";
 
 import { TaskColumnSchema, TaskColumnTypeSchema, TaskSchema } from "../model.ts";
+import { BoardColorSchema } from "./board-color.ts";
 import {
   ConfirmSchema,
   CreateExpectedVersionSchema,
@@ -24,6 +25,7 @@ export const ColumnCreateInputSchema = Type.Object(
     projectId: EntityIdSchema,
     title: TitleSchema,
     type: TaskColumnTypeSchema,
+    color: Type.Optional(BoardColorSchema),
     position: Type.Optional(PositionSchema),
     expectedVersion: Type.Optional(CreateExpectedVersionSchema),
   },
@@ -32,14 +34,35 @@ export const ColumnCreateInputSchema = Type.Object(
 
 export type ColumnCreateInput = Static<typeof ColumnCreateInputSchema>;
 
-/** Вход команды `column.update`: переименование с проверкой версии. */
-export const ColumnUpdateInputSchema = Type.Object(
-  {
-    id: EntityIdSchema,
-    expectedVersion: ExpectedVersionSchema,
-    title: TitleSchema,
-  },
-  { ...DRAFT_2020_12, additionalProperties: false },
+/**
+ * Вход команды `column.update`.
+ *
+ * `title` и `color` необязательны по отдельности, но требуется хотя бы одно
+ * поле: пустой patch отклоняется схемой до записи. Color-only обновление не
+ * меняет заголовок; совпадающий цвет — no-op без новой версии и события.
+ */
+export const ColumnUpdateInputSchema = Type.Union(
+  [
+    Type.Object(
+      {
+        id: EntityIdSchema,
+        expectedVersion: ExpectedVersionSchema,
+        title: TitleSchema,
+        color: Type.Optional(BoardColorSchema),
+      },
+      { ...DRAFT_2020_12, additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        id: EntityIdSchema,
+        expectedVersion: ExpectedVersionSchema,
+        title: Type.Optional(TitleSchema),
+        color: BoardColorSchema,
+      },
+      { ...DRAFT_2020_12, additionalProperties: false },
+    ),
+  ],
+  DRAFT_2020_12,
 );
 
 export type ColumnUpdateInput = Static<typeof ColumnUpdateInputSchema>;
