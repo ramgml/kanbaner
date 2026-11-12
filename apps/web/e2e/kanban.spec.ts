@@ -3137,8 +3137,19 @@ test.describe("канбан в production shell", () => {
     }) => {
       const projectTitle = uniqueTitle("Проект Trello-модала");
       const taskTitle = uniqueTitle("Задача Trello-модала");
-      const updatedTitle = uniqueTitle("Обновлённая Trello-задача");
-      const description = "Описание из Trello-модала\nвторая строка";
+      const updatedTitle = uniqueTitle(
+        "Обновлённая Trello-задача с очень длинным названием, которое должно целиком помещаться в многострочном редакторе без горизонтальной прокрутки",
+      );
+      const description = [
+        "## Контекст",
+        "",
+        "Длинное описание из Trello-модала, которое должно полностью помещаться в редакторе.",
+        "Первая подробная строка с пояснением и дополнительным контекстом задачи.",
+        "Вторая подробная строка с пояснением и дополнительным контекстом задачи.",
+        "Третья подробная строка с пояснением и дополнительным контекстом задачи.",
+        "Четвёртая подробная строка с пояснением и дополнительным контекстом задачи.",
+        "Пятая подробная строка с пояснением и дополнительным контекстом задачи.",
+      ].join("\n");
 
       await openTaskList(page);
       await createProject(page, projectTitle);
@@ -3176,7 +3187,7 @@ test.describe("канбан в production shell", () => {
         expect(Math.abs(box.x - (DESKTOP_VIEWPORT.width - box.width) / 2)).toBeLessThanOrEqual(2);
       }
 
-      // Заголовок: одинарный click, Enter, partial task.update.
+      // Заголовок: одинарный click, клик в свободной области сохраняет partial task.update.
       await page.getByTestId("kanban-modal-title").click();
 
       const titleInput = page.getByTestId("kanban-title-input");
@@ -3188,18 +3199,54 @@ test.describe("канбан в production shell", () => {
       // Inline-редактор занимает свободную ширину шапки, а не intrinsic-width input.
       expect(titleInputBox?.width).toBeGreaterThan(600);
       await titleInput.fill(updatedTitle);
-      await page.keyboard.press("Enter");
+      await expect
+        .poll(async () =>
+          titleInput.evaluate((element) => element.scrollHeight <= element.clientHeight + 2),
+        )
+        .toBe(true);
+
+      const multilineGeometry = await titleInput.evaluate((element) => ({
+        tagName: element.tagName,
+        height: element.getBoundingClientRect().height,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+      }));
+
+      expect(multilineGeometry.tagName).toBe("TEXTAREA");
+      expect(multilineGeometry.height).toBeGreaterThan(50);
+      expect(multilineGeometry.scrollHeight).toBeLessThanOrEqual(
+        multilineGeometry.clientHeight + 2,
+      );
+      await page.getByTestId("kanban-modal-project").click();
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(updatedTitle);
 
-      // Описание: одинарный click, явная кнопка сохранения.
+      // Описание тоже сохраняется кликом вне редактора, без кнопки.
       await page.getByTestId("kanban-modal-description").click();
 
       const descriptionInput = page.getByTestId("kanban-description-input");
 
       await expect(descriptionInput).toBeFocused();
       await descriptionInput.fill(description);
-      await page.getByTestId("kanban-description-save").click();
+      await expect
+        .poll(async () =>
+          descriptionInput.evaluate((element) => element.scrollHeight <= element.clientHeight + 2),
+        )
+        .toBe(true);
+      expect((await descriptionInput.boundingBox())?.height).toBeGreaterThan(200);
+      await page.getByTestId("kanban-modal-project").click();
       await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
+
+      // При повторном открытии существующий Markdown сразу виден целиком,
+      // без низкого textarea и внутренней полосы прокрутки.
+      await page.getByTestId("kanban-modal-description").click();
+      await expect(descriptionInput).toBeFocused();
+      await expect
+        .poll(async () =>
+          descriptionInput.evaluate((element) => element.scrollHeight <= element.clientHeight + 2),
+        )
+        .toBe(true);
+      expect((await descriptionInput.boundingBox())?.height).toBeGreaterThan(200);
+      await page.keyboard.press("Escape");
 
       // Две команды: в первой нет description, во второй — нет title.
       await expect.poll(() => requestBodies.length).toBe(2);
@@ -3278,9 +3325,7 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId(`kanban-subtasks-${parentId}`)).toHaveText("Подзадачи: 1");
     });
 
-    test("Escape в inline-редакторе отменяет поле, а X/backdrop требуют подтверждения", async ({
-      page,
-    }) => {
+    test("Escape отменяет inline-поле, а закрытие автосохраняет его черновик", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект черновика модала");
       const taskTitle = uniqueTitle("Задача черновика модала");
       const draftTitle = uniqueTitle("Черновик Trello");
@@ -3332,41 +3377,23 @@ test.describe("канбан в production shell", () => {
 
       await dirtyInput.fill(draftTitle);
 
-      // Escape вне редактора проходит через close guard.
-      await page.getByTestId("kanban-details-close").focus();
-      await page.keyboard.press("Escape");
-      await expect(page.getByTestId("kanban-draft-confirm")).toBeVisible();
-      await expect(page.getByTestId("kanban-details")).toBeVisible();
-      await expect(dirtyInput).toHaveValue(draftTitle);
-
-      await page.getByTestId("kanban-draft-keep").click();
-      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
-      await expect(dirtyInput).toHaveValue(draftTitle);
-
-      // Backdrop тоже проходит через подтверждение и не теряет draft.
-      await page.mouse.click(5, 5);
-      await expect(page.getByTestId("kanban-draft-confirm")).toBeVisible();
-      await expect(dirtyInput).toHaveValue(draftTitle);
-
-      await page.getByTestId("kanban-draft-keep").click();
+      // Pointerdown на Close запускает autosave, поэтому карточка закрывается
+      // без отдельного подтверждения единственного inline-черновика.
       await page.getByTestId("kanban-details-close").click();
-      await expect(page.getByTestId("kanban-draft-confirm")).toBeVisible();
-      await expect(page.getByTestId("kanban-details")).toBeVisible();
-
-      await page.getByTestId("kanban-draft-discard").click();
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
       await expect(page.getByTestId("kanban-details")).toHaveCount(0);
       await expect(page).not.toHaveURL(/[?&]task=/u);
 
-      await openCardModal(page, taskId, taskTitle);
-      await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
+      await openCardModal(page, taskId, draftTitle);
+      await expect(page.getByTestId("kanban-modal-title")).toHaveText(draftTitle);
     });
 
-    test("удерживает фокус в desktop-модале, inline-подтверждении и возвращает на карточку", async ({
+    test("удерживает фокус в desktop-модале, подтверждении черновика и возвращает на карточку", async ({
       page,
     }) => {
       const projectTitle = uniqueTitle("Проект фокуса модала");
       const taskTitle = uniqueTitle("Задача фокуса модала");
-      const draftTitle = uniqueTitle("Черновик фокуса модала");
+      const draftDue = "2030-10-10";
 
       await openTaskList(page);
       await createProject(page, projectTitle);
@@ -3399,13 +3426,11 @@ test.describe("канбан в production shell", () => {
         );
       }
 
-      // Черновик заголовка: фокус уходит в alertdialog и не покидает его.
-      await page.getByTestId("kanban-modal-title").click();
+      // Быстрый черновик по-прежнему требует подтверждения: фокус уходит в
+      // alertdialog и не покидает его.
+      const dueInput = page.getByTestId("kanban-modal-due");
 
-      const titleInput = page.getByTestId("kanban-title-input");
-
-      await expect(titleInput).toBeFocused();
-      await titleInput.fill(draftTitle);
+      await dueInput.fill(draftDue);
       await page.getByTestId("kanban-details-close").click();
 
       const confirm = page.getByTestId("kanban-draft-confirm");
@@ -3437,13 +3462,15 @@ test.describe("канбан в production shell", () => {
         ).toBe(true);
       }
 
-      // «Продолжить редактирование» возвращает фокус в активное поле.
+      // «Продолжить редактирование» возвращает фокус в поле с черновиком.
       await confirm.getByTestId("kanban-draft-keep").click();
       await expect(confirm).toHaveCount(0);
       await expect
-        .poll(async () => page.evaluate(() => document.activeElement?.getAttribute("name") ?? null))
-        .toBe("title");
-      await expect(titleInput).toHaveValue(draftTitle);
+        .poll(async () =>
+          page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null),
+        )
+        .toBe("kanban-modal-due");
+      await expect(dueInput).toHaveValue(draftDue);
 
       // Закрытие с черновиком снова требует подтверждения.
       await page.getByTestId("kanban-details-close").click();
@@ -4551,11 +4578,23 @@ test.describe("канбан в production shell", () => {
       const bar = page.getByTestId("kanban-bulk-bar");
 
       await expect(bar).toBeVisible();
+      await expect(page.getByTestId("kanban-bulk-move")).toHaveCount(0);
       await expectBulkCount(page, 2);
+
+      const barBox = await bar.boundingBox();
+      const viewport = page.viewportSize();
+
+      expect(barBox).not.toBeNull();
+      expect(viewport).not.toBeNull();
+
+      if (barBox !== null && viewport !== null) {
+        expect(barBox.y).toBeGreaterThan(viewport.height / 2);
+        expect(barBox.y + barBox.height).toBeLessThanOrEqual(viewport.height);
+      }
+
       await page.getByTestId("kanban-bulk-target").selectOption({
         label: STATUS_LABELS.in_progress,
       });
-      await page.getByTestId("kanban-bulk-move").click();
 
       await expect(bar).toHaveCount(0);
       await expect.poll(async () => cardTitles(page, "in_progress")).toEqual([secondId, firstId]);
@@ -4669,8 +4708,10 @@ test.describe("канбан в production shell", () => {
       await moveWithMenu(page, taskId, "in_progress");
       await expectCardInColumn(page, taskId, "in_progress");
 
-      // Вторая вкладка отправляет устаревший snapshot.
-      await stalePage.getByTestId("kanban-bulk-move").click();
+      // Вторая вкладка отправляет устаревший snapshot сразу при выборе target.
+      await stalePage.getByTestId("kanban-bulk-target").selectOption({
+        label: STATUS_LABELS.in_progress,
+      });
       await expect(stalePage.getByTestId("kanban-bulk-error")).toContainText("уже изменены");
       await expect(stalePage.getByTestId("kanban-bulk-bar")).toBeVisible();
       await expectBulkCount(stalePage, 1);
@@ -4681,7 +4722,6 @@ test.describe("канбан в production shell", () => {
       await stalePage.getByTestId("kanban-bulk-target").selectOption({
         label: STATUS_LABELS.in_progress,
       });
-      await stalePage.getByTestId("kanban-bulk-move").click();
       await expect(stalePage.getByTestId("kanban-bulk-bar")).toHaveCount(0);
       await expectCardInColumn(stalePage, taskId, "in_progress");
 
@@ -4728,7 +4768,9 @@ test.describe("канбан в production shell", () => {
 
       // Устаревший payload получает конфликт. После refresh задача не
       // соответствует активному tag, поэтому selection очищается целиком.
-      await stalePage.getByTestId("kanban-bulk-move").click();
+      await stalePage.getByTestId("kanban-bulk-target").selectOption({
+        label: STATUS_LABELS.in_progress,
+      });
       await expect(stalePage.getByTestId("kanban-bulk-bar")).toHaveCount(0);
       await expect(stalePage.getByTestId(`kanban-card-${taskId}`)).toHaveCount(0);
 
@@ -4765,20 +4807,30 @@ test.describe("канбан в production shell", () => {
           .boundingBox();
 
         expect(hitTarget).not.toBeNull();
-        expect(hitTarget?.width ?? 0).toBeGreaterThanOrEqual(40);
-        expect(hitTarget?.height ?? 0).toBeGreaterThanOrEqual(40);
+        expect(hitTarget?.width ?? 0).toBeGreaterThanOrEqual(20);
+        expect(hitTarget?.height ?? 0).toBeGreaterThanOrEqual(20);
 
         await selectCardForBulk(page, taskId);
       }
 
       await expect(page.getByTestId("kanban-bulk-bar")).toBeVisible();
+      await expect(page.getByTestId("kanban-bulk-move")).toHaveCount(0);
       await expectBulkCount(page, 2);
       await expectNoHorizontalOverflow(page);
+
+      const bulkBox = await page.getByTestId("kanban-bulk-bar").boundingBox();
+      const projectsBox = await page.getByTestId("projects-mobile-trigger").boundingBox();
+
+      expect(bulkBox).not.toBeNull();
+      expect(projectsBox).not.toBeNull();
+
+      if (bulkBox !== null && projectsBox !== null) {
+        expect(bulkBox.y + bulkBox.height).toBeLessThanOrEqual(projectsBox.y);
+      }
 
       await page.getByTestId("kanban-bulk-target").selectOption({
         label: STATUS_LABELS.in_progress,
       });
-      await page.getByTestId("kanban-bulk-move").click();
 
       await expect(page.getByTestId("kanban-bulk-bar")).toHaveCount(0);
       await expectCardInColumn(page, firstId, "in_progress");
@@ -5206,7 +5258,6 @@ test.describe("канбан в production shell", () => {
       await expect(card).toBeVisible();
 
       for (const target of [
-        page.getByTestId(`kanban-bulk-check-target-${taskId}`),
         page.getByTestId(`kanban-open-${taskId}`),
         page.getByTestId(`kanban-menu-${taskId}`),
       ]) {
@@ -5217,6 +5268,12 @@ test.describe("канбан в production shell", () => {
         expect(box?.width ?? 0).toBeGreaterThanOrEqual(40);
       }
 
+      const checkboxTargetBox = await page
+        .getByTestId(`kanban-bulk-check-target-${taskId}`)
+        .boundingBox();
+
+      expect(checkboxTargetBox?.width).toBe(20);
+      expect(checkboxTargetBox?.height).toBe(20);
       await expect(page.getByTestId(`kanban-drag-${taskId}`)).toHaveCount(0);
 
       const selectorBox = await page

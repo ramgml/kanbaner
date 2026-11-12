@@ -1592,6 +1592,12 @@ describe("массовые действия с карточками", () => {
     return screen.queryByTestId("kanban-bulk-bar");
   }
 
+  function moveTo(status: "backlog" | "todo" | "in_progress" | "done" = "in_progress"): void {
+    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
+      target: { value: columnIdFor("project-1", status) },
+    });
+  }
+
   function bulkCalls(operationId: string): Array<Record<string, unknown>> {
     return operationsWithCalls
       .filter((call) => call.operationId === operationId)
@@ -1631,13 +1637,9 @@ describe("массовые действия с карточками", () => {
     expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 2");
     expect(screen.getByTestId(`kanban-bulk-check-b`)).toBeChecked();
 
-    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
-      target: { value: columnIdFor("project-1", "in_progress") },
-    });
-
     const summaryBefore = operations.counts.get("kanbaner.tasks.project.summary") ?? 0;
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -1706,7 +1708,7 @@ describe("массовые действия с карточками", () => {
     select("a");
     select("b");
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("Домен недоступен");
@@ -1743,7 +1745,7 @@ describe("массовые действия с карточками", () => {
     select("a");
     select("b");
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("уже изменены");
@@ -1755,7 +1757,7 @@ describe("массовые действия с карточками", () => {
     expect(screen.getByTestId("kanban-bulk-check-a")).toBeChecked();
     expect(screen.queryByTestId("kanban-card-b")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -1763,7 +1765,7 @@ describe("массовые действия с карточками", () => {
 
     expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
       items: [{ id: "a", expectedVersion: 2 }],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
     expect(operations.counts.get("kanbaner.tasks.task.delete")).toBeUndefined();
   });
@@ -1841,7 +1843,8 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(confirm).toBeDisabled();
     });
-    expect(screen.getByTestId("kanban-bulk-move")).toHaveTextContent("Переместить");
+    expect(screen.getByTestId("kanban-bulk-target")).toBeDisabled();
+    expect(screen.queryByTestId("kanban-bulk-move-pending")).toBeNull();
     expect(screen.getByTestId("kanban-bulk-delete")).toBeDisabled();
 
     fireEvent.click(screen.getByTestId("kanban-bulk-delete-cancel"));
@@ -1998,7 +2001,7 @@ describe("массовые действия с карточками", () => {
     });
     expect(screen.getByTestId("kanban-bulk-check-a")).toBeChecked();
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo("backlog");
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2024,13 +2027,14 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
 
-    const button = screen.getByTestId("kanban-bulk-move");
+    const target = screen.getByTestId("kanban-bulk-target");
+    const input = { target: { value: columnIdFor("project-1", "in_progress") } };
 
-    fireEvent.click(button);
-    fireEvent.click(button);
+    fireEvent.change(target, input);
+    fireEvent.change(target, input);
 
     await waitFor(() => {
-      expect(button).toBeDisabled();
+      expect(target).toBeDisabled();
     });
     expect(screen.getByTestId("kanban-bulk-delete")).toBeDisabled();
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
@@ -2060,10 +2064,7 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("b");
     select("a");
-    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
-      target: { value: columnIdFor("project-1", "todo") },
-    });
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo("todo");
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2099,10 +2100,7 @@ describe("массовые действия с карточками", () => {
     });
 
     select("mover");
-    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
-      target: { value: columnIdFor("project-1", "in_progress") },
-    });
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2150,7 +2148,7 @@ describe("массовые действия с карточками", () => {
 
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 1");
@@ -2158,14 +2156,14 @@ describe("массовые действия с карточками", () => {
     expect(screen.queryByTestId("kanban-bulk-check-a")).toBeNull();
     expect(screen.getByTestId("kanban-bulk-check-b")).toBeChecked();
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
     });
     expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
       items: [{ id: "b", expectedVersion: 1 }],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
   });
 
@@ -2207,17 +2205,17 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("НЕ обновлены");
     });
     expect(screen.getByTestId("kanban-bulk-refresh")).toBeVisible();
-    expect(screen.getByTestId("kanban-bulk-move")).toBeDisabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeDisabled();
     expect(screen.getByTestId("kanban-bulk-clear")).toBeDisabled();
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
 
     failReload = false;
@@ -2227,10 +2225,10 @@ describe("массовые действия с карточками", () => {
       expect(screen.queryByTestId("kanban-bulk-refresh")).toBeNull();
     });
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+      expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2240,7 +2238,7 @@ describe("массовые действия с карточками", () => {
         { id: "a", expectedVersion: 2 },
         { id: "b", expectedVersion: 1 },
       ],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
   });
 
@@ -2293,7 +2291,7 @@ describe("массовые действия с карточками", () => {
 
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("НЕ обновлены");
@@ -2315,7 +2313,7 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 1");
     });
-    expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
   });
 
   it("не выставляет блокировку из устаревшей R1 после успешной R2", async () => {
@@ -2358,7 +2356,7 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(r1Started).toBe(true);
@@ -2389,10 +2387,10 @@ describe("массовые действия с карточками", () => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("перечитана");
     });
     expect(screen.queryByTestId("kanban-bulk-refresh")).toBeNull();
-    expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
 
     // R2 обновил версии, поэтому повтор не использует stale expectedVersion.
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2402,7 +2400,7 @@ describe("массовые действия с карточками", () => {
         { id: "a", expectedVersion: 2 },
         { id: "b", expectedVersion: 1 },
       ],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
   });
 
@@ -2443,7 +2441,6 @@ describe("массовые действия с карточками", () => {
     fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
       target: { value: targetId },
     });
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
 
     // Tag меняется до завершения move: b больше не виден.
     act(() => {
@@ -2508,13 +2505,13 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("НЕ обновлены");
     });
     expect(screen.getByTestId("kanban-bulk-refresh")).toBeVisible();
-    expect(screen.getByTestId("kanban-bulk-move")).toBeDisabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeDisabled();
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
 
     failList = false;
@@ -2524,10 +2521,10 @@ describe("массовые действия с карточками", () => {
       expect(screen.queryByTestId("kanban-bulk-refresh")).toBeNull();
     });
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+      expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2537,7 +2534,7 @@ describe("массовые действия с карточками", () => {
         { id: "a", expectedVersion: 2 },
         { id: "b", expectedVersion: 1 },
       ],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
   });
 
@@ -2593,13 +2590,13 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("НЕ обновлены");
     });
     expect(screen.getByTestId("kanban-bulk-refresh")).toBeVisible();
-    expect(screen.getByTestId("kanban-bulk-move")).toBeDisabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeDisabled();
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
 
     fireEvent.click(screen.getByTestId("kanban-bulk-refresh"));
@@ -2608,10 +2605,10 @@ describe("массовые действия с карточками", () => {
       expect(screen.queryByTestId("kanban-bulk-refresh")).toBeNull();
     });
     await waitFor(() => {
-      expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+      expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(bulkBar()).toBeNull();
@@ -2621,7 +2618,7 @@ describe("массовые действия с карточками", () => {
         { id: "a", expectedVersion: 2 },
         { id: "b", expectedVersion: 1 },
       ],
-      columnId: columnIdFor("project-1", "backlog"),
+      columnId: columnIdFor("project-1", "in_progress"),
     });
   });
 
@@ -2667,7 +2664,7 @@ describe("массовые действия с карточками", () => {
     await screen.findByTestId("kanban-card-a");
     select("a");
     select("b");
-    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    moveTo();
 
     await waitFor(() => {
       expect(r1Started).toBe(true);
@@ -2702,7 +2699,7 @@ describe("массовые действия с карточками", () => {
     await waitFor(() => {
       expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 1");
     });
-    expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+    expect(screen.getByTestId("kanban-bulk-target")).toBeEnabled();
   });
 
   it("снимает выбор кнопкой и не отправляет операцию", async () => {

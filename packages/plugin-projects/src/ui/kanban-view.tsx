@@ -993,8 +993,8 @@ export function KanbanView({
       return;
     }
 
-    if (!columnList.some((column) => column.id === bulkTargetId)) {
-      setBulkTargetId(columnList[0]?.id ?? "");
+    if (bulkTargetId !== "" && !columnList.some((column) => column.id === bulkTargetId)) {
+      setBulkTargetId("");
     }
   }, [bulkTargetId, columnList]);
 
@@ -1539,7 +1539,7 @@ export function KanbanView({
     return "blocked";
   };
 
-  const bulkMove = async (): Promise<void> => {
+  const bulkMove = async (targetId: string): Promise<void> => {
     if (
       bulkGuardRef.current ||
       bulkNeedsRefreshRef.current ||
@@ -1548,7 +1548,7 @@ export function KanbanView({
       return;
     }
 
-    const target = currentColumn(bulkTargetId);
+    const target = currentColumn(targetId);
 
     if (target === null) {
       setBulkError("Выберите существующую колонку текущего проекта");
@@ -1628,6 +1628,9 @@ export function KanbanView({
       if (!isOperationCurrent(context)) {
         return;
       }
+
+      // После ошибки выбор колонки повторяется явно, уже со свежими версиями.
+      setBulkTargetId("");
 
       // Даже обычная ошибка перечитывает доску: повтор должен использовать
       // актуальные версии, а исчезнувшие задачи — выпасть из выбора.
@@ -3018,7 +3021,7 @@ export function KanbanView({
               data-testid="kanban-bulk-bar"
               aria-label="Массовые действия"
               aria-busy={bulkBusy}
-              className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-background/85 px-2.5 py-2"
+              className="fixed bottom-[calc(env(safe-area-inset-bottom)+8rem)] left-1/2 z-30 flex max-h-[calc(100dvh-9rem)] w-[calc(100vw-1rem)] max-w-3xl -translate-x-1/2 flex-wrap items-center gap-2 overflow-y-auto rounded-lg border border-border bg-background/95 px-2.5 py-2 shadow-lg backdrop-blur-sm md:bottom-4 md:w-[calc(100vw-2rem)]"
             >
               <p
                 data-testid="kanban-bulk-count"
@@ -3029,18 +3032,28 @@ export function KanbanView({
               </p>
 
               <label className="flex w-full min-w-0 flex-col gap-0.5 text-[11px] text-muted-foreground sm:w-auto sm:flex-row sm:items-center sm:gap-1">
-                <span className="whitespace-nowrap">Колонка</span>
+                <span className="whitespace-nowrap">Переместить в</span>
                 <select
                   data-testid="kanban-bulk-target"
-                  aria-label="Колонка назначения"
+                  aria-label="Переместить выбранные в колонку"
                   value={bulkTargetId}
                   disabled={bulkBusy || bulkNeedsRefresh || columnList.length === 0}
+                  aria-busy={bulkPending === "move"}
                   onChange={(event) => {
-                    setBulkTargetId(event.target.value);
+                    const targetId = event.target.value;
+
+                    setBulkTargetId(targetId);
                     setBulkError(null);
+
+                    if (targetId.length > 0) {
+                      void bulkMove(targetId);
+                    }
                   }}
                   className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 sm:w-auto xl:h-8"
                 >
+                  <option value="" disabled>
+                    Выберите колонку
+                  </option>
                   {columnList.map((column) => (
                     <option key={column.id} value={column.id}>
                       {column.title}
@@ -3051,18 +3064,15 @@ export function KanbanView({
               </label>
 
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  data-testid="kanban-bulk-move"
-                  disabled={bulkBusy || bulkNeedsRefresh || bulkTargetId.length === 0}
-                  aria-busy={bulkPending === "move"}
-                  onClick={() => {
-                    void bulkMove();
-                  }}
-                  className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {bulkPending === "move" ? "Перемещение…" : "Переместить"}
-                </button>
+                {bulkPending === "move" ? (
+                  <span
+                    data-testid="kanban-bulk-move-pending"
+                    role="status"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Перемещение…
+                  </span>
+                ) : null}
 
                 <button
                   type="button"

@@ -784,7 +784,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   };
 
   const saveInlineEdit = async (): Promise<void> => {
-    if (currentTask === null || activeInlineSession === null) {
+    if (currentTask === null || activeInlineSession === null || busyRef.current) {
       return;
     }
 

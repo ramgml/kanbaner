@@ -2,8 +2,10 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
+  type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -210,6 +212,8 @@ export function TaskModal({
   const titleDisplayRef = useRef<HTMLHeadingElement | null>(null);
   const descriptionDisplayRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const titleInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const descriptionInputRef = useRef<HTMLTextAreaElement | null>(null);
   const touchTapRef = useRef<{
     pointerId: number;
     startX: number;
@@ -219,6 +223,7 @@ export function TaskModal({
     invalid: boolean;
   } | null>(null);
   const cancelInlineRef = useRef(onCancelInline);
+  const saveInlineRef = useRef(onSaveInline);
   const lastPointerTypeRef = useRef<string | null>(null);
   const previousInlineFieldRef = useRef<InlineField | null>(null);
   const previousTaskIdRef = useRef(task.id);
@@ -228,6 +233,28 @@ export function TaskModal({
   useEffect(() => {
     cancelInlineRef.current = onCancelInline;
   }, [onCancelInline]);
+
+  useEffect(() => {
+    saveInlineRef.current = onSaveInline;
+  }, [onSaveInline]);
+
+  // Оба редактора показывают весь текст без внутренней прокрутки. Заголовок
+  // переносится только визуально, а Markdown описания сохраняет свои строки.
+  useLayoutEffect(() => {
+    const input =
+      inlineSession?.field === "title"
+        ? titleInputRef.current
+        : inlineSession?.field === "description"
+          ? descriptionInputRef.current
+          : null;
+
+    if (input === null) {
+      return;
+    }
+
+    input.style.height = "auto";
+    input.style.height = `${String(input.scrollHeight)}px`;
+  }, [inlineSession?.field, inlineSession?.draft]);
 
   const canCreateSubtask = task.parentTaskId === null;
   const completed = completedLabel(task.completedAt);
@@ -317,15 +344,28 @@ export function TaskModal({
       cancelInlineRef.current();
     };
 
+    const onPointerDownCapture = (event: PointerEvent): void => {
+      // Клик по нефокусируемому свободному месту не обязан вызывать blur,
+      // поэтому autosave начинается уже на pointerdown.
+      if (event.target instanceof Node && editor.contains(event.target)) {
+        return;
+      }
+
+      saveInlineRef.current();
+    };
+
     editor.addEventListener("keydown", onKeyDownCapture, true);
+    document.addEventListener("pointerdown", onPointerDownCapture, true);
 
     return () => {
       editor.removeEventListener("keydown", onKeyDownCapture, true);
+      document.removeEventListener("pointerdown", onPointerDownCapture, true);
     };
   }, [inlineField, inlineTaskId]);
 
   // После сохранения или отмены возвращаем фокус на заголовок/область
-  // описания. При смене задачи A→B фокус не переносится.
+  // описания, если пользователь уже не перешёл к другому контролу.
+  // При смене задачи A→B фокус не переносится.
   useEffect(() => {
     const field = inlineSession?.field ?? null;
     const taskChanged = previousTaskIdRef.current !== task.id;
@@ -339,8 +379,11 @@ export function TaskModal({
         previousInlineFieldRef.current === "title"
           ? titleDisplayRef.current
           : descriptionDisplayRef.current;
+      const activeElement = document.activeElement;
 
-      target?.focus();
+      if (activeElement === null || activeElement === document.body) {
+        target?.focus();
+      }
     }
 
     previousInlineFieldRef.current = field;
@@ -547,7 +590,7 @@ export function TaskModal({
     }
   };
 
-  const saveTitleOnKey = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
+  const saveTitleOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter" && !isComposing(event)) {
       event.preventDefault();
       onSaveInline();
@@ -559,6 +602,18 @@ export function TaskModal({
       event.preventDefault();
       onSaveInline();
     }
+  };
+
+  const saveInlineOnBlur = (event: ReactFocusEvent<HTMLDivElement>): void => {
+    const nextTarget = event.relatedTarget;
+
+    // Переход между textarea и её Save/Cancel не завершает редактирование.
+    // Клик по свободной области даёт relatedTarget=null и сохраняет черновик.
+    if (busy || (nextTarget instanceof Node && event.currentTarget.contains(nextTarget))) {
+      return;
+    }
+
+    onSaveInline();
   };
 
   const inlineEditorClass =
@@ -581,22 +636,25 @@ export function TaskModal({
             <div
               ref={editorRef}
               data-testid="kanban-title-editor"
+              onBlur={saveInlineOnBlur}
               className="flex min-w-0 flex-col gap-2"
             >
-              <input
+              <textarea
+                ref={titleInputRef}
                 data-testid="kanban-title-input"
                 name="title"
                 aria-label="Название задачи"
                 aria-invalid={inlineError === null ? undefined : true}
                 value={inlineSession.draft}
                 maxLength={200}
+                rows={1}
                 autoFocus
                 disabled={busy}
                 onChange={(event) => {
-                  onChangeInline(event.target.value);
+                  onChangeInline(event.target.value.replace(/\r?\n/g, " "));
                 }}
                 onKeyDown={saveTitleOnKey}
-                className={`${inlineEditorClass} text-lg font-semibold sm:text-xl`}
+                className={`${inlineEditorClass} resize-none overflow-hidden text-lg leading-tight font-semibold break-words sm:text-xl`}
               />
               {inlineError === null ? null : (
                 <p
@@ -809,9 +867,11 @@ export function TaskModal({
                 <div
                   ref={editorRef}
                   data-testid="kanban-description-editor"
+                  onBlur={saveInlineOnBlur}
                   className="mt-2 flex flex-col gap-2"
                 >
                   <textarea
+                    ref={descriptionInputRef}
                     data-testid="kanban-description-input"
                     name="descriptionMarkdown"
                     aria-label="Описание (Markdown)"
@@ -824,7 +884,7 @@ export function TaskModal({
                       onChangeInline(event.target.value);
                     }}
                     onKeyDown={saveDescriptionOnKey}
-                    className={`${inlineEditorClass} min-h-32`}
+                    className={`${inlineEditorClass} min-h-32 resize-none overflow-hidden`}
                   />
                   {inlineError === null ? null : (
                     <p
@@ -856,7 +916,8 @@ export function TaskModal({
                     </button>
                   </div>
                   <p className="m-0 text-[11px] text-muted-foreground">
-                    Ctrl/Cmd+Enter — сохранить, Escape — отменить. Markdown сохраняется как текст.
+                    Клик вне поля или Ctrl/Cmd+Enter — сохранить, Escape — отменить. Markdown
+                    сохраняется как текст.
                   </p>
                 </div>
               ) : (

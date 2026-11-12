@@ -588,6 +588,9 @@ describe("TaskOverlay Trello-модал", () => {
 
     const titleInput = await screen.findByTestId("kanban-title-input");
 
+    expect(titleInput.tagName).toBe("TEXTAREA");
+    fireEvent.change(titleInput, { target: { value: "Первая строка\nвторая строка" } });
+    expect(titleInput).toHaveValue("Первая строка вторая строка");
     fireEvent.change(titleInput, { target: { value: "Новый заголовок" } });
     expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(headerToggle).toBeInTheDocument();
@@ -599,7 +602,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
     expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
 
-    // X при dirty inline-черновике показывает подтверждение.
+    // X запускает autosave inline, но подтверждение остаётся из-за quick drafts.
     fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const dirtyTitle = await screen.findByTestId("kanban-title-input");
@@ -609,11 +612,10 @@ describe("TaskOverlay Trello-модал", () => {
     expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("kanban-draft-keep"));
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
-    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
-    expect(document.activeElement).toBe(screen.getByTestId("kanban-title-input"));
-
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
-    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Черновик заголовка");
+    });
+    expect(screen.queryByTestId("kanban-title-input")).toBeNull();
     expect(screen.queryByTestId("project-view-modal-list")).toBeNull();
     expect(headerToggle).toBeInTheDocument();
   });
@@ -783,7 +785,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-subtask-create")).toBeInTheDocument();
   });
 
-  it("Escape отменяет только inline-редактор, а X с dirty-черновиком требует подтверждения", async () => {
+  it("Escape отменяет inline-редактор, а X автосохраняет черновик и закрывает карточку", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -816,33 +818,27 @@ describe("TaskOverlay Trello-модал", () => {
     expect(document.activeElement).toBe(screen.getByTestId("kanban-modal-title"));
     expect(window.location.search).toContain("task=a");
 
-    // X при dirty inline-черновике открывает confirm; Keep Editing
-    // возвращает фокус в активное поле и сохраняет ввод.
+    // X сначала запускает autosave, поэтому отдельное подтверждение для
+    // единственного inline-черновика больше не требуется.
     fireEvent.click(screen.getByTestId("kanban-modal-title"));
 
     const dirtyInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(dirtyInput, { target: { value: "Черновик заголовка" } });
+    fireEvent.blur(dirtyInput, {
+      relatedTarget: screen.getByTestId("kanban-details-close"),
+    });
     fireEvent.click(screen.getByTestId("kanban-details-close"));
-
-    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
-    expect(screen.getByTestId("kanban-details")).toBeInTheDocument();
-    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
-
-    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
-    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByTestId("kanban-title-input"));
-
-    fireEvent.click(screen.getByTestId("kanban-details-close"));
-    fireEvent.click(await screen.findByTestId("kanban-draft-discard"));
 
     await waitFor(() => {
       expect(screen.queryByTestId("kanban-details")).toBeNull();
     });
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     expect(window.location.search).not.toContain("task=");
+    expect(board.tasks.find((task) => task.id === "a")?.title).toBe("Черновик заголовка");
 
     await openTask("a");
-    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Черновик заголовка");
   });
 
   it("сохраняет title и description строго partial и возвращает фокус", async () => {
@@ -882,6 +878,7 @@ describe("TaskOverlay Trello-модал", () => {
     const descriptionInput = await screen.findByTestId("kanban-description-input");
 
     expect(document.activeElement).toBe(descriptionInput);
+    expect(descriptionInput).toHaveClass("resize-none", "overflow-hidden");
     fireEvent.change(descriptionInput, {
       target: { value: "Новое описание\nвторая строка" },
     });
@@ -929,6 +926,57 @@ describe("TaskOverlay Trello-модал", () => {
         "Добавить описание…",
       );
     });
+  });
+
+  it("сохраняет title и description при уходе фокуса из редактора", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+    const updateCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update");
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Сохранено кликом снаружи" } });
+    fireEvent.blur(titleInput, {
+      relatedTarget: screen.getByTestId("kanban-title-save"),
+    });
+    expect(updateCalls()).toHaveLength(0);
+
+    fireEvent.pointerDown(screen.getByTestId("kanban-modal-project"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent(
+        "Сохранено кликом снаружи",
+      );
+    });
+    expect(updateCalls()).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("kanban-modal-description"));
+
+    const descriptionInput = await screen.findByTestId("kanban-description-input");
+    const priority = screen.getByTestId("kanban-modal-priority");
+
+    fireEvent.change(descriptionInput, {
+      target: { value: "Описание сохранено кликом снаружи" },
+    });
+    priority.focus();
+    fireEvent.blur(descriptionInput, { relatedTarget: priority });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-description")).toHaveTextContent(
+        "Описание сохранено кликом снаружи",
+      );
+    });
+    expect(updateCalls()).toHaveLength(2);
+    expect(document.activeElement).toBe(priority);
   });
 
   it("при VERSION_CONFLICT показывает сообщение и перечитывает серверную версию", async () => {

@@ -525,7 +525,7 @@ export function KanbanCard({
       <div className="flex items-center justify-between gap-1">
         <label
           data-testid={`kanban-bulk-check-target-${task.id}`}
-          className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-accent"
+          className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-accent"
           title="Выбрать задачу"
         >
           <input
@@ -541,7 +541,7 @@ export function KanbanCard({
               // Клик по выбору не открывает карточку и не начинает drag.
               event.stopPropagation();
             }}
-            className="h-5 w-5 cursor-pointer accent-[var(--primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed"
+            className="size-4 cursor-pointer accent-[var(--primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed"
           />
         </label>
 

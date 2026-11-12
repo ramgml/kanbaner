@@ -124,7 +124,8 @@ describe("KanbanCard", () => {
     const hitTarget = screen.getByTestId("kanban-bulk-check-target-task-1");
 
     expect(checkbox).toBeChecked();
-    expect(hitTarget).toHaveClass("min-h-10", "min-w-10");
+    expect(checkbox).toHaveClass("size-4");
+    expect(hitTarget).toHaveClass("size-5");
 
     fireEvent.pointerDown(checkbox, { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 80, clientY: 80 });
