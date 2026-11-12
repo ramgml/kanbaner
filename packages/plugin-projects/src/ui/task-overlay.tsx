@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -351,6 +351,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const generationRef = useRef(0);
   const activeOperationRef = useRef<OperationToken | null>(null);
   const quickBaselineRef = useRef<QuickBaseline | null>(null);
+  const draftDirtyRef = useRef(false);
 
   // Данные от предыдущей задачи (A) не должны показываться или выполнять
   // команды, пока не загрузилась выбранная задача (B).
@@ -389,6 +390,13 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags) ||
       (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
   const draftDirty = inlineDirty || quickDirty;
+
+  // onClose у ModalDialog публикуется effect-ом; под нагрузкой click может
+  // прийти со старой closure. Layout effect обновляет ref до passive effects
+  // ModalDialog, поэтому dirty-guard всегда актуален.
+  useLayoutEffect(() => {
+    draftDirtyRef.current = draftDirty;
+  }, [draftDirty]);
 
   useEffect(() => {
     if (taskId === null || !onKanbanRoute) {
@@ -513,13 +521,21 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   }, []);
 
   const requestClose = useCallback((): void => {
-    if (draftDirty) {
+    // Команда уже отправлена: закрываем сразу, не показывая dirty-confirm на
+    // промежуточном quick-значении. Поздний success безопасно обновит доску
+    // после закрытия (generation/ownership уже проверяются в runCommand).
+    if (busyRef.current) {
+      closeNow();
+      return;
+    }
+
+    if (draftDirtyRef.current) {
       setCloseConfirm(true);
       return;
     }
 
     closeNow();
-  }, [draftDirty, closeNow]);
+  }, [closeNow]);
 
   if (taskId === null || !onKanbanRoute) {
     return null;

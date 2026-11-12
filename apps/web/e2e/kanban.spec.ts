@@ -4615,7 +4615,8 @@ test.describe("канбан в production shell", () => {
 
       await expect(dialog).toBeVisible();
       await expect(page.getByTestId("kanban-bulk-delete-count")).toHaveText("2");
-      await expect(dialog).toContainText("подзадачами");
+      await expect(dialog).toContainText("Выбрано задач:");
+      await expect(dialog).toContainText("Подзадачи в это число не входят");
 
       await page.getByTestId("kanban-bulk-delete-confirm").click();
       await expect(dialog).toHaveCount(0);
@@ -4686,6 +4687,51 @@ test.describe("канбан в production shell", () => {
 
       await stalePage.reload();
       await expectCardInColumn(stalePage, taskId, "in_progress");
+      await stalePage.close();
+    });
+
+    test("снимает с выбора задачу, потерявшую активный tag после конфликта", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект конфликта tag");
+      const taskTitle = uniqueTitle("Массовая tag-задача");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        status: "todo",
+        tags: "release",
+      });
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }).fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expectCardInColumn(page, taskId, "todo");
+
+      const projectUrl = page.url();
+      const stalePage = await context.newPage();
+
+      await stalePage.goto(projectUrl);
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await selectCardForBulk(stalePage, taskId);
+      await expectBulkCount(stalePage, 1);
+
+      // Вторая вкладка убирает тег: задача перестаёт соответствовать фильтру
+      // и меняет версию.
+      await openCardModal(page, taskId, taskTitle);
+      await editTaskInModal(page, { tags: "" });
+      await closeCardModal(page);
+      await expect(page.getByTestId(`kanban-card-${taskId}`)).toHaveCount(0);
+
+      // Устаревший payload получает конфликт. После refresh задача не
+      // соответствует активному tag, поэтому selection очищается целиком.
+      await stalePage.getByTestId("kanban-bulk-move").click();
+      await expect(stalePage.getByTestId("kanban-bulk-bar")).toHaveCount(0);
+      await expect(stalePage.getByTestId(`kanban-card-${taskId}`)).toHaveCount(0);
+
       await stalePage.close();
     });
   });

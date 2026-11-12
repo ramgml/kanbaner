@@ -2830,4 +2830,53 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     },
   );
+
+  it("закрывает карточку во время pending quick-команды без dirty-confirm", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let resolveUpdate: ((value: UiOperationResult) => void) | null = null;
+    const pendingUpdate = new Promise<UiOperationResult>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () => pendingUpdate,
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    const due = screen.getByTestId("kanban-modal-due");
+
+    fireEvent.change(due, { target: { value: "2030-05-05" } });
+    fireEvent.click(screen.getByTestId("kanban-modal-due-save"));
+
+    // busyRef уже установлен: закрытие не показывает dirty-confirm, а поздний
+    // success обновляет доску после закрытия.
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+
+    const updated = {
+      ...board.tasks[0],
+      dueAt: "2030-05-05T00:00:00.000Z",
+      version: 2,
+    } as Task;
+
+    board.tasks = [updated];
+
+    await act(async () => {
+      resolveUpdate?.(ok({ task: updated, resource: {}, eventId: "event" }));
+      await pendingUpdate;
+    });
+
+    expect(board.tasks.find((task) => task.id === "a")?.dueAt).toBe("2030-05-05T00:00:00.000Z");
+    expect(screen.queryByTestId("kanban-details")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+  });
 });

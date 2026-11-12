@@ -1789,7 +1789,8 @@ describe("массовые действия с карточками", () => {
 
     expect(dialog).toBeVisible();
     expect(within(dialog).getByTestId("kanban-bulk-delete-count")).toHaveTextContent("2");
-    expect(dialog).toHaveTextContent("подзадачами");
+    expect(dialog).toHaveTextContent("Выбрано задач:");
+    expect(dialog).toHaveTextContent("Подзадачи в это число не входят");
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskDeleteMany)).toBeUndefined();
 
     fireEvent.click(screen.getByTestId("kanban-bulk-delete-confirm"));
@@ -2043,6 +2044,204 @@ describe("массовые действия с карточками", () => {
       expect(bulkBar()).toBeNull();
     });
     expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
+  });
+
+  it("дописывает same-column в порядке выбора и сразу показывает карточки", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { status: "todo", position: 0 }),
+        makeTask("b", { status: "todo", position: 1 }),
+        makeTask("c", { status: "todo", position: 2 }),
+      ],
+    };
+    const operations = renderBoard(board);
+
+    await screen.findByTestId("kanban-card-a");
+    select("b");
+    select("a");
+    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
+      target: { value: columnIdFor("project-1", "todo") },
+    });
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(bulkBar()).toBeNull();
+    });
+    await waitFor(() => {
+      expect(cardTitles("todo")).toEqual(["Задача c", "Задача b", "Задача a"]);
+    });
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany)).toEqual([
+      {
+        items: [
+          { id: "b", expectedVersion: 1 },
+          { id: "a", expectedVersion: 1 },
+        ],
+        columnId: columnIdFor("project-1", "todo"),
+      },
+    ]);
+    expect(operations.counts.get("kanbaner.tasks.task.move")).toBeUndefined();
+  });
+
+  it("показывает перемещённые карточки за границей страницы target", async () => {
+    const targetTasks = Array.from({ length: 12 }, (_, index) =>
+      makeTask(`target-${String(index)}`, { status: "in_progress", position: index }),
+    );
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("mover", { status: "todo" }), ...targetTasks],
+    };
+    renderBoard(board);
+
+    await screen.findByTestId("kanban-card-mover");
+    await waitFor(() => {
+      expect(cardTitles("in_progress")).toHaveLength(10);
+    });
+
+    select("mover");
+    fireEvent.change(screen.getByTestId("kanban-bulk-target"), {
+      target: { value: columnIdFor("project-1", "in_progress") },
+    });
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(bulkBar()).toBeNull();
+    });
+    await waitFor(() => {
+      const titles = cardTitles("in_progress");
+
+      expect(titles).toHaveLength(13);
+      expect(titles.at(-1)).toBe("Задача mover");
+    });
+    expect(screen.getByTestId("kanban-count-in_progress")).toHaveTextContent("13");
+  });
+
+  it("снимает из выбора задачу, переставшую соответствовать активному tag после конфликта", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { status: "todo", tags: ["release"] }),
+        makeTask("b", { status: "todo", position: 1, tags: ["release"] }),
+      ],
+    };
+    let firstAttempt = true;
+    renderBoard(board, {
+      [TASKS_COMMAND_IDS.taskMoveMany]: (input) => {
+        if (firstAttempt) {
+          firstAttempt = false;
+          board.tasks = board.tasks.map((task) =>
+            task.id === "a" ? ({ ...task, tags: [], version: 2 } as Task) : task,
+          );
+
+          return fail("VERSION_CONFLICT");
+        }
+
+        return applyBulkMove(board, input);
+      },
+    });
+
+    await screen.findByTestId("kanban-card-a");
+    act(() => {
+      updateKanbanQuery({ tag: "release" });
+    });
+    await waitFor(() => {
+      expect(cardTitles("todo")).toEqual(["Задача a", "Задача b"]);
+    });
+
+    select("a");
+    select("b");
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-bulk-count")).toHaveTextContent("Выбрано 1");
+    });
+    expect(screen.queryByTestId("kanban-bulk-check-a")).toBeNull();
+    expect(screen.getByTestId("kanban-bulk-check-b")).toBeChecked();
+
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(bulkBar()).toBeNull();
+    });
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
+      items: [{ id: "b", expectedVersion: 1 }],
+      columnId: columnIdFor("project-1", "backlog"),
+    });
+  });
+
+  it("блокирует повтор после конфликта с неудачной перечиткой и использует свежие версии", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { status: "todo" }), makeTask("b", { status: "todo", position: 1 })],
+    };
+    let firstAttempt = true;
+    let failReload = false;
+    const operations = renderBoard(board, {
+      "kanbaner.tasks.column.list": (input) => {
+        if (failReload) {
+          return fail("INTERNAL", "reload failed");
+        }
+
+        const projectId = String(inputOf(input).projectId);
+        const columns = boardColumns(board, projectId);
+
+        return ok({ items: [...columns], total: columns.length, nextOffset: null });
+      },
+      "kanbaner.tasks.task.list": (input) =>
+        failReload ? fail("INTERNAL", "reload failed") : listTasks(board, input),
+      [TASKS_COMMAND_IDS.taskMoveMany]: (input) => {
+        if (firstAttempt) {
+          firstAttempt = false;
+          failReload = true;
+          board.tasks = board.tasks.map((task) =>
+            task.id === "a" ? ({ ...task, version: 2 } as Task) : task,
+          );
+
+          return fail("VERSION_CONFLICT");
+        }
+
+        return applyBulkMove(board, input);
+      },
+    });
+
+    await screen.findByTestId("kanban-card-a");
+    select("a");
+    select("b");
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-bulk-error")).toHaveTextContent("НЕ обновлены");
+    });
+    expect(screen.getByTestId("kanban-bulk-refresh")).toBeVisible();
+    expect(screen.getByTestId("kanban-bulk-move")).toBeDisabled();
+    expect(screen.getByTestId("kanban-bulk-clear")).toBeDisabled();
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
+
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+    expect(operations.counts.get(TASKS_COMMAND_IDS.taskMoveMany)).toBe(1);
+
+    failReload = false;
+    fireEvent.click(screen.getByTestId("kanban-bulk-refresh"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-bulk-refresh")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-bulk-move")).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-bulk-move"));
+
+    await waitFor(() => {
+      expect(bulkBar()).toBeNull();
+    });
+    expect(bulkCalls(TASKS_COMMAND_IDS.taskMoveMany).at(-1)).toEqual({
+      items: [
+        { id: "a", expectedVersion: 2 },
+        { id: "b", expectedVersion: 1 },
+      ],
+      columnId: columnIdFor("project-1", "backlog"),
+    });
   });
 
   it("снимает выбор кнопкой и не отправляет операцию", async () => {

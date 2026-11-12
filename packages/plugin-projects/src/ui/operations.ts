@@ -43,6 +43,12 @@ export const VERSION_CONFLICT_MESSAGE =
 export const BULK_VERSION_CONFLICT_MESSAGE =
   "Выбранные задачи уже изменены в другом месте. Доска перечитана — проверьте выбор и повторите действие.";
 
+export const BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE =
+  "Выбранные задачи уже изменены в другом месте. Не удалось перечитать доску — версии НЕ обновлены. Повторите загрузку перед повтором.";
+
+export const BULK_REFRESH_FAILED_MESSAGE =
+  "Не удалось перечитать доску. Версии выбранных задач не обновлены — повтор заблокирован до успешной загрузки.";
+
 export const PROJECT_VERSION_CONFLICT_MESSAGE =
   "Проект уже изменён в другом месте. Версия проекта обновлена — проверьте название и повторите действие.";
 
