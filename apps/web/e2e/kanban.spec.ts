@@ -387,6 +387,29 @@ function card(page: Page, taskId: string) {
   return page.getByTestId(`kanban-card-${taskId}`);
 }
 
+/** Читает вычисленный CSS production-сборки, а не исходный класс. */
+async function computedCss(page: Page, testId: string, property: string): Promise<string> {
+  return page
+    .getByTestId(testId)
+    .evaluate((element, name) => getComputedStyle(element).getPropertyValue(name), property);
+}
+
+/** Разрешает CSS-токен в вычисленный цвет, не завися от сериализации OKLCH. */
+async function resolvedColorToken(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("div");
+
+    probe.style.backgroundColor = `var(${name})`;
+    document.body.append(probe);
+
+    const color = getComputedStyle(probe).backgroundColor;
+
+    probe.remove();
+
+    return color;
+  }, token);
+}
+
 async function selectCardForBulk(page: Page, taskId: string): Promise<void> {
   await page.getByTestId(`kanban-bulk-check-${taskId}`).click();
   await expect(page.getByTestId(`kanban-bulk-check-${taskId}`)).toBeChecked();
@@ -1796,6 +1819,184 @@ test.describe("канбан в production shell", () => {
       await expectNoHorizontalOverflow(page);
     });
 
+    test("выбирает цвета доски и колонки с клавиатуры и сохраняет их после reload", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект цветов доски");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      await openSettings(page);
+
+      const projectColor = page.getByTestId("project-settings-color-purple");
+
+      await projectColor.focus();
+      await expect(projectColor).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("project-settings-color-notice")).toContainText(
+        "Цвет доски сохранён",
+      );
+      await expect(projectColor).toHaveAttribute("aria-pressed", "true");
+
+      await closeSettings(page);
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(242, 236, 249)");
+
+      const menu = page.getByTestId("kanban-column-menu-todo");
+      const summary = page.getByLabel("Действия колонки «ToDo»");
+      const columnColor = page.getByTestId("kanban-column-color-todo-blue");
+
+      await summary.focus();
+      await page.keyboard.press("Enter");
+      await expect(menu).toHaveJSProperty("open", true);
+
+      await columnColor.focus();
+      await expect(columnColor).toBeFocused();
+      await page.keyboard.press("Enter");
+
+      await expect(menu).toHaveJSProperty("open", false);
+      await expect(columnColor).toHaveAttribute("aria-pressed", "true");
+      await expect(summary).toBeFocused();
+      await expect
+        .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
+        .toBe("rgb(215, 229, 246)");
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(242, 236, 249)");
+      await expect
+        .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
+        .toBe("rgb(215, 229, 246)");
+
+      await openSettings(page);
+      await expect(page.getByTestId("project-settings-color-purple")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.getByTestId("project-settings-color-blue")).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+      await closeSettings(page);
+
+      await openColumnMenu(page, await columnIdByTitle(page, "ToDo"));
+      await expect(page.getByTestId("kanban-column-color-todo-blue")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.getByTestId("kanban-column-color-todo-green")).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+    });
+
+    test("даёт различимые акценты приоритетов, не заливая карточку", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект приоритетов");
+      const highTitle = uniqueTitle("Высокий приоритет");
+      const mediumTitle = uniqueTitle("Средний приоритет");
+      const lowTitle = uniqueTitle("Низкий приоритет");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const highId = await createTask(page, {
+        projectTitle,
+        title: highTitle,
+        priority: "high",
+      });
+      const mediumId = await createTask(page, {
+        projectTitle,
+        title: mediumTitle,
+        priority: "medium",
+      });
+      const lowId = await createTask(page, {
+        projectTitle,
+        title: lowTitle,
+        priority: "low",
+      });
+
+      await openKanban(page, projectTitle);
+
+      const stripes: string[] = [];
+      const badges: string[] = [];
+      const cardBackground = await resolvedColorToken(page, "--card");
+
+      for (const [taskId, priority] of [
+        [highId, "high"],
+        [mediumId, "medium"],
+        [lowId, "low"],
+      ] as const) {
+        const taskCard = card(page, taskId);
+        const badge = page.getByTestId(`kanban-priority-${taskId}`);
+
+        await expect(taskCard).toHaveAttribute("data-priority", priority);
+        await expect(badge).toHaveAttribute("data-priority", priority);
+        // Заливка остаётся карточной: акцент только в полосе и флажке.
+        await expect
+          .poll(() => computedCss(page, `kanban-card-${taskId}`, "background-color"))
+          .toBe(cardBackground);
+        await expect
+          .poll(() => computedCss(page, `kanban-card-${taskId}`, "border-left-width"))
+          .toBe("3px");
+
+        stripes.push(await computedCss(page, `kanban-card-${taskId}`, "border-left-color"));
+        badges.push(await computedCss(page, `kanban-priority-${taskId}`, "background-color"));
+      }
+
+      expect(new Set(stripes).size).toBe(3);
+      expect(new Set(badges).size).toBe(3);
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("сохраняет читаемый фон палитры в light и dark темах", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект тем палитры");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      await openSettings(page);
+      await page.getByTestId("project-settings-color-red").click();
+      await expect(page.getByTestId("project-settings-color-notice")).toContainText(
+        "Цвет доски сохранён",
+      );
+      await closeSettings(page);
+
+      await openColumnMenu(page, await columnIdByTitle(page, "ToDo"));
+      await page.getByTestId("kanban-column-color-todo-purple").click();
+      await expect(page.getByTestId("kanban-column-color-todo-purple")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(249, 234, 234)");
+      await expect
+        .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
+        .toBe("rgb(231, 221, 244)");
+
+      await page.evaluate(() => document.documentElement.classList.add("dark"));
+
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(43, 28, 31)");
+      await expect
+        .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
+        .toBe("rgb(52, 42, 68)");
+
+      await page.evaluate(() => document.documentElement.classList.remove("dark"));
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(249, 234, 234)");
+      await expectNoHorizontalOverflow(page);
+    });
+
     test("добавляет, переименовывает и переставляет колонки с сохранением после reload", async ({
       page,
     }) => {
@@ -1954,7 +2155,9 @@ test.describe("канбан в production shell", () => {
       await page.keyboard.press("Enter");
       await expect(menu).toHaveJSProperty("open", true);
 
-      for (let index = 0; index < 6; index += 1) {
+      // В меню есть палитра из восьми цветов, поэтому до «Удалить» больше
+      // фокусируемых элементов, чем в меню без палитры.
+      for (let index = 0; index < 20; index += 1) {
         if (await deleteItem.evaluate((element) => element === document.activeElement)) {
           break;
         }
@@ -4972,6 +5175,49 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-bulk-bar")).toHaveCount(0);
       await expectCardInColumn(page, firstId, "in_progress");
       await expectCardInColumn(page, secondId, "in_progress");
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("выбирает цвета доски и колонки на 360 px без горизонтального overflow", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект мобильных цветов");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+      await expectNoHorizontalOverflow(page);
+
+      await openSettings(page);
+      await expectNoHorizontalOverflow(page);
+
+      const settingsColor = page.getByTestId("project-settings-color-green");
+
+      await settingsColor.scrollIntoViewIfNeeded();
+      await settingsColor.click();
+      await expect(page.getByTestId("project-settings-color-notice")).toContainText(
+        "Цвет доски сохранён",
+      );
+      await expect(settingsColor).toHaveAttribute("aria-pressed", "true");
+      await expectNoHorizontalOverflow(page);
+
+      await closeSettings(page);
+      await openColumnMenu(page, await columnIdByTitle(page, "ToDo"));
+
+      const columnColor = page.getByTestId("kanban-column-color-todo-orange");
+
+      await columnColor.click();
+      await expect(columnColor).toHaveAttribute("aria-pressed", "true");
+      await expectNoHorizontalOverflow(page);
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+      await expect
+        .poll(() => computedCss(page, "kanban-view", "background-color"))
+        .toBe("rgb(232, 243, 236)");
+      await expect
+        .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
+        .toBe("rgb(246, 223, 203)");
       await expectNoHorizontalOverflow(page);
     });
 

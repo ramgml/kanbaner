@@ -10,6 +10,7 @@ import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
   normalizeTag,
+  type BoardColor,
   type ColumnMutationOutput,
   type ProjectMutationOutput,
   type Task,
@@ -29,6 +30,7 @@ import {
 } from "@kanbaner/task-ui";
 
 import { KANBAN_ROUTE } from "../metadata.ts";
+import { boardColorSurface } from "./board-colors.ts";
 import { KanbanCard, type KanbanReorderKind } from "./kanban-card.tsx";
 import { KanbanColumn } from "./kanban-column.tsx";
 import { KanbanDeleteColumnDialog } from "./kanban-column-forms.tsx";
@@ -350,6 +352,12 @@ export function KanbanView({
 
   const [columnPending, setColumnPending] = useState<ReadonlySet<string>>(() => new Set());
   const [columnConflicts, setColumnConflicts] = useState<ReadonlySet<string>>(() => new Set());
+  const [columnColorPending, setColumnColorPending] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [columnColorErrors, setColumnColorErrors] = useState<
+    Readonly<Record<string, string | null>>
+  >({});
   const [columnDraggingId, setColumnDraggingId] = useState<string | null>(null);
   const [columnDragOver, setColumnDragOver] = useState<{
     readonly columnId: string;
@@ -393,6 +401,7 @@ export function KanbanView({
   const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
+  const columnColorPendingRef = useRef<ReadonlySet<string>>(new Set());
   const columnsRef = useRef<KanbanColumns>(columns);
   const submitGuardRef = useRef(false);
   const renameGuardRef = useRef(false);
@@ -1036,6 +1045,9 @@ export function KanbanView({
     setDragOver(null);
     setColumnPending(new Set());
     setColumnConflicts(new Set());
+    columnColorPendingRef.current = new Set();
+    setColumnColorPending(new Set());
+    setColumnColorErrors({});
     setColumnDraggingId(null);
     setColumnDragOver(null);
     setRenamingColumnId(null);
@@ -2299,6 +2311,111 @@ export function KanbanView({
     });
   };
 
+  const setColumnColorPendingValue = (columnId: string, value: boolean): void => {
+    const next = new Set(columnColorPendingRef.current);
+
+    if (value) {
+      next.add(columnId);
+    } else {
+      next.delete(columnId);
+    }
+
+    columnColorPendingRef.current = next;
+    setColumnColorPending(next);
+  };
+
+  const setColumnColorError = (columnId: string, message: string | null): void => {
+    setColumnColorErrors((current) => ({ ...current, [columnId]: message }));
+  };
+
+  /**
+   * Color-only `column.update`: title не отправляется, поэтому выбор цвета
+   * не перезаписывает параллельный черновик названия.
+   *
+   * Успех немедленно применяет ответ и ждёт свежий `column.list`; конфликт
+   * перечитывает фактическую версию, чтобы повторный выбор цвета ушёл с
+   * актуальным `expectedVersion`.
+   */
+  const submitColumnColor = async (column: TaskColumn, color: BoardColor): Promise<void> => {
+    const context = operationContext();
+
+    if (
+      currentColumn(column.id) === null ||
+      columnColorPendingRef.current.has(column.id) ||
+      columnPending.has(column.id)
+    ) {
+      return;
+    }
+
+    if ((column.color ?? "default") === color) {
+      setColumnColorError(column.id, null);
+
+      return;
+    }
+
+    setColumnColorPendingValue(column.id, true);
+    setColumnColorError(column.id, null);
+    setError(null);
+
+    try {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      const data = await invokeJson<ColumnMutationOutput>(invoke, TASKS_COMMAND_IDS.columnUpdate, {
+        id: column.id,
+        expectedVersion: column.version,
+        color,
+      } as unknown as JsonValue);
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      applyColumn(data.column);
+
+      const refreshed = await refreshProjectColumns(context.projectId, { reportError: false });
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      if (refreshed === null) {
+        setColumnColorError(
+          column.id,
+          "Цвет сохранён, но список колонок не обновлён. Повторите загрузку доски.",
+        );
+      } else {
+        bumpKanbanRevision();
+      }
+    } catch (commandError) {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      if (isVersionConflict(commandError)) {
+        const refreshed = await refreshProjectColumns(context.projectId, { reportError: false });
+
+        if (!isOperationCurrent(context)) {
+          return;
+        }
+
+        setColumnColorError(
+          column.id,
+          refreshed === null
+            ? "Колонка изменена в другом месте, а обновить список не удалось. Повторите загрузку доски."
+            : "Колонка уже изменена в другом месте. Цвет не изменён — доска перечитана, выберите цвет снова.",
+        );
+      } else {
+        setColumnColorError(column.id, errorMessage(commandError));
+      }
+    } finally {
+      if (isOperationCurrent(context)) {
+        setColumnColorPendingValue(column.id, false);
+      }
+    }
+  };
+
   const moveColumnToIndex = async (column: TaskColumn, targetIndex: number): Promise<void> => {
     if (columnPending.has(column.id) || currentColumn(column.id) === null) {
       return;
@@ -2775,6 +2892,7 @@ export function KanbanView({
   };
 
   const showBoard = onKanbanRoute && effectiveProjectId.length > 0;
+  const boardSurface = boardColorSurface(selectedProject?.color);
   const hasFilters = query.tag.length > 0;
   const visibleTotal = renderedColumnList.reduce((sum, column) => sum + column.total, 0);
   const formColumn = currentColumn(formColumnId);
@@ -2789,7 +2907,7 @@ export function KanbanView({
   return (
     <div
       data-testid="kanban-view"
-      className="flex min-h-0 w-full flex-1 flex-col gap-3 rounded-xl border border-border/60 bg-[#e2e8f0] p-2 sm:p-3 dark:bg-[#1e293b]"
+      className={`flex min-h-0 w-full flex-1 flex-col gap-3 rounded-xl border border-border/60 p-2 transition-colors sm:p-3 ${boardSurface.boardClassName}`}
       style={{ minWidth: 0 }}
     >
       <ProjectHeader
@@ -3162,7 +3280,7 @@ export function KanbanView({
               <div
                 data-testid="kanban-scroll-fade"
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-[#e2e8f0] to-transparent md:w-12 dark:from-[#1e293b]"
+                className={`pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l to-transparent md:w-12 ${boardSurface.boardFadeClassName}`}
               />
             ) : null}
 
@@ -3207,7 +3325,8 @@ export function KanbanView({
                 );
                 const index = renderedColumns.order.indexOf(column.id);
                 const lastOfType = isLastColumnOfType(columnList, column.id);
-                const pendingColumn = columnPending.has(column.id);
+                const pendingColumn =
+                  columnPending.has(column.id) || columnColorPending.has(column.id);
 
                 return (
                   <KanbanColumn
@@ -3239,6 +3358,7 @@ export function KanbanView({
                       error: renameError,
                       submitting: renameSubmitting,
                     }}
+                    colorError={columnColorErrors[column.id] ?? null}
                     onRenameOpen={() => {
                       startRenameColumn(column);
                     }}
@@ -3252,6 +3372,9 @@ export function KanbanView({
                     }}
                     onMoveRight={() => {
                       moveColumnByStep(column, 1);
+                    }}
+                    onColorSelect={(color) => {
+                      void submitColumnColor(column, color);
                     }}
                     onDelete={() => {
                       openDeleteColumn(column);

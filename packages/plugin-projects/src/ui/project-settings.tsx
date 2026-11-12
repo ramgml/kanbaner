@@ -9,6 +9,7 @@ import {
   MAX_TITLE_LENGTH,
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  type BoardColor,
   type ColumnMutationOutput,
   type Project,
   type ProjectListOutput,
@@ -18,6 +19,11 @@ import {
 } from "@kanbaner/plugin-tasks/contract";
 import { LoadingState, ModalDialog, type UiOperationInvoker } from "@kanbaner/task-ui";
 
+import {
+  BOARD_COLOR_OPTIONS,
+  boardColorSwatchClassName,
+  resolveBoardColor,
+} from "./board-colors.ts";
 import { fetchProjectColumns } from "./load-columns.ts";
 import {
   PROJECT_VERSION_CONFLICT_MESSAGE,
@@ -40,6 +46,10 @@ const CREATE_COLUMNS_REFRESH_FAILED_MESSAGE =
   "Колонка добавлена, но список колонок не обновлён. Повторите загрузку списка — создавать колонку повторно не нужно.";
 const CREATE_COLUMNS_REFRESH_RETRY_FAILED_MESSAGE =
   "Список колонок всё ещё не обновлён. Повторите загрузку — создавать колонку повторно не нужно.";
+const PROJECT_COLOR_VERSION_CONFLICT_MESSAGE =
+  "Проект уже изменён в другом месте. Цвет не сохранён — версия обновлена, выберите цвет снова.";
+const PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE =
+  "Проект изменён в другом месте, но обновить версию не удалось. Проверьте соединение и повторите.";
 
 type ColumnsRefreshResult =
   | { readonly kind: "ok"; readonly columns: readonly TaskColumn[] }
@@ -181,6 +191,11 @@ export function ProjectSettingsButton({
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [projectRefreshing, setProjectRefreshing] = useState(false);
+  const [projectColor, setProjectColor] = useState<BoardColor>("default");
+  const [savedProjectColor, setSavedProjectColor] = useState<BoardColor>("default");
+  const [projectColorSubmitting, setProjectColorSubmitting] = useState(false);
+  const [projectColorError, setProjectColorError] = useState<string | null>(null);
+  const [projectColorNotice, setProjectColorNotice] = useState<string | null>(null);
 
   const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({});
@@ -210,6 +225,7 @@ export function ProjectSettingsButton({
 
   const projectVersionRef = useRef(project.version);
   const projectGuardRef = useRef(false);
+  const projectColorGuardRef = useRef(false);
   const projectOperationRef = useRef(0);
   const projectIdRef = useRef(project.id);
   const mountedRef = useRef(true);
@@ -274,6 +290,10 @@ export function ProjectSettingsButton({
     projectVersionRef.current = snapshot.version;
     setSavedProjectTitle(snapshot.title);
     setProjectTitle(snapshot.title);
+    const color = resolveBoardColor(snapshot.color);
+
+    setSavedProjectColor(color);
+    setProjectColor(color);
   };
 
   const applyColumnsSnapshot = (
@@ -360,6 +380,10 @@ export function ProjectSettingsButton({
     setProjectNotice(null);
     setProjectSubmitting(false);
     setProjectRefreshing(false);
+    setProjectColorSubmitting(false);
+    setProjectColorError(null);
+    setProjectColorNotice(null);
+    projectColorGuardRef.current = false;
     setColumns([]);
     setDrafts({});
     setColumnPending(new Set());
@@ -427,6 +451,10 @@ export function ProjectSettingsButton({
       return true;
     }
 
+    if (projectColor !== savedProjectColor) {
+      return true;
+    }
+
     if (createTitle.trim().length > 0) {
       return true;
     }
@@ -452,6 +480,7 @@ export function ProjectSettingsButton({
 
   const isBusy = (): boolean =>
     projectGuardRef.current ||
+    projectColorGuardRef.current ||
     createGuardRef.current ||
     columnsRefreshGuardRef.current ||
     pendingRef.current.size > 0 ||
@@ -498,6 +527,10 @@ export function ProjectSettingsButton({
     setOpen(true);
     setProjectTitle(project.title);
     setSavedProjectTitle(project.title);
+    const color = resolveBoardColor(project.color);
+
+    setProjectColor(color);
+    setSavedProjectColor(color);
     projectVersionRef.current = project.version;
     void loadSettings(projectId, generation);
   };
@@ -569,6 +602,7 @@ export function ProjectSettingsButton({
       projectGuardRef.current ||
       projectSubmitting ||
       projectRefreshing ||
+      projectColorSubmitting ||
       loading ||
       loadError !== null
     ) {
@@ -681,6 +715,113 @@ export function ProjectSettingsButton({
         if (isCurrent(projectId, generation)) {
           setProjectSubmitting(false);
         }
+      }
+    }
+  };
+
+  /**
+   * Сохраняет только `project.color`.
+   *
+   * Title и черновики колонок не отправляются и не перезаписываются: выбранный
+   * цвет фиксируется в локальном `savedProjectColor`, а обновлённая версия
+   * используется следующим `project.update`. При конфликте версия и
+   * сохранённый цвет перечитываются, выбранный пользователем цвет остаётся
+   * как dirty-значение для повтора.
+   */
+  const submitProjectColor = async (nextColor: BoardColor): Promise<void> => {
+    if (
+      projectColorGuardRef.current ||
+      projectColorSubmitting ||
+      projectSubmitting ||
+      projectRefreshing ||
+      loading ||
+      loadError !== null
+    ) {
+      return;
+    }
+
+    setDirtyConfirm(false);
+
+    if (nextColor === savedProjectColor) {
+      setProjectColor(nextColor);
+      setProjectColorError(null);
+      setProjectColorNotice(null);
+
+      return;
+    }
+
+    const projectId = project.id;
+    const generation = generationRef.current;
+
+    projectColorGuardRef.current = true;
+    setProjectColor(nextColor);
+    setProjectColorSubmitting(true);
+    setProjectColorError(null);
+    setProjectColorNotice(null);
+
+    try {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      const data = await invokeJson<ProjectMutationOutput>(
+        invoke,
+        TASKS_COMMAND_IDS.projectUpdate,
+        {
+          id: projectId,
+          expectedVersion: projectVersionRef.current,
+          color: nextColor,
+        } as unknown as JsonValue,
+      );
+
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      const applied = resolveBoardColor(data.project.color);
+
+      projectVersionRef.current = data.project.version;
+      setSavedProjectColor(applied);
+      setProjectColor(applied);
+      setProjectColorNotice("Цвет доски сохранён");
+      bumpProjectsRevision();
+      onProjectUpdated?.();
+    } catch (commandError) {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      if (isVersionConflict(commandError)) {
+        setProjectColorSubmitting(false);
+
+        try {
+          const fresh = await loadCurrentProject(invoke, projectId);
+
+          if (!isCurrent(projectId, generation)) {
+            return;
+          }
+
+          if (fresh === null) {
+            setProjectColorError(PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE);
+          } else {
+            projectVersionRef.current = fresh.version;
+            setSavedProjectColor(resolveBoardColor(fresh.color));
+            bumpProjectsRevision();
+            setProjectColorError(PROJECT_COLOR_VERSION_CONFLICT_MESSAGE);
+          }
+        } catch {
+          if (isCurrent(projectId, generation)) {
+            setProjectColorError(PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE);
+          }
+        }
+      } else {
+        setProjectColorError(errorMessage(commandError));
+      }
+    } finally {
+      projectColorGuardRef.current = false;
+
+      if (isCurrent(projectId, generation)) {
+        setProjectColorSubmitting(false);
       }
     }
   };
@@ -1142,6 +1283,7 @@ export function ProjectSettingsButton({
   const busy =
     projectSubmitting ||
     projectRefreshing ||
+    projectColorSubmitting ||
     columnPending.size > 0 ||
     reorderPending ||
     createSubmitting ||
@@ -1315,6 +1457,78 @@ export function ProjectSettingsButton({
                     </div>
                   )}
                 </form>
+
+                <div
+                  role="group"
+                  aria-label="Цвет доски"
+                  data-testid="project-settings-colors"
+                  aria-busy={projectColorSubmitting}
+                  className="flex flex-col gap-1.5 border-t border-border/70 pt-2"
+                >
+                  <p className="m-0 text-xs font-medium text-muted-foreground">Цвет доски</p>
+                  <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                    {BOARD_COLOR_OPTIONS.map((option) => {
+                      const selected = projectColor === option.value;
+
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          data-testid={`project-settings-color-${option.value}`}
+                          aria-label={`Цвет доски: ${option.label}`}
+                          aria-pressed={selected}
+                          title={option.label}
+                          disabled={projectColorSubmitting || projectRefreshing}
+                          onClick={() => {
+                            void submitProjectColor(option.value);
+                          }}
+                          className={`inline-flex min-h-10 min-w-0 items-center gap-1.5 rounded-md border px-2 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8 ${
+                            selected ? "border-ring bg-accent" : "border-border bg-background"
+                          }`}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`size-3 shrink-0 rounded-full border border-black/10 ${boardColorSwatchClassName(option.value)}`}
+                          />
+                          <span className="truncate">{option.label}</span>
+                          {selected ? (
+                            <Check aria-hidden="true" className="ml-auto size-3 shrink-0" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {projectColorSubmitting ? (
+                    <span
+                      role="status"
+                      data-testid="project-settings-color-pending"
+                      className="text-[11px] text-muted-foreground"
+                    >
+                      Сохранение цвета…
+                    </span>
+                  ) : null}
+
+                  {projectColorError === null ? null : (
+                    <p
+                      role="alert"
+                      data-testid="project-settings-color-error"
+                      className="m-0 text-[11px] text-destructive"
+                    >
+                      {projectColorError}
+                    </p>
+                  )}
+
+                  {projectColorNotice === null ? null : (
+                    <p
+                      role="status"
+                      data-testid="project-settings-color-notice"
+                      className="m-0 text-[11px] text-muted-foreground"
+                    >
+                      {projectColorNotice}
+                    </p>
+                  )}
+                </div>
               </section>
 
               <section

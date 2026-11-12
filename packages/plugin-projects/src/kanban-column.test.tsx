@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TaskColumn, TaskStatus } from "@kanbaner/plugin-tasks/contract";
@@ -52,6 +52,7 @@ function renderColumn(
       onRenameCancel={noop}
       onMoveLeft={noop}
       onMoveRight={noop}
+      onColorSelect={noop}
       onDelete={noop}
       onDragStart={noop}
       onLoadMore={noop}
@@ -178,6 +179,7 @@ describe("KanbanColumn composer", () => {
         onRenameCancel={noop}
         onMoveLeft={noop}
         onMoveRight={noop}
+        onColorSelect={noop}
         onDelete={noop}
         onDragStart={noop}
         onLoadMore={noop}
@@ -216,6 +218,7 @@ describe("KanbanColumn composer", () => {
         onRenameCancel={noop}
         onMoveLeft={noop}
         onMoveRight={noop}
+        onColorSelect={noop}
         onDelete={noop}
         onDragStart={noop}
         onLoadMore={noop}
@@ -230,5 +233,65 @@ describe("KanbanColumn composer", () => {
     expect(
       screen.getByText("Последняя открытая колонка проекта — удаление недоступно."),
     ).toBeInTheDocument();
+  });
+});
+
+describe("KanbanColumn palette", () => {
+  it("даёт восемь доступных кнопок цвета и отмечает выбранный цвет", () => {
+    renderColumn({ column: { ...column("todo"), color: "blue" }, slug: "todo" }, []);
+
+    const group = screen.getByRole("group", { name: "Цвет колонки «todo»" });
+    const buttons = within(group).getAllByRole("button");
+
+    expect(buttons).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "Цвет колонки: Синий" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Цвет колонки: По умолчанию" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(buttons.every((button) => button.tagName === "BUTTON")).toBe(true);
+    expect(screen.getByTestId("kanban-column-todo")).toHaveClass("bg-[#d7e5f6]");
+    expect(screen.getByTestId("kanban-column-todo")).toHaveClass("dark:bg-[#20344c]");
+  });
+
+  it("выбирает цвет, закрывает меню и возвращает фокус на summary", () => {
+    const onColorSelect = vi.fn();
+
+    renderColumn({ column: column("todo"), slug: "todo", onColorSelect }, []);
+
+    const menu = screen.getByTestId("kanban-column-menu-todo") as HTMLDetailsElement;
+
+    menu.open = true;
+    fireEvent.click(screen.getByTestId("kanban-column-color-todo-green"));
+
+    expect(onColorSelect).toHaveBeenCalledWith("green");
+    expect(menu.open).toBe(false);
+    expect(screen.getByLabelText("Действия колонки «todo»")).toHaveFocus();
+  });
+
+  it("блокирует палитру во время сохранения и показывает ошибку цвета", () => {
+    renderColumn(
+      {
+        column: { ...column("todo"), color: "red" },
+        slug: "todo",
+        pending: true,
+        colorError: "Колонка изменена в другом месте",
+      },
+      [],
+    );
+
+    const group = screen.getByRole("group", { name: "Цвет колонки «todo»" });
+
+    for (const button of within(group).getAllByRole("button")) {
+      expect(button).toBeDisabled();
+    }
+
+    expect(screen.getByTestId("kanban-column-color-error-todo")).toHaveTextContent(
+      "Колонка изменена в другом месте",
+    );
+    expect(screen.getByTestId("kanban-column-todo")).toHaveAttribute("aria-busy", "true");
   });
 });
