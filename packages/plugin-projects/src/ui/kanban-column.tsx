@@ -2,10 +2,25 @@
 
 import { useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { ArrowLeft, ArrowRight, GripVertical, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  GripVertical,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 
-import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
+import type { BoardColor, TaskColumn } from "@kanbaner/plugin-tasks/contract";
 import { LoadingState } from "@kanbaner/task-ui";
+
+import {
+  BOARD_COLOR_OPTIONS,
+  boardColorSwatchClassName,
+  boardColorSurface,
+  resolveBoardColor,
+} from "./board-colors.ts";
 
 export interface KanbanColumnRenameState {
   readonly open: boolean;
@@ -30,6 +45,8 @@ export interface KanbanColumnProps {
   readonly canMoveRight: boolean;
   readonly canDelete: boolean;
   readonly deleteDisabledReason: string | null;
+  /** Ошибка color-only `column.update`; null — ошибки нет. */
+  readonly colorError?: string | null;
   readonly rename: KanbanColumnRenameState;
   readonly onRenameOpen: () => void;
   readonly onRenameValueChange: (value: string) => void;
@@ -37,6 +54,7 @@ export interface KanbanColumnProps {
   readonly onRenameCancel: () => void;
   readonly onMoveLeft: () => void;
   readonly onMoveRight: () => void;
+  readonly onColorSelect: (color: BoardColor) => void;
   readonly onDelete: () => void;
   readonly onDragStart: (event: ReactPointerEvent<HTMLElement>) => void;
   readonly onLoadMore: () => void;
@@ -75,6 +93,7 @@ export function KanbanColumn({
   canMoveRight,
   canDelete,
   deleteDisabledReason,
+  colorError = null,
   rename,
   onRenameOpen,
   onRenameValueChange,
@@ -82,6 +101,7 @@ export function KanbanColumn({
   onRenameCancel,
   onMoveLeft,
   onMoveRight,
+  onColorSelect,
   onDelete,
   onDragStart,
   onLoadMore,
@@ -91,6 +111,8 @@ export function KanbanColumn({
 }: KanbanColumnProps) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const summaryRef = useRef<HTMLElement>(null);
+  const columnColor = resolveBoardColor(column.color);
+  const surface = boardColorSurface(columnColor);
 
   const closeMenu = (returnFocus: boolean): void => {
     const details = detailsRef.current;
@@ -170,7 +192,7 @@ export function KanbanColumn({
       data-column-slug={slug}
       aria-labelledby={`kanban-column-title-${slug}`}
       aria-busy={pending}
-      className="flex max-h-full min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border bg-[#f1f5f9] p-2.5 transition-colors md:w-[288px] md:min-w-[288px] md:max-w-[288px] md:flex-[0_0_288px] dark:bg-[#263244]"
+      className={`flex max-h-full min-h-0 w-[85vw] max-w-[272px] shrink-0 snap-start flex-col gap-2 rounded-xl border p-2.5 transition-colors md:w-[288px] md:min-w-[288px] md:max-w-[288px] md:flex-[0_0_288px] ${surface.columnClassName}`}
       style={{
         ...(dragOver
           ? { background: "color-mix(in oklab, var(--accent) 70%, var(--background))" }
@@ -255,8 +277,9 @@ export function KanbanColumn({
               aria-label={`Перетащить колонку «${column.title}»`}
               data-testid={`kanban-column-drag-${slug}`}
               title="Перетащить колонку"
+              disabled={pending}
               onPointerDown={onDragStart}
-              className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-8 xl:min-w-7"
+              className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8 xl:min-w-7"
             >
               <GripVertical aria-hidden="true" className="size-4" />
             </button>
@@ -294,7 +317,7 @@ export function KanbanColumn({
               <div
                 role="group"
                 aria-label={`Меню колонки «${column.title}»`}
-                className="absolute top-full right-0 z-20 mt-1 flex w-[13rem] flex-col gap-1 rounded-md border border-border bg-popover p-1 shadow-md"
+                className="absolute top-full right-0 z-20 mt-1 flex max-h-[calc(100dvh-13rem)] w-[13rem] flex-col gap-1 overflow-y-auto overscroll-contain rounded-md border border-border bg-popover p-1 shadow-md"
               >
                 <button
                   type="button"
@@ -335,6 +358,49 @@ export function KanbanColumn({
                   <ArrowRight aria-hidden="true" className={menuIconClass} />
                   Переместить вправо
                 </button>
+                <div
+                  role="group"
+                  aria-label={`Цвет колонки «${column.title}»`}
+                  data-testid={`kanban-column-color-${slug}`}
+                  className="flex flex-col gap-1 border-t border-border/70 pt-1"
+                >
+                  <p className="m-0 px-2 pt-1 text-[11px] font-medium text-muted-foreground">
+                    Цвет колонки
+                  </p>
+                  <div className="grid grid-cols-2 gap-1">
+                    {BOARD_COLOR_OPTIONS.map((option) => {
+                      const selected = columnColor === option.value;
+
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          data-testid={`kanban-column-color-${slug}-${option.value}`}
+                          aria-label={`Цвет колонки: ${option.label}`}
+                          aria-pressed={selected}
+                          title={option.label}
+                          disabled={pending}
+                          onClick={() => {
+                            // Выбор цвета — действие меню: оно закрывается, а
+                            // фокус возвращается на видимый trigger.
+                            closeMenu(true);
+                            onColorSelect(option.value);
+                          }}
+                          className={`${menuItemClass} ${selected ? "bg-accent" : ""} min-w-0 px-1.5`}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`size-3 shrink-0 rounded-full border border-black/10 ${boardColorSwatchClassName(option.value)}`}
+                          />
+                          <span className="truncate">{option.label}</span>
+                          {selected ? (
+                            <Check aria-hidden="true" className="ml-auto size-3 shrink-0" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 <button
                   type="button"
                   data-testid={`kanban-column-delete-${slug}`}
@@ -369,6 +435,16 @@ export function KanbanColumn({
           Конфликт версий
         </p>
       ) : null}
+
+      {colorError === null ? null : (
+        <p
+          role="alert"
+          data-testid={`kanban-column-color-error-${slug}`}
+          className="m-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive"
+        >
+          {colorError}
+        </p>
+      )}
 
       {/*
         Composer идёт сразу под заголовком и вне прокручиваемого списка:

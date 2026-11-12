@@ -9,6 +9,7 @@ import {
   MAX_TITLE_LENGTH,
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  type BoardColor,
   type ColumnMutationOutput,
   type Project,
   type ProjectListOutput,
@@ -18,6 +19,11 @@ import {
 } from "@kanbaner/plugin-tasks/contract";
 import { LoadingState, ModalDialog, type UiOperationInvoker } from "@kanbaner/task-ui";
 
+import {
+  BOARD_COLOR_OPTIONS,
+  boardColorSwatchClassName,
+  resolveBoardColor,
+} from "./board-colors.ts";
 import { fetchProjectColumns } from "./load-columns.ts";
 import {
   PROJECT_VERSION_CONFLICT_MESSAGE,
@@ -40,6 +46,10 @@ const CREATE_COLUMNS_REFRESH_FAILED_MESSAGE =
   "Колонка добавлена, но список колонок не обновлён. Повторите загрузку списка — создавать колонку повторно не нужно.";
 const CREATE_COLUMNS_REFRESH_RETRY_FAILED_MESSAGE =
   "Список колонок всё ещё не обновлён. Повторите загрузку — создавать колонку повторно не нужно.";
+const PROJECT_COLOR_VERSION_CONFLICT_MESSAGE =
+  "Проект уже изменён в другом месте. Цвет не сохранён — версия обновлена, выберите цвет снова.";
+const PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE =
+  "Проект изменён в другом месте, но обновить версию не удалось. Проверьте соединение и повторите.";
 
 type ColumnsRefreshResult =
   | { readonly kind: "ok"; readonly columns: readonly TaskColumn[] }
@@ -181,6 +191,11 @@ export function ProjectSettingsButton({
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [projectRefreshing, setProjectRefreshing] = useState(false);
+  const [projectColor, setProjectColor] = useState<BoardColor>("default");
+  const [savedProjectColor, setSavedProjectColor] = useState<BoardColor>("default");
+  const [projectColorSubmitting, setProjectColorSubmitting] = useState(false);
+  const [projectColorError, setProjectColorError] = useState<string | null>(null);
+  const [projectColorNotice, setProjectColorNotice] = useState<string | null>(null);
 
   const [columns, setColumns] = useState<readonly TaskColumn[]>([]);
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({});
@@ -210,7 +225,18 @@ export function ProjectSettingsButton({
 
   const projectVersionRef = useRef(project.version);
   const projectGuardRef = useRef(false);
+  const projectColorGuardRef = useRef(false);
   const projectOperationRef = useRef(0);
+  /**
+   * Монотонный владелец color-операции: устаревший finally не должен снимать
+   * guard операции, начатой после close → reopen или смены проекта.
+   */
+  const projectColorOperationRef = useRef(0);
+  /** Актуальные draft/snapshot без ожидания React state в async-ответах. */
+  const projectTitleDraftRef = useRef(project.title);
+  const savedProjectTitleRef = useRef(project.title);
+  const projectColorDraftRef = useRef<BoardColor>(resolveBoardColor(project.color));
+  const savedProjectColorRef = useRef<BoardColor>(resolveBoardColor(project.color));
   const projectIdRef = useRef(project.id);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -270,10 +296,34 @@ export function ProjectSettingsButton({
     setColumnNotices((current) => ({ ...current, [columnId]: message }));
   };
 
+  /**
+   * Применяет свежий `loadCurrentProject` к версии и сохранённым snapshots.
+   *
+   * Snapshots всегда берутся из fresh-ответа, а независимые dirty-черновики
+   * title/color не затираются: каждый draft обновляется только если он не
+   * отличается от своего предыдущего сохранённого значения.
+   */
   const applyProjectSnapshot = (snapshot: Project): void => {
+    const nextTitle = snapshot.title;
+    const nextColor = resolveBoardColor(snapshot.color);
+    const titleDirty = projectTitleDraftRef.current !== savedProjectTitleRef.current;
+    const colorDirty = projectColorDraftRef.current !== savedProjectColorRef.current;
+
     projectVersionRef.current = snapshot.version;
-    setSavedProjectTitle(snapshot.title);
-    setProjectTitle(snapshot.title);
+    savedProjectTitleRef.current = nextTitle;
+    savedProjectColorRef.current = nextColor;
+    setSavedProjectTitle(nextTitle);
+    setSavedProjectColor(nextColor);
+
+    if (!titleDirty) {
+      projectTitleDraftRef.current = nextTitle;
+      setProjectTitle(nextTitle);
+    }
+
+    if (!colorDirty) {
+      projectColorDraftRef.current = nextColor;
+      setProjectColor(nextColor);
+    }
   };
 
   const applyColumnsSnapshot = (
@@ -360,6 +410,11 @@ export function ProjectSettingsButton({
     setProjectNotice(null);
     setProjectSubmitting(false);
     setProjectRefreshing(false);
+    setProjectColorSubmitting(false);
+    setProjectColorError(null);
+    setProjectColorNotice(null);
+    projectColorOperationRef.current += 1;
+    projectColorGuardRef.current = false;
     setColumns([]);
     setDrafts({});
     setColumnPending(new Set());
@@ -427,6 +482,10 @@ export function ProjectSettingsButton({
       return true;
     }
 
+    if (projectColor !== savedProjectColor) {
+      return true;
+    }
+
     if (createTitle.trim().length > 0) {
       return true;
     }
@@ -452,6 +511,8 @@ export function ProjectSettingsButton({
 
   const isBusy = (): boolean =>
     projectGuardRef.current ||
+    projectColorGuardRef.current ||
+    projectColorSubmitting ||
     createGuardRef.current ||
     columnsRefreshGuardRef.current ||
     pendingRef.current.size > 0 ||
@@ -496,8 +557,16 @@ export function ProjectSettingsButton({
 
     resetState();
     setOpen(true);
+    projectTitleDraftRef.current = project.title;
+    savedProjectTitleRef.current = project.title;
     setProjectTitle(project.title);
     setSavedProjectTitle(project.title);
+    const color = resolveBoardColor(project.color);
+
+    projectColorDraftRef.current = color;
+    savedProjectColorRef.current = color;
+    setProjectColor(color);
+    setSavedProjectColor(color);
     projectVersionRef.current = project.version;
     void loadSettings(projectId, generation);
   };
@@ -569,6 +638,7 @@ export function ProjectSettingsButton({
       projectGuardRef.current ||
       projectSubmitting ||
       projectRefreshing ||
+      projectColorSubmitting ||
       loading ||
       loadError !== null
     ) {
@@ -590,6 +660,7 @@ export function ProjectSettingsButton({
     }
 
     if (value === savedProjectTitle) {
+      projectTitleDraftRef.current = savedProjectTitle;
       setProjectValidation(null);
       setProjectTitle(savedProjectTitle);
       setProjectNotice(null);
@@ -629,6 +700,8 @@ export function ProjectSettingsButton({
       }
 
       projectVersionRef.current = data.project.version;
+      savedProjectTitleRef.current = data.project.title;
+      projectTitleDraftRef.current = data.project.title;
       setSavedProjectTitle(data.project.title);
       setProjectTitle(data.project.title);
       setProjectNotice("Название проекта сохранено");
@@ -655,8 +728,10 @@ export function ProjectSettingsButton({
           if (fresh === null) {
             setProjectError(PROJECT_VERSION_REFRESH_FAILED_MESSAGE);
           } else {
-            projectVersionRef.current = fresh.version;
-            setSavedProjectTitle(fresh.title);
+            // Fresh snapshot синхронизирует и title, и color. Dirty title
+            // остаётся как есть, а независимый color-adopt получает чужое
+            // актуальное значение.
+            applyProjectSnapshot(fresh);
             bumpProjectsRevision();
             setProjectError(PROJECT_VERSION_CONFLICT_MESSAGE);
           }
@@ -680,6 +755,117 @@ export function ProjectSettingsButton({
 
         if (isCurrent(projectId, generation)) {
           setProjectSubmitting(false);
+        }
+      }
+    }
+  };
+
+  /**
+   * Сохраняет только `project.color`.
+   *
+   * Title и черновики колонок не отправляются и не перезаписываются: выбранный
+   * цвет фиксируется в локальном `savedProjectColor`, а обновлённая версия
+   * используется следующим `project.update`. При конфликте версия и
+   * сохранённый цвет перечитываются, выбранный пользователем цвет остаётся
+   * как dirty-значение для повтора.
+   */
+  const submitProjectColor = async (nextColor: BoardColor): Promise<void> => {
+    if (
+      projectColorGuardRef.current ||
+      projectColorSubmitting ||
+      projectSubmitting ||
+      projectRefreshing ||
+      loading ||
+      loadError !== null
+    ) {
+      return;
+    }
+
+    setDirtyConfirm(false);
+
+    const projectId = project.id;
+    const generation = generationRef.current;
+    const operation = projectColorOperationRef.current + 1;
+
+    // Владелец операции фиксируется до await: только его finally имеет право
+    // снять guard. Snapshot выбранного цвета живёт в ref, чтобы late response
+    // не перетёр независимый dirty draft.
+    projectColorOperationRef.current = operation;
+    projectColorGuardRef.current = true;
+    projectColorDraftRef.current = nextColor;
+    setProjectColor(nextColor);
+    setProjectColorSubmitting(true);
+    setProjectColorError(null);
+    setProjectColorNotice(null);
+
+    try {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      const data = await invokeJson<ProjectMutationOutput>(
+        invoke,
+        TASKS_COMMAND_IDS.projectUpdate,
+        {
+          id: projectId,
+          expectedVersion: projectVersionRef.current,
+          color: nextColor,
+        } as unknown as JsonValue,
+      );
+
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      const applied = resolveBoardColor(data.project.color);
+
+      projectVersionRef.current = data.project.version;
+      savedProjectColorRef.current = applied;
+      projectColorDraftRef.current = applied;
+      setSavedProjectColor(applied);
+      setProjectColor(applied);
+      setProjectColorNotice("Цвет доски сохранён");
+      bumpProjectsRevision();
+      onProjectUpdated?.();
+    } catch (commandError) {
+      if (!isCurrent(projectId, generation)) {
+        return;
+      }
+
+      if (isVersionConflict(commandError)) {
+        try {
+          const fresh = await loadCurrentProject(invoke, projectId);
+
+          if (!isCurrent(projectId, generation)) {
+            return;
+          }
+
+          if (fresh === null) {
+            setProjectColorError(PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE);
+          } else {
+            // Fresh snapshot обновляет обе версии/снимка. Dirty color остаётся
+            // выбранным пользователем, независимый title-adopt получает
+            // чужое актуальное значение.
+            applyProjectSnapshot(fresh);
+            bumpProjectsRevision();
+            setProjectColorError(PROJECT_COLOR_VERSION_CONFLICT_MESSAGE);
+          }
+        } catch {
+          if (isCurrent(projectId, generation)) {
+            setProjectColorError(PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE);
+          }
+        }
+      } else {
+        setProjectColorError(errorMessage(commandError));
+      }
+    } finally {
+      // Только владелец актуальной операции снимает guard/pending. Поздний
+      // finally старой A не должен открыть окно для C во время B.
+      if (projectColorOperationRef.current === operation) {
+        projectColorGuardRef.current = false;
+
+        if (isCurrent(projectId, generation)) {
+          setProjectColorSubmitting(false);
         }
       }
     }
@@ -1142,6 +1328,7 @@ export function ProjectSettingsButton({
   const busy =
     projectSubmitting ||
     projectRefreshing ||
+    projectColorSubmitting ||
     columnPending.size > 0 ||
     reorderPending ||
     createSubmitting ||
@@ -1252,6 +1439,7 @@ export function ProjectSettingsButton({
                         required
                         disabled={projectSubmitting}
                         onChange={(event) => {
+                          projectTitleDraftRef.current = event.target.value;
                           setProjectTitle(event.target.value);
                           setProjectValidation(null);
                           setProjectError(null);
@@ -1315,6 +1503,78 @@ export function ProjectSettingsButton({
                     </div>
                   )}
                 </form>
+
+                <div
+                  role="group"
+                  aria-label="Цвет доски"
+                  data-testid="project-settings-colors"
+                  aria-busy={projectColorSubmitting}
+                  className="flex flex-col gap-1.5 border-t border-border/70 pt-2"
+                >
+                  <p className="m-0 text-xs font-medium text-muted-foreground">Цвет доски</p>
+                  <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                    {BOARD_COLOR_OPTIONS.map((option) => {
+                      const selected = projectColor === option.value;
+
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          data-testid={`project-settings-color-${option.value}`}
+                          aria-label={`Цвет доски: ${option.label}`}
+                          aria-pressed={selected}
+                          title={option.label}
+                          disabled={projectColorSubmitting || projectRefreshing}
+                          onClick={() => {
+                            void submitProjectColor(option.value);
+                          }}
+                          className={`inline-flex min-h-10 min-w-0 items-center gap-1.5 rounded-md border px-2 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8 ${
+                            selected ? "border-ring bg-accent" : "border-border bg-background"
+                          }`}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`size-3 shrink-0 rounded-full border border-black/10 ${boardColorSwatchClassName(option.value)}`}
+                          />
+                          <span className="truncate">{option.label}</span>
+                          {selected ? (
+                            <Check aria-hidden="true" className="ml-auto size-3 shrink-0" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {projectColorSubmitting ? (
+                    <span
+                      role="status"
+                      data-testid="project-settings-color-pending"
+                      className="text-[11px] text-muted-foreground"
+                    >
+                      Сохранение цвета…
+                    </span>
+                  ) : null}
+
+                  {projectColorError === null ? null : (
+                    <p
+                      role="alert"
+                      data-testid="project-settings-color-error"
+                      className="m-0 text-[11px] text-destructive"
+                    >
+                      {projectColorError}
+                    </p>
+                  )}
+
+                  {projectColorNotice === null ? null : (
+                    <p
+                      role="status"
+                      data-testid="project-settings-color-notice"
+                      className="m-0 text-[11px] text-muted-foreground"
+                    >
+                      {projectColorNotice}
+                    </p>
+                  )}
+                </div>
               </section>
 
               <section

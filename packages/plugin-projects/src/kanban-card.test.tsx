@@ -500,6 +500,33 @@ describe("KanbanCard", () => {
     expect(onDragStart).toHaveBeenCalledTimes(1);
   });
 
+  it("показывает приоритет левой полосой и флажком, не заливая карточку", () => {
+    const accents = {
+      high: { badge: "bg-destructive/15", icon: "text-destructive", stripe: "var(--destructive)" },
+      medium: { badge: "bg-amber-500/20", icon: "text-amber-600", stripe: "#f59e0b" },
+      low: { badge: "bg-emerald-500/15", icon: "text-emerald-600", stripe: "#22c55e" },
+    } as const;
+
+    for (const [priority, expected] of Object.entries(accents) as Array<
+      [keyof typeof accents, (typeof accents)[keyof typeof accents]]
+    >) {
+      renderCard(makeTask({ id: `task-${priority}`, priority }));
+
+      const card = screen.getByTestId(`kanban-card-task-${priority}`);
+      const badge = screen.getByTestId(`kanban-priority-task-${priority}`);
+
+      expect(card).toHaveAttribute("data-priority", priority);
+      expect(card).toHaveClass("bg-card");
+      expect(card.style.borderLeftWidth).toBe("3px");
+      expect(card.style.borderLeftColor).toContain(expected.stripe);
+      expect(badge).toHaveAttribute("data-priority", priority);
+      expect(badge).toHaveClass(expected.badge);
+      expect(badge.querySelector("svg")).toHaveClass(expected.icon);
+
+      cleanup();
+    }
+  });
+
   it("подавляет click после drag и не мешает обычному открытию", () => {
     const onOpen = vi.fn();
     let suppress = true;

@@ -23,14 +23,37 @@ import { describeDue, type DueTone } from "./due.ts";
 
 export type KanbanReorderKind = "up" | "down" | "start" | "end";
 
-const PRIORITY_STYLES: Readonly<
-  Record<TaskPriority, { readonly background: string; readonly color: string }>
+/**
+ * Спокойные акценты приоритета без заливки всей карточки.
+ *
+ * Левая полоса и Lucide-флаг получают один тон: high — red, medium — amber,
+ * low — green. Фон карточки остаётся обычным `--card`, поэтому контраст
+ * текста/чекбокса/меню не зависит от приоритета.
+ */
+const PRIORITY_ACCENTS: Readonly<
+  Record<
+    TaskPriority,
+    {
+      readonly stripeColor: string;
+      readonly badgeClassName: string;
+      readonly iconClassName: string;
+    }
+  >
 > = {
-  low: { background: "var(--muted)", color: "var(--muted-foreground)" },
-  medium: { background: "var(--secondary)", color: "var(--secondary-foreground)" },
+  low: {
+    stripeColor: "color-mix(in oklab, #22c55e 82%, var(--card))",
+    badgeClassName: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+    iconClassName: "text-emerald-600 dark:text-emerald-400",
+  },
+  medium: {
+    stripeColor: "color-mix(in oklab, #f59e0b 86%, var(--card))",
+    badgeClassName: "bg-amber-500/20 text-amber-700 dark:text-amber-300",
+    iconClassName: "text-amber-600 dark:text-amber-400",
+  },
   high: {
-    background: "color-mix(in oklab, var(--destructive) 18%, transparent)",
-    color: "var(--destructive)",
+    stripeColor: "color-mix(in oklab, var(--destructive) 84%, var(--card))",
+    badgeClassName: "bg-destructive/15 text-destructive",
+    iconClassName: "text-destructive",
   },
 };
 
@@ -160,7 +183,7 @@ export function KanbanCard({
   const focusFirstMenuRef = useRef(false);
   const menuId = `kanban-card-menu-${task.id}`;
 
-  const priorityStyle = PRIORITY_STYLES[task.priority];
+  const priorityAccent = PRIORITY_ACCENTS[task.priority];
   const due = describeDue(task.dueAt);
   const dueStyle = DUE_STYLES[due.tone];
   const visibleTags = task.tags.slice(0, 2);
@@ -512,6 +535,7 @@ export function KanbanCard({
     <article
       data-testid={`kanban-card-${task.id}`}
       data-card-id={task.id}
+      data-priority={task.priority}
       aria-current={selected ? "true" : undefined}
       aria-busy={pending}
       onPointerDown={handleArticlePointerDown}
@@ -529,6 +553,8 @@ export function KanbanCard({
       className="flex flex-col gap-1.5 rounded-lg border bg-card p-2.5 text-card-foreground transition-shadow"
       style={{
         borderColor: selected ? "var(--ring)" : "var(--border)",
+        borderLeftColor: priorityAccent.stripeColor,
+        borderLeftWidth: "3px",
         opacity: dragging || pending ? 0.62 : 1,
         boxShadow: selected ? "0 0 0 2px var(--ring)" : "0 1px 2px rgb(0 0 0 / 0.10)",
         touchAction: "auto",
@@ -620,10 +646,11 @@ export function KanbanCard({
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
         <span
-          className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 font-semibold"
-          style={{ background: priorityStyle.background, color: priorityStyle.color }}
+          data-testid={`kanban-priority-${task.id}`}
+          data-priority={task.priority}
+          className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 font-semibold ${priorityAccent.badgeClassName}`}
         >
-          <Flag aria-hidden="true" className="size-3" />
+          <Flag aria-hidden="true" className={`size-3 ${priorityAccent.iconClassName}`} />
           {taskPriorityLabel(task.priority)}
         </span>
 
