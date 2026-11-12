@@ -1,13 +1,13 @@
 ---
 id: KAN-031
 title: Меню колонки, inline-редакторы и иконки
-status: ready
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
+owner: worker-kan-031
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-031-board-usability-icons
+worktree: .worktrees/kan-031-board-usability-icons
 created: 2026-11-12
 updated: 2026-11-12
 specs:
@@ -97,7 +97,8 @@ specs:
 
 ## Журнал
 
-- 2026-11-12 — Задача создана; исходная UX-база зафиксирована отдельно.
+- 2026-11-12 — Задача создана; исходная UX-база зафиксирована коммитом `6d57cf2`.
+- 2026-11-12 — Назначены worker и worktree, задача взята в работу.
 
 ## Итог
 

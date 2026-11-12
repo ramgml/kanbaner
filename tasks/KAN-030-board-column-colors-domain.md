@@ -1,13 +1,13 @@
 ---
 id: KAN-030
 title: Цвета проекта и колонок в домене
-status: ready
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
+owner: worker-kan-030
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-030-board-column-colors-domain
+worktree: .worktrees/kan-030-board-column-colors-domain
 created: 2026-11-12
 updated: 2026-11-12
 specs:
@@ -90,6 +90,7 @@ specs:
 ## Журнал
 
 - 2026-11-12 — Задача создана после согласования цветовой модели.
+- 2026-11-12 — Назначены worker и worktree, задача взята в работу.
 
 ## Итог
 
