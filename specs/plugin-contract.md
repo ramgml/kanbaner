@@ -44,7 +44,7 @@
 
 ```text
 kanbaner.tasks
-kanbaner.kanban
+kanbaner.projects
 kanbaner.notes
 acme.calendar
 ```
@@ -107,7 +107,7 @@ kanbaner.notes.note.updated
 
 ```json
 {
-  "id": "kanbaner.kanban",
+  "id": "kanbaner.projects",
   "name": "Kanban",
   "version": "1.0.0",
   "hostApi": "^1.0.0",
@@ -124,7 +124,7 @@ kanbaner.notes.note.updated
     "kanbaner.tasks.events.v1"
   ],
   "provides": [
-    "kanbaner.kanban.ui.v1"
+    "kanbaner.projects.ui.v1"
   ],
   "permissions": [
     "commands",
@@ -271,6 +271,25 @@ kanbaner.tasks.task.deleteMany   risk = destructive
 
 Обе команды поддерживают `Idempotency-Key`: повтор с тем же ключом и payload
 возвращает сохранённый результат без мутации, событий и повторной индексации.
+
+### Цвета проекта и колонок
+
+`Project` и `TaskColumn` могут содержать необязательное поле `color` со значением
+из общей палитры:
+
+```text
+default | slate | blue | green | yellow | orange | red | purple
+```
+
+Отсутствие поля в существующем документе совместимо и означает стандартное
+оформление. `project.create`, `project.update` и `column.create` принимают
+необязательный `color`. В `column.update` поля `title` и `color` необязательны
+по отдельности, но требуется хотя бы одно из них; color-only обновление не
+меняет заголовок. Обычные правила `expectedVersion`, транзакции и событий после
+коммита сохраняются. Произвольные CSS-значения в контракт не входят.
+
+Цвет задачи отдельно не хранится: цветовой акцент карточки вычисляется
+представлением из существующего `Task.priority`.
 
 ## 7. Запросы
 

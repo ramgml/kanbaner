@@ -99,20 +99,22 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 
 ## Команды
 
-| ID                              | Risk          | Назначение                                   |
-| ------------------------------- | ------------- | -------------------------------------------- |
-| `kanbaner.tasks.project.create` | `write`       | Создать проект                               |
-| `kanbaner.tasks.project.update` | `write`       | Изменить проект по `expectedVersion`         |
-| `kanbaner.tasks.project.delete` | `destructive` | Удалить проект, его задачи и колонки         |
-| `kanbaner.tasks.column.create`  | `write`       | Создать колонку и сдвинуть соседей           |
-| `kanbaner.tasks.column.update`  | `write`       | Переименовать колонку                        |
-| `kanbaner.tasks.column.move`    | `write`       | Переставить колонку и обновить позиции       |
-| `kanbaner.tasks.column.delete`  | `destructive` | Удалить колонку и перенести её задачи        |
-| `kanbaner.tasks.task.create`    | `write`       | Создать задачу или подзадачу                 |
-| `kanbaner.tasks.task.update`    | `write`       | Изменить поля задачи                         |
-| `kanbaner.tasks.task.move`      | `write`       | Сменить статус и позицию                     |
-| `kanbaner.tasks.task.complete`  | `write`       | Перевести в `done` и заполнить `completedAt` |
-| `kanbaner.tasks.task.delete`    | `destructive` | Удалить задачу и её подзадачи                |
+| ID                               | Risk          | Назначение                                   |
+| -------------------------------- | ------------- | -------------------------------------------- |
+| `kanbaner.tasks.project.create`  | `write`       | Создать проект                               |
+| `kanbaner.tasks.project.update`  | `write`       | Изменить проект по `expectedVersion`         |
+| `kanbaner.tasks.project.delete`  | `destructive` | Удалить проект, его задачи и колонки         |
+| `kanbaner.tasks.column.create`   | `write`       | Создать колонку и сдвинуть соседей           |
+| `kanbaner.tasks.column.update`   | `write`       | Переименовать колонку                        |
+| `kanbaner.tasks.column.move`     | `write`       | Переставить колонку и обновить позиции       |
+| `kanbaner.tasks.column.delete`   | `destructive` | Удалить колонку и перенести её задачи        |
+| `kanbaner.tasks.task.create`     | `write`       | Создать задачу или подзадачу                 |
+| `kanbaner.tasks.task.update`     | `write`       | Изменить поля задачи                         |
+| `kanbaner.tasks.task.move`       | `write`       | Сменить статус и позицию                     |
+| `kanbaner.tasks.task.moveMany`   | `write`       | Атомарно перенести 1…200 задач               |
+| `kanbaner.tasks.task.complete`   | `write`       | Перевести в `done` и заполнить `completedAt` |
+| `kanbaner.tasks.task.delete`     | `destructive` | Удалить задачу и её подзадачи                |
+| `kanbaner.tasks.task.deleteMany` | `destructive` | Атомарно удалить 1…200 задач и их подзадачи  |
 
 `project.delete`, `column.delete` и `task.delete` требуют `confirm: true` в
 схеме. `column.delete` дополнительно требует `targetColumnId` того же проекта.

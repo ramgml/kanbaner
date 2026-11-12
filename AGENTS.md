@@ -380,11 +380,16 @@ pnpm format:check
 pnpm test
 pnpm test:watch
 pnpm test:sqlite
+pnpm check:imports
+pnpm --filter @kanbaner/web test:e2e
+pnpm storage:restore
 pnpm check
 ```
 
 `pnpm check` последовательно выполняет `format:check`, `lint`, `typecheck`, `test` и `build`.
-E2E-тесты и миграции появятся в следующих этапах; команд для них пока нет.
+E2E-тесты запускаются в production shell через Playwright Chromium. Миграции Storage Provider
+применяются автоматически при bootstrap; offline restore выполняется только при остановленном
+приложении через `pnpm storage:restore`.
 
 Все команды кроссплатформенные и не требуют bash, Docker или установленного сервера БД.
 

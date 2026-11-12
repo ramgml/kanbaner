@@ -311,6 +311,18 @@ tasks
 Теги входят в документ задачи. Конкретные имена `tasks_*` и физическая схема
 остаются деталью Storage Provider и не входят в публичный контракт.
 
+Логические поля проекта:
+
+```text
+id
+title
+descriptionMarkdown
+color?
+version
+createdAt
+updatedAt
+```
+
 Логические поля колонки:
 
 ```text
@@ -318,6 +330,7 @@ id
 projectId
 title
 status
+color?
 position
 version
 createdAt
@@ -328,6 +341,15 @@ updatedAt
 как `done`, открытая колонка — как `in_progress`. Допускается несколько
 открытых и несколько Done-колонок с одинаковым `status`; различает их `id` и
 `position`.
+
+`color` проекта и колонки — необязательное значение из общей фиксированной
+палитры `default|slate|blue|green|yellow|orange|red|purple`. Старые документы
+без поля читаются как `default` на уровне представления. Поле хранится внутри
+JSON-документа, поэтому его добавление не требует SQLite-миграции.
+`project.create|update` и `column.create|update` принимают необязательный
+`color`; color-only `column.update` не меняет заголовок, а вход без `title` и
+`color` отклоняется. Изменение цвета использует обычные `expectedVersion`,
+версионирование и события после коммита.
 
 Логические поля задачи:
 
