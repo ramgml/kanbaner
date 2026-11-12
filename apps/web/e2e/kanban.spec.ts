@@ -387,6 +387,15 @@ function card(page: Page, taskId: string) {
   return page.getByTestId(`kanban-card-${taskId}`);
 }
 
+async function selectCardForBulk(page: Page, taskId: string): Promise<void> {
+  await page.getByTestId(`kanban-bulk-check-${taskId}`).click();
+  await expect(page.getByTestId(`kanban-bulk-check-${taskId}`)).toBeChecked();
+}
+
+async function expectBulkCount(page: Page, count: number): Promise<void> {
+  await expect(page.getByTestId("kanban-bulk-count")).toHaveText(`Выбрано ${String(count)}`);
+}
+
 async function openCardModal(page: Page, taskId: string, title: string): Promise<Locator> {
   await page.getByTestId(`kanban-open-${taskId}`).click();
 
@@ -583,7 +592,7 @@ async function dragCard(
   target: keyof typeof STATUS_LABELS,
   position: "top" | "bottom" = "bottom",
 ): Promise<void> {
-  const handle = page.getByTestId(`kanban-drag-${taskId}`);
+  const handle = page.getByTestId(`kanban-open-${taskId}`);
   const source = await handle.boundingBox();
   const destination = await column(page, target).boundingBox();
 
@@ -605,7 +614,7 @@ async function dragCard(
 
 /** Бросает карточку в нижнюю половину `afterTaskId`: между ней и следующей. */
 async function dragCardAfter(page: Page, taskId: string, afterTaskId: string): Promise<void> {
-  const handle = page.getByTestId(`kanban-drag-${taskId}`);
+  const handle = page.getByTestId(`kanban-open-${taskId}`);
   const source = await handle.boundingBox();
   const after = page.getByTestId(`kanban-card-${afterTaskId}`);
   const destination = await after.boundingBox();
@@ -3050,7 +3059,7 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId]);
 
-      const handle = page.getByTestId(`kanban-drag-${secondId}`);
+      const handle = page.getByTestId(`kanban-open-${secondId}`);
       const target = page.getByTestId(`kanban-card-${firstId}`);
       const sourceCard = page.getByTestId(`kanban-card-${secondId}`);
       const source = await handle.boundingBox();
@@ -4506,8 +4515,276 @@ test.describe("канбан в production shell", () => {
     });
   });
 
+  test.describe("массовые действия", () => {
+    test("перемещает выбранные карточки одной командой и сохраняет результат", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект массового переноса");
+      const firstTitle = uniqueTitle("Массовая первая");
+      const secondTitle = uniqueTitle("Массовая вторая");
+      const thirdTitle = uniqueTitle("Массовая третья");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const firstId = await createTask(page, {
+        projectTitle,
+        title: firstTitle,
+        status: "todo",
+      });
+      const secondId = await createTask(page, {
+        projectTitle,
+        title: secondTitle,
+        status: "todo",
+      });
+      const thirdId = await createTask(page, {
+        projectTitle,
+        title: thirdTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId, thirdId]);
+
+      // Порядок выбора отличается от порядка карточек: payload обязан его
+      // сохранить.
+      await selectCardForBulk(page, secondId);
+      await selectCardForBulk(page, firstId);
+
+      const bar = page.getByTestId("kanban-bulk-bar");
+
+      await expect(bar).toBeVisible();
+      await expectBulkCount(page, 2);
+      await page.getByTestId("kanban-bulk-target").selectOption({
+        label: STATUS_LABELS.in_progress,
+      });
+      await page.getByTestId("kanban-bulk-move").click();
+
+      await expect(bar).toHaveCount(0);
+      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual([secondId, firstId]);
+      await expect.poll(async () => cardTitles(page, "todo")).toEqual([thirdId]);
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("1");
+      await expect(page.getByTestId("kanban-count-in_progress")).toHaveText("2");
+      await expectBoardSummary(page, {
+        total: 3,
+        counts: { backlog: 0, todo: 1, in_progress: 2, done: 0 },
+        overdue: 0,
+      });
+
+      await page.reload();
+      await expect(page.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await expect.poll(async () => cardTitles(page, "in_progress")).toEqual([secondId, firstId]);
+      await expectCardInColumn(page, firstId, "in_progress");
+      await expectCardInColumn(page, secondId, "in_progress");
+      await expectCardInColumn(page, thirdId, "todo");
+    });
+
+    test("удаляет parent и child одним подтверждением без повторного каскада", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект массового удаления");
+      const parentTitle = uniqueTitle("Массовый родитель");
+      const childTitle = uniqueTitle("Массовый ребёнок");
+      const otherTitle = uniqueTitle("Массовый остаётся");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const parentId = await createTask(page, {
+        projectTitle,
+        title: parentTitle,
+        status: "todo",
+      });
+      const childId = await createTask(page, {
+        projectTitle,
+        title: childTitle,
+        parentTitle,
+        status: "todo",
+      });
+      const otherId = await createTask(page, {
+        projectTitle,
+        title: otherTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      await expectCardInColumn(page, parentId, "todo");
+      await expectCardInColumn(page, childId, "todo");
+
+      await selectCardForBulk(page, parentId);
+      await selectCardForBulk(page, childId);
+      await expectBulkCount(page, 2);
+
+      await page.getByTestId("kanban-bulk-delete").click();
+
+      const dialog = page.getByTestId("kanban-bulk-delete-dialog");
+
+      await expect(dialog).toBeVisible();
+      await expect(page.getByTestId("kanban-bulk-delete-count")).toHaveText("2");
+      await expect(dialog).toContainText("Выбрано задач:");
+      await expect(dialog).toContainText("Подзадачи в это число не входят");
+
+      await page.getByTestId("kanban-bulk-delete-confirm").click();
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId("kanban-bulk-bar")).toHaveCount(0);
+
+      await expect(page.getByTestId(`kanban-card-${parentId}`)).toHaveCount(0);
+      await expect(page.getByTestId(`kanban-card-${childId}`)).toHaveCount(0);
+      await expectCardInColumn(page, otherId, "todo");
+      await expect(page.getByTestId("kanban-count-todo")).toHaveText("1");
+      await expectBoardSummary(page, {
+        total: 1,
+        counts: { backlog: 0, todo: 1, in_progress: 0, done: 0 },
+        overdue: 0,
+      });
+
+      await page.reload();
+      await expect(page.getByTestId(`kanban-card-${parentId}`)).toHaveCount(0);
+      await expect(page.getByTestId(`kanban-card-${childId}`)).toHaveCount(0);
+      await expectCardInColumn(page, otherId, "todo");
+    });
+
+    test("после конфликта второй вкладки сохраняет выбор и повторяет со свежей версией", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект конфликта массового действия");
+      const taskTitle = uniqueTitle("Массовая конфликтная");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+      const projectId = new URL(page.url()).searchParams.get("project") ?? "";
+
+      expect(projectId.length).toBeGreaterThan(0);
+
+      const stalePage = await context.newPage();
+
+      await stalePage.goto(`/view/kanban?project=${projectId}`);
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await selectCardForBulk(stalePage, taskId);
+      await expectBulkCount(stalePage, 1);
+
+      // Первая вкладка меняет версию задачи.
+      await moveWithMenu(page, taskId, "in_progress");
+      await expectCardInColumn(page, taskId, "in_progress");
+
+      // Вторая вкладка отправляет устаревший snapshot.
+      await stalePage.getByTestId("kanban-bulk-move").click();
+      await expect(stalePage.getByTestId("kanban-bulk-error")).toContainText("уже изменены");
+      await expect(stalePage.getByTestId("kanban-bulk-bar")).toBeVisible();
+      await expectBulkCount(stalePage, 1);
+      await expect(stalePage.getByTestId(`kanban-bulk-check-${taskId}`)).toBeChecked();
+
+      // После refresh выбор содержит свежую версию и повтор проходит в
+      // явно выбранную колонку.
+      await stalePage.getByTestId("kanban-bulk-target").selectOption({
+        label: STATUS_LABELS.in_progress,
+      });
+      await stalePage.getByTestId("kanban-bulk-move").click();
+      await expect(stalePage.getByTestId("kanban-bulk-bar")).toHaveCount(0);
+      await expectCardInColumn(stalePage, taskId, "in_progress");
+
+      await stalePage.reload();
+      await expectCardInColumn(stalePage, taskId, "in_progress");
+      await stalePage.close();
+    });
+
+    test("снимает с выбора задачу, потерявшую активный tag после конфликта", async ({
+      page,
+      context,
+    }) => {
+      const projectTitle = uniqueTitle("Проект конфликта tag");
+      const taskTitle = uniqueTitle("Массовая tag-задача");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, {
+        projectTitle,
+        title: taskTitle,
+        status: "todo",
+        tags: "release",
+      });
+
+      await openKanban(page, projectTitle);
+      await page.getByTestId("kanban-filters").getByLabel("Тег", { exact: true }).fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expectCardInColumn(page, taskId, "todo");
+
+      const projectUrl = page.url();
+      const stalePage = await context.newPage();
+
+      await stalePage.goto(projectUrl);
+      await expect(stalePage.getByTestId("kanban-board-title")).toHaveText(projectTitle);
+      await selectCardForBulk(stalePage, taskId);
+      await expectBulkCount(stalePage, 1);
+
+      // Вторая вкладка убирает тег: задача перестаёт соответствовать фильтру
+      // и меняет версию.
+      await openCardModal(page, taskId, taskTitle);
+      await editTaskInModal(page, { tags: "" });
+      await closeCardModal(page);
+      await expect(page.getByTestId(`kanban-card-${taskId}`)).toHaveCount(0);
+
+      // Устаревший payload получает конфликт. После refresh задача не
+      // соответствует активному tag, поэтому selection очищается целиком.
+      await stalePage.getByTestId("kanban-bulk-move").click();
+      await expect(stalePage.getByTestId("kanban-bulk-bar")).toHaveCount(0);
+      await expect(stalePage.getByTestId(`kanban-card-${taskId}`)).toHaveCount(0);
+
+      await stalePage.close();
+    });
+  });
+
   test.describe("мобильный viewport", () => {
     test.use({ viewport: MOBILE_VIEWPORT });
+
+    test("выбирает карточки и переносит их панелью на 360 px без overflow", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект мобильного массового действия");
+      const firstTitle = uniqueTitle("Мобильная массовая первая");
+      const secondTitle = uniqueTitle("Мобильная массовая вторая");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const firstId = await createTask(page, {
+        projectTitle,
+        title: firstTitle,
+        status: "todo",
+      });
+      const secondId = await createTask(page, {
+        projectTitle,
+        title: secondTitle,
+        status: "todo",
+      });
+
+      await openKanban(page, projectTitle);
+
+      for (const taskId of [firstId, secondId]) {
+        const hitTarget = await page
+          .getByTestId(`kanban-bulk-check-target-${taskId}`)
+          .boundingBox();
+
+        expect(hitTarget).not.toBeNull();
+        expect(hitTarget?.width ?? 0).toBeGreaterThanOrEqual(40);
+        expect(hitTarget?.height ?? 0).toBeGreaterThanOrEqual(40);
+
+        await selectCardForBulk(page, taskId);
+      }
+
+      await expect(page.getByTestId("kanban-bulk-bar")).toBeVisible();
+      await expectBulkCount(page, 2);
+      await expectNoHorizontalOverflow(page);
+
+      await page.getByTestId("kanban-bulk-target").selectOption({
+        label: STATUS_LABELS.in_progress,
+      });
+      await page.getByTestId("kanban-bulk-move").click();
+
+      await expect(page.getByTestId("kanban-bulk-bar")).toHaveCount(0);
+      await expectCardInColumn(page, firstId, "in_progress");
+      await expectCardInColumn(page, secondId, "in_progress");
+      await expectNoHorizontalOverflow(page);
+    });
 
     test("создаёт колонку из настроек на 360 px без горизонтального overflow", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект мобильного создания колонки");
@@ -4929,14 +5206,37 @@ test.describe("канбан в production shell", () => {
       await expect(card).toBeVisible();
 
       for (const target of [
+        page.getByTestId(`kanban-bulk-check-target-${taskId}`),
         page.getByTestId(`kanban-open-${taskId}`),
-        page.getByTestId(`kanban-drag-${taskId}`),
         page.getByTestId(`kanban-menu-${taskId}`),
       ]) {
         const box = await target.boundingBox();
 
         expect(box).not.toBeNull();
         expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
+        expect(box?.width ?? 0).toBeGreaterThanOrEqual(40);
+      }
+
+      await expect(page.getByTestId(`kanban-drag-${taskId}`)).toHaveCount(0);
+
+      const selectorBox = await page
+        .getByTestId(`kanban-bulk-check-target-${taskId}`)
+        .boundingBox();
+      const titleBox = await page.getByTestId(`kanban-open-${taskId}`).boundingBox();
+      const menuBox = await page.getByTestId(`kanban-menu-${taskId}`).boundingBox();
+      const cardBox = await card.boundingBox();
+
+      expect(selectorBox).not.toBeNull();
+      expect(titleBox).not.toBeNull();
+      expect(menuBox).not.toBeNull();
+      expect(cardBox).not.toBeNull();
+
+      if (selectorBox !== null && titleBox !== null && menuBox !== null && cardBox !== null) {
+        expect(selectorBox.x).toBeLessThan(menuBox.x);
+        expect(selectorBox.y).toBeLessThan(titleBox.y);
+        expect(menuBox.y).toBeLessThan(titleBox.y);
+        expect(titleBox.y).toBeGreaterThanOrEqual(menuBox.y + menuBox.height);
+        expect(titleBox.width).toBeGreaterThanOrEqual(cardBox.width - 24);
       }
 
       await page.getByTestId(`kanban-menu-${taskId}`).click();
@@ -5065,7 +5365,7 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId]);
 
-      const sourceBox = await page.getByTestId(`kanban-open-${secondId}`).boundingBox();
+      const sourceBox = await page.getByTestId(`kanban-card-${secondId}`).boundingBox();
       const targetBox = await column(page, "todo").locator("header").first().boundingBox();
 
       expect(sourceBox).not.toBeNull();
@@ -5076,7 +5376,20 @@ test.describe("канбан в production shell", () => {
       }
 
       const startX = sourceBox.x + sourceBox.width / 2;
-      const startY = sourceBox.y + sourceBox.height / 2;
+      const startY = sourceBox.y + 10;
+
+      // Жест начинается в карточке, а не в плавающей мобильной навигации.
+      expect(
+        await page.evaluate(
+          ({ x, y }) =>
+            document
+              .elementFromPoint(x, y)
+              ?.closest("[data-card-id]")
+              ?.getAttribute("data-card-id"),
+          { x: startX, y: startY },
+        ),
+      ).toBe(secondId);
+
       const endX = targetBox.x + targetBox.width / 2;
       const endY = targetBox.y + targetBox.height / 2;
 

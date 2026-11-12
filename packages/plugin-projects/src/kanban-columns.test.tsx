@@ -1378,7 +1378,7 @@ describe("управление колонками в KanbanView", () => {
       expect(screen.getByTestId("kanban-card-a")).toBeVisible();
     });
 
-    fireEvent.pointerDown(screen.getByTestId("kanban-drag-a"), {
+    fireEvent.pointerDown(screen.getByTestId("kanban-open-a"), {
       clientX: 10,
       clientY: 10,
     });

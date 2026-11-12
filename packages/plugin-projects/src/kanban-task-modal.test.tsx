@@ -2830,4 +2830,161 @@ describe("TaskOverlay Trello-модал", () => {
       expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
     },
   );
+
+  it("закрывает карточку во время pending quick-команды без dirty-confirm", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let resolveUpdate: ((value: UiOperationResult) => void) | null = null;
+    const pendingUpdate = new Promise<UiOperationResult>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () => pendingUpdate,
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    const due = screen.getByTestId("kanban-modal-due");
+
+    fireEvent.change(due, { target: { value: "2030-05-05" } });
+    fireEvent.click(screen.getByTestId("kanban-modal-due-save"));
+
+    // busyRef уже установлен: закрытие не показывает dirty-confirm, а поздний
+    // success обновляет доску после закрытия.
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-details")).toBeNull();
+    });
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+
+    const updated = {
+      ...board.tasks[0],
+      dueAt: "2030-05-05T00:00:00.000Z",
+      version: 2,
+    } as Task;
+
+    board.tasks = [updated];
+
+    await act(async () => {
+      resolveUpdate?.(ok({ task: updated, resource: {}, eventId: "event" }));
+      await pendingUpdate;
+    });
+
+    expect(board.tasks.find((task) => task.id === "a")?.dueAt).toBe("2030-05-05T00:00:00.000Z");
+    expect(screen.queryByTestId("kanban-details")).toBeNull();
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+  });
+
+  it("сохраняет независимые quick/inline черновики при pending close", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let resolveUpdate: ((value: UiOperationResult) => void) | null = null;
+    const pendingUpdate = new Promise<UiOperationResult>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () => pendingUpdate,
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-05-05" },
+    });
+
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Новый заголовок" } });
+    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Новый заголовок");
+
+    const updated = {
+      ...board.tasks[0],
+      title: "Новый заголовок",
+      version: 2,
+    } as Task;
+
+    board.tasks = [updated];
+
+    await act(async () => {
+      resolveUpdate?.(ok({ task: updated, resource: {}, eventId: "event" }));
+      await pendingUpdate;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-draft-keep")).toBeEnabled();
+    });
+    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
+
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-05-05");
+    expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Новый заголовок");
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+  });
+
+  it("требует confirm при dirty inline и pending quick save", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    let resolveUpdate: ((value: UiOperationResult) => void) | null = null;
+    const pendingUpdate = new Promise<UiOperationResult>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.update": () => pendingUpdate,
+    });
+
+    renderOverlay(operations);
+    await openTask("a");
+
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
+    const titleInput = await screen.findByTestId("kanban-title-input");
+
+    fireEvent.change(titleInput, { target: { value: "Черновик заголовка" } });
+    fireEvent.change(screen.getByTestId("kanban-modal-due"), {
+      target: { value: "2030-06-06" },
+    });
+    fireEvent.click(screen.getByTestId("kanban-modal-due-save"));
+    fireEvent.click(screen.getByTestId("kanban-details-close"));
+
+    expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
+
+    const updated = {
+      ...board.tasks[0],
+      dueAt: "2030-06-06T00:00:00.000Z",
+      version: 2,
+    } as Task;
+
+    board.tasks = [updated];
+
+    await act(async () => {
+      resolveUpdate?.(ok({ task: updated, resource: {}, eventId: "event" }));
+      await pendingUpdate;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-draft-keep")).toBeEnabled();
+    });
+    fireEvent.click(screen.getByTestId("kanban-draft-keep"));
+
+    expect(screen.getByTestId("kanban-title-input")).toHaveValue("Черновик заголовка");
+    expect(screen.getByTestId("kanban-modal-due")).toHaveValue("2030-06-06");
+    expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
+  });
 });

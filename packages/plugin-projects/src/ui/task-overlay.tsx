@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -116,6 +116,22 @@ interface QuickState {
 interface OperationToken {
   readonly generation: number;
   readonly taskId: string | null;
+}
+
+/** Поле, которое сейчас сохраняется; его собственный draft не independent. */
+type PendingEditKind = "inline" | "quick-column" | "quick-due" | "quick-tags" | "subtask" | "other";
+
+interface PendingEdit {
+  readonly id: number;
+  readonly kind: PendingEditKind;
+}
+
+interface DirtySnapshot {
+  readonly inline: boolean;
+  readonly column: boolean;
+  readonly due: boolean;
+  readonly tags: boolean;
+  readonly subtask: boolean;
 }
 
 function baselineOf(task: Task, columns: readonly TaskColumn[]): QuickBaseline {
@@ -351,6 +367,15 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const generationRef = useRef(0);
   const activeOperationRef = useRef<OperationToken | null>(null);
   const quickBaselineRef = useRef<QuickBaseline | null>(null);
+  const pendingEditRef = useRef<PendingEdit | null>(null);
+  const pendingEditIdRef = useRef(0);
+  const dirtySnapshotRef = useRef<DirtySnapshot>({
+    inline: false,
+    column: false,
+    due: false,
+    tags: false,
+    subtask: false,
+  });
 
   // Данные от предыдущей задачи (A) не должны показываться или выполнять
   // команды, пока не загрузилась выбранная задача (B).
@@ -381,14 +406,35 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   const currentColumnId =
     currentTask === null ? "" : (effectiveColumnId(currentTask, columns) ?? "");
   const quickConflicts = activeQuickState?.conflicts ?? [];
-  const quickDirty =
+  const quickColumnDirty =
     currentTask !== null &&
     activeQuickDraft !== null &&
-    (activeQuickDraft.nextColumnId !== currentColumnId ||
-      !sameDueValue(activeQuickDraft.dueValue, currentTask.dueAt) ||
-      !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags) ||
-      (activeQuickDraft.subtaskOpen && activeQuickDraft.subtaskTitle.trim().length > 0));
-  const draftDirty = inlineDirty || quickDirty;
+    activeQuickDraft.nextColumnId !== currentColumnId;
+  const quickDueDirty =
+    currentTask !== null &&
+    activeQuickDraft !== null &&
+    !sameDueValue(activeQuickDraft.dueValue, currentTask.dueAt);
+  const quickTagsDirty =
+    currentTask !== null &&
+    activeQuickDraft !== null &&
+    !sameTagsValue(activeQuickDraft.tagsValue, currentTask.tags);
+  const quickSubtaskDirty =
+    activeQuickDraft !== null &&
+    activeQuickDraft.subtaskOpen &&
+    activeQuickDraft.subtaskTitle.trim().length > 0;
+
+  // onClose у ModalDialog публикуется effect-ом; под нагрузкой click может
+  // прийти со старой closure. Layout effect обновляет ref до passive effects
+  // ModalDialog, поэтому dirty-guard всегда актуален.
+  useLayoutEffect(() => {
+    dirtySnapshotRef.current = {
+      inline: inlineDirty,
+      column: quickColumnDirty,
+      due: quickDueDirty,
+      tags: quickTagsDirty,
+      subtask: quickSubtaskDirty,
+    };
+  }, [inlineDirty, quickColumnDirty, quickDueDirty, quickSubtaskDirty, quickTagsDirty]);
 
   useEffect(() => {
     if (taskId === null || !onKanbanRoute) {
@@ -490,6 +536,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     generationRef.current += 1;
     activeOperationRef.current = null;
     busyRef.current = false;
+    pendingEditRef.current = null;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBusy(false);
     setInlineSession(null);
@@ -501,6 +548,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   }, [taskId]);
 
   const closeNow = useCallback((): void => {
+    pendingEditRef.current = null;
     setCloseConfirm(false);
     setInlineSession(null);
     setInlineError(null);
@@ -513,13 +561,34 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   }, []);
 
   const requestClose = useCallback((): void => {
-    if (draftDirty) {
+    const pendingKind = pendingEditRef.current?.kind ?? null;
+    const dirty = dirtySnapshotRef.current;
+    const independentDirty =
+      (dirty.inline && pendingKind !== "inline") ||
+      (dirty.column && pendingKind !== "quick-column") ||
+      (dirty.due && pendingKind !== "quick-due") ||
+      (dirty.tags && pendingKind !== "quick-tags") ||
+      (dirty.subtask && pendingKind !== "subtask");
+
+    // Pending-команда владеет только своим полем. Если других несохранённых
+    // черновиков нет, закрываем без ложного confirm; иначе спрашиваем.
+    if (busyRef.current) {
+      if (independentDirty) {
+        setCloseConfirm(true);
+      } else {
+        closeNow();
+      }
+
+      return;
+    }
+
+    if (dirty.inline || dirty.column || dirty.due || dirty.tags || dirty.subtask) {
       setCloseConfirm(true);
       return;
     }
 
     closeNow();
-  }, [draftDirty, closeNow]);
+  }, [closeNow]);
 
   if (taskId === null || !onKanbanRoute) {
     return null;
@@ -589,6 +658,21 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
           setBusy(false);
         }
       }
+    }
+  };
+
+  const beginPendingEdit = (kind: PendingEditKind): number => {
+    const id = pendingEditIdRef.current + 1;
+
+    pendingEditIdRef.current = id;
+    pendingEditRef.current = { id, kind };
+
+    return id;
+  };
+
+  const endPendingEdit = (id: number): void => {
+    if (pendingEditRef.current?.id === id) {
+      pendingEditRef.current = null;
     }
   };
 
@@ -740,25 +824,30 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
     setInlineError(null);
 
-    const saved = await runCommand(
-      async (token) => {
-        await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
+    const pendingId = beginPendingEdit("inline");
 
-        if (generationRef.current === token.generation) {
-          setInlineSession((current) =>
-            current !== null && current.taskId === session.taskId ? null : current,
-          );
-        }
-      },
-      { conflictInlineTaskId: session.taskId },
-    );
+    try {
+      await runCommand(
+        async (token) => {
+          await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
 
-    if (saved) {
-      setCloseConfirm(false);
+          if (generationRef.current === token.generation) {
+            setInlineSession((current) =>
+              current !== null && current.taskId === session.taskId ? null : current,
+            );
+          }
+        },
+        { conflictInlineTaskId: session.taskId },
+      );
+    } finally {
+      endPendingEdit(pendingId);
     }
   };
 
-  const updateTask = async (patch: Partial<TaskUpdateInput>): Promise<void> => {
+  const updateTask = async (
+    patch: Partial<TaskUpdateInput>,
+    kind: PendingEditKind = "other",
+  ): Promise<void> => {
     if (currentTask === null) {
       return;
     }
@@ -769,9 +858,15 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       ...patch,
     };
 
-    await runCommand(async () => {
-      await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
-    });
+    const pendingId = beginPendingEdit(kind);
+
+    try {
+      await runCommand(async () => {
+        await invokeJson(invoke, TASKS_COMMAND_IDS.taskUpdate, input as unknown as JsonValue);
+      });
+    } finally {
+      endPendingEdit(pendingId);
+    }
   };
 
   const complete = (): void => {
@@ -784,8 +879,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       expectedVersion: currentTask.version,
     };
 
+    const pendingId = beginPendingEdit("quick-column");
+
     void runCommand(async () => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskComplete, input as unknown as JsonValue);
+    }).finally(() => {
+      endPendingEdit(pendingId);
     });
   };
 
@@ -801,8 +900,12 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
       position: 0,
     };
 
+    const pendingId = beginPendingEdit("quick-column");
+
     void runCommand(async () => {
       await invokeJson(invoke, TASKS_COMMAND_IDS.taskMove, input as unknown as JsonValue);
+    }).finally(() => {
+      endPendingEdit(pendingId);
     });
   };
 
@@ -811,11 +914,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   };
 
   const changeDue = (value: string): void => {
-    void updateTask({ dueAt: dateInputToDueAt(value, "start") });
+    void updateTask({ dueAt: dateInputToDueAt(value, "start") }, "quick-due");
   };
 
   const changeTags = (value: string): void => {
-    void updateTask({ tags: parseTagsInput(value) });
+    void updateTask({ tags: parseTagsInput(value) }, "quick-tags");
   };
 
   const remove = (): void => {
@@ -839,6 +942,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
   };
 
   const openTask = (nextTaskId: string): void => {
+    pendingEditRef.current = null;
     setCloseConfirm(false);
     setInlineSession(null);
     setInlineError(null);
@@ -883,6 +987,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     setCommandError(null);
     setConflictState(null);
 
+    const pendingId = beginPendingEdit("subtask");
+
     try {
       await invokeJson<TaskMutationOutput>(
         invoke,
@@ -918,6 +1024,8 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
 
       return false;
     } finally {
+      endPendingEdit(pendingId);
+
       if (activeOperationRef.current === token) {
         activeOperationRef.current = null;
         busyRef.current = false;

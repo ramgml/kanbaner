@@ -91,6 +91,52 @@ describe("KanbanCard", () => {
     expect(within(card).getByLabelText("Ещё тегов: 2")).toHaveTextContent("+2");
   });
 
+  it("показывает меню над заголовком во всю ширину без отдельной drag-ручки", () => {
+    renderCard(makeTask());
+
+    const menu = screen.getByTestId("kanban-menu-task-1");
+    const title = screen.getByTestId("kanban-open-task-1");
+    const checkbox = screen.getByRole("checkbox", { name: "Выбрать задачу Компактная карточка" });
+
+    expect(screen.queryByTestId("kanban-drag-task-1")).toBeNull();
+    expect(menu.parentElement?.nextElementSibling).toBe(title);
+    expect(menu.parentElement?.firstElementChild).toContainElement(checkbox);
+    expect(menu.parentElement?.lastElementChild).toBe(menu);
+    expect(title).toHaveClass("w-full");
+    expect(title).toHaveAttribute("data-card-drag-allow", "true");
+  });
+
+  it("даёт доступный чекбокс выбора, который не открывает карточку и не начинает drag", () => {
+    const onOpen = vi.fn();
+    const onDragStart = vi.fn();
+    const onBulkToggle = vi.fn();
+
+    renderCard(makeTask(), {
+      bulkSelected: true,
+      onOpen,
+      onDragStart,
+      onBulkToggle,
+    });
+
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Выбрать задачу Компактная карточка",
+    });
+    const hitTarget = screen.getByTestId("kanban-bulk-check-target-task-1");
+
+    expect(checkbox).toBeChecked();
+    expect(hitTarget).toHaveClass("min-h-10", "min-w-10");
+
+    fireEvent.pointerDown(checkbox, { clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: 80 });
+
+    expect(onDragStart).not.toHaveBeenCalled();
+
+    fireEvent.click(checkbox);
+
+    expect(onBulkToggle).toHaveBeenCalledWith(expect.objectContaining({ id: "task-1" }), false);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it("показывает компактный срок с доступным текстом и датой", () => {
     const today = new Date().toISOString().slice(0, 10);
     const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -201,15 +247,15 @@ describe("KanbanCard", () => {
     expect(screen.getByTestId("kanban-card-task-1")).toHaveAttribute("aria-busy", "true");
   });
 
-  it("сохраняет действия меню и drag handle доступными с клавиатуры", () => {
+  it("сохраняет открытие и действия меню доступными с клавиатуры", () => {
     renderCard(makeTask());
 
     expect(
       screen.getByRole("button", { name: "Открыть карточку задачи Компактная карточка" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Перетащить задачу Компактная карточка" }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Перетащить задачу Компактная карточка" }),
+    ).toBeNull();
 
     const trigger = screen.getByTestId("kanban-menu-task-1");
 

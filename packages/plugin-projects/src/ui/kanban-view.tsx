@@ -16,10 +16,12 @@ import {
   type TaskCreateInput,
   type TaskListInput,
   type TaskListOutput,
+  type TaskMoveManyOutput,
   type TaskMutationOutput,
 } from "@kanbaner/plugin-tasks/contract";
 import {
   LoadingState,
+  ModalDialog,
   createProjectFormValues,
   type ProjectFormValues,
   type UiOperationInvoker,
@@ -54,6 +56,10 @@ import {
   type Placement,
 } from "./board-state.ts";
 import {
+  BULK_REFRESH_FAILED_MESSAGE,
+  BULK_VERSION_CONFLICT_MESSAGE,
+  BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE,
+  KanbanOperationError,
   VERSION_CONFLICT_MESSAGE,
   errorMessage,
   invokeJson,
@@ -94,6 +100,9 @@ const CLICK_SUPPRESSION_MS = 400;
 
 const COLUMN_VERSION_CONFLICT_MESSAGE =
   "Колонка уже изменена в другом месте. Доска перечитана — проверьте порядок и повторите действие.";
+
+/** Результат перечитки доски для операций, которым важна свежесть версий. */
+type ReloadOutcome = "applied" | "failed" | "superseded";
 
 interface ColumnPage {
   readonly items: readonly Task[];
@@ -359,12 +368,26 @@ export function KanbanView({
   const [deleteCountError, setDeleteCountError] = useState<string | null>(null);
   const [columnNotice, setColumnNotice] = useState<string | null>(null);
 
+  const [bulkSelection, setBulkSelection] = useState<ReadonlyMap<string, Task>>(() => new Map());
+  const [bulkTargetId, setBulkTargetId] = useState("");
+  const [bulkPending, setBulkPending] = useState<"move" | "delete" | "refresh" | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+  const [bulkNeedsRefresh, setBulkNeedsRefresh] = useState(false);
+  const bulkBusy = bulkPending !== null;
+
   const columnsScrollRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const loadedCountsRef = useRef<Record<string, number>>({});
   const filterKeyRef = useRef<string>("\u0000");
   const filtersRef = useRef({ projectId: effectiveProjectId, tag: query.tag });
   const reloadSequenceRef = useRef(0);
+  const reloadBoardIdRef = useRef(0);
+  const boardReloadRef = useRef<{
+    readonly id: number;
+    readonly promise: Promise<ReloadOutcome>;
+  } | null>(null);
   const loadMoreSequenceRef = useRef<Record<string, number>>({});
   const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
@@ -385,6 +408,19 @@ export function KanbanView({
     readonly columnId: string;
     readonly targetId: string;
   } | null>(null);
+  /**
+   * Массовый выбор хранится как snapshot `Task` в порядке выбора.
+   *
+   * `Map` сохраняет порядок вставки, поэтому payload moveMany идёт в порядке
+   * кликов. Snapshot нужен для `expectedVersion` и не зависит от перерисовок.
+   */
+  const bulkSelectionRef = useRef<ReadonlyMap<string, Task>>(new Map());
+  const bulkGuardRef = useRef(false);
+  /** Монотонный токен: устаревший finally не снимает pending новой операции. */
+  const bulkRequestRef = useRef(0);
+  /** После неудачной перечитки повтор запрещён до успешного reload. */
+  const bulkNeedsRefreshRef = useRef(false);
+  const bulkFilterTagRef = useRef(query.tag);
 
   effectiveProjectIdRef.current = effectiveProjectId;
 
@@ -619,141 +655,285 @@ export function KanbanView({
     }
   };
 
-  const reloadBoard = useCallback(async (): Promise<void> => {
-    const filters = filtersRef.current;
+  const reloadBoard = useCallback((): Promise<ReloadOutcome> => {
+    const reloadId = reloadBoardIdRef.current + 1;
 
-    if (filters.projectId.length === 0) {
-      setColumns(createEmptyColumns());
-      setLoadedProjectId("");
+    reloadBoardIdRef.current = reloadId;
 
-      return;
-    }
+    const latestOutcome = async (): Promise<ReloadOutcome> => {
+      const latest = boardReloadRef.current;
 
-    const sequence = reloadSequenceRef.current + 1;
-    const filterKey = filterKeyRef.current;
-    const requirements = [...visibilityRef.current.values()].filter(
-      (requirement) => requirement.filterKey === filterKey,
-    );
+      if (latest !== null && latest.id !== reloadId) {
+        return await latest.promise;
+      }
 
-    reloadSequenceRef.current = sequence;
+      return "superseded";
+    };
 
-    let projectColumns: readonly TaskColumn[];
+    const run = async (): Promise<ReloadOutcome> => {
+      const filters = filtersRef.current;
 
-    try {
-      projectColumns = await fetchProjectColumns(invoke, filters.projectId);
-    } catch (loadError) {
-      if (reloadSequenceRef.current === sequence && filterKeyRef.current === filterKey) {
+      if (filters.projectId.length === 0) {
+        setColumns(createEmptyColumns());
+        setLoadedProjectId("");
+
+        return "applied";
+      }
+
+      const sequence = reloadSequenceRef.current + 1;
+      const filterKey = filterKeyRef.current;
+      const requirements = [...visibilityRef.current.values()].filter(
+        (requirement) => requirement.filterKey === filterKey,
+      );
+
+      reloadSequenceRef.current = sequence;
+
+      let projectColumns: readonly TaskColumn[];
+
+      try {
+        projectColumns = await fetchProjectColumns(invoke, filters.projectId);
+      } catch (loadError) {
+        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+          return await latestOutcome();
+        }
+
         setLoadedProjectId("");
         setError(errorMessage(loadError));
+
+        return "failed";
       }
 
-      return;
-    }
+      if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+        return await latestOutcome();
+      }
 
-    if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-      return;
-    }
+      const loadMoreGeneration = { ...loadMoreSequenceRef.current };
 
-    const loadMoreGeneration = { ...loadMoreSequenceRef.current };
+      for (const column of projectColumns) {
+        loadMoreGeneration[column.id] = (loadMoreGeneration[column.id] ?? 0) + 1;
+      }
 
-    for (const column of projectColumns) {
-      loadMoreGeneration[column.id] = (loadMoreGeneration[column.id] ?? 0) + 1;
-    }
+      loadMoreSequenceRef.current = loadMoreGeneration;
+      setColumns((current) => syncColumns(current, projectColumns));
+      setLoadedProjectId(filters.projectId);
 
-    loadMoreSequenceRef.current = loadMoreGeneration;
-    setColumns((current) => syncColumns(current, projectColumns));
-    setLoadedProjectId(filters.projectId);
-
-    const results = await Promise.all(
-      projectColumns.map(async (column) => {
-        const columnRequirements = requirements.filter(
-          (requirement) => requirement.columnId === column.id,
-        );
-        const requiredIds = columnRequirements.map((requirement) => requirement.taskId);
-        const requiredPosition =
-          columnRequirements.length === 0
-            ? 0
-            : Math.max(...columnRequirements.map((requirement) => requirement.position + 1));
-        const targetCount = Math.max(
-          loadedCountsRef.current[column.id] ?? KANBAN_PAGE_SIZE,
-          requiredPosition,
-        );
-
-        try {
-          const page = await fetchColumnPage(
-            invoke,
-            column.id,
-            filters.projectId,
-            filters.tag,
-            targetCount,
-            requiredIds,
+      const results = await Promise.all(
+        projectColumns.map(async (column) => {
+          const columnRequirements = requirements.filter(
+            (requirement) => requirement.columnId === column.id,
+          );
+          const requiredIds = columnRequirements.map((requirement) => requirement.taskId);
+          const requiredPosition =
+            columnRequirements.length === 0
+              ? 0
+              : Math.max(...columnRequirements.map((requirement) => requirement.position + 1));
+          const targetCount = Math.max(
+            loadedCountsRef.current[column.id] ?? KANBAN_PAGE_SIZE,
+            requiredPosition,
           );
 
-          return { columnId: column.id, page, error: null } as const;
-        } catch (loadError) {
-          return {
-            columnId: column.id,
-            page: null,
-            error: errorMessage(loadError),
-          } as const;
-        }
-      }),
-    );
+          try {
+            const page = await fetchColumnPage(
+              invoke,
+              column.id,
+              filters.projectId,
+              filters.tag,
+              targetCount,
+              requiredIds,
+            );
 
-    if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-      return;
-    }
+            return { columnId: column.id, page, error: null } as const;
+          } catch (loadError) {
+            return {
+              columnId: column.id,
+              page: null,
+              error: errorMessage(loadError),
+            } as const;
+          }
+        }),
+      );
 
-    for (const result of results) {
-      if (result.page === null) {
-        continue;
-      }
-
-      const loadedIds = new Set(result.page.items.map((task) => task.id));
-
-      for (const requirement of requirements) {
-        if (requirement.columnId === result.columnId && loadedIds.has(requirement.taskId)) {
-          visibilityRef.current.delete(requirement.taskId);
-        }
-      }
-    }
-
-    setColumns((current) => {
       if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-        return current;
+        return await latestOutcome();
       }
 
-      const byId = { ...current.byId };
+      let refreshComplete = results.every((result) => result.page !== null);
+
+      // Массовый выбор переживает обычный refresh: snapshot обновляется до
+      // актуальных версий, а исчезнувшие/скрытые задачи из выбора убираются.
+      if (bulkSelectionRef.current.size > 0) {
+        const normalizedTag = normalizeFilterTag(filters.tag);
+        const matchesActiveFilter = (task: Task): boolean =>
+          task.projectId === filters.projectId &&
+          (normalizedTag.length === 0 || task.tags.includes(normalizedTag));
+        const freshTasks = new Map<string, Task>();
+
+        for (const result of results) {
+          for (const task of result.page?.items ?? []) {
+            if (matchesActiveFilter(task)) {
+              freshTasks.set(task.id, task);
+            }
+          }
+        }
+
+        // Задача могла находиться за границей загруженной страницы после
+        // чужого move. Отдельный task.get отличает «ещё существует» от
+        // «удалена», не требуя полной перезагрузки всех страниц. Задача,
+        // переставшая соответствовать активному tag, тоже снимается.
+        const missingIds = [...bulkSelectionRef.current.keys()].filter((id) => !freshTasks.has(id));
+        const lookups = new Map<string, Task | null | undefined>();
+
+        if (missingIds.length > 0) {
+          const found = await Promise.all(
+            missingIds.map(async (id) => {
+              try {
+                const data = await invokeJson<{ readonly task: Task }>(
+                  invoke,
+                  TASKS_QUERY_IDS.taskGet,
+                  { id } as unknown as JsonValue,
+                );
+
+                return [id, matchesActiveFilter(data.task) ? data.task : null] as const;
+              } catch (lookupError) {
+                if (
+                  lookupError instanceof KanbanOperationError &&
+                  lookupError.code === "NOT_FOUND"
+                ) {
+                  return [id, null] as const;
+                }
+
+                // Временная ошибка не должна молча стирать выбор.
+                return [id, undefined] as const;
+              }
+            }),
+          );
+
+          for (const [id, task] of found) {
+            lookups.set(id, task);
+          }
+
+          if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+            return await latestOutcome();
+          }
+        }
+
+        const nextSelection = new Map<string, Task>();
+        let selectionChanged = false;
+
+        for (const [id, snapshot] of bulkSelectionRef.current) {
+          const fresh = freshTasks.get(id);
+          const lookup = lookups.get(id);
+
+          // Временная ошибка task.get: задача не найдена на странице, но её
+          // существование не опровергнуто — сохраняем прежний snapshot.
+          if (fresh === undefined && lookup === undefined) {
+            refreshComplete = false;
+            nextSelection.set(id, snapshot);
+
+            continue;
+          }
+
+          if (fresh === undefined && lookup === null) {
+            selectionChanged = true;
+
+            continue;
+          }
+
+          const resolved = fresh ?? lookup;
+
+          if (resolved === undefined || resolved === null) {
+            selectionChanged = true;
+
+            continue;
+          }
+
+          nextSelection.set(id, resolved);
+
+          if (resolved.version !== snapshot.version) {
+            selectionChanged = true;
+          }
+        }
+
+        if (selectionChanged) {
+          bulkSelectionRef.current = nextSelection;
+          setBulkSelection(nextSelection);
+
+          if (nextSelection.size === 0) {
+            // Нет payload для retry — скрытая блокировка не нужна.
+            bulkNeedsRefreshRef.current = false;
+            setBulkNeedsRefresh(false);
+            setBulkError(null);
+            setBulkDeleteOpen(false);
+            setBulkDeleteError(null);
+          }
+        }
+      }
 
       for (const result of results) {
-        const existing = current.byId[result.columnId];
-
-        if (existing === undefined) {
-          continue;
-        }
-
         if (result.page === null) {
-          byId[result.columnId] = { ...existing, loading: false, error: result.error };
-
           continue;
         }
 
-        loadedCountsRef.current[result.columnId] = Math.max(
-          KANBAN_PAGE_SIZE,
-          result.page.items.length,
-        );
-        byId[result.columnId] = {
-          ...existing,
-          items: result.page.items,
-          total: result.page.total,
-          nextOffset: result.page.nextOffset,
-          loading: false,
-          error: null,
-        };
+        const loadedIds = new Set(result.page.items.map((task) => task.id));
+
+        for (const requirement of requirements) {
+          if (requirement.columnId === result.columnId && loadedIds.has(requirement.taskId)) {
+            visibilityRef.current.delete(requirement.taskId);
+          }
+        }
       }
 
-      return { order: current.order, byId };
-    });
+      setColumns((current) => {
+        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+          return current;
+        }
+
+        const byId = { ...current.byId };
+
+        for (const result of results) {
+          const existing = current.byId[result.columnId];
+
+          if (existing === undefined) {
+            continue;
+          }
+
+          if (result.page === null) {
+            byId[result.columnId] = { ...existing, loading: false, error: result.error };
+
+            continue;
+          }
+
+          loadedCountsRef.current[result.columnId] = Math.max(
+            KANBAN_PAGE_SIZE,
+            result.page.items.length,
+          );
+          byId[result.columnId] = {
+            ...existing,
+            items: result.page.items,
+            total: result.page.total,
+            nextOffset: result.page.nextOffset,
+            loading: false,
+            error: null,
+          };
+        }
+
+        return { order: current.order, byId };
+      });
+
+      if (bulkNeedsRefreshRef.current && refreshComplete) {
+        bulkNeedsRefreshRef.current = false;
+        setBulkNeedsRefresh(false);
+        setBulkError(null);
+        setBulkDeleteError(null);
+      }
+
+      return refreshComplete ? "applied" : "failed";
+    };
+
+    const promise = run();
+    boardReloadRef.current = { id: reloadId, promise };
+
+    return promise;
   }, [invoke]);
 
   useEffect(() => {
@@ -768,6 +948,55 @@ export function KanbanView({
 
     void reloadBoard();
   }, [reloadBoard, effectiveProjectId, query.tag, query.revision]);
+
+  // Смена tag не должна оставлять в массовом выборе скрытые фильтром задачи:
+  // пользователь не видит их на доске, но действие затронуло бы.
+  useEffect(() => {
+    if (bulkFilterTagRef.current === query.tag) {
+      return;
+    }
+
+    bulkFilterTagRef.current = query.tag;
+
+    const tag = normalizeFilterTag(query.tag);
+    const current = bulkSelectionRef.current;
+    const next = new Map<string, Task>();
+
+    for (const [id, task] of current) {
+      if (tag.length === 0 || task.tags.includes(tag)) {
+        next.set(id, task);
+      }
+    }
+
+    if (next.size !== current.size) {
+      bulkSelectionRef.current = next;
+      setBulkSelection(next);
+    }
+
+    setBulkError(null);
+
+    if (next.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+    }
+  }, [query.tag]);
+
+  // Target обязан быть фактической колонкой текущего проекта.
+  useEffect(() => {
+    if (columnList.length === 0) {
+      if (bulkTargetId !== "") {
+        setBulkTargetId("");
+      }
+
+      return;
+    }
+
+    if (!columnList.some((column) => column.id === bulkTargetId)) {
+      setBulkTargetId(columnList[0]?.id ?? "");
+    }
+  }, [bulkTargetId, columnList]);
 
   // Первая фактическая колонка должна быть активной после загрузки/смены
   // проекта. Браузер иногда восстанавливает горизонтальный scroll контейнера
@@ -784,6 +1013,17 @@ export function KanbanView({
     deleteDialogRef.current = null;
     deleteDialogRequestRef.current += 1;
     deleteCountRequestRef.current += 1;
+    bulkSelectionRef.current = new Map();
+    bulkGuardRef.current = false;
+    bulkRequestRef.current += 1;
+    bulkNeedsRefreshRef.current = false;
+    setBulkNeedsRefresh(false);
+    setBulkSelection(new Map());
+    setBulkTargetId("");
+    setBulkPending(null);
+    setBulkError(null);
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
     placementsRef.current = new Map();
     pendingRef.current = new Set();
     visibilityRef.current.clear();
@@ -825,6 +1065,10 @@ export function KanbanView({
       deleteDialogRef.current = null;
       deleteDialogRequestRef.current += 1;
       deleteCountRequestRef.current += 1;
+      bulkGuardRef.current = false;
+      bulkRequestRef.current += 1;
+      bulkNeedsRefreshRef.current = false;
+      bulkSelectionRef.current = new Map();
     },
     [],
   );
@@ -1220,6 +1464,350 @@ export function KanbanView({
 
   const moveToColumn = (task: Task, columnId: string): void => {
     void moveTask(task, columnId, { kind: "append" }, { columnId, beforeId: null });
+  };
+
+  const toggleBulkSelection = (task: Task, checked: boolean): void => {
+    if (
+      bulkGuardRef.current ||
+      bulkNeedsRefreshRef.current ||
+      task.projectId !== effectiveProjectIdRef.current
+    ) {
+      return;
+    }
+
+    const next = new Map(bulkSelectionRef.current);
+
+    if (checked) {
+      // Повторный set существующего ключа не меняет порядок выбора, но
+      // обновляет snapshot версии.
+      next.set(task.id, task);
+    } else {
+      next.delete(task.id);
+    }
+
+    bulkSelectionRef.current = next;
+    setBulkSelection(next);
+    setBulkError(null);
+
+    if (next.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+    }
+  };
+
+  const clearBulkSelection = (): void => {
+    if (bulkGuardRef.current || bulkNeedsRefreshRef.current) {
+      return;
+    }
+
+    bulkSelectionRef.current = new Map();
+    setBulkSelection(new Map());
+    setBulkError(null);
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
+  };
+
+  /**
+   * Единая точка применения результата перечитки для массовых операций.
+   *
+   * Selection мог опустеть во время refresh (tag/удаление) — тогда скрытая
+   * блокировка без payload недопустима, даже если refresh завершился ошибкой.
+   */
+  const settleBulkRefresh = (outcome: ReloadOutcome): "cleared" | "applied" | "blocked" => {
+    if (bulkSelectionRef.current.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+      setBulkError(null);
+      setBulkDeleteError(null);
+      setBulkDeleteOpen(false);
+
+      return "cleared";
+    }
+
+    if (outcome === "applied") {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
+
+      return "applied";
+    }
+
+    bulkNeedsRefreshRef.current = true;
+    setBulkNeedsRefresh(true);
+
+    return "blocked";
+  };
+
+  const bulkMove = async (): Promise<void> => {
+    if (
+      bulkGuardRef.current ||
+      bulkNeedsRefreshRef.current ||
+      bulkSelectionRef.current.size === 0
+    ) {
+      return;
+    }
+
+    const target = currentColumn(bulkTargetId);
+
+    if (target === null) {
+      setBulkError("Выберите существующую колонку текущего проекта");
+      return;
+    }
+
+    if (bulkSelectionRef.current.size > MAX_LIST_LIMIT) {
+      setBulkError(`За один раз можно переместить не больше ${String(MAX_LIST_LIMIT)} задач`);
+      return;
+    }
+
+    const context = operationContext();
+    const items = [...bulkSelectionRef.current.values()].map((task) => ({
+      id: task.id,
+      expectedVersion: task.version,
+    }));
+
+    bulkGuardRef.current = true;
+    const request = bulkRequestRef.current + 1;
+
+    bulkRequestRef.current = request;
+    setBulkPending("move");
+    setBulkError(null);
+
+    try {
+      // Порядок items — порядок выбора; target append выполняет домен.
+      const data = await invokeJson<TaskMoveManyOutput>(invoke, TASKS_COMMAND_IDS.taskMoveMany, {
+        items,
+        columnId: target.id,
+      } as unknown as JsonValue);
+
+      if (!isOperationCurrent(context) || currentColumn(target.id) === null) {
+        return;
+      }
+
+      // Фактические positions из ответа важны для append за границей
+      // загруженной страницы и для same-column append. Регистрируем их до
+      // reload так же, как single move, но только для задач, которые всё ещё
+      // видны под активным tag: иначе смена фильтра во время pending оставит
+      // лишние required IDs и полную догрузку.
+      const filterKey = filterKeyRef.current;
+      const activeTag = normalizeFilterTag(filtersRef.current.tag);
+
+      for (const moved of data.tasks) {
+        if (
+          moved.projectId !== context.projectId ||
+          (activeTag.length > 0 && !moved.tags.includes(activeTag))
+        ) {
+          continue;
+        }
+
+        loadedCountsRef.current[target.id] = Math.max(
+          loadedCountsRef.current[target.id] ?? KANBAN_PAGE_SIZE,
+          moved.position + 1,
+        );
+        visibilityRef.current.set(moved.id, {
+          taskId: moved.id,
+          columnId: target.id,
+          position: moved.position,
+          filterKey,
+        });
+      }
+
+      bulkSelectionRef.current = new Map();
+      setBulkSelection(new Map());
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bumpKanbanRevision();
+    } catch (commandError) {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      // Даже обычная ошибка перечитывает доску: повтор должен использовать
+      // актуальные версии, а исчезнувшие задачи — выпасть из выбора.
+      const refreshed = await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      const status = settleBulkRefresh(refreshed);
+
+      if (status === "cleared") {
+        return;
+      }
+
+      setBulkError(
+        status === "blocked"
+          ? isVersionConflict(commandError)
+            ? BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE
+            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`
+          : isVersionConflict(commandError)
+            ? BULK_VERSION_CONFLICT_MESSAGE
+            : errorMessage(commandError),
+      );
+    } finally {
+      if (bulkRequestRef.current === request) {
+        bulkGuardRef.current = false;
+        setBulkPending(null);
+      }
+    }
+  };
+
+  const retryBulkRefresh = async (): Promise<void> => {
+    if (bulkGuardRef.current || !bulkNeedsRefreshRef.current) {
+      return;
+    }
+
+    const context = operationContext();
+    const request = bulkRequestRef.current + 1;
+
+    bulkRequestRef.current = request;
+    bulkGuardRef.current = true;
+    setBulkPending("refresh");
+    setBulkError(null);
+
+    try {
+      const refreshed = await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      const status = settleBulkRefresh(refreshed);
+
+      if (status === "cleared") {
+        return;
+      }
+
+      if (status === "blocked") {
+        setBulkError(BULK_REFRESH_FAILED_MESSAGE);
+        setBulkDeleteError(BULK_REFRESH_FAILED_MESSAGE);
+
+        return;
+      }
+
+      setBulkError(null);
+      setBulkDeleteError(null);
+    } finally {
+      if (bulkRequestRef.current === request) {
+        bulkGuardRef.current = false;
+        setBulkPending(null);
+      }
+    }
+  };
+
+  const openBulkDelete = (): void => {
+    if (
+      bulkGuardRef.current ||
+      bulkNeedsRefreshRef.current ||
+      bulkSelectionRef.current.size === 0
+    ) {
+      return;
+    }
+
+    setBulkDeleteError(null);
+    setBulkDeleteOpen(true);
+  };
+
+  const cancelBulkDelete = (): void => {
+    if (bulkGuardRef.current) {
+      return;
+    }
+
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
+  };
+
+  const confirmBulkDelete = async (): Promise<void> => {
+    if (
+      bulkGuardRef.current ||
+      bulkNeedsRefreshRef.current ||
+      bulkSelectionRef.current.size === 0
+    ) {
+      return;
+    }
+
+    if (bulkSelectionRef.current.size > MAX_LIST_LIMIT) {
+      setBulkDeleteError(`За один раз можно удалить не больше ${String(MAX_LIST_LIMIT)} задач`);
+
+      return;
+    }
+
+    const context = operationContext();
+    const items = [...bulkSelectionRef.current.values()].map((task) => ({
+      id: task.id,
+      expectedVersion: task.version,
+    }));
+
+    bulkGuardRef.current = true;
+    const request = bulkRequestRef.current + 1;
+
+    bulkRequestRef.current = request;
+    setBulkPending("delete");
+    setBulkDeleteError(null);
+
+    try {
+      await invokeJson(invoke, TASKS_COMMAND_IDS.taskDeleteMany, {
+        items,
+        confirm: true,
+      } as unknown as JsonValue);
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bulkSelectionRef.current = new Map();
+      setBulkSelection(new Map());
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+      setBulkError(null);
+
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bumpKanbanRevision();
+    } catch (commandError) {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      const refreshed = await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      const status = settleBulkRefresh(refreshed);
+
+      if (status === "cleared") {
+        return;
+      }
+
+      setBulkDeleteError(
+        status === "blocked"
+          ? isVersionConflict(commandError)
+            ? BULK_VERSION_CONFLICT_REFRESH_FAILED_MESSAGE
+            : `${errorMessage(commandError)} ${BULK_REFRESH_FAILED_MESSAGE}`
+          : isVersionConflict(commandError)
+            ? BULK_VERSION_CONFLICT_MESSAGE
+            : errorMessage(commandError),
+      );
+    } finally {
+      if (bulkRequestRef.current === request) {
+        bulkGuardRef.current = false;
+        setBulkPending(null);
+      }
+    }
   };
 
   const reorder = (task: Task, kind: KanbanReorderKind): void => {
@@ -2425,6 +3013,109 @@ export function KanbanView({
             ) : null}
           </form>
 
+          {bulkSelection.size === 0 ? null : (
+            <section
+              data-testid="kanban-bulk-bar"
+              aria-label="Массовые действия"
+              aria-busy={bulkBusy}
+              className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-background/85 px-2.5 py-2"
+            >
+              <p
+                data-testid="kanban-bulk-count"
+                role="status"
+                className="m-0 text-sm font-medium whitespace-nowrap"
+              >
+                Выбрано {bulkSelection.size}
+              </p>
+
+              <label className="flex w-full min-w-0 flex-col gap-0.5 text-[11px] text-muted-foreground sm:w-auto sm:flex-row sm:items-center sm:gap-1">
+                <span className="whitespace-nowrap">Колонка</span>
+                <select
+                  data-testid="kanban-bulk-target"
+                  aria-label="Колонка назначения"
+                  value={bulkTargetId}
+                  disabled={bulkBusy || bulkNeedsRefresh || columnList.length === 0}
+                  onChange={(event) => {
+                    setBulkTargetId(event.target.value);
+                    setBulkError(null);
+                  }}
+                  className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 sm:w-auto xl:h-8"
+                >
+                  {columnList.map((column) => (
+                    <option key={column.id} value={column.id}>
+                      {column.title}
+                      {column.status === "done" ? " (Done)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-move"
+                  disabled={bulkBusy || bulkNeedsRefresh || bulkTargetId.length === 0}
+                  aria-busy={bulkPending === "move"}
+                  onClick={() => {
+                    void bulkMove();
+                  }}
+                  className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {bulkPending === "move" ? "Перемещение…" : "Переместить"}
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-delete"
+                  disabled={bulkBusy || bulkNeedsRefresh}
+                  onClick={openBulkDelete}
+                  className="inline-flex min-h-10 items-center rounded-md border border-destructive/40 px-3 text-sm font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Удалить
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-clear"
+                  disabled={bulkBusy || bulkNeedsRefresh}
+                  onClick={clearBulkSelection}
+                  className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Снять выбор
+                </button>
+              </div>
+
+              {bulkError === null && !bulkNeedsRefresh ? null : (
+                <div className="flex basis-full flex-wrap items-center gap-2">
+                  {bulkError === null ? null : (
+                    <p
+                      role="alert"
+                      data-testid="kanban-bulk-error"
+                      className="m-0 min-w-0 flex-1 text-xs font-medium text-destructive"
+                    >
+                      {bulkError}
+                    </p>
+                  )}
+
+                  {bulkNeedsRefresh ? (
+                    <button
+                      type="button"
+                      data-testid="kanban-bulk-refresh"
+                      disabled={bulkBusy}
+                      aria-busy={bulkPending === "refresh"}
+                      onClick={() => {
+                        void retryBulkRefresh();
+                      }}
+                      className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                    >
+                      {bulkPending === "refresh" ? "Обновление…" : "Обновить доску"}
+                    </button>
+                  ) : null}
+                </div>
+              )}
+            </section>
+          )}
+
           {hasFilters && boardSettled && visibleTotal === 0 ? (
             <div
               data-testid="kanban-empty-filter"
@@ -2589,6 +3280,9 @@ export function KanbanView({
                           pending={pending.has(task.id)}
                           conflict={conflicts.has(task.id)}
                           dragging={draggingId === task.id}
+                          bulkSelected={bulkSelection.has(task.id)}
+                          bulkDisabled={bulkBusy || bulkNeedsRefresh}
+                          onBulkToggle={toggleBulkSelection}
                           onOpen={(openedTask) => {
                             updateKanbanQuery({ taskId: openedTask.id });
                           }}
@@ -2682,6 +3376,83 @@ export function KanbanView({
           }}
           onCancel={cancelDeleteColumn}
         />
+      )}
+
+      {!bulkDeleteOpen ? null : (
+        <ModalDialog
+          open
+          label="Удалить выбранные задачи"
+          testId="kanban-bulk-delete-dialog"
+          onClose={cancelBulkDelete}
+          className="m-auto w-[calc(100vw-2rem)] max-w-[30rem] rounded-xl border border-border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/45"
+        >
+          <div className="flex flex-col gap-3 p-4">
+            <div className="flex flex-col gap-1">
+              <h2 className="m-0 text-base font-semibold">Удалить выбранные задачи?</h2>
+              <p className="m-0 text-xs text-muted-foreground">
+                Действие нельзя отменить. Задачи будут удалены вместе с подзадачами.
+              </p>
+            </div>
+
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs">
+              <p className="m-0 font-medium text-destructive">
+                Выбрано задач:{" "}
+                <span data-testid="kanban-bulk-delete-count">{bulkSelection.size}</span>
+              </p>
+              <p className="m-0 text-destructive">
+                Подзадачи в это число не входят — они удалятся каскадом.
+              </p>
+            </div>
+
+            {bulkDeleteError === null ? null : (
+              <p
+                role="alert"
+                data-testid="kanban-bulk-delete-error"
+                className="m-0 text-xs text-destructive"
+              >
+                {bulkDeleteError}
+              </p>
+            )}
+
+            {bulkNeedsRefresh ? (
+              <button
+                type="button"
+                data-testid="kanban-bulk-delete-refresh"
+                disabled={bulkBusy}
+                onClick={() => {
+                  void retryBulkRefresh();
+                }}
+                className="inline-flex min-h-10 items-center self-start rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+              >
+                {bulkPending === "refresh" ? "Обновление…" : "Обновить доску"}
+              </button>
+            ) : null}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                data-testid="kanban-bulk-delete-cancel"
+                disabled={bulkBusy}
+                onClick={cancelBulkDelete}
+                className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                data-testid="kanban-bulk-delete-confirm"
+                disabled={bulkBusy || bulkNeedsRefresh || bulkSelection.size === 0}
+                aria-busy={bulkPending === "delete"}
+                onClick={() => {
+                  void confirmBulkDelete();
+                }}
+                className="inline-flex min-h-10 items-center rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {bulkPending === "delete" ? "Удаление…" : "Удалить задачи"}
+              </button>
+            </div>
+          </div>
+        </ModalDialog>
       )}
     </div>
   );
