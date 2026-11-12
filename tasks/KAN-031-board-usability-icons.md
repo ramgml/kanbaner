@@ -1,7 +1,7 @@
 ---
 id: KAN-031
 title: Меню колонки, inline-редакторы и иконки
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-031
@@ -60,6 +60,7 @@ specs:
 - `packages/plugin-projects/**`;
 - `apps/web/e2e/kanban.spec.ts`;
 - `pnpm-lock.yaml` — только регистрация существующего `lucide-react` в пакете;
+- `scripts/check-import-boundaries.mjs` — только allowlist `lucide-react` для UI-плагина;
 - `tasks/reports/KAN-031.md`.
 
 Запрещено:
@@ -99,6 +100,9 @@ specs:
 
 - 2026-11-12 — Задача создана; исходная UX-база зафиксирована коммитом `6d57cf2`.
 - 2026-11-12 — Назначены worker и worktree, задача взята в работу.
+- 2026-11-12 — Коммит `496cef4`, проверки зелёные, задача переведена в review.
+  Allowlist Lucide в `scripts/check-import-boundaries.mjs` принят оркестратором
+  как необходимая часть задачи.
 
 ## Итог
 
