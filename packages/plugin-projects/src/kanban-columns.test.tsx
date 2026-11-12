@@ -1854,6 +1854,173 @@ describe("цвета колонок в KanbanView", () => {
     expect(updates).toHaveLength(1);
   });
 
+  it("color pending блокирует move и DnD той же колонки", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    const colorUpdates: Array<Record<string, unknown>> = [];
+    let resolveColor: ((value: UiOperationResult) => void) | null = null;
+    const operations = renderBoard(board, {
+      "kanbaner.tasks.column.update": (input) => {
+        colorUpdates.push(inputOf(input));
+
+        return new Promise<UiOperationResult>((resolve) => {
+          resolveColor = resolve;
+        });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+
+    const todo = board.columns[0] as TaskColumn;
+    const target = document.querySelector<HTMLElement>(
+      '[data-kanban-column-id="column-project-1-in-progress"]',
+    );
+    const originalElementFromPoint = document.elementFromPoint;
+
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => target,
+    });
+
+    try {
+      await openMenu(todo.id, "todo");
+      fireEvent.click(screen.getByTestId("kanban-column-color-todo-blue"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("kanban-column-todo")).toHaveAttribute("aria-busy", "true");
+      });
+
+      const moveRight = screen.getByTestId("kanban-column-move-right-todo");
+      const dragHandle = screen.getByTestId("kanban-column-drag-todo");
+
+      expect(moveRight).toBeDisabled();
+      expect(dragHandle).toBeDisabled();
+      fireEvent.click(moveRight);
+
+      // Даже если disabled-состояние ещё не успело визуально обновиться,
+      // pointerdown drag handle не должен начать reorder.
+      fireEvent.pointerDown(dragHandle, {
+        pointerId: 1,
+        pointerType: "mouse",
+        button: 0,
+        clientX: 10,
+        clientY: 10,
+        isPrimary: true,
+      });
+      fireEvent.pointerMove(window, { clientX: 400, clientY: 100 });
+      fireEvent.pointerUp(window, { clientX: 400, clientY: 100 });
+
+      expect(
+        operations.calls.filter((call) => call.operationId === "kanbaner.tasks.column.move"),
+      ).toHaveLength(0);
+      expect(colorUpdates).toHaveLength(1);
+    } finally {
+      Object.defineProperty(document, "elementFromPoint", {
+        configurable: true,
+        value: originalElementFromPoint,
+      });
+    }
+
+    const updated: TaskColumn = { ...todo, color: "blue", version: todo.version + 1 };
+
+    board.columns[0] = updated;
+
+    await act(async () => {
+      resolveColor?.(ok({ column: updated, resource: {}, eventId: "event" }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-todo")).toHaveAttribute("aria-busy", "false");
+    });
+  });
+
+  it("move pending блокирует color той же колонки", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    const colorUpdates: Array<Record<string, unknown>> = [];
+    const moveUpdates: Array<Record<string, unknown>> = [];
+    let resolveMove: ((value: UiOperationResult) => void) | null = null;
+
+    const operations = renderBoard(board, {
+      "kanbaner.tasks.column.move": (input) => {
+        moveUpdates.push(inputOf(input));
+
+        return new Promise<UiOperationResult>((resolve) => {
+          resolveMove = resolve;
+        });
+      },
+      "kanbaner.tasks.column.update": (input) => {
+        const values = inputOf(input);
+
+        colorUpdates.push(values);
+
+        const index = board.columns.findIndex((column) => column.id === values.id);
+        const current = board.columns[index];
+
+        if (current === undefined) {
+          return fail("NOT_FOUND");
+        }
+
+        const updated: TaskColumn = {
+          ...current,
+          color: values.color as NonNullable<TaskColumn["color"]>,
+          version: current.version + 1,
+        };
+
+        board.columns[index] = updated;
+
+        return ok({ column: updated, resource: {}, eventId: "event" });
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+
+    const todo = board.columns[0] as TaskColumn;
+
+    await openMenu(todo.id, "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-move-right-todo"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-todo")).toHaveAttribute("aria-busy", "true");
+    });
+    expect(moveUpdates).toHaveLength(1);
+
+    await openMenu(todo.id, "todo");
+
+    const color = screen.getByTestId("kanban-column-color-todo-green");
+
+    expect(color).toBeDisabled();
+    expect(screen.getByTestId("kanban-column-rename-todo")).toBeDisabled();
+    fireEvent.click(color);
+    expect(colorUpdates).toHaveLength(0);
+
+    await act(async () => {
+      resolveMove?.(
+        ok({
+          column: { ...todo, version: todo.version + 1 },
+          resource: {},
+          eventId: "event",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-todo")).toHaveAttribute("aria-busy", "false");
+    });
+
+    await openMenu(todo.id, "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-color-todo-green"));
+
+    await waitFor(() => {
+      expect(colorUpdates).toHaveLength(1);
+    });
+    expect(
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.column.move"),
+    ).toHaveLength(1);
+  });
+
   it("сообщает, что цвет сохранён, но список колонок не обновлён", async () => {
     const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
     let listCalls = 0;

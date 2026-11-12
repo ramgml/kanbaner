@@ -401,10 +401,12 @@ export function KanbanView({
   const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
   const pendingRef = useRef<ReadonlySet<string>>(new Set());
+  const columnPendingRef = useRef<ReadonlySet<string>>(new Set());
   const columnColorPendingRef = useRef<ReadonlySet<string>>(new Set());
   const columnsRef = useRef<KanbanColumns>(columns);
   const submitGuardRef = useRef(false);
   const renameGuardRef = useRef(false);
+  const renamingColumnIdRef = useRef<string | null>(null);
   const deleteGuardRef = useRef(false);
   const deleteCountRequestRef = useRef(0);
   const deleteDialogRequestRef = useRef(0);
@@ -449,6 +451,18 @@ export function KanbanView({
 
     return data !== undefined && data.column.projectId === effectiveProjectId ? data.column : null;
   };
+
+  /**
+   * Синхронный guard операций над одной колонкой.
+   *
+   * Rename, move и color меняют одну и ту же версию строки. Проверки только по
+   * React state пропускают вторую команду до перерисовки, поэтому все пути
+   * (кнопки, drag handle и DnD) обязаны смотреть на refs, а не на state.
+   */
+  const isColumnOperationPending = (columnId: string): boolean =>
+    columnPendingRef.current.has(columnId) ||
+    columnColorPendingRef.current.has(columnId) ||
+    (renameGuardRef.current && renamingColumnIdRef.current === columnId);
 
   const operationContext = (): { readonly projectId: string; readonly generation: number } => ({
     projectId: effectiveProjectIdRef.current,
@@ -1044,6 +1058,7 @@ export function KanbanView({
     setDraggingId(null);
     setDragOver(null);
     setColumnPending(new Set());
+    columnPendingRef.current = new Set();
     setColumnConflicts(new Set());
     columnColorPendingRef.current = new Set();
     setColumnColorPending(new Set());
@@ -1051,6 +1066,7 @@ export function KanbanView({
     setColumnDraggingId(null);
     setColumnDragOver(null);
     setRenamingColumnId(null);
+    renamingColumnIdRef.current = null;
     setRenameError(null);
     setDeletingColumnId(null);
     setDeleteError(null);
@@ -2284,17 +2300,16 @@ export function KanbanView({
   };
 
   const setColumnPendingCard = (columnId: string, value: boolean): void => {
-    setColumnPending((current) => {
-      const next = new Set(current);
+    const next = new Set(columnPendingRef.current);
 
-      if (value) {
-        next.add(columnId);
-      } else {
-        next.delete(columnId);
-      }
+    if (value) {
+      next.add(columnId);
+    } else {
+      next.delete(columnId);
+    }
 
-      return next;
-    });
+    columnPendingRef.current = next;
+    setColumnPending(next);
   };
 
   const setColumnConflict = (columnId: string, value: boolean): void => {
@@ -2339,11 +2354,7 @@ export function KanbanView({
   const submitColumnColor = async (column: TaskColumn, color: BoardColor): Promise<void> => {
     const context = operationContext();
 
-    if (
-      currentColumn(column.id) === null ||
-      columnColorPendingRef.current.has(column.id) ||
-      columnPending.has(column.id)
-    ) {
+    if (currentColumn(column.id) === null || isColumnOperationPending(column.id)) {
       return;
     }
 
@@ -2417,7 +2428,7 @@ export function KanbanView({
   };
 
   const moveColumnToIndex = async (column: TaskColumn, targetIndex: number): Promise<void> => {
-    if (columnPending.has(column.id) || currentColumn(column.id) === null) {
+    if (currentColumn(column.id) === null || isColumnOperationPending(column.id)) {
       return;
     }
 
@@ -2498,7 +2509,7 @@ export function KanbanView({
   };
 
   const startColumnDrag = (column: TaskColumn, event: ReactPointerEvent<HTMLElement>): void => {
-    if (currentColumn(column.id) === null) {
+    if (currentColumn(column.id) === null || isColumnOperationPending(column.id)) {
       return;
     }
 
@@ -2590,10 +2601,11 @@ export function KanbanView({
   };
 
   const startRenameColumn = (column: TaskColumn): void => {
-    if (currentColumn(column.id) === null) {
+    if (currentColumn(column.id) === null || isColumnOperationPending(column.id)) {
       return;
     }
 
+    renamingColumnIdRef.current = column.id;
     setRenamingColumnId(column.id);
     setRenameValue(column.title);
     setRenameError(null);
@@ -2605,6 +2617,7 @@ export function KanbanView({
       return;
     }
 
+    renamingColumnIdRef.current = null;
     setRenamingColumnId(null);
     setRenameError(null);
   };
@@ -2617,8 +2630,13 @@ export function KanbanView({
     const column = currentColumn(renamingColumnId);
 
     if (column === null) {
+      renamingColumnIdRef.current = null;
       setRenamingColumnId(null);
 
+      return;
+    }
+
+    if (isColumnOperationPending(column.id)) {
       return;
     }
 
@@ -2630,6 +2648,7 @@ export function KanbanView({
     }
 
     if (title === column.title) {
+      renamingColumnIdRef.current = null;
       setRenamingColumnId(null);
       setRenameError(null);
 
@@ -2690,6 +2709,11 @@ export function KanbanView({
       }
     } finally {
       renameGuardRef.current = false;
+
+      if (renamingColumnIdRef.current === column.id) {
+        renamingColumnIdRef.current = null;
+      }
+
       setRenameSubmitting(false);
     }
   };
@@ -2724,7 +2748,7 @@ export function KanbanView({
   };
 
   const openDeleteColumn = (column: TaskColumn): void => {
-    if (currentColumn(column.id) === null) {
+    if (currentColumn(column.id) === null || isColumnOperationPending(column.id)) {
       return;
     }
 
@@ -2774,6 +2798,10 @@ export function KanbanView({
     if (column === null) {
       setDeletingColumnId(null);
 
+      return;
+    }
+
+    if (isColumnOperationPending(column.id)) {
       return;
     }
 

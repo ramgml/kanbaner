@@ -2132,6 +2132,285 @@ describe("Цвет доски в настройках", () => {
     );
   });
 
+  it("при title-конфликте сохраняет dirty title и принимает свежий цвет", async () => {
+    let project: Project = makeProject("project-1", "Релиз");
+    const expectedVersions: number[] = [];
+    let conflict = true;
+    let listCalls = 0;
+
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(projectList(project));
+        }
+
+        // Другая вкладка одновременно изменила title и color.
+        project = { ...project, title: "Чужое название", color: "green", version: 2 };
+
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId !== "kanbaner.tasks.project.update") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+
+      expectedVersions.push(Number(values.expectedVersion));
+
+      if (conflict) {
+        conflict = false;
+
+        return {
+          ok: false,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "Версия проекта устарела",
+            retryable: false,
+          },
+        };
+      }
+
+      project = {
+        ...project,
+        title: String(values.title),
+        version: project.version + 1,
+      };
+
+      return ok(projectMutation(project) as unknown as JsonValue);
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    const input = screen.getByTestId("project-settings-title-input");
+
+    fireEvent.change(input, { target: { value: "Моё название" } });
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-title-error")).toHaveTextContent(
+        "Проект уже изменён в другом месте",
+      );
+    });
+
+    // Dirty title не затёрт чужим значением, а независимый color-adopt
+    // получил свежий snapshot из того же loadCurrentProject.
+    expect(input).toHaveValue("Моё название");
+    expect(screen.getByTestId("project-settings-color-green")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("project-settings-color-red")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    fireEvent.click(screen.getByTestId("project-settings-title-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-title-notice")).toHaveTextContent(
+        "Название проекта сохранено",
+      );
+    });
+    expect(expectedVersions).toEqual([1, 2]);
+  });
+
+  it("при color-конфликте сохраняет dirty color и принимает свежий title", async () => {
+    let project: Project = makeProject("project-1", "Релиз");
+    const expectedVersions: number[] = [];
+    let conflict = true;
+    let listCalls = 0;
+
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        listCalls += 1;
+
+        if (listCalls === 1) {
+          return ok(projectList(project));
+        }
+
+        // Другая вкладка одновременно изменила title и color.
+        project = { ...project, title: "Чужое название", color: "green", version: 2 };
+
+        return ok(projectList(project));
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId !== "kanbaner.tasks.project.update") {
+        return ok(null);
+      }
+
+      const values = inputOf(input);
+
+      expectedVersions.push(Number(values.expectedVersion));
+
+      if (conflict) {
+        conflict = false;
+
+        return {
+          ok: false,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "Версия проекта устарела",
+            retryable: false,
+          },
+        };
+      }
+
+      project = {
+        ...project,
+        color: values.color as NonNullable<Project["color"]>,
+        version: project.version + 1,
+      };
+
+      return ok(projectMutation(project) as unknown as JsonValue);
+    };
+
+    render(<ProjectSettingsButton invoke={invoke} project={project} />);
+    await openSettings();
+
+    fireEvent.click(screen.getByTestId("project-settings-color-red"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-color-error")).toHaveTextContent(
+        "Проект уже изменён в другом месте",
+      );
+    });
+
+    // Dirty color остаётся выбранным, а не-dirty title принимает свежее
+    // значение из того же fresh snapshot.
+    expect(screen.getByTestId("project-settings-color-red")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("project-settings-color-green")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByTestId("project-settings-title-input")).toHaveValue("Чужое название");
+
+    fireEvent.click(screen.getByTestId("project-settings-color-red"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-color-notice")).toHaveTextContent(
+        "Цвет доски сохранён",
+      );
+    });
+    expect(expectedVersions).toEqual([1, 2]);
+  });
+
+  it("не снимает pending новой color-операции после A → B → A", async () => {
+    const firstProject = makeProject("project-1", "Первый");
+    const secondProject = makeProject("project-2", "Второй");
+    let updateCalls = 0;
+    let resolveOld!: (value: UiOperationResult) => void;
+    let resolveNew!: (value: UiOperationResult) => void;
+    const oldSave = new Promise<UiOperationResult>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newSave = new Promise<UiOperationResult>((resolve) => {
+      resolveNew = resolve;
+    });
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        return ok({
+          items: [firstProject, secondProject],
+          total: 2,
+          nextOffset: null,
+        } as unknown as JsonValue);
+      }
+
+      if (operationId === "kanbaner.tasks.column.list") {
+        return ok(columnList([]));
+      }
+
+      if (operationId !== "kanbaner.tasks.project.update") {
+        return ok(null);
+      }
+
+      updateCalls += 1;
+
+      return updateCalls === 1 ? oldSave : newSave;
+    };
+
+    const view = render(<ProjectSettingsButton invoke={invoke} project={firstProject} />);
+    await openSettings();
+
+    fireEvent.click(screen.getByTestId("project-settings-color-blue"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-color-pending")).toBeVisible();
+    });
+
+    // A → B: смена проекта закрывает настройки, не дожидаясь старой операции.
+    view.rerender(<ProjectSettingsButton invoke={invoke} project={secondProject} />);
+    await waitFor(() => {
+      expect(screen.queryByTestId("project-settings-dialog")).toBeNull();
+    });
+
+    // B → A: новая операция той же project-сущности.
+    view.rerender(<ProjectSettingsButton invoke={invoke} project={firstProject} />);
+    await openSettings();
+    fireEvent.click(screen.getByTestId("project-settings-color-green"));
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-color-pending")).toBeVisible();
+    });
+
+    await act(async () => {
+      resolveOld(
+        ok(
+          projectMutation({
+            ...firstProject,
+            color: "blue",
+            version: 2,
+          }) as unknown as JsonValue,
+        ),
+      );
+      await oldSave;
+    });
+
+    // Устаревший finally A не снимает pending B: закрытие всё ещё недоступно.
+    expect(screen.getByTestId("project-settings-color-pending")).toBeVisible();
+    expect(screen.getByTestId("project-settings-color-blue")).toBeDisabled();
+    expect(screen.getByTestId("project-settings-done")).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("project-settings-done"));
+    expect(screen.getByTestId("project-settings-dialog")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveNew(
+        ok(
+          projectMutation({
+            ...firstProject,
+            color: "green",
+            version: 3,
+          }) as unknown as JsonValue,
+        ),
+      );
+      await newSave;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-settings-color-notice")).toHaveTextContent(
+        "Цвет доски сохранён",
+      );
+    });
+    expect(screen.getByTestId("project-settings-color-green")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("project-settings-done")).toBeEnabled();
+  });
+
   it("показывает pending цвета и не отправляет повторную команду", async () => {
     const project = makeProject("project-1", "Релиз");
     const updates: Array<Record<string, unknown>> = [];

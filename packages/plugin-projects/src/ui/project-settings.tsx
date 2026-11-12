@@ -227,6 +227,16 @@ export function ProjectSettingsButton({
   const projectGuardRef = useRef(false);
   const projectColorGuardRef = useRef(false);
   const projectOperationRef = useRef(0);
+  /**
+   * Монотонный владелец color-операции: устаревший finally не должен снимать
+   * guard операции, начатой после close → reopen или смены проекта.
+   */
+  const projectColorOperationRef = useRef(0);
+  /** Актуальные draft/snapshot без ожидания React state в async-ответах. */
+  const projectTitleDraftRef = useRef(project.title);
+  const savedProjectTitleRef = useRef(project.title);
+  const projectColorDraftRef = useRef<BoardColor>(resolveBoardColor(project.color));
+  const savedProjectColorRef = useRef<BoardColor>(resolveBoardColor(project.color));
   const projectIdRef = useRef(project.id);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -286,14 +296,34 @@ export function ProjectSettingsButton({
     setColumnNotices((current) => ({ ...current, [columnId]: message }));
   };
 
+  /**
+   * Применяет свежий `loadCurrentProject` к версии и сохранённым snapshots.
+   *
+   * Snapshots всегда берутся из fresh-ответа, а независимые dirty-черновики
+   * title/color не затираются: каждый draft обновляется только если он не
+   * отличается от своего предыдущего сохранённого значения.
+   */
   const applyProjectSnapshot = (snapshot: Project): void => {
-    projectVersionRef.current = snapshot.version;
-    setSavedProjectTitle(snapshot.title);
-    setProjectTitle(snapshot.title);
-    const color = resolveBoardColor(snapshot.color);
+    const nextTitle = snapshot.title;
+    const nextColor = resolveBoardColor(snapshot.color);
+    const titleDirty = projectTitleDraftRef.current !== savedProjectTitleRef.current;
+    const colorDirty = projectColorDraftRef.current !== savedProjectColorRef.current;
 
-    setSavedProjectColor(color);
-    setProjectColor(color);
+    projectVersionRef.current = snapshot.version;
+    savedProjectTitleRef.current = nextTitle;
+    savedProjectColorRef.current = nextColor;
+    setSavedProjectTitle(nextTitle);
+    setSavedProjectColor(nextColor);
+
+    if (!titleDirty) {
+      projectTitleDraftRef.current = nextTitle;
+      setProjectTitle(nextTitle);
+    }
+
+    if (!colorDirty) {
+      projectColorDraftRef.current = nextColor;
+      setProjectColor(nextColor);
+    }
   };
 
   const applyColumnsSnapshot = (
@@ -383,6 +413,7 @@ export function ProjectSettingsButton({
     setProjectColorSubmitting(false);
     setProjectColorError(null);
     setProjectColorNotice(null);
+    projectColorOperationRef.current += 1;
     projectColorGuardRef.current = false;
     setColumns([]);
     setDrafts({});
@@ -481,6 +512,7 @@ export function ProjectSettingsButton({
   const isBusy = (): boolean =>
     projectGuardRef.current ||
     projectColorGuardRef.current ||
+    projectColorSubmitting ||
     createGuardRef.current ||
     columnsRefreshGuardRef.current ||
     pendingRef.current.size > 0 ||
@@ -525,10 +557,14 @@ export function ProjectSettingsButton({
 
     resetState();
     setOpen(true);
+    projectTitleDraftRef.current = project.title;
+    savedProjectTitleRef.current = project.title;
     setProjectTitle(project.title);
     setSavedProjectTitle(project.title);
     const color = resolveBoardColor(project.color);
 
+    projectColorDraftRef.current = color;
+    savedProjectColorRef.current = color;
     setProjectColor(color);
     setSavedProjectColor(color);
     projectVersionRef.current = project.version;
@@ -624,6 +660,7 @@ export function ProjectSettingsButton({
     }
 
     if (value === savedProjectTitle) {
+      projectTitleDraftRef.current = savedProjectTitle;
       setProjectValidation(null);
       setProjectTitle(savedProjectTitle);
       setProjectNotice(null);
@@ -663,6 +700,8 @@ export function ProjectSettingsButton({
       }
 
       projectVersionRef.current = data.project.version;
+      savedProjectTitleRef.current = data.project.title;
+      projectTitleDraftRef.current = data.project.title;
       setSavedProjectTitle(data.project.title);
       setProjectTitle(data.project.title);
       setProjectNotice("Название проекта сохранено");
@@ -689,8 +728,10 @@ export function ProjectSettingsButton({
           if (fresh === null) {
             setProjectError(PROJECT_VERSION_REFRESH_FAILED_MESSAGE);
           } else {
-            projectVersionRef.current = fresh.version;
-            setSavedProjectTitle(fresh.title);
+            // Fresh snapshot синхронизирует и title, и color. Dirty title
+            // остаётся как есть, а независимый color-adopt получает чужое
+            // актуальное значение.
+            applyProjectSnapshot(fresh);
             bumpProjectsRevision();
             setProjectError(PROJECT_VERSION_CONFLICT_MESSAGE);
           }
@@ -742,18 +783,16 @@ export function ProjectSettingsButton({
 
     setDirtyConfirm(false);
 
-    if (nextColor === savedProjectColor) {
-      setProjectColor(nextColor);
-      setProjectColorError(null);
-      setProjectColorNotice(null);
-
-      return;
-    }
-
     const projectId = project.id;
     const generation = generationRef.current;
+    const operation = projectColorOperationRef.current + 1;
 
+    // Владелец операции фиксируется до await: только его finally имеет право
+    // снять guard. Snapshot выбранного цвета живёт в ref, чтобы late response
+    // не перетёр независимый dirty draft.
+    projectColorOperationRef.current = operation;
     projectColorGuardRef.current = true;
+    projectColorDraftRef.current = nextColor;
     setProjectColor(nextColor);
     setProjectColorSubmitting(true);
     setProjectColorError(null);
@@ -781,6 +820,8 @@ export function ProjectSettingsButton({
       const applied = resolveBoardColor(data.project.color);
 
       projectVersionRef.current = data.project.version;
+      savedProjectColorRef.current = applied;
+      projectColorDraftRef.current = applied;
       setSavedProjectColor(applied);
       setProjectColor(applied);
       setProjectColorNotice("Цвет доски сохранён");
@@ -792,8 +833,6 @@ export function ProjectSettingsButton({
       }
 
       if (isVersionConflict(commandError)) {
-        setProjectColorSubmitting(false);
-
         try {
           const fresh = await loadCurrentProject(invoke, projectId);
 
@@ -804,8 +843,10 @@ export function ProjectSettingsButton({
           if (fresh === null) {
             setProjectColorError(PROJECT_COLOR_VERSION_REFRESH_FAILED_MESSAGE);
           } else {
-            projectVersionRef.current = fresh.version;
-            setSavedProjectColor(resolveBoardColor(fresh.color));
+            // Fresh snapshot обновляет обе версии/снимка. Dirty color остаётся
+            // выбранным пользователем, независимый title-adopt получает
+            // чужое актуальное значение.
+            applyProjectSnapshot(fresh);
             bumpProjectsRevision();
             setProjectColorError(PROJECT_COLOR_VERSION_CONFLICT_MESSAGE);
           }
@@ -818,10 +859,14 @@ export function ProjectSettingsButton({
         setProjectColorError(errorMessage(commandError));
       }
     } finally {
-      projectColorGuardRef.current = false;
+      // Только владелец актуальной операции снимает guard/pending. Поздний
+      // finally старой A не должен открыть окно для C во время B.
+      if (projectColorOperationRef.current === operation) {
+        projectColorGuardRef.current = false;
 
-      if (isCurrent(projectId, generation)) {
-        setProjectColorSubmitting(false);
+        if (isCurrent(projectId, generation)) {
+          setProjectColorSubmitting(false);
+        }
       }
     }
   };
@@ -1394,6 +1439,7 @@ export function ProjectSettingsButton({
                         required
                         disabled={projectSubmitting}
                         onChange={(event) => {
+                          projectTitleDraftRef.current = event.target.value;
                           setProjectTitle(event.target.value);
                           setProjectValidation(null);
                           setProjectError(null);

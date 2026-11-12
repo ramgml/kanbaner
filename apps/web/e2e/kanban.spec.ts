@@ -394,6 +394,14 @@ async function computedCss(page: Page, testId: string, property: string): Promis
     .evaluate((element, name) => getComputedStyle(element).getPropertyValue(name), property);
 }
 
+/** Читает вычисленный CSS произвольного locator (например, focus-visible ring). */
+async function computedCssOf(locator: Locator, property: string): Promise<string> {
+  return locator.evaluate(
+    (element, name) => getComputedStyle(element).getPropertyValue(name),
+    property,
+  );
+}
+
 /** Разрешает CSS-токен в вычисленный цвет, не завися от сериализации OKLCH. */
 async function resolvedColorToken(page: Page, token: string): Promise<string> {
   return page.evaluate((name) => {
@@ -1974,6 +1982,43 @@ test.describe("канбан в production shell", () => {
         "true",
       );
 
+      const title = page.getByTestId("kanban-column-title-todo");
+      const summary = page.getByLabel("Действия колонки «ToDo»");
+      const palette = page.getByTestId("kanban-column-color-todo-purple");
+
+      // Открываем меню с клавиатуры и доходим до выбранного цвета ровно по
+      // DOM-порядку BOARD_COLORS, чтобы проверить не только фон, но и
+      // focus-visible ring контрола палитры.
+      await summary.focus();
+      await page.keyboard.press("Enter");
+
+      for (const item of [
+        "kanban-column-rename-todo",
+        "kanban-column-move-right-todo",
+        "kanban-column-color-todo-default",
+        "kanban-column-color-todo-slate",
+        "kanban-column-color-todo-blue",
+        "kanban-column-color-todo-green",
+        "kanban-column-color-todo-yellow",
+        "kanban-column-color-todo-orange",
+        "kanban-column-color-todo-red",
+        "kanban-column-color-todo-purple",
+      ]) {
+        await page.keyboard.press("Tab");
+        await expect(page.getByTestId(item)).toBeFocused();
+      }
+
+      const lightForeground = await resolvedColorToken(page, "--foreground");
+      const lightMuted = await resolvedColorToken(page, "--muted-foreground");
+      const lightAccent = await resolvedColorToken(page, "--accent");
+      const lightRing = await resolvedColorToken(page, "--ring");
+
+      expect(await computedCssOf(title, "color")).toBe(lightForeground);
+      expect(await computedCssOf(summary, "color")).toBe(lightMuted);
+      expect(await computedCssOf(palette, "color")).toBe(lightForeground);
+      expect(await computedCssOf(palette, "background-color")).toBe(lightAccent);
+      expect(await computedCssOf(palette, "box-shadow")).not.toBe("none");
+
       await expect
         .poll(() => computedCss(page, "kanban-view", "background-color"))
         .toBe("rgb(249, 234, 234)");
@@ -1983,17 +2028,34 @@ test.describe("канбан в production shell", () => {
 
       await page.evaluate(() => document.documentElement.classList.add("dark"));
 
+      const darkForeground = await resolvedColorToken(page, "--foreground");
+      const darkMuted = await resolvedColorToken(page, "--muted-foreground");
+      const darkAccent = await resolvedColorToken(page, "--accent");
+      const darkRing = await resolvedColorToken(page, "--ring");
+
       await expect
         .poll(() => computedCss(page, "kanban-view", "background-color"))
         .toBe("rgb(43, 28, 31)");
       await expect
         .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
         .toBe("rgb(52, 42, 68)");
+      expect(await computedCssOf(title, "color")).toBe(darkForeground);
+      expect(await computedCssOf(summary, "color")).toBe(darkMuted);
+      expect(await computedCssOf(palette, "color")).toBe(darkForeground);
+      expect(await computedCssOf(palette, "background-color")).toBe(darkAccent);
+      expect(await computedCssOf(palette, "box-shadow")).not.toBe("none");
+
+      // Темы действительно меняют text/control/focus-палитру, а не только фон.
+      expect(darkForeground).not.toBe(lightForeground);
+      expect(darkMuted).not.toBe(lightMuted);
+      expect(darkAccent).not.toBe(lightAccent);
+      expect(darkRing).not.toBe(lightRing);
 
       await page.evaluate(() => document.documentElement.classList.remove("dark"));
       await expect
         .poll(() => computedCss(page, "kanban-view", "background-color"))
         .toBe("rgb(249, 234, 234)");
+      expect(await computedCssOf(title, "color")).toBe(lightForeground);
       await expectNoHorizontalOverflow(page);
     });
 
@@ -2155,16 +2217,25 @@ test.describe("канбан в production shell", () => {
       await page.keyboard.press("Enter");
       await expect(menu).toHaveJSProperty("open", true);
 
-      // В меню есть палитра из восьми цветов, поэтому до «Удалить» больше
-      // фокусируемых элементов, чем в меню без палитры.
-      for (let index = 0; index < 20; index += 1) {
-        if (await deleteItem.evaluate((element) => element === document.activeElement)) {
-          break;
-        }
-
+      // Явный порядок для первой колонки: у неё move-left disabled и потому
+      // пропускается Tab: summary → rename → move-right → палитра.
+      for (const item of [
+        "kanban-column-rename-todo",
+        "kanban-column-move-right-todo",
+        "kanban-column-color-todo-default",
+      ]) {
         await page.keyboard.press("Tab");
+        await expect(page.getByTestId(item)).toBeFocused();
       }
 
+      // Восемь цветов контракта идут в DOM порядке BOARD_COLORS; после
+      // последнего Tab ведёт ровно на «Удалить колонку».
+      for (const color of ["slate", "blue", "green", "yellow", "orange", "red", "purple"]) {
+        await page.keyboard.press("Tab");
+        await expect(page.getByTestId(`kanban-column-color-todo-${color}`)).toBeFocused();
+      }
+
+      await page.keyboard.press("Tab");
       await expect(deleteItem).toBeFocused();
       await page.keyboard.press("Enter");
 
@@ -5219,6 +5290,45 @@ test.describe("канбан в production shell", () => {
         .poll(() => computedCss(page, "kanban-column-todo", "background-color"))
         .toBe("rgb(246, 223, 203)");
       await expectNoHorizontalOverflow(page);
+    });
+
+    test("меню колонки на низком landscape прокручивается и даёт дойти до удаления", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект низкого landscape");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      await page.setViewportSize({ width: 740, height: 360 });
+      await expect(page.getByTestId("kanban-view")).toBeVisible();
+
+      const menu = page.getByTestId("kanban-column-menu-todo");
+
+      await openColumnMenu(page, await columnIdByTitle(page, "ToDo"));
+      await expect(menu).toHaveJSProperty("open", true);
+
+      const menuPanel = page.getByRole("group", { name: "Меню колонки «ToDo»" });
+      const box = await menuPanel.boundingBox();
+
+      expect(box).not.toBeNull();
+      expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(361);
+      expect(await computedCssOf(menuPanel, "overflow-y")).toBe("auto");
+
+      const deleteItem = page.getByTestId("kanban-column-delete-todo");
+
+      await deleteItem.scrollIntoViewIfNeeded();
+      await expect(deleteItem).toBeVisible();
+      await expect(deleteItem).toBeInViewport();
+      await deleteItem.click();
+
+      const dialog = page.getByTestId("kanban-column-delete-dialog");
+
+      await expect(dialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(menu).toHaveJSProperty("open", false);
     });
 
     test("создаёт колонку из настроек на 360 px без горизонтального overflow", async ({ page }) => {

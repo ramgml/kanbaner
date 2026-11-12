@@ -277,8 +277,9 @@ export function KanbanColumn({
               aria-label={`Перетащить колонку «${column.title}»`}
               data-testid={`kanban-column-drag-${slug}`}
               title="Перетащить колонку"
+              disabled={pending}
               onPointerDown={onDragStart}
-              className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-8 xl:min-w-7"
+              className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8 xl:min-w-7"
             >
               <GripVertical aria-hidden="true" className="size-4" />
             </button>
@@ -316,7 +317,7 @@ export function KanbanColumn({
               <div
                 role="group"
                 aria-label={`Меню колонки «${column.title}»`}
-                className="absolute top-full right-0 z-20 mt-1 flex w-[13rem] flex-col gap-1 rounded-md border border-border bg-popover p-1 shadow-md"
+                className="absolute top-full right-0 z-20 mt-1 flex max-h-[calc(100dvh-13rem)] w-[13rem] flex-col gap-1 overflow-y-auto overscroll-contain rounded-md border border-border bg-popover p-1 shadow-md"
               >
                 <button
                   type="button"
