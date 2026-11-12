@@ -1,13 +1,13 @@
-import { MAX_BULK_TASKS } from "../constants.ts";
+import { MAX_BULK_TASKS, MAX_POSITION } from "../constants.ts";
 import type { DeletedTaskDescriptor, Task } from "../model.ts";
 import type { TasksStoreTransaction } from "../store.ts";
-import { TasksNotFoundError, TasksVersionConflictError } from "../store/index.ts";
 import {
-  TasksValidationError,
-  resolveTaskColumnId,
-  type TasksValidationCode,
-} from "../validation.ts";
-import { shiftedNeighbors, snapshotProjectColumns, snapshotProjectTasks } from "./snapshots.ts";
+  TasksNotFoundError,
+  TasksStoreValidationError,
+  TasksVersionConflictError,
+} from "../store/index.ts";
+import { TasksValidationError, type TasksValidationCode } from "../validation.ts";
+import { shiftedNeighbors, snapshotProjectTasks } from "./snapshots.ts";
 
 /** Одна задача массовой операции с точной ожидаемой версией. */
 export interface BulkTaskItem {
@@ -113,10 +113,12 @@ async function loadBulkTasks(
  * Атомарно дописывает задачи в конец `columnId` в порядке входного массива.
  *
  * До первой записи проверяются размер, уникальность, существование, один
- * проект, точные версии и target того же проекта. Базовая позиция считается
- * по target без выбранных задач; затем каждая задача перемещается с фактической
- * версией внутри транзакции, потому что предыдущие перемещения этой же операции
- * могли сдвинуть соседа и повысить его версию.
+ * проект, точные версии и target того же проекта. Каждая задача дописывается в
+ * конец актуального target: Store сам исключает текущую задачу при same-column
+ * и берёт фактическую длину при cross-column, потому что `MAX_POSITION`
+ * клампится к позиции append. Фактическая версия читается перед каждым move:
+ * предыдущие перемещения этой же операции могли сдвинуть соседа и повысить его
+ * версию. Результат и события строятся по финальному снимку после всех moves.
  */
 export async function moveTasksInBulk(
   transaction: TasksStoreTransaction,
@@ -134,7 +136,6 @@ export async function moveTasksInBulk(
   }
 
   const projectId = first.projectId;
-  const columnMap = await snapshotProjectColumns(transaction, projectId);
   const target = await transaction.getColumn(columnId);
 
   if (target === null) {
@@ -147,48 +148,38 @@ export async function moveTasksInBulk(
 
   const beforeSnapshot = await snapshotProjectTasks(transaction, projectId);
   const beforeById = new Map(beforeTasks.map((task) => [task.id, task]));
-  const selected = new Set(items.map((item) => item.id));
-  const columns = [...columnMap.values()];
-  let base = 0;
 
-  for (const task of beforeSnapshot.values()) {
-    if (selected.has(task.id)) {
-      continue;
-    }
-
-    if (resolveTaskColumnId(task, columns) === columnId) {
-      base += 1;
-    }
-  }
-
-  const moved: BulkMovedTask[] = [];
-
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
-    const before = item === undefined ? undefined : beforeById.get(item.id);
-
-    if (item === undefined || before === undefined) {
-      throw new TasksNotFoundError("task", item?.id ?? "unknown");
-    }
-
+  for (const item of items) {
     const current = await transaction.getTask(item.id);
 
     if (current === null) {
       throw new TasksNotFoundError("task", item.id);
     }
 
-    const task = await transaction.moveTask({
+    await transaction.moveTask({
       id: item.id,
       expectedVersion: current.version,
       columnId,
-      position: base + index,
+      position: MAX_POSITION,
       updatedAt,
     });
-
-    moved.push({ task, before });
   }
 
   const afterSnapshot = await snapshotProjectTasks(transaction, projectId);
+  const moved: BulkMovedTask[] = items.map((item) => {
+    const before = beforeById.get(item.id);
+    const task = afterSnapshot.get(item.id);
+
+    if (before === undefined) {
+      throw new TasksNotFoundError("task", item.id);
+    }
+
+    if (task === undefined) {
+      throw new TasksStoreValidationError("Задача исчезла во время массового перемещения");
+    }
+
+    return { task, before };
+  });
   const movedIds = new Set(moved.map((entry) => entry.task.id));
   const neighbors = shiftedNeighbors(beforeSnapshot, afterSnapshot, null).filter(
     (task) => !movedIds.has(task.id),

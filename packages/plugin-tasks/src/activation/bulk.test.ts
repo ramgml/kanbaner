@@ -418,6 +418,82 @@ for (const variant of variants) {
       );
     });
 
+    it("moveMany дописывает после невыбранных target и отдаёт финальные версии и события", async () => {
+      const harness = await startHarness(variant);
+      const projectId = await createProject(harness);
+      const progress = await columnId(harness, projectId, "in_progress");
+
+      const beforeFirst = await createTask(harness, projectId, progress, "u1");
+      const selectedFirst = await createTask(harness, projectId, progress, "t1");
+      const between = await createTask(harness, projectId, progress, "u2");
+      const selectedSecond = await createTask(harness, projectId, progress, "t2");
+      const afterLast = await createTask(harness, projectId, progress, "u3");
+      clearEffects(harness);
+
+      const result = await harness.command<TaskMoveManyOutput>(TASKS_COMMAND_IDS.taskMoveMany, {
+        items: [item(selectedSecond), item(selectedFirst)],
+        columnId: progress,
+      });
+
+      const target = await columnTasks(harness, projectId, progress);
+      const finalById = new Map(target.map((task) => [task.id, task]));
+
+      expect(target.map((task) => task.id)).toEqual([
+        beforeFirst.id,
+        between.id,
+        afterLast.id,
+        selectedSecond.id,
+        selectedFirst.id,
+      ]);
+      expect(target.map((task) => task.position)).toEqual([0, 1, 2, 3, 4]);
+      expect(result.tasks.map((task) => task.id)).toEqual([selectedSecond.id, selectedFirst.id]);
+
+      for (const task of result.tasks) {
+        const final = finalById.get(task.id);
+
+        expect(final).toBeDefined();
+        expect(task.version).toBe(final?.version);
+        expect(task.position).toBe(final?.position);
+      }
+
+      const movedEvents = harness.events.filter(
+        (event) => event.type === "kanbaner.tasks.task.moved",
+      );
+      expect(movedEvents.map((event) => event.payload["taskId"])).toEqual([
+        selectedSecond.id,
+        selectedFirst.id,
+      ]);
+
+      for (const event of movedEvents) {
+        const final = finalById.get(String(event.payload["taskId"]));
+
+        expect(event.resourceVersion).toBe(final?.version);
+        expect(event.payload["version"]).toBe(final?.version);
+        expect(event.payload["position"]).toBe(final?.position);
+      }
+
+      const updatedEvents = harness.events.filter(
+        (event) => event.type === "kanbaner.tasks.task.updated",
+      );
+      expect(updatedEvents.length).toBeGreaterThan(0);
+
+      for (const event of updatedEvents) {
+        const final = finalById.get(String(event.payload["taskId"]));
+
+        expect(final).toBeDefined();
+        expect(event.resourceVersion).toBe(final?.version);
+        expect(event.payload["version"]).toBe(final?.version);
+        expect(event.payload["position"]).toBe(final?.position);
+      }
+
+      expect(harness.searchUpserts).toEqual(
+        expect.arrayContaining([
+          ...result.tasks.map((task) => `kanbaner.tasks:task:${task.id}`),
+          ...updatedEvents.map((event) => `kanbaner.tasks:task:${String(event.payload["taskId"])}`),
+        ]),
+      );
+    });
+
     it("moveMany с одной устаревшей версией откатывает весь набор", async () => {
       const harness = await startHarness(variant);
       const projectId = await createProject(harness);
@@ -522,9 +598,12 @@ for (const variant of variants) {
       expect(deletedIds).toEqual([parent.id, child.id, sibling.id]);
       expect(new Set(deletedIds).size).toBe(deletedIds.length);
       expect(new Set(result.deletedResourceRefs).size).toBe(result.deletedResourceRefs.length);
-      expect(
-        harness.events.filter((event) => event.type === "kanbaner.tasks.task.deleted"),
-      ).toHaveLength(3);
+      const deletedEvents = harness.events.filter(
+        (event) => event.type === "kanbaner.tasks.task.deleted",
+      );
+      expect(deletedEvents).toHaveLength(3);
+      expect(result.eventId).toBe(deletedEvents[0]?.eventId);
+      expect(new Set(deletedEvents.map((event) => event.eventId)).size).toBe(3);
       expect(harness.searchDeletes).toHaveLength(3);
       expect(new Set(harness.searchDeletes).size).toBe(3);
       expect(

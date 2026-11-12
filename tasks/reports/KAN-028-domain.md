@@ -3,7 +3,9 @@
 - Задача: `tasks/KAN-028-bulk-card-actions.md`
 - Ветка: `feat/kan-028-bulk-domain`
 - Worktree: `.worktrees/kan-028-bulk-domain`
-- Коммит: `feat(tasks): добавить атомарные массовые операции`
+- Коммиты:
+  - `feat(tasks): добавить атомарные массовые операции`;
+  - `fix(tasks): гарантировать порядок и финальные версии bulk-операций`.
 
 ## Публичный контракт
 
@@ -36,11 +38,17 @@ kanbaner.tasks.task.deleteMany   risk = destructive
   - предварительная проверка размера, уникальности ID, существования, одного
     `projectId`, точных `expectedVersion` и target того же проекта до первой
     записи;
-  - move: стабильный base по target без выбранных задач, последовательный
-    append в порядке входа, фактическая версия из транзакции для каждой задачи
-    (сдвиг соседей этой же операцией не даёт ложный `VERSION_CONFLICT`);
+  - move: каждая задача дописывается в конец актуального target через
+    `MAX_POSITION`, который Store клампит к фактической append-позиции
+    (same-column после исключения текущей, cross-column после текущего
+    содержимого). Поэтому `[A,U,B]` + `[B,A]` даёт `[U,B,A]`; фактические
+    версии читаются перед каждым move;
+  - после всех moves строится финальный снимок проекта: `result.tasks`,
+    `task.moved` и `searchUpserts` используют финальные Task snapshots в
+    порядке входа, `before` — только для `fromStatus`/`fromColumnId`;
   - delete: каскад parent+child без повторного удаления, дедупликация
-    дескрипторов, all-missing no-op.
+    дескрипторов, all-missing no-op. `eventId` результата — ID первого
+    корневого `task.deleted` события, оно получает этот ID явно.
 - `packages/plugin-tasks/src/activation.ts` — обработчики, события
   `task.moved`/`task.updated`/`task.deleted`, search upsert/delete и публикация
   только после commit через `executeMutation`.
@@ -72,10 +80,13 @@ SDK отклонял camelCase в сегменте действия (`OPERATION_
 - `packages/plugin-tasks/src/activation/bulk.test.ts` — параметризованный
   in-memory + SQLite harness:
   - порядок append и source=target overlap;
+  - невыбранные target до/между/после выбранных, точные позиции 0…N-1;
+  - финальные версии/позиции в `result.tasks` и `task.moved`/`task.updated`;
   - соседние `task.updated` и search upsert;
   - rollback при stale version без изменений, событий и индексации;
   - duplicate / not found / чужой проект / чужой target rollback;
   - parent+child без дублей дескрипторов, событий и search refs;
+  - `eventId` первого корневого delete-события;
   - all-missing no-op;
   - повтор moveMany/deleteMany по `Idempotency-Key`.
 - `packages/plugin-tasks/src/schemas/task.test.ts` — границы 1…200, `confirm`,
@@ -89,10 +100,10 @@ SDK отклонял camelCase в сегменте действия (`OPERATION_
 
 - `pnpm install --frozen-lockfile --strict-peer-dependencies` — успешно.
 - `pnpm --filter @kanbaner/plugin-tasks typecheck` — успешно.
-- focused bulk/schema/operations/contract — 42 теста, зелёные.
+- focused bulk/schema/operations/contract — 44 теста, зелёные.
 - `pnpm check:imports` — успешно.
 - `node scripts/check-import-boundaries.mjs --self-test` — успешно.
-- `pnpm test` — 98 файлов, 1375 тестов, зелёные.
+- `pnpm test` — 98 файлов, 1377 тестов, зелёные.
 - `pnpm check` (format, lint, typecheck, test, build) — успешно; в production
   build остаются только прежние Turbopack warnings о dynamic filesystem access
   в kernel/storage-sqlite.

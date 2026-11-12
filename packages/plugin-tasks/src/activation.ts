@@ -89,7 +89,7 @@ import {
   formatTaskRef,
   tryParseTasksResourceRef,
 } from "./resources.ts";
-import { TasksNotFoundError, createTasksStore } from "./store/index.ts";
+import { TasksNotFoundError, TasksStoreValidationError, createTasksStore } from "./store/index.ts";
 import type { TasksIdFactory, TasksStore, TasksStoreTransaction } from "./store.ts";
 import { normalizeTags } from "./validation.ts";
 
@@ -269,8 +269,10 @@ function changedProjectFields(before: Project, after: Project): readonly string[
 function taskDeletedEvent(
   descriptor: DeletedTaskDescriptor,
   deletedTasks: readonly DeletedTaskDescriptor[],
+  eventId?: string,
 ) {
   return domainEvent({
+    ...(eventId === undefined ? {} : { eventId }),
     type: TASK_EVENT_TYPES.deleted,
     resource: descriptor.resourceRef,
     resourceVersion: descriptor.eventVersion,
@@ -1251,23 +1253,35 @@ const taskDeleteMany: CommandFn = async (input, executionContext, operationId, d
       const deletedResourceRefs = [
         ...new Set(deletedTasks.map((descriptor) => descriptor.resourceRef)),
       ];
-      const eventId = newEventId();
+      let firstEventId: string | undefined;
       const events = [
-        ...execution.groups.flatMap((group) => [
-          taskDeletedEvent(group.root, group.descriptors),
-          ...group.descriptors
-            .slice(1)
-            .map((descriptor) => taskDeletedEvent(descriptor, [descriptor])),
-        ]),
+        ...execution.groups.flatMap((group) => {
+          const rootEventId = newEventId();
+
+          if (firstEventId === undefined) {
+            firstEventId = rootEventId;
+          }
+
+          return [
+            taskDeletedEvent(group.root, group.descriptors, rootEventId),
+            ...group.descriptors
+              .slice(1)
+              .map((descriptor) => taskDeletedEvent(descriptor, [descriptor])),
+          ];
+        }),
         ...execution.neighbors.map(neighborUpdatedEvent),
       ];
+
+      if (firstEventId === undefined) {
+        throw new TasksStoreValidationError("Массовое удаление не вернуло корневые дескрипторы");
+      }
 
       return {
         result: {
           deleted: true as const,
           deletedResourceRefs,
           deletedTasks,
-          eventId,
+          eventId: firstEventId,
         },
         effects: effects({
           events,
