@@ -504,12 +504,24 @@ describe("управление колонками в KanbanView", () => {
     fireEvent.pointerDown(document.body);
     expect(menuDetails().open).toBe(false);
 
-    // Открываем меню повторно: Escape закрывает его и возвращает фокус trigger-у.
+    // Escape вне меню закрывает его, но не перехватывает событие и не
+    // переносит фокус с активного контрола.
+    const dragHandle = screen.getByTestId("kanban-column-drag-todo");
+
+    await openMenu("column-project-1-todo", "todo");
+    expect(menuDetails().open).toBe(true);
+    dragHandle.focus();
+    fireEvent.keyDown(dragHandle, { key: "Escape" });
+    expect(menuDetails().open).toBe(false);
+    expect(document.activeElement).toBe(dragHandle);
+
+    // Открываем меню повторно: Escape внутри меню закрывает его и возвращает
+    // фокус trigger-у.
     const summary = screen.getByLabelText("Действия колонки «ToDo»");
 
     await openMenu("column-project-1-todo", "todo");
     expect(menuDetails().open).toBe(true);
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(summary, { key: "Escape" });
     expect(menuDetails().open).toBe(false);
     expect(document.activeElement).toBe(summary);
 

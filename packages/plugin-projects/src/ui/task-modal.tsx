@@ -239,6 +239,10 @@ export function TaskModal({
   const saveInlineRef = useRef(onSaveInline);
   const lastPointerTypeRef = useRef<string | null>(null);
   const previousInlineFieldRef = useRef<InlineField | null>(null);
+  /** Возвращать ли фокус на display после завершения inline-сессии. */
+  const restoreDisplayOnInlineEndRef = useRef(true);
+  /** Контрол, на который пользователь кликнул/перешёл при autosave. */
+  const outsideFocusTargetRef = useRef<HTMLElement | null>(null);
   const previousTaskIdRef = useRef(task.id);
   const inlineField = inlineSession?.field ?? null;
   const inlineTaskId = inlineSession?.taskId ?? null;
@@ -354,16 +358,24 @@ export function TaskModal({
 
       event.preventDefault();
       event.stopPropagation();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       cancelInlineRef.current();
     };
 
     const onPointerDownCapture = (event: PointerEvent): void => {
       // Клик по нефокусируемому свободному месту не обязан вызывать blur,
-      // поэтому autosave начинается уже на pointerdown.
+      // поэтому autosave начинается уже на pointerdown. Фокус возвращаем на
+      // фактический контрол пользователя, а не на display редактора.
       if (event.target instanceof Node && editor.contains(event.target)) {
         return;
       }
 
+      restoreDisplayOnInlineEndRef.current = false;
+      outsideFocusTargetRef.current =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>(FOCUSABLE_SELECTOR)
+          : null;
       saveInlineRef.current();
     };
 
@@ -378,7 +390,10 @@ export function TaskModal({
 
   // После сохранения или отмены возвращаем фокус на заголовок/область
   // описания, если пользователь уже не перешёл к другому контролу.
-  // При смене задачи A→B фокус не переносится.
+  // При смене задачи A→B фокус не переносится. Autosave по клику вне
+  // редактора не возвращает фокус на display: целевой контрол может быть
+  // временно disabled на время команды, поэтому его восстанавливает отдельный
+  // эффект ниже, когда busy снимется.
   useEffect(() => {
     const field = inlineSession?.field ?? null;
     const taskChanged = previousTaskIdRef.current !== task.id;
@@ -387,20 +402,70 @@ export function TaskModal({
       previousTaskIdRef.current = task.id;
     }
 
-    if (!taskChanged && previousInlineFieldRef.current !== null && field === null) {
+    if (field !== null) {
+      // Новая inline-сессия всегда сбрасывает режим autosave.
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
+    } else if (!taskChanged && previousInlineFieldRef.current !== null) {
       const target =
         previousInlineFieldRef.current === "title"
           ? titleDisplayRef.current
           : descriptionDisplayRef.current;
       const activeElement = document.activeElement;
 
-      if (activeElement === null || activeElement === document.body) {
+      if (
+        restoreDisplayOnInlineEndRef.current &&
+        (activeElement === null || activeElement === document.body)
+      ) {
         target?.focus();
       }
     }
 
     previousInlineFieldRef.current = field;
   }, [inlineSession?.field, task.id]);
+
+  // Клик/переход фокуса вне редактора запускает autosave, но busy временно
+  // отключает целевой контрол. Возвращаем фокус этому контролу, когда команда
+  // завершилась, вместо того чтобы оставлять фокус на body или на display.
+  useEffect(() => {
+    if (inlineField !== null || restoreDisplayOnInlineEndRef.current) {
+      return;
+    }
+
+    const target = outsideFocusTargetRef.current;
+
+    if (target === null) {
+      return;
+    }
+
+    const activeElement = document.activeElement;
+    const targetDisabled =
+      target.matches(":disabled") || target.getAttribute("aria-disabled") === "true";
+
+    if (activeElement !== null && activeElement !== document.body) {
+      // Пока busy не снят, браузер мог уже перевести фокус на body из-за
+      // disabled-цели. Если же фокус осмысленно стоит на другом контроле,
+      // восстановление больше не нужно.
+      if (!targetDisabled) {
+        outsideFocusTargetRef.current = null;
+      }
+
+      return;
+    }
+
+    if (!target.isConnected) {
+      outsideFocusTargetRef.current = null;
+
+      return;
+    }
+
+    if (targetDisabled) {
+      return;
+    }
+
+    target.focus();
+    outsideFocusTargetRef.current = null;
+  }, [busy, inlineField]);
 
   // Второй палец или движение вне контейнера тоже отменяют tap. Слушаем
   // документ, потому что touch-события второго пальца не обязаны всплывать
@@ -606,6 +671,8 @@ export function TaskModal({
   const saveTitleOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter" && !isComposing(event)) {
       event.preventDefault();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       onSaveInline();
     }
   };
@@ -613,6 +680,8 @@ export function TaskModal({
   const saveDescriptionOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !isComposing(event)) {
       event.preventDefault();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       onSaveInline();
     }
   };
@@ -627,6 +696,8 @@ export function TaskModal({
       return;
     }
 
+    restoreDisplayOnInlineEndRef.current = false;
+    outsideFocusTargetRef.current = nextTarget instanceof HTMLElement ? nextTarget : null;
     onSaveInline();
   };
 

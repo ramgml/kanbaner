@@ -133,10 +133,22 @@ export function KanbanColumn({
         return;
       }
 
-      // Escape относится только к меню: не доходит до окна/других обработчиков.
+      const target = event.target;
+      const focusInsideMenu = target instanceof Node && details.contains(target);
+
+      details.open = false;
+
+      // Escape вне меню (например, в inline-редакторе карточки) только
+      // закрывает меню. Событие не перехватывается и фокус не переносится,
+      // поэтому активный контрол обрабатывает Escape сам.
+      if (!focusInsideMenu) {
+        return;
+      }
+
+      // Escape внутри меню относится только к меню: не доходит до окна и
+      // других обработчиков, а фокус возвращается на видимый summary.
       event.preventDefault();
       event.stopPropagation();
-      details.open = false;
       summaryRef.current?.focus();
     };
 
@@ -329,7 +341,7 @@ export function KanbanColumn({
                   disabled={pending || !canDelete}
                   title={deleteDisabledReason ?? undefined}
                   onClick={() => {
-                    closeMenu(false);
+                    closeMenu(true);
                     onDelete();
                   }}
                   className={`${menuItemClass} text-destructive`}

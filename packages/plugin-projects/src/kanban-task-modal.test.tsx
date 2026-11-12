@@ -971,7 +971,41 @@ describe("TaskOverlay Trello-модал", () => {
       );
     });
     expect(updateCalls()).toHaveLength(2);
-    expect(document.activeElement).toBe(priority);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(priority);
+    });
+  });
+
+  it("outside pointerdown по focusable-контролу не отбирает у него фокус", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+    const updateCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update");
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+    const priority = screen.getByTestId("kanban-modal-priority");
+
+    fireEvent.change(titleInput, { target: { value: "Сохранено pointerdown" } });
+    priority.focus();
+    fireEvent.pointerDown(priority);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Сохранено pointerdown");
+    });
+    expect(updateCalls()).toHaveLength(1);
+    await waitFor(() => {
+      expect(priority).toBeEnabled();
+      expect(document.activeElement).toBe(priority);
+    });
+    expect(document.activeElement).not.toBe(screen.getByTestId("kanban-modal-title"));
   });
 
   it("при VERSION_CONFLICT показывает сообщение и перечитывает серверную версию", async () => {
