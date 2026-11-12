@@ -1,6 +1,19 @@
 "use client";
 
 import {
+  CalendarDays,
+  Check,
+  ChevronUp,
+  Flag,
+  ListPlus,
+  ListTree,
+  MoveRight,
+  Plus,
+  Tag,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
   useEffect,
   useLayoutEffect,
   useRef,
@@ -226,6 +239,10 @@ export function TaskModal({
   const saveInlineRef = useRef(onSaveInline);
   const lastPointerTypeRef = useRef<string | null>(null);
   const previousInlineFieldRef = useRef<InlineField | null>(null);
+  /** Возвращать ли фокус на display после завершения inline-сессии. */
+  const restoreDisplayOnInlineEndRef = useRef(true);
+  /** Контрол, на который пользователь кликнул/перешёл при autosave. */
+  const outsideFocusTargetRef = useRef<HTMLElement | null>(null);
   const previousTaskIdRef = useRef(task.id);
   const inlineField = inlineSession?.field ?? null;
   const inlineTaskId = inlineSession?.taskId ?? null;
@@ -341,16 +358,24 @@ export function TaskModal({
 
       event.preventDefault();
       event.stopPropagation();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       cancelInlineRef.current();
     };
 
     const onPointerDownCapture = (event: PointerEvent): void => {
       // Клик по нефокусируемому свободному месту не обязан вызывать blur,
-      // поэтому autosave начинается уже на pointerdown.
+      // поэтому autosave начинается уже на pointerdown. Фокус возвращаем на
+      // фактический контрол пользователя, а не на display редактора.
       if (event.target instanceof Node && editor.contains(event.target)) {
         return;
       }
 
+      restoreDisplayOnInlineEndRef.current = false;
+      outsideFocusTargetRef.current =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>(FOCUSABLE_SELECTOR)
+          : null;
       saveInlineRef.current();
     };
 
@@ -365,7 +390,10 @@ export function TaskModal({
 
   // После сохранения или отмены возвращаем фокус на заголовок/область
   // описания, если пользователь уже не перешёл к другому контролу.
-  // При смене задачи A→B фокус не переносится.
+  // При смене задачи A→B фокус не переносится. Autosave по клику вне
+  // редактора не возвращает фокус на display: целевой контрол может быть
+  // временно disabled на время команды, поэтому его восстанавливает отдельный
+  // эффект ниже, когда busy снимется.
   useEffect(() => {
     const field = inlineSession?.field ?? null;
     const taskChanged = previousTaskIdRef.current !== task.id;
@@ -374,20 +402,70 @@ export function TaskModal({
       previousTaskIdRef.current = task.id;
     }
 
-    if (!taskChanged && previousInlineFieldRef.current !== null && field === null) {
+    if (field !== null) {
+      // Новая inline-сессия всегда сбрасывает режим autosave.
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
+    } else if (!taskChanged && previousInlineFieldRef.current !== null) {
       const target =
         previousInlineFieldRef.current === "title"
           ? titleDisplayRef.current
           : descriptionDisplayRef.current;
       const activeElement = document.activeElement;
 
-      if (activeElement === null || activeElement === document.body) {
+      if (
+        restoreDisplayOnInlineEndRef.current &&
+        (activeElement === null || activeElement === document.body)
+      ) {
         target?.focus();
       }
     }
 
     previousInlineFieldRef.current = field;
   }, [inlineSession?.field, task.id]);
+
+  // Клик/переход фокуса вне редактора запускает autosave, но busy временно
+  // отключает целевой контрол. Возвращаем фокус этому контролу, когда команда
+  // завершилась, вместо того чтобы оставлять фокус на body или на display.
+  useEffect(() => {
+    if (inlineField !== null || restoreDisplayOnInlineEndRef.current) {
+      return;
+    }
+
+    const target = outsideFocusTargetRef.current;
+
+    if (target === null) {
+      return;
+    }
+
+    const activeElement = document.activeElement;
+    const targetDisabled =
+      target.matches(":disabled") || target.getAttribute("aria-disabled") === "true";
+
+    if (activeElement !== null && activeElement !== document.body) {
+      // Пока busy не снят, браузер мог уже перевести фокус на body из-за
+      // disabled-цели. Если же фокус осмысленно стоит на другом контроле,
+      // восстановление больше не нужно.
+      if (!targetDisabled) {
+        outsideFocusTargetRef.current = null;
+      }
+
+      return;
+    }
+
+    if (!target.isConnected) {
+      outsideFocusTargetRef.current = null;
+
+      return;
+    }
+
+    if (targetDisabled) {
+      return;
+    }
+
+    target.focus();
+    outsideFocusTargetRef.current = null;
+  }, [busy, inlineField]);
 
   // Второй палец или движение вне контейнера тоже отменяют tap. Слушаем
   // документ, потому что touch-события второго пальца не обязаны всплывать
@@ -593,6 +671,8 @@ export function TaskModal({
   const saveTitleOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter" && !isComposing(event)) {
       event.preventDefault();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       onSaveInline();
     }
   };
@@ -600,6 +680,8 @@ export function TaskModal({
   const saveDescriptionOnKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !isComposing(event)) {
       event.preventDefault();
+      restoreDisplayOnInlineEndRef.current = true;
+      outsideFocusTargetRef.current = null;
       onSaveInline();
     }
   };
@@ -607,12 +689,15 @@ export function TaskModal({
   const saveInlineOnBlur = (event: ReactFocusEvent<HTMLDivElement>): void => {
     const nextTarget = event.relatedTarget;
 
-    // Переход между textarea и её Save/Cancel не завершает редактирование.
-    // Клик по свободной области даёт relatedTarget=null и сохраняет черновик.
+    // Переход фокуса внутри редактора (например, к сообщению об ошибке)
+    // редактирование не завершает. Клик по свободной области даёт
+    // relatedTarget=null и сохраняет черновик.
     if (busy || (nextTarget instanceof Node && event.currentTarget.contains(nextTarget))) {
       return;
     }
 
+    restoreDisplayOnInlineEndRef.current = false;
+    outsideFocusTargetRef.current = nextTarget instanceof HTMLElement ? nextTarget : null;
     onSaveInline();
   };
 
@@ -665,26 +750,9 @@ export function TaskModal({
                   {inlineError}
                 </p>
               )}
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  data-testid="kanban-title-save"
-                  disabled={busy}
-                  onClick={onSaveInline}
-                  className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-                >
-                  Сохранить
-                </button>
-                <button
-                  type="button"
-                  data-testid="kanban-title-cancel"
-                  disabled={busy}
-                  onClick={onCancelInline}
-                  className={actionClass}
-                >
-                  Отмена
-                </button>
-              </div>
+              <p className="m-0 text-[11px] text-muted-foreground">
+                Enter или клик вне поля — сохранить, Escape — отменить.
+              </p>
             </div>
           ) : (
             <h2
@@ -741,7 +809,7 @@ export function TaskModal({
             onClick={onClose}
             className="flex size-10 shrink-0 items-center justify-center rounded-md text-lg leading-none text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
-            <span aria-hidden="true">×</span>
+            <X aria-hidden="true" className="size-5" />
           </button>
         </div>
       </header>
@@ -800,8 +868,9 @@ export function TaskModal({
             data-testid="kanban-inline-stale-cancel"
             disabled={busy}
             onClick={onCancelInline}
-            className={actionClass}
+            className={`${actionClass} inline-flex items-center gap-1.5`}
           >
+            <X aria-hidden="true" className="size-3.5" />
             Отменить правки
           </button>
         </div>
@@ -895,26 +964,6 @@ export function TaskModal({
                       {inlineError}
                     </p>
                   )}
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      data-testid="kanban-description-save"
-                      disabled={busy}
-                      onClick={onSaveInline}
-                      className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
-                    >
-                      Сохранить
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="kanban-description-cancel"
-                      disabled={busy}
-                      onClick={onCancelInline}
-                      className={actionClass}
-                    >
-                      Отмена
-                    </button>
-                  </div>
                   <p className="m-0 text-[11px] text-muted-foreground">
                     Клик вне поля или Ctrl/Cmd+Enter — сохранить, Escape — отменить. Markdown
                     сохраняется как текст.
@@ -949,7 +998,8 @@ export function TaskModal({
 
             <section aria-label="Подзадачи" className={sectionClass}>
               <div className="flex items-center justify-between gap-2">
-                <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                <h3 className="m-0 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                  <ListTree aria-hidden="true" className="size-3.5" />
                   Подзадачи
                 </h3>
                 {canCreateSubtask ? (
@@ -961,8 +1011,13 @@ export function TaskModal({
                       onSubtaskDraftChange({ open: !subtaskDraft.open });
                       setSubtaskError(null);
                     }}
-                    className={actionClass}
+                    className={`${actionClass} inline-flex items-center gap-1.5`}
                   >
+                    {subtaskDraft.open ? (
+                      <ChevronUp aria-hidden="true" className="size-3.5" />
+                    ) : (
+                      <ListPlus aria-hidden="true" className="size-3.5" />
+                    )}
                     {subtaskDraft.open ? "Скрыть форму" : "Добавить подзадачу"}
                   </button>
                 ) : null}
@@ -1026,8 +1081,9 @@ export function TaskModal({
                       disabled={
                         busy || subtaskDraft.title.trim().length === 0 || subtaskColumn === null
                       }
-                      className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                     >
+                      <Plus aria-hidden="true" className="size-3.5" />
                       Создать подзадачу
                     </button>
                     <button
@@ -1038,8 +1094,9 @@ export function TaskModal({
                         onSubtaskDraftChange({ open: false });
                         setSubtaskError(null);
                       }}
-                      className={actionClass}
+                      className={`${actionClass} inline-flex items-center gap-1.5`}
                     >
+                      <X aria-hidden="true" className="size-3.5" />
                       Отмена
                     </button>
                   </div>
@@ -1091,7 +1148,8 @@ export function TaskModal({
 
           <aside aria-label="Действия с задачей" className="flex min-w-0 flex-col gap-3">
             <section className={sectionClass}>
-              <h3 className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+              <h3 className="m-0 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                <MoveRight aria-hidden="true" className="size-3.5" />
                 Колонка и перемещение
               </h3>
               <label className={`${labelClass} mt-2`}>
@@ -1124,8 +1182,9 @@ export function TaskModal({
                 onClick={() => {
                   onMove(nextColumnId);
                 }}
-                className={`${actionClass} mt-2 w-full`}
+                className={`${actionClass} mt-2 inline-flex w-full items-center justify-center gap-1.5`}
               >
+                <MoveRight aria-hidden="true" className="size-3.5" />
                 Переместить
               </button>
               {currentColumnDone ? null : (
@@ -1134,8 +1193,9 @@ export function TaskModal({
                   data-testid="kanban-modal-complete"
                   disabled={busy}
                   onClick={onComplete}
-                  className="mt-2 w-full rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+                  className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
                 >
+                  <Check aria-hidden="true" className="size-3.5" />
                   Завершить
                 </button>
               )}
@@ -1143,7 +1203,10 @@ export function TaskModal({
 
             <section className={sectionClass}>
               <label className={labelClass}>
-                Приоритет
+                <span className="inline-flex items-center gap-1.5">
+                  <Flag aria-hidden="true" className="size-3.5" />
+                  Приоритет
+                </span>
                 <select
                   data-testid="kanban-modal-priority"
                   value={task.priority}
@@ -1164,7 +1227,10 @@ export function TaskModal({
 
             <section className={sectionClass}>
               <label className={labelClass}>
-                Срок
+                <span className="inline-flex items-center gap-1.5">
+                  <CalendarDays aria-hidden="true" className="size-3.5" />
+                  Срок
+                </span>
                 <input
                   data-testid="kanban-modal-due"
                   type="date"
@@ -1183,8 +1249,9 @@ export function TaskModal({
                 onClick={() => {
                   onDue(dueValue);
                 }}
-                className={`${actionClass} mt-2 w-full`}
+                className={`${actionClass} mt-2 inline-flex w-full items-center justify-center gap-1.5`}
               >
+                <Check aria-hidden="true" className="size-3.5" />
                 Сохранить срок
               </button>
               <p className="mt-1 m-0 text-[11px] text-muted-foreground">
@@ -1194,7 +1261,10 @@ export function TaskModal({
 
             <section className={sectionClass}>
               <label className={labelClass}>
-                Теги через запятую
+                <span className="inline-flex items-center gap-1.5">
+                  <Tag aria-hidden="true" className="size-3.5" />
+                  Теги через запятую
+                </span>
                 <input
                   data-testid="kanban-modal-tags"
                   value={tagsValue}
@@ -1213,8 +1283,9 @@ export function TaskModal({
                 onClick={() => {
                   onTags(tagsValue);
                 }}
-                className={`${actionClass} mt-2 w-full`}
+                className={`${actionClass} mt-2 inline-flex w-full items-center justify-center gap-1.5`}
               >
+                <Check aria-hidden="true" className="size-3.5" />
                 Сохранить теги
               </button>
             </section>
@@ -1235,8 +1306,9 @@ export function TaskModal({
                     data-testid="task-delete-confirm"
                     disabled={busy}
                     onClick={onDelete}
-                    className="rounded-md bg-destructive px-2.5 py-1.5 text-xs font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-2.5 py-1.5 text-xs font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50"
                   >
+                    <Trash2 aria-hidden="true" className="size-3.5" />
                     Удалить задачу
                   </button>
                   <button
@@ -1246,8 +1318,9 @@ export function TaskModal({
                     onClick={() => {
                       setConfirmingDelete(false);
                     }}
-                    className={actionClass}
+                    className={`${actionClass} inline-flex items-center gap-1.5`}
                   >
+                    <X aria-hidden="true" className="size-3.5" />
                     Отмена
                   </button>
                 </div>
@@ -1259,8 +1332,9 @@ export function TaskModal({
                   onClick={() => {
                     setConfirmingDelete(true);
                   }}
-                  className={`${DESTRUCTIVE_BUTTON} w-full`}
+                  className={`${DESTRUCTIVE_BUTTON} inline-flex w-full items-center justify-center gap-1.5`}
                 >
+                  <Trash2 aria-hidden="true" className="size-3.5" />
                   Удалить
                 </button>
               )}

@@ -912,7 +912,7 @@ describe("TaskOverlay Trello-модал", () => {
     const emptyInput = await screen.findByTestId("kanban-description-input");
 
     fireEvent.change(emptyInput, { target: { value: "" } });
-    fireEvent.click(screen.getByTestId("kanban-description-save"));
+    fireEvent.keyDown(emptyInput, { key: "Enter", ctrlKey: true });
 
     await waitFor(() => {
       expect(inputOf(updateCalls().at(-1)?.input ?? {})).toEqual({
@@ -945,11 +945,6 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Сохранено кликом снаружи" } });
-    fireEvent.blur(titleInput, {
-      relatedTarget: screen.getByTestId("kanban-title-save"),
-    });
-    expect(updateCalls()).toHaveLength(0);
-
     fireEvent.pointerDown(screen.getByTestId("kanban-modal-project"));
 
     await waitFor(() => {
@@ -976,7 +971,41 @@ describe("TaskOverlay Trello-модал", () => {
       );
     });
     expect(updateCalls()).toHaveLength(2);
-    expect(document.activeElement).toBe(priority);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(priority);
+    });
+  });
+
+  it("outside pointerdown по focusable-контролу не отбирает у него фокус", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Задача A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+    const updateCalls = () =>
+      operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update");
+
+    renderOverlay(operations);
+    await openTask("a");
+    fireEvent.click(screen.getByTestId("kanban-modal-title"));
+
+    const titleInput = await screen.findByTestId("kanban-title-input");
+    const priority = screen.getByTestId("kanban-modal-priority");
+
+    fireEvent.change(titleInput, { target: { value: "Сохранено pointerdown" } });
+    priority.focus();
+    fireEvent.pointerDown(priority);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Сохранено pointerdown");
+    });
+    expect(updateCalls()).toHaveLength(1);
+    await waitFor(() => {
+      expect(priority).toBeEnabled();
+      expect(document.activeElement).toBe(priority);
+    });
+    expect(document.activeElement).not.toBe(screen.getByTestId("kanban-modal-title"));
   });
 
   it("при VERSION_CONFLICT показывает сообщение и перечитывает серверную версию", async () => {
@@ -1004,7 +1033,7 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Локальная правка" } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     await waitFor(() => {
       expect(screen.getByTestId("task-details-error")).toHaveTextContent(
@@ -1094,7 +1123,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
     expect(screen.queryByTestId("kanban-modal-title")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(title, { key: "Enter" });
 
     await waitFor(() => {
       const update = operations.calls
@@ -1626,7 +1655,7 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "   " } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     expect(screen.getByTestId("kanban-inline-error")).toHaveTextContent("Укажите название задачи");
     expect(screen.getByTestId("kanban-title-input")).toHaveValue("   ");
@@ -1635,7 +1664,7 @@ describe("TaskOverlay Trello-модал", () => {
 
     // trim делает значение неизменённым: команда не отправляется.
     fireEvent.change(titleInput, { target: { value: "  Задача A  " } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     expect(screen.queryByTestId("kanban-title-input")).toBeNull();
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
@@ -1661,7 +1690,7 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Несохранённый заголовок" } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     await waitFor(() => {
       expect(screen.getByTestId("task-details-error")).toHaveTextContent("Сервер недоступен");
@@ -1674,7 +1703,7 @@ describe("TaskOverlay Trello-модал", () => {
     fireEvent.click(screen.getByTestId("kanban-details-close"));
     expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("kanban-draft-keep"));
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-title-input"), { key: "Escape" });
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача A");
   });
 
@@ -1702,7 +1731,7 @@ describe("TaskOverlay Trello-модал", () => {
       "Сначала сохраните или отмените изменение",
     );
 
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-title-input"), { key: "Escape" });
     fireEvent.click(screen.getByTestId("kanban-modal-description"));
 
     expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
@@ -1721,18 +1750,18 @@ describe("TaskOverlay Trello-модал", () => {
 
     touchTap(screen.getByTestId("kanban-modal-title"));
     expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-title-input"), { key: "Escape" });
 
     touchTap(screen.getByTestId("kanban-modal-description"));
     expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("kanban-description-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-description-input"), { key: "Escape" });
 
     const description = screen.getByTestId("kanban-modal-description");
 
     description.focus();
     fireEvent.keyDown(description, { key: "F2" });
     expect(await screen.findByTestId("kanban-description-input")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("kanban-description-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-description-input"), { key: "Escape" });
 
     const title = screen.getByTestId("kanban-modal-title");
 
@@ -1850,7 +1879,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(await screen.findByTestId("kanban-title-input")).toBeInTheDocument();
   });
 
-  it("Escape на Save/Cancel завершает только редактор, не закрывая dialog", async () => {
+  it("Escape завершает только активный редактор, не закрывая dialog", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {
       projects: [project],
@@ -1866,8 +1895,8 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Черновик" } });
-    screen.getByTestId("kanban-title-save").focus();
-    fireEvent.keyDown(screen.getByTestId("kanban-title-save"), { key: "Escape" });
+    titleInput.focus();
+    fireEvent.keyDown(titleInput, { key: "Escape" });
 
     expect(screen.queryByTestId("kanban-title-editor")).toBeNull();
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
@@ -1883,8 +1912,8 @@ describe("TaskOverlay Trello-модал", () => {
     const descriptionInput = await screen.findByTestId("kanban-description-input");
 
     fireEvent.change(descriptionInput, { target: { value: "Черновик описания" } });
-    screen.getByTestId("kanban-description-cancel").focus();
-    fireEvent.keyDown(screen.getByTestId("kanban-description-cancel"), { key: "Escape" });
+    descriptionInput.focus();
+    fireEvent.keyDown(descriptionInput, { key: "Escape" });
 
     expect(screen.queryByTestId("kanban-description-editor")).toBeNull();
     expect(screen.queryByTestId("kanban-draft-confirm")).toBeNull();
@@ -1937,7 +1966,7 @@ describe("TaskOverlay Trello-модал", () => {
       "Задача уже изменена в другом месте",
     );
 
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-title-input"), { key: "Escape" });
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Серверная версия");
   });
 
@@ -2079,7 +2108,7 @@ describe("TaskOverlay Trello-модал", () => {
     expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "1");
     expect(screen.queryByTestId("kanban-modal-title")).toBeNull();
 
-    fireEvent.click(screen.getByTestId("kanban-title-cancel"));
+    fireEvent.keyDown(screen.getByTestId("kanban-title-input"), { key: "Escape" });
     expect(screen.getByTestId("kanban-modal-title")).toHaveTextContent("Задача B");
   });
 
@@ -2709,7 +2738,7 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Заголовок с inline" } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     await waitFor(() => {
       expect(screen.getByTestId("kanban-modal")).toHaveAttribute("data-task-version", "2");
@@ -2755,10 +2784,8 @@ describe("TaskOverlay Trello-модал", () => {
 
     fireEvent.change(titleInput, { target: { value: "Один раз" } });
 
-    const saveButton = screen.getByTestId("kanban-title-save");
-
-    fireEvent.click(saveButton);
-    fireEvent.click(saveButton);
+    fireEvent.keyDown(titleInput, { key: "Enter" });
+    fireEvent.keyDown(titleInput, { key: "Enter" });
 
     expect(
       operations.calls.filter((call) => call.operationId === "kanbaner.tasks.task.update"),
@@ -2953,7 +2980,7 @@ describe("TaskOverlay Trello-модал", () => {
     const titleInput = await screen.findByTestId("kanban-title-input");
 
     fireEvent.change(titleInput, { target: { value: "Новый заголовок" } });
-    fireEvent.click(screen.getByTestId("kanban-title-save"));
+    fireEvent.keyDown(titleInput, { key: "Enter" });
     fireEvent.click(screen.getByTestId("kanban-details-close"));
 
     expect(await screen.findByTestId("kanban-draft-confirm")).toBeInTheDocument();

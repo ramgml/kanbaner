@@ -1838,6 +1838,143 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByRole("heading", { name: "Done 2", exact: true })).toBeVisible();
     });
 
+    test("закрывает меню колонки кликом вне, Escape и после действия", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект меню колонки");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      const menu = page.getByTestId("kanban-column-menu-todo");
+      const summary = page.getByLabel("Действия колонки «ToDo»");
+
+      // Клик по свободному месту доски закрывает меню без возврата фокуса.
+      await summary.click();
+      await expect(menu).toHaveJSProperty("open", true);
+      await page.getByTestId("kanban-view").click({ position: { x: 3, y: 3 } });
+      await expect(menu).toHaveJSProperty("open", false);
+
+      // Escape закрывает меню и возвращает фокус на trigger.
+      await summary.click();
+      await expect(menu).toHaveJSProperty("open", true);
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveJSProperty("open", false);
+      await expect(summary).toBeFocused();
+
+      // Выбор действия тоже не оставляет меню открытым: форма переименования
+      // заменяет заголовок вместе с `<details>`.
+      await summary.click();
+      await expect(menu).toHaveJSProperty("open", true);
+      await page.getByTestId("kanban-column-rename-todo").click();
+      await expect(menu).toHaveCount(0);
+      await expect(page.getByTestId("kanban-column-rename-input-todo")).toBeVisible();
+
+      await page.getByTestId("kanban-column-rename-input-todo").press("Escape");
+      await expect(page.getByTestId("kanban-column-rename-input-todo")).toHaveCount(0);
+    });
+
+    test("клавиатурный Escape в inline-редакторе не перехватывается открытым меню колонки", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект Escape меню");
+      const taskTitle = uniqueTitle("Задача Escape меню");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      const menu = page.getByTestId("kanban-column-menu-todo");
+      const summary = page.getByLabel("Действия колонки «ToDo»");
+      const opener = page.getByTestId(`kanban-open-${taskId}`);
+
+      const tabUntil = async (testId: string): Promise<void> => {
+        for (let index = 0; index < 20; index += 1) {
+          await page.keyboard.press("Tab");
+
+          const focused = await page.evaluate(
+            () => document.activeElement?.getAttribute("data-testid") ?? null,
+          );
+
+          if (focused === testId) {
+            return;
+          }
+        }
+
+        throw new Error(`Фокус не дошёл до ${testId}`);
+      };
+
+      // Меню открывается с клавиатуры и остаётся открытым, пока фокус
+      // уходит по Tab к карточке.
+      await summary.focus();
+      await page.keyboard.press("Enter");
+      await expect(menu).toHaveJSProperty("open", true);
+
+      await tabUntil(`kanban-open-${taskId}`);
+      await expect(opener).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(menu).toHaveJSProperty("open", true);
+
+      await tabUntil("kanban-modal-title");
+      await expect(page.getByTestId("kanban-modal-title")).toBeFocused();
+      await page.keyboard.press("Enter");
+
+      const titleInput = page.getByTestId("kanban-title-input");
+
+      await expect(titleInput).toBeVisible();
+      await titleInput.fill(uniqueTitle("Черновик Escape меню"));
+
+      // Один Escape отменяет inline-редактор. Открытое меню колонки не
+      // перехватывает событие и не переносит фокус на summary.
+      await page.keyboard.press("Escape");
+      await expect(titleInput).toHaveCount(0);
+      await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
+      await expect(page.getByTestId("kanban-details")).toBeVisible();
+      await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
+      await expect(page.getByTestId("kanban-modal-title")).toBeFocused();
+      await expect(menu).toHaveJSProperty("open", false);
+    });
+
+    test("отмена удаления колонки закрывает меню и возвращает фокус на summary", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект отмены удаления колонки");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await openKanban(page, projectTitle);
+
+      const menu = page.getByTestId("kanban-column-menu-todo");
+      const summary = page.getByLabel("Действия колонки «ToDo»");
+      const deleteItem = page.getByTestId("kanban-column-delete-todo");
+
+      await summary.focus();
+      await page.keyboard.press("Enter");
+      await expect(menu).toHaveJSProperty("open", true);
+
+      for (let index = 0; index < 6; index += 1) {
+        if (await deleteItem.evaluate((element) => element === document.activeElement)) {
+          break;
+        }
+
+        await page.keyboard.press("Tab");
+      }
+
+      await expect(deleteItem).toBeFocused();
+      await page.keyboard.press("Enter");
+
+      const dialog = page.getByTestId("kanban-column-delete-dialog");
+
+      await expect(dialog).toBeVisible();
+      await expect(menu).toHaveJSProperty("open", false);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(menu).toHaveJSProperty("open", false);
+      await expect(summary).toBeFocused();
+    });
+
     test("переставляет колонки pointer DnD до/после/no-op и card drop header не меняет порядок", async ({
       page,
     }) => {
@@ -2980,7 +3117,7 @@ test.describe("канбан в production shell", () => {
       const descriptionInput = page.getByTestId("kanban-description-input");
 
       await descriptionInput.fill(description);
-      await page.getByTestId("kanban-description-save").click();
+      await descriptionInput.press("Control+Enter");
       await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
       await expect(page.getByTestId("kanban-modal-tags")).toHaveValue("draft");
       await closeCardModal(page);
@@ -3350,20 +3487,20 @@ test.describe("канбан в production shell", () => {
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
 
-      // Escape при фокусе на Save тоже отменяет только редактор.
+      // Escape при фокусе в textarea тоже отменяет только редактор.
       await page.getByTestId("kanban-modal-title").click();
       await page.getByTestId("kanban-title-input").fill(draftTitle);
-      await page.getByTestId("kanban-title-save").focus();
+      await page.getByTestId("kanban-title-input").focus();
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
       await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(taskTitle);
 
-      // И на Cancel редактора описания.
+      // И в textarea описания.
       await page.getByTestId("kanban-modal-description").click();
       await page.getByTestId("kanban-description-input").fill("Черновик описания");
-      await page.getByTestId("kanban-description-cancel").focus();
+      await page.getByTestId("kanban-description-input").focus();
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("kanban-description-editor")).toHaveCount(0);
       await expect(page.getByTestId("kanban-draft-confirm")).toHaveCount(0);
@@ -3641,7 +3778,7 @@ test.describe("канбан в production shell", () => {
       // Устаревшая вкладка пытается перезаписать чужую правку.
       await stalePage.getByTestId("kanban-modal-title").click();
       await stalePage.getByTestId("kanban-title-input").fill(staleTitle);
-      await stalePage.getByTestId("kanban-title-save").click();
+      await stalePage.getByTestId("kanban-title-input").press("Enter");
 
       await expect(stalePage.getByTestId("task-details-error")).toContainText(
         "Задача уже изменена в другом месте",
@@ -5647,7 +5784,7 @@ test.describe("канбан в production shell", () => {
 
       await expect(titleInput).toBeFocused();
       await titleInput.fill(updatedTitle);
-      await page.getByTestId("kanban-title-save").tap();
+      await titleInput.press("Enter");
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(updatedTitle);
       await expectNoHorizontalOverflow(page);
 
@@ -5658,7 +5795,7 @@ test.describe("канбан в production shell", () => {
 
       await expect(descriptionInput).toBeFocused();
       await descriptionInput.fill(description);
-      await page.getByTestId("kanban-description-save").tap();
+      await descriptionInput.press("Control+Enter");
       await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
       await expectNoHorizontalOverflow(page);
 
@@ -5721,7 +5858,8 @@ test.describe("канбан в production shell", () => {
       await dispatch("touchEnd", []);
       await expect(page.getByTestId("kanban-title-editor")).toHaveCount(1);
       await expect(page.getByTestId("kanban-title-input")).toHaveValue(taskTitle);
-      await page.getByTestId("kanban-title-cancel").tap();
+      await page.getByTestId("kanban-title-input").press("Escape");
+      await expect(page.getByTestId("kanban-title-editor")).toHaveCount(0);
 
       // Drag больше порога не открывает редактор.
       await dispatch("touchStart", [{ x: titleX, y: titleY, id: 1 }]);

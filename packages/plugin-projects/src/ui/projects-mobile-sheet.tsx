@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { FolderKanban, Plus, X } from "lucide-react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import { TASKS_COMMAND_IDS, type ProjectMutationOutput } from "@kanbaner/plugin-tasks/contract";
@@ -129,7 +130,7 @@ function MobileSheetContent({
           }}
           className="inline-flex min-h-10 items-center gap-1.5 rounded-full border border-border bg-background px-3 text-xs font-semibold shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
-          <span aria-hidden="true">▤</span>
+          <FolderKanban aria-hidden="true" className="size-4" />
           Проекты
         </button>
       </div>
@@ -157,9 +158,10 @@ function MobileSheetContent({
                   setFormError(null);
                   setCreating((current) => !current);
                 }}
-                className="inline-flex min-h-10 items-center rounded-md border border-border px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
-                + Новый проект
+                <Plus aria-hidden="true" className="size-3.5" />
+                Новый проект
               </button>
               <button
                 type="button"
@@ -171,7 +173,7 @@ function MobileSheetContent({
                 }}
                 className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border border-border text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
-                <span aria-hidden="true">×</span>
+                <X aria-hidden="true" className="size-4" />
               </button>
             </div>
           </div>

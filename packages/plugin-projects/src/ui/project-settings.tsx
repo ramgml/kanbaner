@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { ArrowDown, ArrowUp, Check, GripVertical, Plus, Settings, X } from "lucide-react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -49,10 +50,10 @@ type ColumnsRefreshResult =
 const DRAG_THRESHOLD = 8;
 
 const actionButtonClass =
-  "inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
+  "inline-flex min-h-10 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
 
 const primaryButtonClass =
-  "inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
+  "inline-flex min-h-10 items-center gap-1.5 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
 
 const inputClass =
   "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 xl:h-8";
@@ -1155,6 +1156,7 @@ export function ProjectSettingsButton({
         onClick={openSettings}
         className={actionButtonClass}
       >
+        <Settings aria-hidden="true" className="size-3.5 shrink-0" />
         Настроить
       </button>
 
@@ -1183,7 +1185,7 @@ export function ProjectSettingsButton({
               disabled={busy}
               className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border border-border bg-background text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
             >
-              <span aria-hidden="true">×</span>
+              <X aria-hidden="true" className="size-4" />
             </button>
           </div>
 
@@ -1269,6 +1271,7 @@ export function ProjectSettingsButton({
                         aria-busy={projectSubmitting || projectRefreshing}
                         className={primaryButtonClass}
                       >
+                        <Check aria-hidden="true" className="size-3.5 shrink-0" />
                         {projectSubmitting
                           ? "Сохранение…"
                           : projectRefreshing
@@ -1326,7 +1329,7 @@ export function ProjectSettingsButton({
                     Колонки
                   </h3>
                   <p className="m-0 text-[11px] text-muted-foreground">
-                    Порядок меняется ручкой или кнопками ↑/↓.
+                    Порядок меняется ручкой или кнопками перемещения.
                   </p>
                 </div>
 
@@ -1389,7 +1392,7 @@ export function ProjectSettingsButton({
                             }}
                             className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-8"
                           >
-                            <span aria-hidden="true">⠿</span>
+                            <GripVertical aria-hidden="true" className="size-4" />
                           </button>
 
                           <input
@@ -1433,6 +1436,7 @@ export function ProjectSettingsButton({
                             }}
                             className={primaryButtonClass}
                           >
+                            <Check aria-hidden="true" className="size-3.5 shrink-0" />
                             {pending ? "…" : "Сохранить"}
                           </button>
 
@@ -1448,7 +1452,7 @@ export function ProjectSettingsButton({
                               }}
                               className="inline-flex min-h-10 min-w-8 items-center justify-center rounded-md border border-border bg-background text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 xl:min-h-8"
                             >
-                              <span aria-hidden="true">↑</span>
+                              <ArrowUp aria-hidden="true" className="size-3.5" />
                             </button>
                             <button
                               type="button"
@@ -1461,7 +1465,7 @@ export function ProjectSettingsButton({
                               }}
                               className="inline-flex min-h-10 min-w-8 items-center justify-center rounded-md border border-border bg-background text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 xl:min-h-8"
                             >
-                              <span aria-hidden="true">↓</span>
+                              <ArrowDown aria-hidden="true" className="size-3.5" />
                             </button>
                           </div>
                         </div>
@@ -1578,6 +1582,7 @@ export function ProjectSettingsButton({
                       aria-busy={createSubmitting}
                       className={`${primaryButtonClass} w-full min-[420px]:col-span-2`}
                     >
+                      <Plus aria-hidden="true" className="size-3.5 shrink-0" />
                       {createSubmitting ? "Добавление…" : "Добавить колонку"}
                     </button>
                   </div>

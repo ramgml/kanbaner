@@ -29,7 +29,8 @@
   "dependencies": {
     "@kanbaner/plugin-sdk": "workspace:*",
     "@kanbaner/plugin-tasks": "workspace:*",
-    "@kanbaner/task-ui": "workspace:*"
+    "@kanbaner/task-ui": "workspace:*",
+    "lucide-react": "1.70.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",

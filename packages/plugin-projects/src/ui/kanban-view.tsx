@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
+import { Plus, RotateCcw, Trash2, X } from "lucide-react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
@@ -2811,8 +2812,9 @@ export function KanbanView({
               onClick={() => {
                 openTaskComposer();
               }}
-              className="inline-flex min-h-10 items-center rounded-md border border-transparent bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-transparent bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8"
             >
+              <Plus aria-hidden="true" className="size-3.5 shrink-0" />
               Новая задача
             </button>
           ) : null
@@ -3000,7 +3002,7 @@ export function KanbanView({
                   className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
                 >
                   Тег: {query.tag}
-                  <span aria-hidden="true">×</span>
+                  <X aria-hidden="true" className="size-3.5 shrink-0" />
                 </button>
 
                 <button
@@ -3008,8 +3010,9 @@ export function KanbanView({
                   onClick={() => {
                     resetKanbanFilters();
                   }}
-                  className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
                 >
+                  <RotateCcw aria-hidden="true" className="size-3.5 shrink-0" />
                   Сбросить фильтры
                 </button>
               </div>
@@ -3079,8 +3082,9 @@ export function KanbanView({
                   data-testid="kanban-bulk-delete"
                   disabled={bulkBusy || bulkNeedsRefresh}
                   onClick={openBulkDelete}
-                  className="inline-flex min-h-10 items-center rounded-md border border-destructive/40 px-3 text-sm font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-destructive/40 px-3 text-sm font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  <Trash2 aria-hidden="true" className="size-3.5 shrink-0" />
                   Удалить
                 </button>
 
@@ -3089,8 +3093,9 @@ export function KanbanView({
                   data-testid="kanban-bulk-clear"
                   disabled={bulkBusy || bulkNeedsRefresh}
                   onClick={clearBulkSelection}
-                  className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  <X aria-hidden="true" className="size-3.5 shrink-0" />
                   Снять выбор
                 </button>
               </div>
@@ -3144,8 +3149,9 @@ export function KanbanView({
                 onClick={() => {
                   resetKanbanFilters();
                 }}
-                className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
               >
+                <RotateCcw aria-hidden="true" className="size-3.5 shrink-0" />
                 Сбросить фильтры
               </button>
             </div>
@@ -3456,8 +3462,9 @@ export function KanbanView({
                 onClick={() => {
                   void confirmBulkDelete();
                 }}
-                className="inline-flex min-h-10 items-center rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
               >
+                <Trash2 aria-hidden="true" className="size-3.5 shrink-0" />
                 {bulkPending === "delete" ? "Удаление…" : "Удалить задачи"}
               </button>
             </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import { TASKS_COMMAND_IDS, type ProjectMutationOutput } from "@kanbaner/plugin-tasks/contract";
@@ -154,7 +155,7 @@ function ProjectSidebarContent({
           }}
           className="flex size-8 items-center justify-center rounded-md border border-border bg-background text-base leading-none hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
-          <span aria-hidden="true">+</span>
+          <Plus aria-hidden="true" className="size-4" />
         </button>
       </div>
 

@@ -3,6 +3,17 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  ArrowUpToLine,
+  CalendarDays,
+  Flag,
+  ListTree,
+  MoreHorizontal,
+  MoveRight,
+} from "lucide-react";
 
 import type { Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
 import { taskPriorityLabel } from "@kanbaner/task-ui";
@@ -426,9 +437,10 @@ export function KanbanCard({
               closeMenu(true);
               onMoveTo(task, column.id);
             }}
-            className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+            className="inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
             style={actionButtonStyle}
           >
+            <MoveRight aria-hidden="true" className="size-3.5 shrink-0" />
             Переместить в {column.title}
           </button>
         ))}
@@ -442,9 +454,10 @@ export function KanbanCard({
             closeMenu(true);
             onReorder(task, "up");
           }}
-          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          className="inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
           style={actionButtonStyle}
         >
+          <ArrowUp aria-hidden="true" className="size-3.5 shrink-0" />
           Выше
         </button>
         <button
@@ -456,9 +469,10 @@ export function KanbanCard({
             closeMenu(true);
             onReorder(task, "down");
           }}
-          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          className="inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
           style={actionButtonStyle}
         >
+          <ArrowDown aria-hidden="true" className="size-3.5 shrink-0" />
           Ниже
         </button>
         <button
@@ -470,10 +484,10 @@ export function KanbanCard({
             closeMenu(true);
             onReorder(task, "start");
           }}
-          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          className="inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
           style={actionButtonStyle}
         >
-          В начало
+          <ArrowUpToLine aria-hidden="true" className="size-3.5 shrink-0" />В начало
         </button>
         <button
           type="button"
@@ -484,10 +498,10 @@ export function KanbanCard({
             closeMenu(true);
             onReorder(task, "end");
           }}
-          className="min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
+          className="inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7"
           style={actionButtonStyle}
         >
-          В конец
+          <ArrowDownToLine aria-hidden="true" className="size-3.5 shrink-0" />В конец
         </button>
       </div>,
       document.body,
@@ -566,7 +580,7 @@ export function KanbanCard({
           }}
           className="flex min-h-10 min-w-10 shrink-0 items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-7 xl:min-w-7"
         >
-          <span aria-hidden="true">⋯</span>
+          <MoreHorizontal aria-hidden="true" className="size-4" />
         </button>
       </div>
 
@@ -606,9 +620,10 @@ export function KanbanCard({
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
         <span
-          className="rounded-full px-1.5 py-0.5 font-semibold"
+          className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 font-semibold"
           style={{ background: priorityStyle.background, color: priorityStyle.color }}
         >
+          <Flag aria-hidden="true" className="size-3" />
           {taskPriorityLabel(task.priority)}
         </span>
 
@@ -616,13 +631,18 @@ export function KanbanCard({
           data-testid={`kanban-due-${task.id}`}
           aria-label={due.ariaLabel}
           title={due.title}
-          className="rounded px-1 py-0.5 font-medium"
+          className="inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium"
           style={{ background: dueStyle.background, color: dueStyle.color }}
         >
+          <CalendarDays aria-hidden="true" className="size-3" />
           {due.label}
         </span>
 
-        <span data-testid={`kanban-subtasks-${task.id}`} className="whitespace-nowrap">
+        <span
+          data-testid={`kanban-subtasks-${task.id}`}
+          className="inline-flex items-center gap-1 whitespace-nowrap"
+        >
+          <ListTree aria-hidden="true" className="size-3" />
           Подзадачи: {subtaskCount ?? "—"}
         </span>
       </div>
