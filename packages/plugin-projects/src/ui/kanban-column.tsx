@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { ArrowLeft, ArrowRight, GripVertical, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
 import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
 import { LoadingState } from "@kanbaner/task-ui";
@@ -48,7 +50,9 @@ const secondaryButtonClass =
   "inline-flex min-h-10 items-center justify-center rounded-md border border-border bg-background/70 px-2 text-xs font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
 
 const menuItemClass =
-  "min-h-10 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
+  "inline-flex min-h-10 items-center gap-1.5 rounded px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8";
+
+const menuIconClass = "size-3.5 shrink-0";
 
 /**
  * Колонка доски: заголовок, счётчик, меню действий, composer и список.
@@ -85,6 +89,66 @@ export function KanbanColumn({
   quickComposer,
   children,
 }: KanbanColumnProps) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const summaryRef = useRef<HTMLElement>(null);
+
+  const closeMenu = (returnFocus: boolean): void => {
+    const details = detailsRef.current;
+
+    if (details === null) {
+      return;
+    }
+
+    details.open = false;
+
+    if (returnFocus) {
+      summaryRef.current?.focus();
+    }
+  };
+
+  // Нативный <details> сам не закрывается по клику вне или Escape.
+  // Слушаем документ только пока меню открыто. Событие не перехватывается,
+  // поэтому DnD, кнопки внутри меню и открытие другого меню не ломаются.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent): void => {
+      const details = detailsRef.current;
+
+      if (details === null || !details.open) {
+        return;
+      }
+
+      const target = event.target;
+
+      if (target instanceof Node && details.contains(target)) {
+        return;
+      }
+
+      details.open = false;
+    };
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const details = detailsRef.current;
+
+      if (details === null || !details.open || event.key !== "Escape") {
+        return;
+      }
+
+      // Escape относится только к меню: не доходит до окна/других обработчиков.
+      event.preventDefault();
+      event.stopPropagation();
+      details.open = false;
+      summaryRef.current?.focus();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, []);
+
   return (
     <section
       id={`kanban-column-${slug}`}
@@ -182,7 +246,7 @@ export function KanbanColumn({
               onPointerDown={onDragStart}
               className="flex min-h-10 min-w-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-8 xl:min-w-7"
             >
-              <span aria-hidden="true">⠿</span>
+              <GripVertical aria-hidden="true" className="size-4" />
             </button>
 
             <h2
@@ -202,13 +266,18 @@ export function KanbanColumn({
               {total}
             </span>
 
-            <details data-testid={`kanban-column-menu-${slug}`} className="relative shrink-0">
+            <details
+              ref={detailsRef}
+              data-testid={`kanban-column-menu-${slug}`}
+              className="relative shrink-0"
+            >
               <summary
+                ref={summaryRef}
                 aria-label={`Действия колонки «${column.title}»`}
                 title="Действия колонки"
                 className="flex min-h-10 min-w-8 cursor-pointer list-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:min-h-8 xl:min-w-7"
               >
-                <span aria-hidden="true">⋯</span>
+                <MoreHorizontal aria-hidden="true" className="size-4" />
               </summary>
               <div
                 role="group"
@@ -219,27 +288,39 @@ export function KanbanColumn({
                   type="button"
                   data-testid={`kanban-column-rename-${slug}`}
                   disabled={pending}
-                  onClick={onRenameOpen}
+                  onClick={() => {
+                    closeMenu(false);
+                    onRenameOpen();
+                  }}
                   className={menuItemClass}
                 >
+                  <Pencil aria-hidden="true" className={menuIconClass} />
                   Переименовать
                 </button>
                 <button
                   type="button"
                   data-testid={`kanban-column-move-left-${slug}`}
                   disabled={pending || !canMoveLeft}
-                  onClick={onMoveLeft}
+                  onClick={() => {
+                    closeMenu(true);
+                    onMoveLeft();
+                  }}
                   className={menuItemClass}
                 >
+                  <ArrowLeft aria-hidden="true" className={menuIconClass} />
                   Переместить влево
                 </button>
                 <button
                   type="button"
                   data-testid={`kanban-column-move-right-${slug}`}
                   disabled={pending || !canMoveRight}
-                  onClick={onMoveRight}
+                  onClick={() => {
+                    closeMenu(true);
+                    onMoveRight();
+                  }}
                   className={menuItemClass}
                 >
+                  <ArrowRight aria-hidden="true" className={menuIconClass} />
                   Переместить вправо
                 </button>
                 <button
@@ -247,9 +328,13 @@ export function KanbanColumn({
                   data-testid={`kanban-column-delete-${slug}`}
                   disabled={pending || !canDelete}
                   title={deleteDisabledReason ?? undefined}
-                  onClick={onDelete}
+                  onClick={() => {
+                    closeMenu(false);
+                    onDelete();
+                  }}
                   className={`${menuItemClass} text-destructive`}
                 >
+                  <Trash2 aria-hidden="true" className={menuIconClass} />
                   Удалить колонку
                 </button>
                 {deleteDisabledReason === null ? null : (

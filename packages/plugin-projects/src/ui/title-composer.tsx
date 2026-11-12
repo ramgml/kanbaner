@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Plus, X } from "lucide-react";
 
 import { taskStatusLabel } from "@kanbaner/task-ui";
 import type { TaskStatus } from "@kanbaner/plugin-tasks/contract";
@@ -178,8 +179,9 @@ export function TitleComposer({
           data-testid={`${testIdPrefix}-submit`}
           disabled={disabled || submitting || title.trim().length === 0 || projectId.length === 0}
           aria-busy={submitting}
-          className={`${actionButtonClass} bg-primary text-primary-foreground hover:bg-primary/90`}
+          className={`${actionButtonClass} gap-1.5 bg-primary text-primary-foreground hover:bg-primary/90`}
         >
+          <Plus aria-hidden="true" className="size-3.5" />
           {submitting ? "Добавление…" : submitLabel}
         </button>
         <button
@@ -187,9 +189,9 @@ export function TitleComposer({
           aria-label="Закрыть добавление карточки"
           onClick={onCancel}
           disabled={submitting}
-          className={`${actionButtonClass} border border-border bg-background text-foreground hover:bg-accent`}
+          className={`${actionButtonClass} gap-1.5 border border-border bg-background text-foreground hover:bg-accent`}
         >
-          <span aria-hidden="true">×</span>
+          <X aria-hidden="true" className="size-4" />
         </button>
       </div>
     </form>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 
 import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
 
@@ -77,11 +78,9 @@ export function KanbanQuickComposer({
         title={disabled ? "Сначала создайте проект" : `Добавить карточку в колонку «${label}»`}
         disabled={disabled}
         onClick={openComposer}
-        className={`inline-flex min-h-10 items-center justify-start rounded-md border border-transparent bg-transparent px-3 text-left text-sm font-medium text-muted-foreground hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8`}
+        className={`inline-flex min-h-10 items-center justify-start gap-1.5 rounded-md border border-transparent bg-transparent px-3 text-left text-sm font-medium text-muted-foreground hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 xl:min-h-8`}
       >
-        <span aria-hidden="true" className="mr-1 text-base leading-none">
-          +
-        </span>
+        <Plus aria-hidden="true" className="size-4 shrink-0" />
         Добавить карточку
       </button>
     );

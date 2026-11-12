@@ -42,6 +42,7 @@ const ALLOWED_PROJECTS_DEPENDENCIES = new Set([
   "react/jsx-runtime",
   "@kanbaner/plugin-sdk",
   "@kanbaner/plugin-tasks/contract",
+  "lucide-react",
   TASK_UI_PACKAGE,
 ]);
 const PROJECTS_SERVER_ENTRYPOINT = "index.ts";
@@ -856,7 +857,12 @@ function analyzeManifests(root, violations) {
     {
       file: "packages/plugin-projects/package.json",
       name: PROJECTS_PACKAGE,
-      allowed: new Set([TASKS_PACKAGE, ALLOWED_FIXTURE_DEPENDENCY, TASK_UI_PACKAGE]),
+      allowed: new Set([
+        TASKS_PACKAGE,
+        ALLOWED_FIXTURE_DEPENDENCY,
+        TASK_UI_PACKAGE,
+        "lucide-react",
+      ]),
     },
   ];
 

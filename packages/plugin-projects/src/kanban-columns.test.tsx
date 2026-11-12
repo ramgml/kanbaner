@@ -487,6 +487,38 @@ describe("управление колонками в KanbanView", () => {
     });
   });
 
+  it("закрывает меню колонки по клику вне, Escape и после действия", async () => {
+    const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
+    renderBoard(board);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-column-title-todo")).toHaveTextContent("ToDo");
+    });
+
+    const menuDetails = (): HTMLDetailsElement =>
+      screen.getByTestId("kanban-column-menu-todo") as HTMLDetailsElement;
+
+    await openMenu("column-project-1-todo", "todo");
+    expect(menuDetails().open).toBe(true);
+
+    fireEvent.pointerDown(document.body);
+    expect(menuDetails().open).toBe(false);
+
+    // Открываем меню повторно: Escape закрывает его и возвращает фокус trigger-у.
+    const summary = screen.getByLabelText("Действия колонки «ToDo»");
+
+    await openMenu("column-project-1-todo", "todo");
+    expect(menuDetails().open).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(menuDetails().open).toBe(false);
+    expect(document.activeElement).toBe(summary);
+
+    // Выбор действия не оставляет меню открытым.
+    await openMenu("column-project-1-todo", "todo");
+    fireEvent.click(screen.getByTestId("kanban-column-move-right-todo"));
+    expect(menuDetails().open).toBe(false);
+  });
+
   it("переставляет колонки оптимистично и откатывает при ошибке", async () => {
     const board: Board = { columns: defaultColumns(), tasks: [], nextColumn: 1 };
     renderBoard(board, {

@@ -3,6 +3,8 @@
 
 "use client";
 
+import { LayoutGrid, List } from "lucide-react";
+
 import { KANBAN_ROUTE, TASK_LIST_ROUTE, type ProjectRoute } from "../metadata.ts";
 import { rememberProjectView } from "./workspace.ts";
 
@@ -22,7 +24,7 @@ function withSearch(pathname: string, search: string): string {
 }
 
 const toggleClass = (active: boolean): string =>
-  `inline-flex min-h-10 items-center px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8 ${
+  `inline-flex min-h-10 items-center gap-1.5 px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8 ${
     active ? "bg-primary text-primary-foreground" : "bg-background hover:bg-accent"
   }`;
 
@@ -55,6 +57,7 @@ export function ViewToggle({
         }}
         className={toggleClass(route === TASK_LIST_ROUTE)}
       >
+        <List aria-hidden="true" className="size-3.5" />
         Список
       </a>
       <a
@@ -67,6 +70,7 @@ export function ViewToggle({
         }}
         className={`${toggleClass(route === KANBAN_ROUTE)} border-l border-border`}
       >
+        <LayoutGrid aria-hidden="true" className="size-3.5" />
         Канбан
       </a>
     </div>
