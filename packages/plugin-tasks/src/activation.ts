@@ -66,6 +66,7 @@ import type {
   ProjectUpdateInput,
 } from "./schemas/project.ts";
 import type { DeleteOutput } from "./schemas/common.ts";
+import type { BoardColor } from "./schemas/board-color.ts";
 import type {
   ColumnListInput,
   ProjectListInput,
@@ -89,7 +90,12 @@ import {
   formatTaskRef,
   tryParseTasksResourceRef,
 } from "./resources.ts";
-import { TasksNotFoundError, TasksStoreValidationError, createTasksStore } from "./store/index.ts";
+import {
+  TasksNotFoundError,
+  TasksStoreValidationError,
+  TasksVersionConflictError,
+  createTasksStore,
+} from "./store/index.ts";
 import type { TasksIdFactory, TasksStore, TasksStoreTransaction } from "./store.ts";
 import { normalizeTags } from "./validation.ts";
 
@@ -252,7 +258,8 @@ function changedTaskFields(before: Task, after: Task): readonly string[] {
   return changed;
 }
 
-function changedProjectFields(before: Project, after: Project): readonly string[] {
+/** Поля проекта, доступные `project.update`; порядок стабилен для события. */
+export function changedProjectFields(before: Project, after: Project): readonly string[] {
   const changed: string[] = [];
 
   if (before.title !== after.title) {
@@ -261,6 +268,47 @@ function changedProjectFields(before: Project, after: Project): readonly string[
 
   if (before.descriptionMarkdown !== after.descriptionMarkdown) {
     changed.push("descriptionMarkdown");
+  }
+
+  if (before.color !== after.color) {
+    changed.push("color");
+  }
+
+  return changed;
+}
+
+/**
+ * Идемпотентный color-only update: заголовок и (для проекта) описание не
+ * переданы, а цвет совпадает с сохранённым. Такая команда не повышает версию и
+ * не публикует событие. Title-only update сохраняет прежнюю семантику и
+ * повышает версию даже при совпадающем заголовке.
+ */
+export function isSameColorOnlyPatch(
+  patch: {
+    readonly title?: string | undefined;
+    readonly descriptionMarkdown?: string | undefined;
+    readonly color?: BoardColor | undefined;
+  },
+  current: { readonly color?: BoardColor | undefined },
+): boolean {
+  return (
+    patch.color !== undefined &&
+    patch.title === undefined &&
+    patch.descriptionMarkdown === undefined &&
+    patch.color === current.color
+  );
+}
+
+/** Поля колонки, доступные `column.update`; порядок стабилен для события. */
+export function changedColumnFields(before: TaskColumn, after: TaskColumn): readonly string[] {
+  const changed: string[] = [];
+
+  if (before.title !== after.title) {
+    changed.push("title");
+  }
+
+  if (before.color !== after.color) {
+    changed.push("color");
   }
 
   return changed;
@@ -530,6 +578,7 @@ const projectCreate: CommandFn = async (input, executionContext, operationId, de
   const normalized = {
     title: data.title,
     descriptionMarkdown: data.descriptionMarkdown ?? "",
+    ...(data.color === undefined ? {} : { color: data.color }),
     expectedVersion: 0 as const,
   };
 
@@ -543,6 +592,7 @@ const projectCreate: CommandFn = async (input, executionContext, operationId, de
         id: dependencies.idFactory.nextProjectId(),
         title: normalized.title,
         descriptionMarkdown: normalized.descriptionMarkdown,
+        ...(normalized.color === undefined ? {} : { color: normalized.color }),
         createdAt: now,
         expectedVersion: normalized.expectedVersion,
       });
@@ -577,6 +627,7 @@ const projectUpdate: CommandFn = async (input, executionContext, operationId, de
     ...(data.descriptionMarkdown === undefined
       ? {}
       : { descriptionMarkdown: data.descriptionMarkdown }),
+    ...(data.color === undefined ? {} : { color: data.color }),
   };
 
   return executeMutation(
@@ -591,6 +642,18 @@ const projectUpdate: CommandFn = async (input, executionContext, operationId, de
         throw new TasksNotFoundError("project", normalized.id);
       }
 
+      if (isSameColorOnlyPatch(data, before)) {
+        if (before.version !== normalized.expectedVersion) {
+          throw new TasksVersionConflictError(normalized.expectedVersion, before.version);
+        }
+
+        // Событие не публикуется, но контракт выхода требует eventId.
+        return {
+          result: { project: before, resource: formatProjectRef(before.id), eventId: newEventId() },
+          effects: noEffects(),
+        };
+      }
+
       const project = await transaction.updateProject({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
@@ -598,6 +661,7 @@ const projectUpdate: CommandFn = async (input, executionContext, operationId, de
         ...(data.descriptionMarkdown === undefined
           ? {}
           : { descriptionMarkdown: data.descriptionMarkdown }),
+        ...(data.color === undefined ? {} : { color: data.color }),
         updatedAt: now,
       });
       const eventId = newEventId();
@@ -690,6 +754,7 @@ const columnCreate: CommandFn = async (input, executionContext, operationId, dep
     projectId: data.projectId,
     title: data.title,
     type: data.type,
+    ...(data.color === undefined ? {} : { color: data.color }),
     expectedVersion: 0 as const,
     ...(data.position === undefined ? {} : { position: data.position }),
   };
@@ -706,6 +771,7 @@ const columnCreate: CommandFn = async (input, executionContext, operationId, dep
         projectId: normalized.projectId,
         title: normalized.title,
         type: normalized.type,
+        ...(normalized.color === undefined ? {} : { color: normalized.color }),
         ...(normalized.position === undefined ? {} : { position: normalized.position }),
         createdAt: now,
         expectedVersion: normalized.expectedVersion,
@@ -732,7 +798,8 @@ const columnUpdate: CommandFn = async (input, executionContext, operationId, dep
   const normalized = {
     id: data.id,
     expectedVersion: data.expectedVersion,
-    title: data.title,
+    ...(data.title === undefined ? {} : { title: data.title }),
+    ...(data.color === undefined ? {} : { color: data.color }),
   };
 
   return executeMutation(
@@ -747,10 +814,23 @@ const columnUpdate: CommandFn = async (input, executionContext, operationId, dep
         throw new TasksNotFoundError("column", normalized.id);
       }
 
+      if (isSameColorOnlyPatch(data, before)) {
+        if (before.version !== normalized.expectedVersion) {
+          throw new TasksVersionConflictError(normalized.expectedVersion, before.version);
+        }
+
+        // No-op без записи и события; eventId оставлен ради контракта выхода.
+        return {
+          result: { column: before, resource: formatColumnRef(before.id), eventId: newEventId() },
+          effects: noEffects(),
+        };
+      }
+
       const column = await transaction.updateColumn({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
-        title: normalized.title,
+        ...(data.title === undefined ? {} : { title: data.title }),
+        ...(data.color === undefined ? {} : { color: data.color }),
         updatedAt: now,
       });
       const eventId = newEventId();
@@ -758,7 +838,7 @@ const columnUpdate: CommandFn = async (input, executionContext, operationId, dep
       return {
         result: { column, resource: formatColumnRef(column.id), eventId },
         effects: effects({
-          events: [columnUpdatedEvent(column, before.title === column.title ? [] : ["title"])],
+          events: [columnUpdatedEvent(column, changedColumnFields(before, column))],
         }),
       };
     },

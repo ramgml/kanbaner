@@ -31,7 +31,8 @@ KAN-014.
 - `src/contract.ts` — client-safe entrypoint.
 - `src/model.ts` — `Project`, `TaskColumn`, `Task`, статусы, приоритеты и
   сортировка.
-- `src/schemas/*.ts` — TypeBox-схемы и производные TS-типы.
+- `src/schemas/*.ts` — TypeBox-схемы и производные TS-типы, включая общую
+  палитру `BOARD_COLORS`/`BoardColorSchema`.
 - `src/operations.ts` — серверные метаданные команд и запросов для `OperationBus`.
 - `src/activation.ts` — `activate(context)`: регистрация операций, ресурсов,
   idempotency, событий и поиска.
@@ -102,10 +103,10 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 | ID                               | Risk          | Назначение                                   |
 | -------------------------------- | ------------- | -------------------------------------------- |
 | `kanbaner.tasks.project.create`  | `write`       | Создать проект                               |
-| `kanbaner.tasks.project.update`  | `write`       | Изменить проект по `expectedVersion`         |
+| `kanbaner.tasks.project.update`  | `write`       | Изменить проект или его цвет по версии       |
 | `kanbaner.tasks.project.delete`  | `destructive` | Удалить проект, его задачи и колонки         |
 | `kanbaner.tasks.column.create`   | `write`       | Создать колонку и сдвинуть соседей           |
-| `kanbaner.tasks.column.update`   | `write`       | Переименовать колонку                        |
+| `kanbaner.tasks.column.update`   | `write`       | Изменить title и/или color колонки           |
 | `kanbaner.tasks.column.move`     | `write`       | Переставить колонку и обновить позиции       |
 | `kanbaner.tasks.column.delete`   | `destructive` | Удалить колонку и перенести её задачи        |
 | `kanbaner.tasks.task.create`     | `write`       | Создать задачу или подзадачу                 |
@@ -181,7 +182,7 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
 ## Колонки проекта
 
 Колонка (`TaskColumn`) содержит `id`, `projectId`, `title`, `status`,
-`position`, `version`, `createdAt`, `updatedAt`.
+необязательный `color`, `position`, `version`, `createdAt`, `updatedAt`.
 
 - Новый проект атомарно получает три default-колонки: `ToDo`, `In Progress`,
   `Done` с ID `column-<projectId>-todo`, `column-<projectId>-in-progress`,
@@ -204,8 +205,9 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   с `changed: ["position"]`, а `columnId`/`status` задачи синхронизируются. Три
   default-колонки нового проекта при этом сохраняются.
 - `column.create` вставляет колонку и повышает версии сдвинутых соседей;
-  `position === undefined` означает append. `column.update` меняет только
-  заголовок. `column.move` выполняет транзакционный reorder.
+  `position === undefined` означает append. `column.update` меняет `title`
+  и/или `color` и требует хотя бы одно из этих полей; color-only обновление
+  не трогает заголовок. `column.move` выполняет транзакционный reorder.
 - `column.delete` требует `confirm: true`, `expectedVersion` и
   `targetColumnId`. Запрещены удаление последней открытой колонки
   (`COLUMN_LAST_OPEN`), последней Done-колонки (`COLUMN_LAST_DONE`), target,
@@ -225,6 +227,34 @@ Kernel `OperationFailure` является его subclass-ом, поэтому 
   `in_progress`, поэтому старый клиент без `columnId` создаёт задачу в `todo`,
   а move по `status` выбирает первую колонку с этим статусом.
 - `project.delete` каскадно удаляет колонки и возвращает `deletedColumns`.
+
+## Цвета проекта и колонок
+
+`Project` и `TaskColumn` могут содержать необязательное поле `color` из общей
+фиксированной палитры:
+
+```text
+default | slate | blue | green | yellow | orange | red | purple
+```
+
+- Палитра экспортируется из client-safe contract как `BOARD_COLORS`,
+  `BoardColor` и `BoardColorSchema`.
+- `project.create`/`project.update` и `column.create` принимают
+  необязательный `color`; произвольные HEX/CSS-значения отклоняются схемой.
+  Color-only `project.update` с тем же цветом — такой же идемпотентный no-op.
+- В `column.update` `title` и `color` необязательны по отдельности, но пустой
+  patch отклоняется: схема требует хотя бы одно поле, а Store дополнительно
+  возвращает `INVALID_COLUMN_PATCH`. Color-only update сохраняет заголовок и
+  повышает версию колонки; color-only update с уже сохранённым цветом —
+  идемпотентный no-op без новой версии и без события. Прежняя семантика
+  title-only update не меняется.
+- Отсутствие поля в старом документе валидно и не требует миграции: SQLite
+  хранит проект и колонку как JSON-документ. `default` — оформление по
+  умолчанию на уровне представления; Store не подставляет поле при чтении.
+- `column.updated` содержит `changed` с фактически изменёнными полями
+  (`title`, `color`); `project.updated` аналогично включает `color`.
+- Цвет задачи отдельно не хранится: акцент карточки представление вычисляет из
+  `Task.priority`.
 
 ## Позиция задачи
 
@@ -325,7 +355,8 @@ kanbaner.tasks.task.created|updated|moved|completed|deleted
 Payload содержит минимальные идентификаторы и версию; полное состояние
 получается запросом. События `column.*` содержат `columnId`, `projectId`,
 `version`; `column.moved` добавляет `fromPosition`/`toPosition`,
-`column.updated` — `changed`. `column.deleted` для `column.delete` содержит
+`column.updated` — `changed` со значениями `title`/`color`.
+`project.updated` также передаёт `changed`, включая `color`. `column.deleted` для `column.delete` содержит
 `targetColumnId` и `movedTaskIds`; при каскадном `project.delete` эти поля
 отсутствуют, а на каждую удалённую колонку публикуется отдельный
 `column.deleted`, чтобы подписчики очистили универсальные ссылки.
@@ -461,8 +492,9 @@ case проверяет CAS, rollback rejected Promise, вложенную тр�
 `documents`, конкурентные create/complete/move и backfill, уникальность
 позиций, подзадачи, каскады, `completedAt`, теги, фильтры, пагинацию,
 UTC/application IDs, default/legacy-колонки, CRUD/reorder/delete-transfer
-колонок, разреженные позиции и `MAX_POSITION` при delete, read-only query,
-multi-Done и `columnId`/`status`-совместимость.
+колонок, цвета проекта и колонок, пустой `column.update`, разреженные позиции и
+`MAX_POSITION` при delete, read-only query, multi-Done и
+`columnId`/`status`-совместимость.
 
 ### Транзакции и idempotency
 

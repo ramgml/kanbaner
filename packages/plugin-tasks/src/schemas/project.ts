@@ -3,6 +3,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { DRAFT_2020_12, ResourceRefSchema } from "@kanbaner/plugin-sdk";
 
 import { ProjectSchema } from "../model.ts";
+import { BoardColorSchema } from "./board-color.ts";
 import {
   ConfirmSchema,
   CreateExpectedVersionSchema,
@@ -19,6 +20,7 @@ export const ProjectCreateInputSchema = Type.Object(
   {
     title: TitleSchema,
     descriptionMarkdown: Type.Optional(DescriptionMarkdownSchema),
+    color: Type.Optional(BoardColorSchema),
     expectedVersion: Type.Optional(CreateExpectedVersionSchema),
   },
   { ...DRAFT_2020_12, additionalProperties: false },
@@ -26,13 +28,14 @@ export const ProjectCreateInputSchema = Type.Object(
 
 export type ProjectCreateInput = Static<typeof ProjectCreateInputSchema>;
 
-/** Вход команды `project.update`. */
+/** Вход команды `project.update`; color-only update с тем же цветом — no-op. */
 export const ProjectUpdateInputSchema = Type.Object(
   {
     id: EntityIdSchema,
     expectedVersion: ExpectedVersionSchema,
     title: Type.Optional(TitleSchema),
     descriptionMarkdown: Type.Optional(DescriptionMarkdownSchema),
+    color: Type.Optional(BoardColorSchema),
   },
   { ...DRAFT_2020_12, additionalProperties: false },
 );

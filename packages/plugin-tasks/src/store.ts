@@ -19,6 +19,7 @@ import type {
   TaskStatus,
 } from "./model.ts";
 import type { ProjectSummary, ProjectSummaryTotals } from "./schemas/queries.ts";
+import type { BoardColor } from "./schemas/board-color.ts";
 
 /** Стабильная страница результата Store. */
 export interface StorePage<Item> {
@@ -104,16 +105,18 @@ export interface CreateProjectStoreInput {
   readonly id: string;
   readonly title: string;
   readonly descriptionMarkdown: string;
+  readonly color?: BoardColor | undefined;
   readonly createdAt: UtcTimestamp;
   readonly expectedVersion: 0;
 }
 
-/** Вход изменения проекта. */
+/** Вход изменения проекта; color-only update с тем же цветом — no-op. */
 export interface UpdateProjectStoreInput {
   readonly id: string;
   readonly expectedVersion: number;
   readonly title?: string;
   readonly descriptionMarkdown?: string;
+  readonly color?: BoardColor | undefined;
   readonly updatedAt: UtcTimestamp;
 }
 
@@ -162,16 +165,24 @@ export interface CreateColumnStoreInput {
   readonly projectId: string;
   readonly title: string;
   readonly type: TaskColumnType;
+  readonly color?: BoardColor | undefined;
   readonly position?: number | undefined;
   readonly createdAt: UtcTimestamp;
   readonly expectedVersion: 0;
 }
 
-/** Вход переименования колонки. */
+/**
+ * Вход изменения колонки.
+ *
+ * `title` и `color` необязательны по отдельности, но Store отклоняет patch без
+ * обоих полей. Color-only update сохраняет заголовок; совпадающий цвет —
+ * идемпотентный no-op без повышения версии.
+ */
 export interface UpdateColumnStoreInput {
   readonly id: string;
   readonly expectedVersion: number;
-  readonly title: string;
+  readonly title?: string | undefined;
+  readonly color?: BoardColor | undefined;
   readonly updatedAt: UtcTimestamp;
 }
 

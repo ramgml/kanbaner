@@ -111,14 +111,14 @@ export const TASKS_COMMANDS = Object.freeze({
     "write",
     ProjectCreateInputSchema,
     ProjectMutationOutputSchema,
-    "Создаёт проект задач",
+    "Создаёт проект задач с необязательным цветом доски",
   ),
   projectUpdate: commandMetadata(
     TASKS_COMMAND_IDS.projectUpdate,
     "write",
     ProjectUpdateInputSchema,
     ProjectMutationOutputSchema,
-    "Изменяет проект с проверкой expectedVersion",
+    "Изменяет проект, включая необязательный цвет, с проверкой expectedVersion",
   ),
   projectDelete: commandMetadata(
     TASKS_COMMAND_IDS.projectDelete,
@@ -132,14 +132,14 @@ export const TASKS_COMMANDS = Object.freeze({
     "write",
     ColumnCreateInputSchema,
     ColumnMutationOutputSchema,
-    "Создаёт колонку проекта и упорядочивает соседей",
+    "Создаёт колонку проекта с необязательным цветом и упорядочивает соседей",
   ),
   columnUpdate: commandMetadata(
     TASKS_COMMAND_IDS.columnUpdate,
     "write",
     ColumnUpdateInputSchema,
     ColumnMutationOutputSchema,
-    "Переименовывает колонку с проверкой expectedVersion",
+    "Изменяет title и/или color колонки с проверкой expectedVersion",
   ),
   columnMove: commandMetadata(
     TASKS_COMMAND_IDS.columnMove,

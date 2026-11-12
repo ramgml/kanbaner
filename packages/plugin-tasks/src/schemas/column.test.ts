@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
 import { MAX_TITLE_LENGTH } from "../constants.ts";
+import { TaskColumnSchema } from "../model.ts";
+import { BOARD_COLORS } from "./board-color.ts";
 import {
   ColumnCreateInputSchema,
   ColumnDeleteInputSchema,
@@ -103,6 +105,78 @@ describe("column schemas", () => {
     ).toBe(false);
   });
 
+  it("принимает все цвета палитры при создании и обновлении колонки", () => {
+    for (const color of BOARD_COLORS) {
+      expect(
+        validateWithSchema(ColumnCreateInputSchema, {
+          projectId: "project-1",
+          title: "Review",
+          type: "open",
+          color,
+        }).ok,
+      ).toBe(true);
+      expect(
+        validateWithSchema(ColumnUpdateInputSchema, {
+          id: "column-1",
+          expectedVersion: 1,
+          color,
+        }).ok,
+      ).toBe(true);
+    }
+  });
+
+  it("требует хотя бы title или color в column.update", () => {
+    expect(
+      validateWithSchema(ColumnUpdateInputSchema, {
+        id: "column-1",
+        expectedVersion: 1,
+        title: "Новая",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ColumnUpdateInputSchema, {
+        id: "column-1",
+        expectedVersion: 1,
+        color: "blue",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ColumnUpdateInputSchema, { id: "column-1", expectedVersion: 1 }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ColumnUpdateInputSchema, {
+        id: "column-1",
+        expectedVersion: 1,
+        title: "Новая",
+        color: "blue",
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("отклоняет произвольный цвет колонки до записи", () => {
+    expect(
+      validateWithSchema(ColumnCreateInputSchema, {
+        projectId: "project-1",
+        title: "Review",
+        type: "open",
+        color: "#00ff00",
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(ColumnUpdateInputSchema, {
+        id: "column-1",
+        expectedVersion: 1,
+        color: "pink",
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("читает колонки прежней схемы без color и сохраняет выбранный цвет", () => {
+    expect(validateWithSchema(TaskColumnSchema, column).ok).toBe(true);
+    expect(validateWithSchema(TaskColumnSchema, { ...column, color: "green" }).ok).toBe(true);
+    expect(validateWithSchema(TaskColumnSchema, { ...column, color: "#00ff00" }).ok).toBe(false);
+  });
+
   it("требует id и expectedVersion для column.update и column.move", () => {
     expect(
       validateWithSchema(ColumnUpdateInputSchema, {
@@ -171,6 +245,13 @@ describe("column schemas", () => {
     expect(
       validateWithSchema(ColumnMutationOutputSchema, {
         column,
+        resource: "kanbaner.tasks:task-column:column-1",
+        eventId: "event-1",
+      }).ok,
+    ).toBe(true);
+    expect(
+      validateWithSchema(ColumnMutationOutputSchema, {
+        column: { ...column, color: "orange" },
         resource: "kanbaner.tasks:task-column:column-1",
         eventId: "event-1",
       }).ok,

@@ -1068,6 +1068,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         id,
         title: input.title,
         descriptionMarkdown: input.descriptionMarkdown,
+        ...(input.color === undefined ? {} : { color: input.color }),
         version: 1,
         createdAt,
         updatedAt: createdAt,
@@ -1087,6 +1088,18 @@ function createCore(dependencies: StoreDependencies): CoreStore {
 
       assertProjectVersion(record.project, expectedVersion);
 
+      // Color-only update с тем же цветом — идемпотентный no-op: версия,
+      // updatedAt и документ не меняются. Title-only update сохраняет прежнюю
+      // семантику и повышает версию.
+      if (
+        input.title === undefined &&
+        input.descriptionMarkdown === undefined &&
+        input.color !== undefined &&
+        input.color === record.project.color
+      ) {
+        return record.project;
+      }
+
       const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
       const project = buildProject({
         ...record.project,
@@ -1094,6 +1107,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         ...(input.descriptionMarkdown === undefined
           ? {}
           : { descriptionMarkdown: input.descriptionMarkdown }),
+        ...(input.color === undefined ? {} : { color: input.color }),
         version: record.project.version + 1,
         updatedAt,
       });
@@ -1239,6 +1253,7 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         projectId: input.projectId,
         title: input.title,
         status: columnStatusForType(input.type),
+        ...(input.color === undefined ? {} : { color: input.color }),
         position: index,
         version: 1,
         createdAt,
@@ -1250,6 +1265,13 @@ function createCore(dependencies: StoreDependencies): CoreStore {
     },
 
     async updateColumn(input) {
+      if (input.title === undefined && input.color === undefined) {
+        throw new TasksValidationError(
+          "INVALID_COLUMN_PATCH",
+          "Изменение колонки требует хотя бы одного поля: title или color",
+        );
+      }
+
       const expectedVersion = assertExpectedVersion(input.expectedVersion);
       const record = await requireColumnRecord(input.id);
 
@@ -1257,10 +1279,20 @@ function createCore(dependencies: StoreDependencies): CoreStore {
         throw new TasksVersionConflictError(expectedVersion, record.column.version);
       }
 
+      // Color-only update с тем же цветом не создаёт новую версию.
+      if (
+        input.title === undefined &&
+        input.color !== undefined &&
+        input.color === record.column.color
+      ) {
+        return record.column;
+      }
+
       const updatedAt = resolveTimestamp(input.updatedAt, now, "updatedAt");
       const column = buildColumn({
         ...record.column,
-        title: input.title,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.color === undefined ? {} : { color: input.color }),
         version: record.column.version + 1,
         updatedAt,
       });
