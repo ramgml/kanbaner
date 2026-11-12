@@ -25,6 +25,7 @@ import {
   TASKS_QUERY_IDS,
 } from "./constants.ts";
 import { domainEvent, eventPayload, publishDomainEvents } from "./activation/events.ts";
+import { deleteTasksInBulk, moveTasksInBulk } from "./activation/bulk.ts";
 import {
   checkIdempotency,
   hashIdempotencyInput,
@@ -74,8 +75,12 @@ import type {
 import type {
   TaskCompleteInput,
   TaskCreateInput,
+  TaskDeleteManyInput,
+  TaskDeleteManyOutput,
   TaskDeleteInput,
   TaskMoveInput,
+  TaskMoveManyInput,
+  TaskMoveManyOutput,
   TaskUpdateInput,
 } from "./schemas/task.ts";
 import {
@@ -84,7 +89,7 @@ import {
   formatTaskRef,
   tryParseTasksResourceRef,
 } from "./resources.ts";
-import { TasksNotFoundError, createTasksStore } from "./store/index.ts";
+import { TasksNotFoundError, TasksStoreValidationError, createTasksStore } from "./store/index.ts";
 import type { TasksIdFactory, TasksStore, TasksStoreTransaction } from "./store.ts";
 import { normalizeTags } from "./validation.ts";
 
@@ -264,8 +269,10 @@ function changedProjectFields(before: Project, after: Project): readonly string[
 function taskDeletedEvent(
   descriptor: DeletedTaskDescriptor,
   deletedTasks: readonly DeletedTaskDescriptor[],
+  eventId?: string,
 ) {
   return domainEvent({
+    ...(eventId === undefined ? {} : { eventId }),
     type: TASK_EVENT_TYPES.deleted,
     resource: descriptor.resourceRef,
     resourceVersion: descriptor.eventVersion,
@@ -1072,6 +1079,46 @@ const taskMove: CommandFn = async (input, executionContext, operationId, depende
   );
 };
 
+const taskMoveMany: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as TaskMoveManyInput;
+  const normalized = {
+    items: data.items.map((item) => ({
+      id: item.id,
+      expectedVersion: item.expectedVersion,
+    })),
+    columnId: data.columnId,
+  };
+
+  return executeMutation<TaskMoveManyOutput>(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction, now) => {
+      const execution = await moveTasksInBulk(
+        transaction,
+        normalized.items,
+        normalized.columnId,
+        now,
+      );
+      const events = [
+        ...execution.moved.map(({ task, before }) =>
+          taskMovedEvent(task, { status: before.status, columnId: before.columnId }, newEventId()),
+        ),
+        ...execution.neighbors.map(neighborUpdatedEvent),
+      ];
+
+      return {
+        result: { tasks: [...execution.tasks] },
+        effects: effects({
+          events,
+          searchUpserts: [...execution.tasks, ...execution.neighbors],
+        }),
+      };
+    },
+  );
+};
+
 const taskComplete: CommandFn = async (input, executionContext, operationId, dependencies) => {
   const data = input as TaskCompleteInput;
   const normalized = {
@@ -1174,6 +1221,71 @@ const taskDelete: CommandFn = async (input, executionContext, operationId, depen
         effects: effects({
           events,
           searchDeleteRefs: deletion.deletedResourceRefs,
+        }),
+      };
+    },
+  );
+};
+
+const taskDeleteMany: CommandFn = async (input, executionContext, operationId, dependencies) => {
+  const data = input as TaskDeleteManyInput;
+  const normalized = {
+    items: data.items.map((item) => ({
+      id: item.id,
+      expectedVersion: item.expectedVersion,
+    })),
+    confirm: true as const,
+  };
+
+  return executeMutation<TaskDeleteManyOutput>(
+    dependencies,
+    executionContext,
+    operationId,
+    normalized,
+    async (transaction) => {
+      const execution = await deleteTasksInBulk(transaction, normalized.items);
+
+      if (!execution.deleted) {
+        return { result: { deleted: false as const }, effects: noEffects() };
+      }
+
+      const deletedTasks = execution.groups.flatMap((group) => group.descriptors);
+      const deletedResourceRefs = [
+        ...new Set(deletedTasks.map((descriptor) => descriptor.resourceRef)),
+      ];
+      let firstEventId: string | undefined;
+      const events = [
+        ...execution.groups.flatMap((group) => {
+          const rootEventId = newEventId();
+
+          if (firstEventId === undefined) {
+            firstEventId = rootEventId;
+          }
+
+          return [
+            taskDeletedEvent(group.root, group.descriptors, rootEventId),
+            ...group.descriptors
+              .slice(1)
+              .map((descriptor) => taskDeletedEvent(descriptor, [descriptor])),
+          ];
+        }),
+        ...execution.neighbors.map(neighborUpdatedEvent),
+      ];
+
+      if (firstEventId === undefined) {
+        throw new TasksStoreValidationError("Массовое удаление не вернуло корневые дескрипторы");
+      }
+
+      return {
+        result: {
+          deleted: true as const,
+          deletedResourceRefs,
+          deletedTasks,
+          eventId: firstEventId,
+        },
+        effects: effects({
+          events,
+          searchDeleteRefs: deletedResourceRefs,
         }),
       };
     },
@@ -1316,8 +1428,10 @@ const COMMAND_HANDLERS: Readonly<Record<string, CommandFn>> = Object.freeze({
   [TASKS_COMMAND_IDS.taskCreate]: taskCreate,
   [TASKS_COMMAND_IDS.taskUpdate]: taskUpdate,
   [TASKS_COMMAND_IDS.taskMove]: taskMove,
+  [TASKS_COMMAND_IDS.taskMoveMany]: taskMoveMany,
   [TASKS_COMMAND_IDS.taskComplete]: taskComplete,
   [TASKS_COMMAND_IDS.taskDelete]: taskDelete,
+  [TASKS_COMMAND_IDS.taskDeleteMany]: taskDeleteMany,
 });
 
 const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({

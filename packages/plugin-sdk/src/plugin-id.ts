@@ -29,12 +29,21 @@ export type Relation = string;
 /** Сегмент идентификатора: нижний регистр, цифры и дефисы. */
 export const SEGMENT_SOURCE = "[a-z][a-z0-9-]*";
 
+/**
+ * Сегмент идентификатора операции.
+ *
+ * Действие может быть camelCase (`moveMany`), поэтому после первого символа
+ * допускается верхний регистр. Plugin ID, контракты, типы ресурсов и связи
+ * по-прежнему используют строгий `SEGMENT_SOURCE`.
+ */
+export const OPERATION_SEGMENT_SOURCE = "[a-z][A-Za-z0-9-]*";
+
 /** Источник Plugin ID без якорей: ровно `<namespace>.<plugin>`. */
 export const PLUGIN_ID_SOURCE = `${SEGMENT_SOURCE}\\.${SEGMENT_SOURCE}`;
 
 export const PLUGIN_ID_PATTERN = `^${PLUGIN_ID_SOURCE}$`;
 
-export const OPERATION_ID_PATTERN = `^${PLUGIN_ID_SOURCE}\\.${SEGMENT_SOURCE}(?:\\.${SEGMENT_SOURCE})*$`;
+export const OPERATION_ID_PATTERN = `^${PLUGIN_ID_SOURCE}\\.${OPERATION_SEGMENT_SOURCE}(?:\\.${OPERATION_SEGMENT_SOURCE})*$`;
 
 export const CONTRACT_ID_PATTERN = `^${PLUGIN_ID_SOURCE}\\.${SEGMENT_SOURCE}(?:\\.${SEGMENT_SOURCE})*\\.v[0-9]+$`;
 

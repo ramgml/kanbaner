@@ -218,6 +218,8 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
     expect(contract.PLUGIN_ID).toBe("kanbaner.tasks");
     expect(contract.TASKS_COMMAND_IDS).toMatchObject({
       taskComplete: "kanbaner.tasks.task.complete",
+      taskMoveMany: "kanbaner.tasks.task.moveMany",
+      taskDeleteMany: "kanbaner.tasks.task.deleteMany",
       columnCreate: "kanbaner.tasks.column.create",
       columnUpdate: "kanbaner.tasks.column.update",
       columnMove: "kanbaner.tasks.column.move",
@@ -228,6 +230,10 @@ describe("client-safe entrypoint @kanbaner/plugin-tasks/contract", () => {
       projectSummary: "kanbaner.tasks.project.summary",
       columnList: "kanbaner.tasks.column.list",
     });
+    expect(contract.TaskMoveManyInputSchema).toBeTypeOf("object");
+    expect(contract.TaskMoveManyOutputSchema).toBeTypeOf("object");
+    expect(contract.TaskDeleteManyInputSchema).toBeTypeOf("object");
+    expect(contract.TaskDeleteManyOutputSchema).toBeTypeOf("object");
     expect(contract.ProjectSummaryInputSchema).toBeTypeOf("object");
     expect(contract.ProjectSummaryOutputSchema).toBeTypeOf("object");
     expect(contract.ColumnCreateInputSchema).toBeTypeOf("object");
