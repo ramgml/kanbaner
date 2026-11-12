@@ -7,79 +7,76 @@
 - UI-коммиты:
   - `21507e4` — `feat(projects): добавить массовые действия с карточками`;
   - `1152e51`, `d379096` — отчёт;
+  - `2d9ced7` — `fix(projects): укрепить массовый выбор карточек`;
+  - `f04367d` — `fix(projects): синхронизировать массовый выбор после обновления`;
   - финальный fix-коммит — tip ветки:
-    `fix(projects): синхронизировать массовый выбор после обновления`.
+    `fix(projects): завершить синхронизацию массовых операций`.
 
 ## Итог
 
-Все findings ревью KAN-028 UI исправлены. Fallback-контракта нет: используются
+Все findings повторного ревью исправлены. Fallback-контракта нет: используются
 ровно `TASKS_COMMAND_IDS.taskMoveMany` и `TASKS_COMMAND_IDS.taskDeleteMany`
 (`kanbaner.tasks.task.moveMany` / `kanbaner.tasks.task.deleteMany`).
 
-## Исправления по findings
+## Повторное ревью
 
-### HIGH: скрытый filter после конфликта
+### HIGH: pending close и независимые черновики
 
-`reconcile` при `task.get` принимает задачу только если совпадают:
+`busy` больше не является общим bypass dirty-guard. Для каждой операции
+запоминается отправляемое поле (`inline`, `quick-column`, `quick-due`,
+`quick-tags`, `subtask`). При закрытии:
 
-- `projectId` активного проекта;
-- активный `normalizeFilterTag(filters.tag)` (пустой tag не ограничивает).
+- собственный pending-черновик не считается независимым;
+- inline/quick/subtask-черновики других полей требуют подтверждения;
+- pending без дополнительных черновиков закрывает карточку без ложного
+  confirm, а поздний success обновляет доску.
 
-Если во второй вкладке у задачи удалён тег, filtered list её больше не
-содержит, `task.get` возвращает задачу без нужного тега, и она снимается с
-выбора. Повторный payload её не содержит. Задачи, подходящие под фильтр, но
-находящиеся за границей страницы, по-прежнему сохраняются через `task.get`.
+Покрыто deferred-тестами:
 
-Покрыто component- и E2E-регрессиями «conflict + tag removed».
+- pending inline save + quick-draft → confirm, оба черновика сохранены;
+- dirty inline + pending quick save → confirm, черновик сохранён;
+- pending quick save без других черновиков → закрытие без confirm.
 
-### MEDIUM: видимость перемещённых карточек
+### MEDIUM: пустой выбор снимает refresh-блокировку
 
-`task.moveMany` теперь типизирован как `TaskMoveManyOutput`. До reload UI для
-каждой перемещённой задачи:
+Если после неудачной перечитки selection становится пустым (все задачи
+удалены или перестали соответствовать активному tag), `bulkNeedsRefresh`
+сбрасывается вместе с ошибками и диалогом. Скрытой блокировки без payload нет.
+Смена tag, оставившая выбор пустым, делает то же. `toggleBulkSelection`
+проверяет и `bulkNeedsRefreshRef`, и `bulkGuardRef`.
 
-- обновляет `loadedCountsRef[target]` до `position + 1`;
-- регистрирует `visibilityRef` с фактической позицией и текущим `filterKey`.
+Покрыто тестом conflict → failed reload → tag mismatch/empty selection:
+checkbox снова enabled, можно выбрать задачу и открыть панель.
 
-Поэтому target догружается до последней перемещённой позиции, и карточки сразу
-видны:
+### MEDIUM: superseded reload
 
-- при append в колонку длиннее `KANBAN_PAGE_SIZE`;
-- при same-column append;
-- после stale-ответа операция не применяется из-за project/generation guard.
+`reloadBoard()` возвращает `"applied" | "failed" | "superseded"` и хранит
+promise последней перечитки. Устаревшая R1 при sequence/filter mismatch ждёт
+результат более новой R2, а не выставляет блокировку по своему late-ответу.
+Успешная R2 не перезаписывается. Deferred-тест R1/R2 подтверждает отсутствие
+ложной блокировки и повтор с версией, полученной R2.
 
-Покрыто component-тестами target > page size и same-column append.
+### MEDIUM: visibility и текущий tag
 
-### MEDIUM: failed refresh после конфликта
+При `task.moveMany` `loadedCountsRef`/`visibilityRef` регистрируются только
+для moved-задач, соответствующих текущим `projectId` и
+`normalizeFilterTag(activeTag)`. Если tag сменился во время pending, лишние ID
+не остаются required, нет полной догрузки/повторного сканирования; подходящие
+задачи сохраняются. Deferred-тест проверяет последнюю страницу target: 6, а не
+7 при ошибочной регистрации скрытой задачи.
 
-`reloadBoard()` теперь возвращает `boolean`: `true` только если применил все
-колонки и полностью согласовал selection (включая `task.get`). Существующие
-callers не изменены по контракту вызова и игнорируют результат там, где он не
-нужен.
+## Ранее исправленное
 
-Поведение mass actions:
-
-- сообщение «доска перечитана / версии обновлены» показывается только при
-  успешном refresh;
-- при неудаче UI явно пишет, что версии НЕ обновлены;
-- move/delete/clear/checkbox блокируются до успешной перечитки;
-- в панели и destructive-диалоге доступна кнопка «Обновить доску»;
-- повторная команда уходит только после успешного refresh со свежими
-  `expectedVersion`.
-
-Component-тест `VERSION_CONFLICT + failed reload` доказывает отсутствие второго
-stale payload и успешный retry после перечитки.
-
-### LOW: текст подтверждения удаления
-
-Диалог показывает `Выбрано задач: N` и отдельно поясняет, что каскадные
-подзадачи в это число не входят. Component- и E2E-проверки обновлены.
-
-### Дополнительно: стабильность закрытия карточки
-
-Устранён источник intermittent E2E-падений при закрытии карточки во время
-pending quick-команды: `requestClose` использует актуальный dirty-guard из
-layout-ref и при busy закрывает карточку без промежуточного dirty-confirm.
-Поздний success по-прежнему обновляет доску. Добавлен component-тест.
+- `task.get` в reconcile принимает задачу только при совпадении `projectId`
+  и активного tag; conflict + удалённый tag снимает задачу с выбора.
+- `TaskMoveManyOutput` используется для фактических positions, append за
+  границей страницы и same-column append сразу показывают карточки.
+- Неудачная перечитка после конфликта не заявляет обновление версий и
+  блокирует повтор до успешного refresh с кнопкой «Обновить доску».
+- Диалог удаления: `Выбрано задач: N`, каскадные подзадачи в число не входят.
+- Стабильное закрытие карточки во время pending quick-команды.
+- Лимит 200 проверяется и для move, и для delete.
+- Последовательных single-команд для массовых действий нет.
 
 ## Проверки
 
@@ -90,8 +87,8 @@ layout-ref и при busy закрывает карточку без проме�
 - `pnpm --filter @kanbaner/plugin-projects typecheck` — успешно.
 - Focused bulk:
   `vitest run packages/plugin-projects/src/kanban.test.tsx -t "массовые действия"`
-  — **16 passed**.
-- `vitest run packages/plugin-projects` — **273 passed / 18 files**.
+  — **19 passed**.
+- `vitest run packages/plugin-projects` — **278 passed / 18 files**.
 - `pnpm check:imports` — успешно.
 - `node scripts/check-import-boundaries.mjs --self-test` — успешно
   (22 ожидаемых нарушения).
@@ -99,9 +96,9 @@ layout-ref и при busy закрывает карточку без проме�
   - `format:check`;
   - `lint`;
   - typecheck всех пакетов и `apps/web`;
-  - **1396 passed / 98 files**;
+  - **1401 passed / 98 files**;
   - production `build`.
-- `pnpm --filter @kanbaner/web test:e2e` — **103 passed (3.0m)**.
+- `pnpm --filter @kanbaner/web test:e2e` — **103 passed (2.8m)**.
   Playwright использовал реальные `task.moveMany`/`task.deleteMany`.
   Покрыто:
   - move 2 карточек в порядке выбора, summary и persistence после reload;
@@ -118,6 +115,4 @@ layout-ref и при busy закрывает карточку без проме�
 
 - При временной ошибке `task.get` задача консервативно остаётся в выборе до
   следующего успешного refresh.
-- Смена tag во время pending снимает скрытые задачи, но не отменяет уже
-  отправленную команду; успешный ответ очищает выбор.
 - Лимит 200 окончательно валидирует домен; UI проверяет его заранее.

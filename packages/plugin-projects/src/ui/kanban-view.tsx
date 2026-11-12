@@ -101,6 +101,9 @@ const CLICK_SUPPRESSION_MS = 400;
 const COLUMN_VERSION_CONFLICT_MESSAGE =
   "Колонка уже изменена в другом месте. Доска перечитана — проверьте порядок и повторите действие.";
 
+/** Результат перечитки доски для операций, которым важна свежесть версий. */
+type ReloadOutcome = "applied" | "failed" | "superseded";
+
 interface ColumnPage {
   readonly items: readonly Task[];
   readonly total: number;
@@ -380,6 +383,11 @@ export function KanbanView({
   const filterKeyRef = useRef<string>("\u0000");
   const filtersRef = useRef({ projectId: effectiveProjectId, tag: query.tag });
   const reloadSequenceRef = useRef(0);
+  const reloadBoardIdRef = useRef(0);
+  const boardReloadRef = useRef<{
+    readonly id: number;
+    readonly promise: Promise<ReloadOutcome>;
+  } | null>(null);
   const loadMoreSequenceRef = useRef<Record<string, number>>({});
   const visibilityRef = useRef<Map<string, VisibilityRequirement>>(new Map());
   const placementsRef = useRef<ReadonlyMap<string, Placement>>(new Map());
@@ -647,255 +655,285 @@ export function KanbanView({
     }
   };
 
-  const reloadBoard = useCallback(async (): Promise<boolean> => {
-    const filters = filtersRef.current;
+  const reloadBoard = useCallback((): Promise<ReloadOutcome> => {
+    const reloadId = reloadBoardIdRef.current + 1;
 
-    if (filters.projectId.length === 0) {
-      setColumns(createEmptyColumns());
-      setLoadedProjectId("");
+    reloadBoardIdRef.current = reloadId;
 
-      return true;
-    }
+    const latestOutcome = async (): Promise<ReloadOutcome> => {
+      const latest = boardReloadRef.current;
 
-    const sequence = reloadSequenceRef.current + 1;
-    const filterKey = filterKeyRef.current;
-    const requirements = [...visibilityRef.current.values()].filter(
-      (requirement) => requirement.filterKey === filterKey,
-    );
-
-    reloadSequenceRef.current = sequence;
-
-    let projectColumns: readonly TaskColumn[];
-
-    try {
-      projectColumns = await fetchProjectColumns(invoke, filters.projectId);
-    } catch (loadError) {
-      if (reloadSequenceRef.current === sequence && filterKeyRef.current === filterKey) {
-        setLoadedProjectId("");
-        setError(errorMessage(loadError));
+      if (latest !== null && latest.id !== reloadId) {
+        return await latest.promise;
       }
 
-      return false;
-    }
+      return "superseded";
+    };
 
-    if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-      return false;
-    }
+    const run = async (): Promise<ReloadOutcome> => {
+      const filters = filtersRef.current;
 
-    const loadMoreGeneration = { ...loadMoreSequenceRef.current };
+      if (filters.projectId.length === 0) {
+        setColumns(createEmptyColumns());
+        setLoadedProjectId("");
 
-    for (const column of projectColumns) {
-      loadMoreGeneration[column.id] = (loadMoreGeneration[column.id] ?? 0) + 1;
-    }
+        return "applied";
+      }
 
-    loadMoreSequenceRef.current = loadMoreGeneration;
-    setColumns((current) => syncColumns(current, projectColumns));
-    setLoadedProjectId(filters.projectId);
+      const sequence = reloadSequenceRef.current + 1;
+      const filterKey = filterKeyRef.current;
+      const requirements = [...visibilityRef.current.values()].filter(
+        (requirement) => requirement.filterKey === filterKey,
+      );
 
-    const results = await Promise.all(
-      projectColumns.map(async (column) => {
-        const columnRequirements = requirements.filter(
-          (requirement) => requirement.columnId === column.id,
-        );
-        const requiredIds = columnRequirements.map((requirement) => requirement.taskId);
-        const requiredPosition =
-          columnRequirements.length === 0
-            ? 0
-            : Math.max(...columnRequirements.map((requirement) => requirement.position + 1));
-        const targetCount = Math.max(
-          loadedCountsRef.current[column.id] ?? KANBAN_PAGE_SIZE,
-          requiredPosition,
-        );
+      reloadSequenceRef.current = sequence;
 
-        try {
-          const page = await fetchColumnPage(
-            invoke,
-            column.id,
-            filters.projectId,
-            filters.tag,
-            targetCount,
-            requiredIds,
+      let projectColumns: readonly TaskColumn[];
+
+      try {
+        projectColumns = await fetchProjectColumns(invoke, filters.projectId);
+      } catch (loadError) {
+        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+          return await latestOutcome();
+        }
+
+        setLoadedProjectId("");
+        setError(errorMessage(loadError));
+
+        return "failed";
+      }
+
+      if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+        return await latestOutcome();
+      }
+
+      const loadMoreGeneration = { ...loadMoreSequenceRef.current };
+
+      for (const column of projectColumns) {
+        loadMoreGeneration[column.id] = (loadMoreGeneration[column.id] ?? 0) + 1;
+      }
+
+      loadMoreSequenceRef.current = loadMoreGeneration;
+      setColumns((current) => syncColumns(current, projectColumns));
+      setLoadedProjectId(filters.projectId);
+
+      const results = await Promise.all(
+        projectColumns.map(async (column) => {
+          const columnRequirements = requirements.filter(
+            (requirement) => requirement.columnId === column.id,
+          );
+          const requiredIds = columnRequirements.map((requirement) => requirement.taskId);
+          const requiredPosition =
+            columnRequirements.length === 0
+              ? 0
+              : Math.max(...columnRequirements.map((requirement) => requirement.position + 1));
+          const targetCount = Math.max(
+            loadedCountsRef.current[column.id] ?? KANBAN_PAGE_SIZE,
+            requiredPosition,
           );
 
-          return { columnId: column.id, page, error: null } as const;
-        } catch (loadError) {
-          return {
-            columnId: column.id,
-            page: null,
-            error: errorMessage(loadError),
-          } as const;
+          try {
+            const page = await fetchColumnPage(
+              invoke,
+              column.id,
+              filters.projectId,
+              filters.tag,
+              targetCount,
+              requiredIds,
+            );
+
+            return { columnId: column.id, page, error: null } as const;
+          } catch (loadError) {
+            return {
+              columnId: column.id,
+              page: null,
+              error: errorMessage(loadError),
+            } as const;
+          }
+        }),
+      );
+
+      if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+        return await latestOutcome();
+      }
+
+      let refreshComplete = results.every((result) => result.page !== null);
+
+      // Массовый выбор переживает обычный refresh: snapshot обновляется до
+      // актуальных версий, а исчезнувшие/скрытые задачи из выбора убираются.
+      if (bulkSelectionRef.current.size > 0) {
+        const normalizedTag = normalizeFilterTag(filters.tag);
+        const matchesActiveFilter = (task: Task): boolean =>
+          task.projectId === filters.projectId &&
+          (normalizedTag.length === 0 || task.tags.includes(normalizedTag));
+        const freshTasks = new Map<string, Task>();
+
+        for (const result of results) {
+          for (const task of result.page?.items ?? []) {
+            if (matchesActiveFilter(task)) {
+              freshTasks.set(task.id, task);
+            }
+          }
         }
-      }),
-    );
 
-    if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-      return false;
-    }
+        // Задача могла находиться за границей загруженной страницы после
+        // чужого move. Отдельный task.get отличает «ещё существует» от
+        // «удалена», не требуя полной перезагрузки всех страниц. Задача,
+        // переставшая соответствовать активному tag, тоже снимается.
+        const missingIds = [...bulkSelectionRef.current.keys()].filter((id) => !freshTasks.has(id));
+        const lookups = new Map<string, Task | null | undefined>();
 
-    let refreshComplete = results.every((result) => result.page !== null);
+        if (missingIds.length > 0) {
+          const found = await Promise.all(
+            missingIds.map(async (id) => {
+              try {
+                const data = await invokeJson<{ readonly task: Task }>(
+                  invoke,
+                  TASKS_QUERY_IDS.taskGet,
+                  { id } as unknown as JsonValue,
+                );
 
-    // Массовый выбор переживает обычный refresh: snapshot обновляется до
-    // актуальных версий, а исчезнувшие/скрытые задачи из выбора убираются.
-    if (bulkSelectionRef.current.size > 0) {
-      const normalizedTag = normalizeFilterTag(filters.tag);
-      const matchesActiveFilter = (task: Task): boolean =>
-        task.projectId === filters.projectId &&
-        (normalizedTag.length === 0 || task.tags.includes(normalizedTag));
-      const freshTasks = new Map<string, Task>();
+                return [id, matchesActiveFilter(data.task) ? data.task : null] as const;
+              } catch (lookupError) {
+                if (
+                  lookupError instanceof KanbanOperationError &&
+                  lookupError.code === "NOT_FOUND"
+                ) {
+                  return [id, null] as const;
+                }
 
-      for (const result of results) {
-        for (const task of result.page?.items ?? []) {
-          if (matchesActiveFilter(task)) {
-            freshTasks.set(task.id, task);
+                // Временная ошибка не должна молча стирать выбор.
+                return [id, undefined] as const;
+              }
+            }),
+          );
+
+          for (const [id, task] of found) {
+            lookups.set(id, task);
+          }
+
+          if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+            return await latestOutcome();
+          }
+        }
+
+        const nextSelection = new Map<string, Task>();
+        let selectionChanged = false;
+
+        for (const [id, snapshot] of bulkSelectionRef.current) {
+          const fresh = freshTasks.get(id);
+          const lookup = lookups.get(id);
+
+          // Временная ошибка task.get: задача не найдена на странице, но её
+          // существование не опровергнуто — сохраняем прежний snapshot.
+          if (fresh === undefined && lookup === undefined) {
+            refreshComplete = false;
+            nextSelection.set(id, snapshot);
+
+            continue;
+          }
+
+          if (fresh === undefined && lookup === null) {
+            selectionChanged = true;
+
+            continue;
+          }
+
+          const resolved = fresh ?? lookup;
+
+          if (resolved === undefined || resolved === null) {
+            selectionChanged = true;
+
+            continue;
+          }
+
+          nextSelection.set(id, resolved);
+
+          if (resolved.version !== snapshot.version) {
+            selectionChanged = true;
+          }
+        }
+
+        if (selectionChanged) {
+          bulkSelectionRef.current = nextSelection;
+          setBulkSelection(nextSelection);
+
+          if (nextSelection.size === 0) {
+            // Нет payload для retry — скрытая блокировка не нужна.
+            bulkNeedsRefreshRef.current = false;
+            setBulkNeedsRefresh(false);
+            setBulkError(null);
+            setBulkDeleteOpen(false);
+            setBulkDeleteError(null);
           }
         }
       }
 
-      // Задача могла находиться за границей загруженной страницы после
-      // чужого move. Отдельный task.get отличает «ещё существует» от
-      // «удалена», не требуя полной перезагрузки всех страниц. Задача,
-      // переставшая соответствовать активному tag, тоже снимается.
-      const missingIds = [...bulkSelectionRef.current.keys()].filter((id) => !freshTasks.has(id));
-      const lookups = new Map<string, Task | null | undefined>();
-
-      if (missingIds.length > 0) {
-        const found = await Promise.all(
-          missingIds.map(async (id) => {
-            try {
-              const data = await invokeJson<{ readonly task: Task }>(
-                invoke,
-                TASKS_QUERY_IDS.taskGet,
-                { id } as unknown as JsonValue,
-              );
-
-              return [id, matchesActiveFilter(data.task) ? data.task : null] as const;
-            } catch (lookupError) {
-              if (lookupError instanceof KanbanOperationError && lookupError.code === "NOT_FOUND") {
-                return [id, null] as const;
-              }
-
-              // Временная ошибка не должна молча стирать выбор.
-              return [id, undefined] as const;
-            }
-          }),
-        );
-
-        for (const [id, task] of found) {
-          lookups.set(id, task);
-        }
-
-        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-          return false;
-        }
-      }
-
-      const nextSelection = new Map<string, Task>();
-      let selectionChanged = false;
-
-      for (const [id, snapshot] of bulkSelectionRef.current) {
-        const fresh = freshTasks.get(id);
-        const lookup = lookups.get(id);
-
-        // Временная ошибка task.get: задача не найдена на странице, но её
-        // существование не опровергнуто — сохраняем прежний snapshot.
-        if (fresh === undefined && lookup === undefined) {
-          refreshComplete = false;
-          nextSelection.set(id, snapshot);
-
-          continue;
-        }
-
-        if (fresh === undefined && lookup === null) {
-          selectionChanged = true;
-
-          continue;
-        }
-
-        const resolved = fresh ?? lookup;
-
-        if (resolved === undefined || resolved === null) {
-          selectionChanged = true;
-
-          continue;
-        }
-
-        nextSelection.set(id, resolved);
-
-        if (resolved.version !== snapshot.version) {
-          selectionChanged = true;
-        }
-      }
-
-      if (selectionChanged) {
-        bulkSelectionRef.current = nextSelection;
-        setBulkSelection(nextSelection);
-
-        if (nextSelection.size === 0) {
-          setBulkDeleteOpen(false);
-          setBulkDeleteError(null);
-        }
-      }
-    }
-
-    for (const result of results) {
-      if (result.page === null) {
-        continue;
-      }
-
-      const loadedIds = new Set(result.page.items.map((task) => task.id));
-
-      for (const requirement of requirements) {
-        if (requirement.columnId === result.columnId && loadedIds.has(requirement.taskId)) {
-          visibilityRef.current.delete(requirement.taskId);
-        }
-      }
-    }
-
-    setColumns((current) => {
-      if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
-        return current;
-      }
-
-      const byId = { ...current.byId };
-
       for (const result of results) {
-        const existing = current.byId[result.columnId];
-
-        if (existing === undefined) {
-          continue;
-        }
-
         if (result.page === null) {
-          byId[result.columnId] = { ...existing, loading: false, error: result.error };
-
           continue;
         }
 
-        loadedCountsRef.current[result.columnId] = Math.max(
-          KANBAN_PAGE_SIZE,
-          result.page.items.length,
-        );
-        byId[result.columnId] = {
-          ...existing,
-          items: result.page.items,
-          total: result.page.total,
-          nextOffset: result.page.nextOffset,
-          loading: false,
-          error: null,
-        };
+        const loadedIds = new Set(result.page.items.map((task) => task.id));
+
+        for (const requirement of requirements) {
+          if (requirement.columnId === result.columnId && loadedIds.has(requirement.taskId)) {
+            visibilityRef.current.delete(requirement.taskId);
+          }
+        }
       }
 
-      return { order: current.order, byId };
-    });
+      setColumns((current) => {
+        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+          return current;
+        }
 
-    if (bulkNeedsRefreshRef.current && refreshComplete) {
-      bulkNeedsRefreshRef.current = false;
-      setBulkNeedsRefresh(false);
-      setBulkError(null);
-      setBulkDeleteError(null);
-    }
+        const byId = { ...current.byId };
 
-    return refreshComplete;
+        for (const result of results) {
+          const existing = current.byId[result.columnId];
+
+          if (existing === undefined) {
+            continue;
+          }
+
+          if (result.page === null) {
+            byId[result.columnId] = { ...existing, loading: false, error: result.error };
+
+            continue;
+          }
+
+          loadedCountsRef.current[result.columnId] = Math.max(
+            KANBAN_PAGE_SIZE,
+            result.page.items.length,
+          );
+          byId[result.columnId] = {
+            ...existing,
+            items: result.page.items,
+            total: result.page.total,
+            nextOffset: result.page.nextOffset,
+            loading: false,
+            error: null,
+          };
+        }
+
+        return { order: current.order, byId };
+      });
+
+      if (bulkNeedsRefreshRef.current && refreshComplete) {
+        bulkNeedsRefreshRef.current = false;
+        setBulkNeedsRefresh(false);
+        setBulkError(null);
+        setBulkDeleteError(null);
+      }
+
+      return "applied";
+    };
+
+    const promise = run();
+    boardReloadRef.current = { id: reloadId, promise };
+
+    return promise;
   }, [invoke]);
 
   useEffect(() => {
@@ -938,6 +976,8 @@ export function KanbanView({
     setBulkError(null);
 
     if (next.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
       setBulkDeleteOpen(false);
       setBulkDeleteError(null);
     }
@@ -1427,7 +1467,11 @@ export function KanbanView({
   };
 
   const toggleBulkSelection = (task: Task, checked: boolean): void => {
-    if (bulkGuardRef.current || task.projectId !== effectiveProjectIdRef.current) {
+    if (
+      bulkGuardRef.current ||
+      bulkNeedsRefreshRef.current ||
+      task.projectId !== effectiveProjectIdRef.current
+    ) {
       return;
     }
 
@@ -1446,6 +1490,8 @@ export function KanbanView({
     setBulkError(null);
 
     if (next.size === 0) {
+      bulkNeedsRefreshRef.current = false;
+      setBulkNeedsRefresh(false);
       setBulkDeleteOpen(false);
       setBulkDeleteError(null);
     }
@@ -1510,10 +1556,20 @@ export function KanbanView({
 
       // Фактические positions из ответа важны для append за границей
       // загруженной страницы и для same-column append. Регистрируем их до
-      // reload так же, как single move.
+      // reload так же, как single move, но только для задач, которые всё ещё
+      // видны под активным tag: иначе смена фильтра во время pending оставит
+      // лишние required IDs и полную догрузку.
       const filterKey = filterKeyRef.current;
+      const activeTag = normalizeFilterTag(filtersRef.current.tag);
 
       for (const moved of data.tasks) {
+        if (
+          moved.projectId !== context.projectId ||
+          (activeTag.length > 0 && !moved.tags.includes(activeTag))
+        ) {
+          continue;
+        }
+
         loadedCountsRef.current[target.id] = Math.max(
           loadedCountsRef.current[target.id] ?? KANBAN_PAGE_SIZE,
           moved.position + 1,
@@ -1551,7 +1607,7 @@ export function KanbanView({
         return;
       }
 
-      if (!refreshed) {
+      if (refreshed !== "applied") {
         bulkNeedsRefreshRef.current = true;
         setBulkNeedsRefresh(true);
         setBulkError(
@@ -1596,7 +1652,7 @@ export function KanbanView({
         return;
       }
 
-      if (!refreshed) {
+      if (refreshed !== "applied") {
         bulkNeedsRefreshRef.current = true;
         setBulkNeedsRefresh(true);
         setBulkError(BULK_REFRESH_FAILED_MESSAGE);
@@ -1711,7 +1767,7 @@ export function KanbanView({
         return;
       }
 
-      if (!refreshed) {
+      if (refreshed !== "applied") {
         bulkNeedsRefreshRef.current = true;
         setBulkNeedsRefresh(true);
         setBulkDeleteError(
