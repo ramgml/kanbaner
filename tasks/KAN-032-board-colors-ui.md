@@ -1,7 +1,7 @@
 ---
 id: KAN-032
 title: Цвета доски, колонок и приоритетов в интерфейсе
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-032
@@ -92,6 +92,7 @@ specs:
 
 - 2026-11-12 — Задача создана, заблокирована KAN-030 и KAN-031.
 - 2026-11-12 — Зависимости влиты в `dev`, назначены worker и worktree.
+- 2026-11-12 — Коммит `453c29a`, полный check и 110 E2E зелёные, задача в review.
 
 ## Итог
 
