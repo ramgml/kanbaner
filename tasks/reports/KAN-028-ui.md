@@ -80,7 +80,7 @@ fallback. После merge фактическим источником оста�
 - `kanban-card.test.tsx`:
   - layout: checkbox слева, меню справа, title full width, drag-ручки нет;
   - accessible checkbox, hit target, click не открывает, drag не стартует.
-- `kanban.test.tsx`, 14 новых сценариев:
+- `kanban.test.tsx`, 12 новых сценариев:
   - move одной командой, порядок payload и append;
   - ошибка сохраняет выбор;
   - conflict обновляет версии, убирает исчезнувшие и повторяет по свежим;
