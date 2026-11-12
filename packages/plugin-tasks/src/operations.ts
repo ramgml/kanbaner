@@ -40,8 +40,12 @@ import {
   TaskCompleteInputSchema,
   TaskCreateInputSchema,
   TaskDeleteInputSchema,
+  TaskDeleteManyInputSchema,
+  TaskDeleteManyOutputSchema,
   TaskDeleteOutputSchema,
   TaskMoveInputSchema,
+  TaskMoveManyInputSchema,
+  TaskMoveManyOutputSchema,
   TaskMutationOutputSchema,
   TaskUpdateInputSchema,
 } from "./schemas/task.ts";
@@ -179,12 +183,26 @@ export const TASKS_COMMANDS = Object.freeze({
     TaskMutationOutputSchema,
     "Переводит задачу в done и фиксирует completedAt",
   ),
+  taskMoveMany: commandMetadata(
+    TASKS_COMMAND_IDS.taskMoveMany,
+    "write",
+    TaskMoveManyInputSchema,
+    TaskMoveManyOutputSchema,
+    "Атомарно дописывает задачи в колонку в порядке входного массива",
+  ),
   taskDelete: commandMetadata(
     TASKS_COMMAND_IDS.taskDelete,
     "destructive",
     TaskDeleteInputSchema,
     TaskDeleteOutputSchema,
     "Удаляет задачу и её подзадачи после явного подтверждения",
+  ),
+  taskDeleteMany: commandMetadata(
+    TASKS_COMMAND_IDS.taskDeleteMany,
+    "destructive",
+    TaskDeleteManyInputSchema,
+    TaskDeleteManyOutputSchema,
+    "Атомарно удаляет набор задач и подзадачи после явного подтверждения",
   ),
 } satisfies Record<string, CommandMetadata>);
 

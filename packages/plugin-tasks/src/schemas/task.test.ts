@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import { validateWithSchema } from "@kanbaner/plugin-sdk";
 
-import { MAX_RAW_TAG_LENGTH, MAX_RAW_TAGS, MAX_TAGS } from "../constants.ts";
+import { MAX_BULK_TASKS, MAX_RAW_TAG_LENGTH, MAX_RAW_TAGS, MAX_TAGS } from "../constants.ts";
 import {
   TaskCompleteInputSchema,
   TaskCreateInputSchema,
   TaskDeleteInputSchema,
+  TaskDeleteManyInputSchema,
+  TaskDeleteManyOutputSchema,
   TaskDeleteOutputSchema,
   TaskMoveInputSchema,
+  TaskMoveManyInputSchema,
+  TaskMoveManyOutputSchema,
   TaskMutationOutputSchema,
   TaskUpdateInputSchema,
 } from "./task.ts";
@@ -336,6 +340,68 @@ describe("task schemas", () => {
         deletedTasks: [{ ...deletedTask, eventVersion: 1 }],
       }).ok,
     ).toBe(false);
+  });
+
+  it("проверяет task.moveMany: 1…200 уникальных ссылок и target", () => {
+    const base = {
+      items: [{ id: "task-1", expectedVersion: 1 }],
+      columnId: "column-1",
+    };
+
+    expect(validateWithSchema(TaskMoveManyInputSchema, base).ok).toBe(true);
+    expect(validateWithSchema(TaskMoveManyInputSchema, { ...base, items: [] }).ok).toBe(false);
+    expect(
+      validateWithSchema(TaskMoveManyInputSchema, {
+        ...base,
+        items: Array.from({ length: MAX_BULK_TASKS + 1 }, (_value, index) => ({
+          id: `task-${String(index)}`,
+          expectedVersion: 1,
+        })),
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(TaskMoveManyInputSchema, {
+        items: [{ id: "task-1", expectedVersion: 0 }],
+        columnId: "column-1",
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateWithSchema(TaskMoveManyInputSchema, { ...base, columnId: "bad:column" }).ok,
+    ).toBe(false);
+  });
+
+  it("проверяет task.deleteMany и его успешный/no-op выход", () => {
+    const input = {
+      items: [{ id: "task-1", expectedVersion: 1 }],
+      confirm: true,
+    };
+    const deletedTask = {
+      id: "task-1",
+      projectId: "project-1",
+      resourceRef: "kanbaner.tasks:task:task-1",
+      version: 4,
+      eventVersion: 5,
+    };
+
+    expect(validateWithSchema(TaskDeleteManyInputSchema, input).ok).toBe(true);
+    expect(validateWithSchema(TaskDeleteManyInputSchema, { ...input, confirm: false }).ok).toBe(
+      false,
+    );
+    expect(validateWithSchema(TaskDeleteManyInputSchema, { ...input, items: [] }).ok).toBe(false);
+    expect(
+      validateWithSchema(TaskDeleteManyOutputSchema, {
+        deleted: true,
+        deletedResourceRefs: ["kanbaner.tasks:task:task-1"],
+        deletedTasks: [deletedTask],
+        eventId: "event-1",
+      }).ok,
+    ).toBe(true);
+    expect(validateWithSchema(TaskDeleteManyOutputSchema, { deleted: false }).ok).toBe(true);
+    expect(
+      validateWithSchema(TaskDeleteManyOutputSchema, { deleted: false, eventId: "x" }).ok,
+    ).toBe(false);
+    expect(validateWithSchema(TaskMoveManyOutputSchema, { tasks: [task] }).ok).toBe(true);
+    expect(validateWithSchema(TaskMoveManyOutputSchema, { tasks: [] }).ok).toBe(false);
   });
 
   it("принимает optional columnId в task.create и task.move", () => {

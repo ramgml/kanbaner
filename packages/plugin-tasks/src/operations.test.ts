@@ -63,6 +63,7 @@ describe("operation metadata", () => {
       TASKS_COMMAND_IDS.projectDelete,
       TASKS_COMMAND_IDS.columnDelete,
       TASKS_COMMAND_IDS.taskDelete,
+      TASKS_COMMAND_IDS.taskDeleteMany,
     ]);
   });
 

@@ -83,8 +83,10 @@ export const TASKS_COMMAND_IDS = Object.freeze({
   taskCreate: "kanbaner.tasks.task.create",
   taskUpdate: "kanbaner.tasks.task.update",
   taskMove: "kanbaner.tasks.task.move",
+  taskMoveMany: "kanbaner.tasks.task.moveMany",
   taskComplete: "kanbaner.tasks.task.complete",
   taskDelete: "kanbaner.tasks.task.delete",
+  taskDeleteMany: "kanbaner.tasks.task.deleteMany",
 } as const);
 
 export type TasksCommandName = keyof typeof TASKS_COMMAND_IDS;
@@ -165,6 +167,9 @@ export const MAX_RAW_TAG_LENGTH = 256;
 
 /** Максимальная длина поискового фильтра `text`. */
 export const MAX_SEARCH_TEXT_LENGTH = 200;
+
+/** Максимальное количество задач в одной массовой операции. */
+export const MAX_BULK_TASKS = 200;
 
 /**
  * Максимально допустимая позиция задачи.
