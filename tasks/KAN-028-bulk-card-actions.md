@@ -1,7 +1,7 @@
 ---
 id: KAN-028
 title: Массовый перенос и удаление карточек
-status: in_progress
+status: review
 stage: 3
 priority: high
 owner: worker-kan-028-domain, worker-kan-028-ui
