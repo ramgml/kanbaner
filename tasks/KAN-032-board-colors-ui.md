@@ -1,15 +1,13 @@
 ---
 id: KAN-032
 title: Цвета доски, колонок и приоритетов в интерфейсе
-status: backlog
+status: in_progress
 stage: 3
 priority: high
-owner: unassigned
-blocked_by:
-  - KAN-030
-  - KAN-031
-branch: null
-worktree: null
+owner: worker-kan-032
+blocked_by: []
+branch: feat/kan-032-board-colors-ui
+worktree: /home/aero/.herdr/worktrees/kanbaner/feat-kan-032-board-colors-ui
 created: 2026-11-12
 updated: 2026-11-12
 specs:
@@ -93,6 +91,7 @@ specs:
 ## Журнал
 
 - 2026-11-12 — Задача создана, заблокирована KAN-030 и KAN-031.
+- 2026-11-12 — Зависимости влиты в `dev`, назначены worker и worktree.
 
 ## Итог
 

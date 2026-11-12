@@ -1,7 +1,7 @@
 ---
 id: KAN-030
 title: Цвета проекта и колонок в домене
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-030
@@ -33,15 +33,15 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить `BOARD_COLORS`/`BoardColor` и TypeBox-схему со значениями
+- [x] Добавить `BOARD_COLORS`/`BoardColor` и TypeBox-схему со значениями
   `default`, `slate`, `blue`, `green`, `yellow`, `orange`, `red`, `purple`.
-- [ ] Добавить optional `color` в модели и входы `project.create|update`,
+- [x] Добавить optional `color` в модели и входы `project.create|update`,
   `column.create|update`; сделать `title` в `column.update` необязательным при
   обязательном наличии хотя бы одного изменяемого поля.
-- [ ] Сохранять цвет через backend-neutral Store без SQL и новых таблиц.
-- [ ] Проверить версии, changed-поля, события после коммита и no-op поведение.
-- [ ] Добавить schema/store/activation/contract/conformance-тесты.
-- [ ] Актуализировать `packages/plugin-tasks/README.md` и создать отчёт.
+- [x] Сохранять цвет через backend-neutral Store без SQL и новых таблиц.
+- [x] Проверить версии, changed-поля, события после коммита и no-op поведение.
+- [x] Добавить schema/store/activation/contract/conformance-тесты.
+- [x] Актуализировать `packages/plugin-tasks/README.md` и создать отчёт.
 
 ## Владение файлами
 
@@ -70,17 +70,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Все значения палитры проходят создание и обновление проекта/колонки.
-- [ ] Произвольный цвет и update без полей получают validation error до записи.
-- [ ] Color-only update сохраняет title и повышает версию только при изменении.
-- [ ] Документы прежней схемы читаются без миграции.
-- [ ] SQLite и in-memory conformance зелёные.
+- [x] Все значения палитры проходят создание и обновление проекта/колонки.
+- [x] Произвольный цвет и update без полей получают validation error до записи.
+- [x] Color-only update сохраняет title и повышает версию только при изменении.
+- [x] Документы прежней схемы читаются без миграции.
+- [x] SQLite и in-memory conformance зелёные.
 
 ## Проверки
 
-- [ ] Focused domain tests и typecheck пакета.
-- [ ] `pnpm test:sqlite` и релевантные conformance-тесты.
-- [ ] Полный `pnpm check` перед коммитом.
+- [x] Focused domain tests и typecheck пакета.
+- [x] `pnpm test:sqlite` и релевантные conformance-тесты.
+- [x] Полный `pnpm check` перед коммитом.
 
 ## Риски
 
@@ -95,4 +95,10 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммиты: `3d8d3ec`, `b3fc3fe`; merge `143ef30`.
+- Проверки: полный `pnpm check` на ветке и `dev`, 100 файлов / 1434 теста;
+  command-level activation 14/14, conformance 156/156, check:imports и SQLite.
+- Независимое ревью: функциональных проблем нет; замечание о command-level
+  покрытии устранено до merge.
+- Worktree и ветка удалены. Push не выполнялся: remote не настроен.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.

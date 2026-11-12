@@ -1,7 +1,7 @@
 ---
 id: KAN-031
 title: Меню колонки, inline-редакторы и иконки
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-031
@@ -40,18 +40,18 @@ specs:
 
 ### Осталось
 
-- [ ] Добавить outside/Escape/action close для `<details>` меню колонки без
+- [x] Добавить outside/Escape/action close для `<details>` меню колонки без
   вмешательства в DnD и фокус следующего контрола.
-- [ ] Удалить Save/Cancel у обоих редакторов; title сохраняет Enter, description
+- [x] Удалить Save/Cancel у обоих редакторов; title сохраняет Enter, description
   — Ctrl/Cmd+Enter, оба сохраняют кликом снаружи, Escape отменяет.
-- [ ] Обновить подсказки и focus/close guard тесты под отсутствие кнопок.
-- [ ] Подключить `lucide-react@1.70.0` к `plugin-projects`, обновить lock-файл
+- [x] Обновить подсказки и focus/close guard тесты под отсутствие кнопок.
+- [x] Подключить `lucide-react@1.70.0` к `plugin-projects`, обновить lock-файл
   обычной pnpm-установкой без force/legacy-peer-deps.
-- [ ] Заменить текстовые символы на согласованные иконки для create/settings/
+- [x] Заменить текстовые символы на согласованные иконки для create/settings/
   menus/drag/rename/move/delete/save/cancel/close/priority/due/tags/subtasks.
   Удалённые кнопки inline Save/Cancel иконками не заменять.
-- [ ] Сохранить текст основных действий и accessible names icon-only кнопок.
-- [ ] Обновить `packages/plugin-projects/README.md`, component/E2E и отчёт.
+- [x] Сохранить текст основных действий и accessible names icon-only кнопок.
+- [x] Обновить `packages/plugin-projects/README.md`, component/E2E и отчёт.
 
 ## Владение файлами
 
@@ -78,18 +78,18 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Клик по свободному месту и Escape закрывают меню в реальном Chromium.
-- [ ] Выбор действия не оставляет меню открытым.
-- [ ] Заголовок и описание сохраняются снаружи без видимых Save/Cancel.
-- [ ] Escape по-прежнему отменяет только активный редактор.
-- [ ] Иконки не меняют hit targets, keyboard/touch и mobile overflow.
-- [ ] Все проверки зелёные.
+- [x] Клик по свободному месту и Escape закрывают меню в реальном Chromium.
+- [x] Выбор действия не оставляет меню открытым.
+- [x] Заголовок и описание сохраняются снаружи без видимых Save/Cancel.
+- [x] Escape по-прежнему отменяет только активный редактор.
+- [x] Иконки не меняют hit targets, keyboard/touch и mobile overflow.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Focused component tests и typecheck пакета.
-- [ ] Strict frozen install без unmet peers.
-- [ ] Полный `pnpm check` и `pnpm --filter @kanbaner/web test:e2e`.
+- [x] Focused component tests и typecheck пакета.
+- [x] Strict frozen install без unmet peers.
+- [x] Полный `pnpm check` и `pnpm --filter @kanbaner/web test:e2e`.
 
 ## Риски
 
@@ -106,4 +106,10 @@ specs:
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммиты: `496cef4`, `4343816`; merge `0bc3ccb`.
+- Проверки: полный `pnpm check` на ветке и `dev`, 1407 тестов до добавления
+  домена; 106 Playwright E2E, включая keyboard-only и DnD.
+- Независимое ревью: два medium findings по Escape/focus устранены до merge;
+  интеграционный autosave-focus regression также исправлен.
+- Worktree и ветка удалены. Push не выполнялся: remote не настроен.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.
