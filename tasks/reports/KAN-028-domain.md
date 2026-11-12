@@ -117,3 +117,10 @@ SDK отклонял camelCase в сегменте действия (`OPERATION_
 - UI должен использовать ровно `kanbaner.tasks.task.moveMany` и
   `kanbaner.tasks.task.deleteMany`; hyphenated alias намеренно отсутствует.
 - HTTP/MCP для новых команд не включены, как и для остальных операций домена.
+
+## Финальная интеграция
+
+Финальный merge: `9840a73e16a67710eec41ac8473aac9852c9ffcb`. Повторное
+независимое ревью разрешило интеграцию. Merge queue выполнил strict install,
+check:imports, полный check, 103 E2E и deferred SIGTERM на ветке и `dev`; все
+проверки зелёные. Ветка и worktree удалены. Push не выполнялся.

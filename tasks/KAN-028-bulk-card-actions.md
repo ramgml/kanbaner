@@ -1,7 +1,7 @@
 ---
 id: KAN-028
 title: Массовый перенос и удаление карточек
-status: review
+status: done
 stage: 3
 priority: high
 owner: worker-kan-028-domain, worker-kan-028-ui
@@ -37,36 +37,36 @@ specs:
 
 ## Домен
 
-- [ ] Добавить `kanbaner.tasks.task.moveMany` и `task.deleteMany` после явного
+- [x] Добавить `kanbaner.tasks.task.moveMany` и `task.deleteMany` после явного
   согласования пользователя.
-- [ ] Вход: уникальные `{id, expectedVersion}` (1…200), move — `columnId`,
+- [x] Вход: уникальные `{id, expectedVersion}` (1…200), move — `columnId`,
   delete — `confirm: true`; выход содержит фактически изменённые/удалённые
   задачи и дескрипторы.
-- [ ] Одна Store-транзакция на команду, предварительная проверка существования,
+- [x] Одна Store-транзакция на команду, предварительная проверка существования,
   одного projectId, версий и target до первой записи.
-- [ ] Move: append с сохранением порядка входа; версии соседей, изменившиеся в
+- [x] Move: append с сохранением порядка входа; версии соседей, изменившиеся в
   этой же транзакции, не дают ложный конфликт после первичной валидации.
-- [ ] Delete: каскад подзадач; parent+child в одном входе не удаляются дважды.
+- [x] Delete: каскад подзадач; parent+child в одном входе не удаляются дважды.
   Повтор по Idempotency-Key и полностью отсутствующий набор не создают события.
-- [ ] События после коммита для каждой задачи/соседа; поисковые upsert/delete
+- [x] События после коммита для каждой задачи/соседа; поисковые upsert/delete
   и универсальные ссылки соответствуют существующим single-операциям.
-- [ ] Метаданные write/destructive, JSON Schema, contract/operation tests,
+- [x] Метаданные write/destructive, JSON Schema, contract/operation tests,
   activation и SQLite conformance.
 
 ## UI
 
-- [ ] Checkbox с accessible name и hit target не менее 40 px; input исключён
+- [x] Checkbox с accessible name и hit target не менее 40 px; input исключён
   из drag, клик не открывает карточку. Выбор не мешает title/menu/DnD.
-- [ ] Selection привязан к projectId; смена проекта очищает его. Скрытые фильтром
+- [x] Selection привязан к projectId; смена проекта очищает его. Скрытые фильтром
   задачи не попадают в действие случайно: смена tag снимает скрытый выбор.
-- [ ] Панель доступна с клавиатуры и на mobile 360, pending блокирует повторную
+- [x] Панель доступна с клавиатуры и на mobile 360, pending блокирует повторную
   отправку, ошибка сохраняет выбор.
-- [ ] Move/delete только через новые команды с версиями из актуальных task
+- [x] Move/delete только через новые команды с версиями из актуальных task
   snapshots; после успеха selection очищается, доска/сводка обновляются.
-- [ ] VERSION_CONFLICT перечитывает доску и сохраняет выбор только тех задач,
+- [x] VERSION_CONFLICT перечитывает доску и сохраняет выбор только тех задач,
   которые ещё существуют; повторная отправка использует свежие версии.
-- [ ] Удаление — отдельный destructive dialog; pending нельзя закрыть/повторить.
-- [ ] Сохранить текущую верстку: без drag-ручки, меню сверху, title full width.
+- [x] Удаление — отдельный destructive dialog; pending нельзя закрыть/повторить.
+- [x] Сохранить текущую верстку: без drag-ручки, меню сверху, title full width.
 
 ## Владение файлами
 
@@ -97,17 +97,17 @@ UI worker:
 
 ## Критерии приёмки
 
-- [ ] Несколько карточек выбираются и перемещаются одной атомарной командой.
-- [ ] Несколько удаляются после подтверждения, включая parent+child без дублей.
-- [ ] Конфликт/validation не оставляет частичных изменений.
-- [ ] Keyboard, touch, mobile 360 и прежний DnD работают.
-- [ ] Все проверки зелёные.
+- [x] Несколько карточек выбираются и перемещаются одной атомарной командой.
+- [x] Несколько удаляются после подтверждения, включая parent+child без дублей.
+- [x] Конфликт/validation не оставляет частичных изменений.
+- [x] Keyboard, touch, mobile 360 и прежний DnD работают.
+- [x] Все проверки зелёные.
 
 ## Проверки
 
-- [ ] Strict install, focused domain/UI, check:imports и self-test.
-- [ ] SQLite и in-memory conformance, чистая база.
-- [ ] Полный `pnpm check`, все Playwright, deferred SIGTERM.
+- [x] Strict install, focused domain/UI, check:imports и self-test.
+- [x] SQLite и in-memory conformance, чистая база.
+- [x] Полный `pnpm check`, все Playwright, deferred SIGTERM.
 
 ## Риски
 
@@ -119,8 +119,17 @@ UI worker:
 
 ## Журнал
 
+- 2026-11-12 — Домен влит merge-коммитом
+  `9840a73e16a67710eec41ac8473aac9852c9ffcb`, UI — merge-коммитом
+  `6a8c33bc3de5dabe7b4eca7bb66d6f2737206deb`. Независимые ревью разрешили
+  интеграцию; повторные проверки на ветках и `dev` зелёные.
 - 2026-11-12 — Пользователь согласовал атомарные публичные команды.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+- Коммиты: domain `9840a73e16a67710eec41ac8473aac9852c9ffcb`, UI
+  `6a8c33bc3de5dabe7b4eca7bb66d6f2737206deb`.
+- Ветки и worktree обеих частей удалены после успешного merge.
+- Проверки: 98 файлов / 1404 теста, 103 production E2E, strict install,
+  check:imports, SQLite/in-memory conformance и deferred SIGTERM зелёные.
+- Остаточные риски: Windows и браузеры кроме Chromium не проверялись.
