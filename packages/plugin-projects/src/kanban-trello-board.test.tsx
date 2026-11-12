@@ -494,7 +494,7 @@ describe("Trello-доска", () => {
       value: () => composer,
     });
 
-    const handle = screen.getByTestId("kanban-drag-mover");
+    const handle = screen.getByTestId("kanban-open-mover");
 
     fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY: 50 });
@@ -541,7 +541,7 @@ describe("Trello-доска", () => {
       value: () => composer,
     });
 
-    const handle = screen.getByTestId("kanban-drag-a");
+    const handle = screen.getByTestId("kanban-open-a");
 
     fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY: 50 });
@@ -601,7 +601,7 @@ describe("Trello-доска", () => {
       value: () => target,
     });
 
-    const handle = screen.getByTestId("kanban-drag-b");
+    const handle = screen.getByTestId("kanban-open-b");
 
     fireEvent.pointerDown(handle, { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY: 20 });
@@ -680,7 +680,7 @@ describe("Trello-доска", () => {
       value: () => list,
     });
 
-    fireEvent.pointerDown(screen.getByTestId("kanban-drag-a"), { clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(screen.getByTestId("kanban-open-a"), { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY: 104 });
 
     const placeholder = await screen.findByTestId("kanban-drop-placeholder");
@@ -744,7 +744,7 @@ describe("Trello-доска", () => {
       value: () => list,
     });
 
-    fireEvent.pointerDown(screen.getByTestId(`kanban-drag-${id}`), { clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(screen.getByTestId(`kanban-open-${id}`), { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(window, { clientX: 20, clientY });
     await screen.findByTestId("kanban-drop-placeholder");
     fireEvent.pointerUp(window);

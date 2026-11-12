@@ -1,5 +1,22 @@
 import type { JsonValue } from "@kanbaner/plugin-sdk";
+import { TASKS_COMMAND_IDS } from "@kanbaner/plugin-tasks/contract";
 import type { UiOperationError, UiOperationInvoker } from "@kanbaner/task-ui";
+
+/**
+ * Массовые команды KAN-028 появятся в контракте домена после merge.
+ *
+ * Сначала читается `TASKS_COMMAND_IDS`, поэтому после слияния используется
+ * фактический ID контракта. Fallback нужен только для isolated-сборки UI до
+ * merge.
+ */
+export const BULK_TASK_COMMAND_IDS = {
+  taskMoveMany:
+    (TASKS_COMMAND_IDS as Readonly<Record<string, string | undefined>>).taskMoveMany ??
+    "kanbaner.tasks.task.moveMany",
+  taskDeleteMany:
+    (TASKS_COMMAND_IDS as Readonly<Record<string, string | undefined>>).taskDeleteMany ??
+    "kanbaner.tasks.task.deleteMany",
+} as const;
 
 /** Ошибка публичной операции, которую можно показать пользователю. */
 export class KanbanOperationError extends Error {
@@ -39,6 +56,9 @@ export function errorMessage(error: unknown): string {
 
 export const VERSION_CONFLICT_MESSAGE =
   "Задача уже изменена в другом месте. Доска перечитана — проверьте её и повторите действие.";
+
+export const BULK_VERSION_CONFLICT_MESSAGE =
+  "Выбранные задачи уже изменены в другом месте. Доска перечитана — проверьте выбор и повторите действие.";
 
 export const PROJECT_VERSION_CONFLICT_MESSAGE =
   "Проект уже изменён в другом месте. Версия проекта обновлена — проверьте название и повторите действие.";

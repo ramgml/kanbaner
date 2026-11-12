@@ -20,6 +20,7 @@ import {
 } from "@kanbaner/plugin-tasks/contract";
 import {
   LoadingState,
+  ModalDialog,
   createProjectFormValues,
   type ProjectFormValues,
   type UiOperationInvoker,
@@ -54,6 +55,9 @@ import {
   type Placement,
 } from "./board-state.ts";
 import {
+  BULK_TASK_COMMAND_IDS,
+  BULK_VERSION_CONFLICT_MESSAGE,
+  KanbanOperationError,
   VERSION_CONFLICT_MESSAGE,
   errorMessage,
   invokeJson,
@@ -359,6 +363,13 @@ export function KanbanView({
   const [deleteCountError, setDeleteCountError] = useState<string | null>(null);
   const [columnNotice, setColumnNotice] = useState<string | null>(null);
 
+  const [bulkSelection, setBulkSelection] = useState<ReadonlyMap<string, Task>>(() => new Map());
+  const [bulkTargetId, setBulkTargetId] = useState("");
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+
   const columnsScrollRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const loadedCountsRef = useRef<Record<string, number>>({});
@@ -385,6 +396,15 @@ export function KanbanView({
     readonly columnId: string;
     readonly targetId: string;
   } | null>(null);
+  /**
+   * Массовый выбор хранится как snapshot `Task` в порядке выбора.
+   *
+   * `Map` сохраняет порядок вставки, поэтому payload moveMany идёт в порядке
+   * кликов. Snapshot нужен для `expectedVersion` и не зависит от перерисовок.
+   */
+  const bulkSelectionRef = useRef<ReadonlyMap<string, Task>>(new Map());
+  const bulkGuardRef = useRef(false);
+  const bulkFilterTagRef = useRef(query.tag);
 
   effectiveProjectIdRef.current = effectiveProjectId;
 
@@ -704,6 +724,103 @@ export function KanbanView({
       return;
     }
 
+    // Массовый выбор переживает обычный refresh: snapshot обновляется до
+    // актуальных версий, а исчезнувшие/скрытые задачи из выбора убираются.
+    if (bulkSelectionRef.current.size > 0) {
+      const freshTasks = new Map<string, Task>();
+
+      for (const result of results) {
+        for (const task of result.page?.items ?? []) {
+          if (task.projectId === filters.projectId) {
+            freshTasks.set(task.id, task);
+          }
+        }
+      }
+
+      // Задача могла находиться за границей загруженной страницы после
+      // чужого move. Отдельный task.get отличает «ещё существует» от
+      // «удалена», не требуя полной перезагрузки всех страниц.
+      const missingIds = [...bulkSelectionRef.current.keys()].filter((id) => !freshTasks.has(id));
+      const lookups = new Map<string, Task | null>();
+
+      if (missingIds.length > 0) {
+        const found = await Promise.all(
+          missingIds.map(async (id) => {
+            try {
+              const data = await invokeJson<{ readonly task: Task }>(
+                invoke,
+                TASKS_QUERY_IDS.taskGet,
+                { id } as unknown as JsonValue,
+              );
+
+              return [id, data.task] as const;
+            } catch (lookupError) {
+              if (lookupError instanceof KanbanOperationError && lookupError.code === "NOT_FOUND") {
+                return [id, null] as const;
+              }
+
+              // Временная ошибка не должна молча стирать выбор.
+              return [id, undefined] as const;
+            }
+          }),
+        );
+
+        for (const [id, task] of found) {
+          lookups.set(id, task ?? null);
+        }
+
+        if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
+          return;
+        }
+      }
+
+      const nextSelection = new Map<string, Task>();
+      let selectionChanged = false;
+
+      for (const [id, snapshot] of bulkSelectionRef.current) {
+        const fresh = freshTasks.get(id);
+        const lookup = lookups.get(id);
+
+        // Временная ошибка task.get: задача не найдена на странице, но её
+        // существование не опровергнуто — сохраняем прежний snapshot.
+        if (fresh === undefined && lookup === undefined) {
+          nextSelection.set(id, snapshot);
+
+          continue;
+        }
+
+        if (fresh === undefined && lookup === null) {
+          selectionChanged = true;
+
+          continue;
+        }
+
+        const resolved = fresh ?? lookup;
+
+        if (resolved === undefined || resolved === null) {
+          selectionChanged = true;
+
+          continue;
+        }
+
+        nextSelection.set(id, resolved);
+
+        if (resolved.version !== snapshot.version) {
+          selectionChanged = true;
+        }
+      }
+
+      if (selectionChanged) {
+        bulkSelectionRef.current = nextSelection;
+        setBulkSelection(nextSelection);
+
+        if (nextSelection.size === 0) {
+          setBulkDeleteOpen(false);
+          setBulkDeleteError(null);
+        }
+      }
+    }
+
     for (const result of results) {
       if (result.page === null) {
         continue;
@@ -769,6 +886,53 @@ export function KanbanView({
     void reloadBoard();
   }, [reloadBoard, effectiveProjectId, query.tag, query.revision]);
 
+  // Смена tag не должна оставлять в массовом выборе скрытые фильтром задачи:
+  // пользователь не видит их на доске, но действие затронуло бы.
+  useEffect(() => {
+    if (bulkFilterTagRef.current === query.tag) {
+      return;
+    }
+
+    bulkFilterTagRef.current = query.tag;
+
+    const tag = normalizeFilterTag(query.tag);
+    const current = bulkSelectionRef.current;
+    const next = new Map<string, Task>();
+
+    for (const [id, task] of current) {
+      if (tag.length === 0 || task.tags.includes(tag)) {
+        next.set(id, task);
+      }
+    }
+
+    if (next.size !== current.size) {
+      bulkSelectionRef.current = next;
+      setBulkSelection(next);
+    }
+
+    setBulkError(null);
+
+    if (next.size === 0) {
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+    }
+  }, [query.tag]);
+
+  // Target обязан быть фактической колонкой текущего проекта.
+  useEffect(() => {
+    if (columnList.length === 0) {
+      if (bulkTargetId !== "") {
+        setBulkTargetId("");
+      }
+
+      return;
+    }
+
+    if (!columnList.some((column) => column.id === bulkTargetId)) {
+      setBulkTargetId(columnList[0]?.id ?? "");
+    }
+  }, [bulkTargetId, columnList]);
+
   // Первая фактическая колонка должна быть активной после загрузки/смены
   // проекта. Браузер иногда восстанавливает горизонтальный scroll контейнера
   // (например, после full navigation), поэтому сбрасываем его один раз на
@@ -784,6 +948,14 @@ export function KanbanView({
     deleteDialogRef.current = null;
     deleteDialogRequestRef.current += 1;
     deleteCountRequestRef.current += 1;
+    bulkSelectionRef.current = new Map();
+    bulkGuardRef.current = false;
+    setBulkSelection(new Map());
+    setBulkTargetId("");
+    setBulkPending(false);
+    setBulkError(null);
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
     placementsRef.current = new Map();
     pendingRef.current = new Set();
     visibilityRef.current.clear();
@@ -825,6 +997,8 @@ export function KanbanView({
       deleteDialogRef.current = null;
       deleteDialogRequestRef.current += 1;
       deleteCountRequestRef.current += 1;
+      bulkGuardRef.current = false;
+      bulkSelectionRef.current = new Map();
     },
     [],
   );
@@ -1220,6 +1394,204 @@ export function KanbanView({
 
   const moveToColumn = (task: Task, columnId: string): void => {
     void moveTask(task, columnId, { kind: "append" }, { columnId, beforeId: null });
+  };
+
+  const toggleBulkSelection = (task: Task, checked: boolean): void => {
+    if (bulkGuardRef.current || task.projectId !== effectiveProjectIdRef.current) {
+      return;
+    }
+
+    const next = new Map(bulkSelectionRef.current);
+
+    if (checked) {
+      // Повторный set существующего ключа не меняет порядок выбора, но
+      // обновляет snapshot версии.
+      next.set(task.id, task);
+    } else {
+      next.delete(task.id);
+    }
+
+    bulkSelectionRef.current = next;
+    setBulkSelection(next);
+    setBulkError(null);
+
+    if (next.size === 0) {
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+    }
+  };
+
+  const clearBulkSelection = (): void => {
+    if (bulkGuardRef.current) {
+      return;
+    }
+
+    bulkSelectionRef.current = new Map();
+    setBulkSelection(new Map());
+    setBulkError(null);
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
+  };
+
+  const bulkMove = async (): Promise<void> => {
+    if (bulkGuardRef.current || bulkSelectionRef.current.size === 0) {
+      return;
+    }
+
+    const target = currentColumn(bulkTargetId);
+
+    if (target === null) {
+      setBulkError("Выберите существующую колонку текущего проекта");
+      return;
+    }
+
+    if (bulkSelectionRef.current.size > MAX_LIST_LIMIT) {
+      setBulkError(`За один раз можно переместить не больше ${String(MAX_LIST_LIMIT)} задач`);
+      return;
+    }
+
+    const context = operationContext();
+    const items = [...bulkSelectionRef.current.values()].map((task) => ({
+      id: task.id,
+      expectedVersion: task.version,
+    }));
+
+    bulkGuardRef.current = true;
+    setBulkPending(true);
+    setBulkError(null);
+
+    try {
+      // Порядок items — порядок выбора; target append выполняет домен.
+      await invokeJson<{ readonly tasks: readonly Task[] }>(
+        invoke,
+        BULK_TASK_COMMAND_IDS.taskMoveMany,
+        { items, columnId: target.id } as unknown as JsonValue,
+      );
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bulkSelectionRef.current = new Map();
+      setBulkSelection(new Map());
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bumpKanbanRevision();
+    } catch (commandError) {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      // Даже обычная ошибка перечитывает доску: повтор должен использовать
+      // актуальные версии, а исчезнувшие задачи — выпасть из выбора.
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      setBulkError(
+        isVersionConflict(commandError)
+          ? BULK_VERSION_CONFLICT_MESSAGE
+          : errorMessage(commandError),
+      );
+    } finally {
+      bulkGuardRef.current = false;
+      setBulkPending(false);
+    }
+  };
+
+  const openBulkDelete = (): void => {
+    if (bulkGuardRef.current || bulkSelectionRef.current.size === 0) {
+      return;
+    }
+
+    setBulkDeleteError(null);
+    setBulkDeleteOpen(true);
+  };
+
+  const cancelBulkDelete = (): void => {
+    if (bulkGuardRef.current) {
+      return;
+    }
+
+    setBulkDeleteOpen(false);
+    setBulkDeleteError(null);
+  };
+
+  const confirmBulkDelete = async (): Promise<void> => {
+    if (bulkGuardRef.current || bulkSelectionRef.current.size === 0) {
+      return;
+    }
+
+    const context = operationContext();
+    const items = [...bulkSelectionRef.current.values()].map((task) => ({
+      id: task.id,
+      expectedVersion: task.version,
+    }));
+
+    bulkGuardRef.current = true;
+    setBulkPending(true);
+    setBulkDeleteError(null);
+
+    try {
+      await invokeJson(invoke, BULK_TASK_COMMAND_IDS.taskDeleteMany, {
+        items,
+        confirm: true,
+      } as unknown as JsonValue);
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bulkSelectionRef.current = new Map();
+      setBulkSelection(new Map());
+      setBulkDeleteOpen(false);
+      setBulkDeleteError(null);
+      setBulkError(null);
+
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      bumpKanbanRevision();
+    } catch (commandError) {
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      await reloadBoard();
+
+      if (!isOperationCurrent(context)) {
+        return;
+      }
+
+      if (bulkSelectionRef.current.size === 0) {
+        // Повторять нечего: выбранные задачи уже удалены или скрыты.
+        setBulkDeleteOpen(false);
+        setBulkDeleteError(null);
+
+        return;
+      }
+
+      setBulkDeleteError(
+        isVersionConflict(commandError)
+          ? BULK_VERSION_CONFLICT_MESSAGE
+          : errorMessage(commandError),
+      );
+    } finally {
+      bulkGuardRef.current = false;
+      setBulkPending(false);
+    }
   };
 
   const reorder = (task: Task, kind: KanbanReorderKind): void => {
@@ -2425,6 +2797,90 @@ export function KanbanView({
             ) : null}
           </form>
 
+          {bulkSelection.size === 0 ? null : (
+            <section
+              data-testid="kanban-bulk-bar"
+              aria-label="Массовые действия"
+              aria-busy={bulkPending}
+              className="flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-background/85 px-2.5 py-2"
+            >
+              <p
+                data-testid="kanban-bulk-count"
+                role="status"
+                className="m-0 text-sm font-medium whitespace-nowrap"
+              >
+                Выбрано {bulkSelection.size}
+              </p>
+
+              <label className="flex w-full min-w-0 flex-col gap-0.5 text-[11px] text-muted-foreground sm:w-auto sm:flex-row sm:items-center sm:gap-1">
+                <span className="whitespace-nowrap">Колонка</span>
+                <select
+                  data-testid="kanban-bulk-target"
+                  aria-label="Колонка назначения"
+                  value={bulkTargetId}
+                  disabled={bulkPending || columnList.length === 0}
+                  onChange={(event) => {
+                    setBulkTargetId(event.target.value);
+                    setBulkError(null);
+                  }}
+                  className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 sm:w-auto xl:h-8"
+                >
+                  {columnList.map((column) => (
+                    <option key={column.id} value={column.id}>
+                      {column.title}
+                      {column.status === "done" ? " (Done)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-move"
+                  disabled={bulkPending || bulkTargetId.length === 0}
+                  aria-busy={bulkPending}
+                  onClick={() => {
+                    void bulkMove();
+                  }}
+                  className="inline-flex min-h-10 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {bulkPending ? "Перемещение…" : "Переместить"}
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-delete"
+                  disabled={bulkPending}
+                  onClick={openBulkDelete}
+                  className="inline-flex min-h-10 items-center rounded-md border border-destructive/40 px-3 text-sm font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Удалить
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="kanban-bulk-clear"
+                  disabled={bulkPending}
+                  onClick={clearBulkSelection}
+                  className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Снять выбор
+                </button>
+              </div>
+
+              {bulkError === null ? null : (
+                <p
+                  role="alert"
+                  data-testid="kanban-bulk-error"
+                  className="m-0 basis-full text-xs font-medium text-destructive"
+                >
+                  {bulkError}
+                </p>
+              )}
+            </section>
+          )}
+
           {hasFilters && boardSettled && visibleTotal === 0 ? (
             <div
               data-testid="kanban-empty-filter"
@@ -2589,6 +3045,9 @@ export function KanbanView({
                           pending={pending.has(task.id)}
                           conflict={conflicts.has(task.id)}
                           dragging={draggingId === task.id}
+                          bulkSelected={bulkSelection.has(task.id)}
+                          bulkDisabled={bulkPending}
+                          onBulkToggle={toggleBulkSelection}
                           onOpen={(openedTask) => {
                             updateKanbanQuery({ taskId: openedTask.id });
                           }}
@@ -2682,6 +3141,66 @@ export function KanbanView({
           }}
           onCancel={cancelDeleteColumn}
         />
+      )}
+
+      {!bulkDeleteOpen ? null : (
+        <ModalDialog
+          open
+          label="Удалить выбранные задачи"
+          testId="kanban-bulk-delete-dialog"
+          onClose={cancelBulkDelete}
+          className="m-auto w-[calc(100vw-2rem)] max-w-[30rem] rounded-xl border border-border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/45"
+        >
+          <div className="flex flex-col gap-3 p-4">
+            <div className="flex flex-col gap-1">
+              <h2 className="m-0 text-base font-semibold">Удалить выбранные задачи?</h2>
+              <p className="m-0 text-xs text-muted-foreground">
+                Действие нельзя отменить. Задачи будут удалены вместе с подзадачами.
+              </p>
+            </div>
+
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs">
+              <p className="m-0 font-medium text-destructive">
+                Будет удалено задач:{" "}
+                <span data-testid="kanban-bulk-delete-count">{bulkSelection.size}</span>
+              </p>
+            </div>
+
+            {bulkDeleteError === null ? null : (
+              <p
+                role="alert"
+                data-testid="kanban-bulk-delete-error"
+                className="m-0 text-xs text-destructive"
+              >
+                {bulkDeleteError}
+              </p>
+            )}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                data-testid="kanban-bulk-delete-cancel"
+                disabled={bulkPending}
+                onClick={cancelBulkDelete}
+                className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                data-testid="kanban-bulk-delete-confirm"
+                disabled={bulkPending || bulkSelection.size === 0}
+                aria-busy={bulkPending}
+                onClick={() => {
+                  void confirmBulkDelete();
+                }}
+                className="inline-flex min-h-10 items-center rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {bulkPending ? "Удаление…" : "Удалить задачи"}
+              </button>
+            </div>
+          </div>
+        </ModalDialog>
       )}
     </div>
   );

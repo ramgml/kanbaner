@@ -55,13 +55,14 @@ const actionButtonStyle = {
 /**
  * Элементы, с которых карточка не начинает перетаскивание.
  *
- * Кнопка открытия и ручка — исключение: это осознанные drag-поверхности,
- * которые одновременно остаются обычными элементами управления.
+ * Кнопка открытия — исключение: это осознанная drag-поверхность, которая
+ * одновременно остаётся обычным элементом управления.
  */
 const NON_DRAG_SELECTOR = [
   "a",
   "button",
   "input",
+  "label",
   "textarea",
   `${"sel"}${"ect"}`,
   "summary",
@@ -89,6 +90,11 @@ export interface KanbanCardProps {
   readonly pending: boolean;
   readonly conflict: boolean;
   readonly dragging: boolean;
+  /** Карточка входит в массовый выбор. */
+  readonly bulkSelected?: boolean;
+  /** Массовая операция выполняется: менять выбор нельзя. */
+  readonly bulkDisabled?: boolean;
+  readonly onBulkToggle?: (task: Task, selected: boolean) => void;
   readonly onOpen: (task: Task) => void;
   readonly onMoveTo: (task: Task, columnId: string) => void;
   readonly onReorder: (task: Task, kind: KanbanReorderKind) => void;
@@ -110,8 +116,9 @@ export interface KanbanCardProps {
  * Заголовок — главный элемент. Теги ограничены двумя видимыми + `+N`, срок
  * получает семантический тон (просрочено/сегодня/завтра/дата) и текстовое
  * описание, а pending/conflict занимают строку только пока актуальны.
- * Перетаскивание доступно за любую неинтерактивную область карточки, а также
- * за заголовок/ручку; меню «Переместить в…» и кнопки порядка остаются
+ * В верхней строке слева находится чекбокс массового выбора, справа — меню.
+ * Перетаскивание доступно за любую неинтерактивную область карточки и за
+ * заголовок; меню «Переместить в…» и кнопки порядка остаются
  * альтернативой для клавиатуры и мобильного.
  */
 export function KanbanCard({
@@ -125,6 +132,9 @@ export function KanbanCard({
   pending,
   conflict,
   dragging,
+  bulkSelected = false,
+  bulkDisabled = false,
+  onBulkToggle,
   onOpen,
   onMoveTo,
   onReorder,
@@ -344,7 +354,7 @@ export function KanbanCard({
       return;
     }
 
-    const dragSurface = target.closest("[data-card-drag-allow], [data-card-drag-handle]");
+    const dragSurface = target.closest("[data-card-drag-allow]");
     const interactive = target.closest(NON_DRAG_SELECTOR);
 
     if (interactive !== null && dragSurface === null) {
@@ -512,19 +522,28 @@ export function KanbanCard({
         userSelect: "none",
       }}
     >
-      <div className="flex items-start gap-1">
-        <button
-          type="button"
-          aria-label={`Открыть карточку задачи ${task.title}`}
-          data-testid={`kanban-open-${task.id}`}
-          data-card-drag-allow
-          onClick={() => {
-            onOpen(task);
-          }}
-          className="flex min-h-10 min-w-0 flex-1 items-center rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-7"
+      <div className="flex items-center justify-between gap-1">
+        <label
+          data-testid={`kanban-bulk-check-target-${task.id}`}
+          className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-accent"
+          title="Выбрать задачу"
         >
-          {task.title}
-        </button>
+          <input
+            type="checkbox"
+            data-testid={`kanban-bulk-check-${task.id}`}
+            aria-label={`Выбрать задачу ${task.title}`}
+            checked={bulkSelected}
+            disabled={bulkDisabled}
+            onChange={(event) => {
+              onBulkToggle?.(task, event.target.checked);
+            }}
+            onClick={(event) => {
+              // Клик по выбору не открывает карточку и не начинает drag.
+              event.stopPropagation();
+            }}
+            className="h-5 w-5 cursor-pointer accent-[var(--primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed"
+          />
+        </label>
 
         <button
           ref={triggerRef}
@@ -549,18 +568,20 @@ export function KanbanCard({
         >
           <span aria-hidden="true">⋯</span>
         </button>
-
-        <button
-          type="button"
-          aria-label={`Перетащить задачу ${task.title}`}
-          data-testid={`kanban-drag-${task.id}`}
-          data-card-drag-handle
-          title="Перетащить карточку"
-          className="flex min-h-10 min-w-10 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing xl:min-h-7 xl:min-w-7"
-        >
-          <span aria-hidden="true">⠿</span>
-        </button>
       </div>
+
+      <button
+        type="button"
+        aria-label={`Открыть карточку задачи ${task.title}`}
+        data-testid={`kanban-open-${task.id}`}
+        data-card-drag-allow
+        onClick={() => {
+          onOpen(task);
+        }}
+        className="flex min-h-10 w-full min-w-0 items-center rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-7"
+      >
+        {task.title}
+      </button>
 
       {visibleTags.length === 0 ? null : (
         <ul aria-label="Теги" className="flex flex-wrap items-center gap-1">
