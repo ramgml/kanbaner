@@ -73,6 +73,8 @@ specs:
 Domain worker:
 
 - `packages/plugin-tasks/**`;
+- `packages/plugin-sdk/src/plugin-id.ts` и `plugin-id.test.ts` — только поддержка
+  camelCase в action-сегменте согласованных operation ID;
 - `specs/plugin-contract.md`, `specs/architecture.md` — только описание новых
   публичных операций;
 - `tasks/reports/KAN-028-domain.md`.
@@ -85,7 +87,7 @@ UI worker:
 - незакоммиченная верстка карточки из основного checkout переносится в этот
   worktree и входит в его коммит.
 
-Запрещено менять чужие области, kernel, SDK, storage, зависимости и task-list.
+Запрещено менять чужие области, kernel, storage, зависимости и task-list.
 
 ## Контракты и зависимости
 
