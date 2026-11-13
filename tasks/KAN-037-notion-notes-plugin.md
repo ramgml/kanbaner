@@ -1,7 +1,7 @@
 ---
 id: KAN-037
 title: Notion-подобный плагин заметок
-status: done
+status: in_progress
 stage: 4
 priority: high
 owner: orchestrator
@@ -82,6 +82,9 @@ specs:
 - 2026-11-13 — Домен, UI runtime и Milkdown-редактор реализованы тремя workers и
   влиты. Оркестраторская интеграция завершена: 114 файлов / 1580 тестов и
   120/120 Playwright E2E зелёные. Задача переведена в `review`.
+- 2026-11-13 — Независимое ревью выявило deferred-гонки autosave и ещё 9
+  findings. Задача возвращена в `in_progress`; закрытие только после regression
+  tests и повторных полных проверок.
 
 ## Итог
 
