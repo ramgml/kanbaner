@@ -116,6 +116,14 @@ export const NoteMoveInputSchema = InputObject({
 export const NoteDeleteInputSchema = InputObject({
   id: Id,
   expectedVersion: ExpectedVersion,
+  /**
+   * Размер поддерева из свежего preview (`note.subtree`).
+   *
+   * Необязателен для обратной совместимости: старый клиент удаляет ветку без
+   * проверки размера. Новый клиент передаёт count и получает конфликт, если
+   * дерево изменилось между preview и delete.
+   */
+  expectedDescendants: Type.Optional(Type.Integer({ minimum: 1 })),
   confirm: Type.Literal(true),
 });
 
@@ -146,6 +154,16 @@ export const NoteFavoriteInputSchema = InputObject({
 
 export const NoteVisitInputSchema = InputObject({ id: Id });
 export const NoteGetInputSchema = InputObject({ id: Id });
+export const NoteSubtreeInputSchema = InputObject({ id: Id });
+
+export const NoteSubtreeOutputSchema = Type.Object(
+  {
+    noteId: Id,
+    noteCount: Type.Integer({ minimum: 1 }),
+    attachmentCount: Type.Integer({ minimum: 0 }),
+  },
+  DRAFT_2020_12,
+);
 
 export const NoteListInputSchema = InputObject({
   parentId: Type.Optional(Type.Union([Id, Type.Null()])),
@@ -193,6 +211,19 @@ export const NoteSearchOutputSchema = Type.Object(
 
 export const NoteLinkInputSchema = InputObject({
   noteId: Id,
+  targetRef: ResourceRefSchema,
+});
+
+/**
+ * Удаление конкретной пары связи.
+ *
+ * `noteId` должен быть одним из участников (`sourceRef` или `targetRef`):
+ * это позволяет снять входящую или исходящую связь с обеих сторон, но не
+ * разрешает удалить чужую пару.
+ */
+export const NoteUnlinkInputSchema = InputObject({
+  noteId: Id,
+  sourceRef: ResourceRefSchema,
   targetRef: ResourceRefSchema,
 });
 
@@ -267,9 +298,11 @@ export type NoteDeleteInput = Static<typeof NoteDeleteInputSchema>;
 export type NoteFavoriteInput = Static<typeof NoteFavoriteInputSchema>;
 export type NoteVisitInput = Static<typeof NoteVisitInputSchema>;
 export type NoteGetInput = Static<typeof NoteGetInputSchema>;
+export type NoteSubtreeInput = Static<typeof NoteSubtreeInputSchema>;
 export type NoteListInput = Static<typeof NoteListInputSchema>;
 export type NoteSearchInput = Static<typeof NoteSearchInputSchema>;
 export type NoteLinkInput = Static<typeof NoteLinkInputSchema>;
+export type NoteUnlinkInput = Static<typeof NoteUnlinkInputSchema>;
 export type NoteLinksInput = Static<typeof NoteLinksInputSchema>;
 export type NoteAttachmentCreateInput = Static<typeof NoteAttachmentCreateInputSchema>;
 export type NoteAttachmentGetInput = Static<typeof NoteAttachmentGetInputSchema>;

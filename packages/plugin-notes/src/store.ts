@@ -38,6 +38,7 @@ import type {
   NoteExport,
   NoteListPage,
   NoteMoveResult,
+  NoteSubtree,
   NoteView,
 } from "./model.ts";
 import { formatNoteRef } from "./resources.ts";
@@ -78,6 +79,17 @@ export class NotesVersionConflictError extends Error {
   }
 }
 
+/** Размер поддерева изменился между preview и каскадным удалением. */
+export class NotesSubtreeConflictError extends Error {
+  override readonly name = "NotesSubtreeConflictError";
+  constructor(
+    readonly expectedDescendants: number,
+    readonly actualDescendants: number,
+  ) {
+    super("Дерево заметок изменилось после подтверждения удаления");
+  }
+}
+
 /**
  * Операции домена заметок в уже открытой транзакции Storage Provider.
  *
@@ -105,9 +117,11 @@ export interface NotesStoreTransaction {
   deleteNote(input: {
     id: string;
     expectedVersion: number;
+    expectedDescendants?: number;
     confirm: true;
   }): Promise<NoteDeleteResult>;
   getNote(id: string): Promise<NoteDetails | null>;
+  getSubtree(id: string): Promise<NoteSubtree | null>;
   listNotes(input: NoteListInput): Promise<NoteListPage>;
   listAllNotes(): Promise<readonly Note[]>;
   setFavorite(input: { id: string; favorite: boolean; updatedAt: UtcTimestamp }): Promise<NoteView>;
@@ -715,6 +729,11 @@ export function createNotesTransaction(documents: PluginDocumentStore): NotesSto
         throw new NotesVersionConflictError(input.expectedVersion, current.version);
       }
       const subtree = descendantsOf(notes, current.id);
+
+      if (input.expectedDescendants !== undefined && input.expectedDescendants !== subtree.size) {
+        throw new NotesSubtreeConflictError(input.expectedDescendants, subtree.size);
+      }
+
       const deletedNotes = notes
         .filter((note) => subtree.has(note.id))
         .sort((left, right) => left.id.localeCompare(right.id));
@@ -752,6 +771,29 @@ export function createNotesTransaction(documents: PluginDocumentStore): NotesSto
     async getNote(id) {
       const document = await documents.get(NOTES_PLUGIN_ID, NOTE_COLLECTION, id);
       return document === null ? null : detailsOf(documents, toNote(document));
+    },
+
+    async getSubtree(id) {
+      const notes = await allNotes(documents);
+      const current = notes.find((note) => note.id === id);
+
+      if (current === undefined) {
+        return null;
+      }
+
+      const subtree = descendantsOf(notes, current.id);
+      const attachmentDocuments = await documents.query({
+        pluginId: NOTES_PLUGIN_ID,
+        collection: NOTE_ATTACHMENT_COLLECTION,
+      });
+
+      return {
+        noteId: current.id,
+        noteCount: subtree.size,
+        attachmentCount: attachmentDocuments
+          .map(toAttachment)
+          .filter((attachment) => subtree.has(attachment.noteId)).length,
+      };
     },
 
     async listNotes(input) {
@@ -960,6 +1002,9 @@ export function createNotesStore(options: CreateNotesStoreOptions): NotesStore {
     },
     getNote(id) {
       return createNotesTransaction(storage.documents).getNote(id);
+    },
+    getSubtree(id) {
+      return createNotesTransaction(storage.documents).getSubtree(id);
     },
     listNotes(input) {
       return createNotesTransaction(storage.documents).listNotes(input);

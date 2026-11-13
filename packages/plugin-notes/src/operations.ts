@@ -37,6 +37,9 @@ import {
   NoteMoveOutputSchema,
   NoteSearchInputSchema,
   NoteSearchOutputSchema,
+  NoteSubtreeInputSchema,
+  NoteSubtreeOutputSchema,
+  NoteUnlinkInputSchema,
   NoteUpdateInputSchema,
   NoteViewSchema,
   NoteVisitInputSchema,
@@ -147,9 +150,9 @@ export const NOTES_COMMAND_LIST: readonly CommandMetadata[] = Object.freeze([
   command(
     NOTES_COMMAND_IDS.unlink,
     "write",
-    NoteLinkInputSchema,
+    NoteUnlinkInputSchema,
     UnlinkOutputSchema,
-    "Удаляет универсальную связь",
+    "Удаляет связь, в которой участвует заметка",
     { idempotency: "none" },
   ),
   command(
@@ -175,6 +178,12 @@ export const NOTES_QUERY_LIST: readonly QueryMetadata[] = Object.freeze([
     NoteGetInputSchema,
     NoteDetailsSchema,
     "Возвращает страницу, ancestors и attachments",
+  ),
+  query(
+    NOTES_QUERY_IDS.subtree,
+    NoteSubtreeInputSchema,
+    NoteSubtreeOutputSchema,
+    "Возвращает свежий размер поддерева для подтверждения удаления",
   ),
   query(
     NOTES_QUERY_IDS.list,

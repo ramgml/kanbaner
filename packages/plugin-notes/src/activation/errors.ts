@@ -5,7 +5,12 @@ import {
   type PluginErrorCode,
 } from "@kanbaner/plugin-sdk";
 
-import { NotesNotFoundError, NotesValidationError, NotesVersionConflictError } from "../store.ts";
+import {
+  NotesNotFoundError,
+  NotesSubtreeConflictError,
+  NotesValidationError,
+  NotesVersionConflictError,
+} from "../store.ts";
 import { IdempotencyConflictError } from "./idempotency.ts";
 
 /**
@@ -27,6 +32,13 @@ export function mapNotesError(error: unknown): {
     return mapped("VERSION_CONFLICT", "Заметка была изменена другой операцией", {
       expectedVersion: error.expectedVersion,
       actualVersion: error.actualVersion,
+    });
+  }
+
+  if (error instanceof NotesSubtreeConflictError) {
+    return mapped("VERSION_CONFLICT", error.message, {
+      expectedDescendants: error.expectedDescendants,
+      actualDescendants: error.actualDescendants,
     });
   }
 

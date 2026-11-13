@@ -39,6 +39,7 @@ export const NOTES_COMMAND_IDS = Object.freeze({
 
 export const NOTES_QUERY_IDS = Object.freeze({
   get: "kanbaner.notes.note.get",
+  subtree: "kanbaner.notes.note.subtree",
   list: "kanbaner.notes.note.list",
   search: "kanbaner.notes.note.search",
   links: "kanbaner.notes.note.links",

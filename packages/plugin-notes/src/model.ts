@@ -64,6 +64,14 @@ export interface NoteDetails {
   readonly attachments: readonly NoteAttachmentDescriptor[];
 }
 
+/** Свежий снимок поддерева для подтверждения каскадного удаления. */
+export interface NoteSubtree {
+  readonly noteId: string;
+  /** Количество заметок в поддереве, включая корневую. */
+  readonly noteCount: number;
+  readonly attachmentCount: number;
+}
+
 export interface NoteDeleteSuccess {
   readonly deleted: true;
   readonly deletedNotes: readonly Note[];
