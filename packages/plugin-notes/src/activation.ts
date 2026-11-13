@@ -63,6 +63,8 @@ import type {
   NoteListInput,
   NoteMoveInput,
   NoteSearchInput,
+  NoteSubtreeInput,
+  NoteUnlinkInput,
   NoteUpdateInput,
   NoteVisitInput,
 } from "./schemas.ts";
@@ -465,6 +467,9 @@ const noteDelete: CommandFn = async (input, executionContext, operationId, depen
   const normalized = {
     id: data.id,
     expectedVersion: data.expectedVersion,
+    ...(data.expectedDescendants === undefined
+      ? {}
+      : { expectedDescendants: data.expectedDescendants }),
     confirm: true as const,
   };
 
@@ -477,6 +482,9 @@ const noteDelete: CommandFn = async (input, executionContext, operationId, depen
       const deletion = await transaction.deleteNote({
         id: normalized.id,
         expectedVersion: normalized.expectedVersion,
+        ...(normalized.expectedDescendants === undefined
+          ? {}
+          : { expectedDescendants: normalized.expectedDescendants }),
         confirm: true,
       });
 
@@ -646,8 +654,8 @@ const noteLink: CommandFn = async (input, executionContext, _operationId, depend
 };
 
 const noteUnlink: CommandFn = async (input, executionContext, _operationId, dependencies) => {
-  const data = input as NoteLinkInput;
-  const sourceRef = formatNoteRef(data.noteId);
+  const data = input as NoteUnlinkInput;
+  const noteRef = formatNoteRef(data.noteId);
 
   return runMapped(async () => {
     const details = await dependencies.store.getNote(data.noteId);
@@ -656,11 +664,18 @@ const noteUnlink: CommandFn = async (input, executionContext, _operationId, depe
       throw new NotesNotFoundError("Заметка", data.noteId);
     }
 
-    const links = await executionContext.resources.list(sourceRef, NOTES_RELATION);
+    if (data.sourceRef !== noteRef && data.targetRef !== noteRef) {
+      throw new NotesValidationError(
+        "Заметка не участвует в указанной связи",
+        "NOTE_LINK_PARTICIPANT_REQUIRED",
+      );
+    }
+
+    const links = await executionContext.resources.list(noteRef, NOTES_RELATION);
     const existed = links.some(
-      (link) => link.sourceRef === sourceRef && link.targetRef === data.targetRef,
+      (link) => link.sourceRef === data.sourceRef && link.targetRef === data.targetRef,
     );
-    await executionContext.resources.unlink(sourceRef, data.targetRef, NOTES_RELATION);
+    await executionContext.resources.unlink(data.sourceRef, data.targetRef, NOTES_RELATION);
 
     return { result: { unlinked: existed }, events: [] };
   });
@@ -679,6 +694,17 @@ const noteGet: QueryFn = async (input, _executionContext, dependencies) => {
   }
 
   return details;
+};
+
+const noteSubtree: QueryFn = async (input, _executionContext, dependencies) => {
+  const data = input as NoteSubtreeInput;
+  const subtree = await dependencies.store.getSubtree(data.id);
+
+  if (subtree === null) {
+    throw new NotesNotFoundError("Заметка", data.id);
+  }
+
+  return subtree;
 };
 
 const noteList: QueryFn = async (input, _executionContext, dependencies) => {
@@ -796,6 +822,7 @@ const COMMAND_HANDLERS: Readonly<Record<string, CommandFn>> = Object.freeze({
 
 const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({
   [NOTES_QUERY_IDS.get]: noteGet,
+  [NOTES_QUERY_IDS.subtree]: noteSubtree,
   [NOTES_QUERY_IDS.list]: noteList,
   [NOTES_QUERY_IDS.search]: noteSearch,
   [NOTES_QUERY_IDS.links]: noteLinks,

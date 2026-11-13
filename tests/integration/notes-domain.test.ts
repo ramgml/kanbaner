@@ -299,6 +299,73 @@ describe("NotesStore", () => {
     });
   });
 
+  it("возвращает свежий размер поддерева и отклоняет delete по устаревшему preview", async () => {
+    const { store } = await createHarness();
+
+    await store.createNote({ id: "note-root", title: "Корень", createdAt: timestamp(0) });
+    await store.createNote({
+      id: "note-child",
+      parentId: "note-root",
+      title: "Ребёнок",
+      createdAt: timestamp(1),
+    });
+    await store.createAttachment({
+      id: "attachment-child",
+      noteId: "note-child",
+      mimeType: "image/png",
+      contentBase64: PNG_BASE64,
+      createdAt: timestamp(2),
+    });
+
+    expect(await store.getSubtree("note-root")).toEqual({
+      noteId: "note-root",
+      noteCount: 2,
+      attachmentCount: 1,
+    });
+    expect(await store.getSubtree("note-missing")).toBeNull();
+
+    await store.createNote({
+      id: "note-late",
+      parentId: "note-root",
+      title: "Добавлен после preview",
+      createdAt: timestamp(3),
+    });
+
+    await expect(
+      store.deleteNote({
+        id: "note-root",
+        expectedVersion: 1,
+        expectedDescendants: 2,
+        confirm: true,
+      }),
+    ).rejects.toMatchObject({
+      name: "NotesSubtreeConflictError",
+      expectedDescendants: 2,
+      actualDescendants: 3,
+    });
+
+    expect(await store.getNote("note-root")).not.toBeNull();
+    expect(await store.getNote("note-late")).not.toBeNull();
+    expect(await store.getAttachment("attachment-child")).not.toBeNull();
+
+    const deletion = await store.deleteNote({
+      id: "note-root",
+      expectedVersion: 1,
+      expectedDescendants: 3,
+      confirm: true,
+    });
+
+    expect(deletion.deleted).toBe(true);
+
+    if (deletion.deleted) {
+      expect(deletion.deletedNotes.map((note) => note.id)).toEqual([
+        "note-child",
+        "note-late",
+        "note-root",
+      ]);
+    }
+  });
+
   it("сохраняет локальные изображения и встраивает их в экспорт", async () => {
     const { store } = await createHarness();
 
@@ -353,6 +420,68 @@ describe("NotesStore", () => {
     });
 
     expect(await store.deleteAttachment({ id: "attachment-1", confirm: true })).toBe(true);
+  });
+
+  it("распознаёт reference-style изображения в validation, cleanup и export", async () => {
+    const { store } = await createHarness();
+
+    await store.createNote({ id: "note-ref", title: "Ссылки", createdAt: timestamp(0) });
+    await store.createAttachment({
+      id: "attachment-ref",
+      noteId: "note-ref",
+      mimeType: "image/png",
+      contentBase64: PNG_BASE64,
+      createdAt: timestamp(1),
+    });
+
+    const content = [
+      "Прямая ![inline](attachment://attachment-ref)",
+      "",
+      "Ссылочная ![ref][logo]",
+      "",
+      "```",
+      "[logo]: attachment://attachment-ref",
+      "```",
+      "",
+      '[logo]: attachment://attachment-ref "Логотип"',
+    ].join("\n");
+
+    await store.updateNote({
+      id: "note-ref",
+      expectedVersion: 1,
+      contentMarkdown: content,
+      updatedAt: timestamp(2),
+    });
+
+    const renamed = await store.updateNote({
+      id: "note-ref",
+      expectedVersion: 2,
+      title: "Ссылки переименованы",
+      updatedAt: timestamp(3),
+    });
+
+    expect(renamed.view.note.version).toBe(3);
+
+    await expect(
+      store.deleteAttachment({ id: "attachment-ref", confirm: true }),
+    ).rejects.toMatchObject({ reason: "ATTACHMENT_IN_USE" });
+
+    const exported = await store.exportNote("note-ref");
+
+    expect(exported?.content).toContain(`![inline](data:image/png;base64,${PNG_BASE64})`);
+    expect(exported?.content).toContain(`[logo]: data:image/png;base64,${PNG_BASE64} "Логотип"`);
+    expect(exported?.content).not.toContain('[logo]: attachment://attachment-ref "Логотип"');
+    expect(exported?.content).toContain("![ref][logo]");
+    expect(exported?.content).toContain("[logo]: attachment://attachment-ref");
+
+    await store.updateNote({
+      id: "note-ref",
+      expectedVersion: 3,
+      contentMarkdown: "Без изображений",
+      updatedAt: timestamp(4),
+    });
+
+    expect(await store.deleteAttachment({ id: "attachment-ref", confirm: true })).toBe(true);
   });
 
   it("принимает валидный GIF по сигнатуре GIF87a/89a", async () => {

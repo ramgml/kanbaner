@@ -676,6 +676,139 @@ describe("активация kanbaner.notes", () => {
       expect(inUse.error.code).toBe("VALIDATION_ERROR");
     }
   });
+
+  it("возвращает preview поддерева и отклоняет delete при изменившемся размере", async () => {
+    const harness = await startHarness();
+    const root = await createNote(harness, { title: "Корень" });
+    const rootId = root.view.note.id;
+    const child = await createNote(harness, { title: "Ребёнок", parentId: rootId });
+    const childId = child.view.note.id;
+
+    await createNote(harness, { title: "Внук", parentId: childId });
+    expectOk(
+      await harness.command(NOTES_COMMAND_IDS.attachmentCreate, {
+        noteId: childId,
+        mimeType: "image/png",
+        contentBase64: PNG_BASE64,
+      }),
+    );
+
+    const preview = expectOk<{
+      readonly noteId: string;
+      readonly noteCount: number;
+      readonly attachmentCount: number;
+    }>(await harness.query(NOTES_QUERY_IDS.subtree, { id: rootId }));
+
+    expect(preview).toEqual({ noteId: rootId, noteCount: 3, attachmentCount: 1 });
+
+    await createNote(harness, { title: "Добавлен после preview", parentId: rootId });
+
+    const conflict = await harness.command(NOTES_COMMAND_IDS.delete, {
+      id: rootId,
+      expectedVersion: 1,
+      expectedDescendants: preview.noteCount,
+      confirm: true,
+    });
+
+    expect(conflict.ok).toBe(false);
+    if (!conflict.ok) {
+      expect(conflict.error.code).toBe("VERSION_CONFLICT");
+    }
+
+    expect(
+      expectOk<NoteDetails>(await harness.query(NOTES_QUERY_IDS.get, { id: rootId })).view.note.id,
+    ).toBe(rootId);
+
+    const fresh = expectOk<{ readonly noteCount: number }>(
+      await harness.query(NOTES_QUERY_IDS.subtree, { id: rootId }),
+    );
+
+    expect(fresh.noteCount).toBe(4);
+
+    const deleted = expectOk<NoteDeleteResult>(
+      await harness.command(NOTES_COMMAND_IDS.delete, {
+        id: rootId,
+        expectedVersion: 1,
+        expectedDescendants: fresh.noteCount,
+        confirm: true,
+      }),
+    );
+
+    expect(deleted.deleted).toBe(true);
+
+    if (deleted.deleted) {
+      expect(deleted.deletedNotes).toHaveLength(4);
+    }
+
+    expect((await harness.query(NOTES_QUERY_IDS.get, { id: rootId })).ok).toBe(false);
+  });
+
+  it("удаляет входящую и исходящую связь только при участии заметки", async () => {
+    const harness = await startHarness();
+    const created = await createNote(harness, { title: "Связи" });
+    const noteId = created.view.note.id;
+    const noteRef = formatNoteRef(noteId);
+    const externalRef = "kanbaner.tasks:task:task-1";
+
+    expectOk(
+      await harness.command(NOTES_COMMAND_IDS.link, {
+        noteId,
+        targetRef: externalRef,
+      }),
+    );
+
+    const outgoing = expectOk<{ readonly unlinked: boolean }>(
+      await harness.command(NOTES_COMMAND_IDS.unlink, {
+        noteId,
+        sourceRef: noteRef,
+        targetRef: externalRef,
+      }),
+    );
+
+    expect(outgoing.unlinked).toBe(true);
+    expect(await harness.composition.links.list(noteRef, NOTES_RELATION)).toHaveLength(0);
+
+    expect(
+      expectOk<{ readonly unlinked: boolean }>(
+        await harness.command(NOTES_COMMAND_IDS.unlink, {
+          noteId,
+          sourceRef: noteRef,
+          targetRef: externalRef,
+        }),
+      ).unlinked,
+    ).toBe(false);
+
+    await harness.composition.links.link(externalRef, noteRef, NOTES_RELATION);
+
+    const incoming = expectOk<{ readonly unlinked: boolean }>(
+      await harness.command(NOTES_COMMAND_IDS.unlink, {
+        noteId,
+        sourceRef: externalRef,
+        targetRef: noteRef,
+      }),
+    );
+
+    expect(incoming.unlinked).toBe(true);
+    expect(await harness.composition.links.list(noteRef, NOTES_RELATION)).toHaveLength(0);
+
+    const foreignSource = "kanbaner.tasks:task:foreign-source";
+    const foreignTarget = "kanbaner.tasks:task:foreign-target";
+
+    await harness.composition.links.link(foreignSource, foreignTarget, NOTES_RELATION);
+
+    const forbidden = await harness.command(NOTES_COMMAND_IDS.unlink, {
+      noteId,
+      sourceRef: foreignSource,
+      targetRef: foreignTarget,
+    });
+
+    expect(forbidden.ok).toBe(false);
+    if (!forbidden.ok) {
+      expect(forbidden.error.code).toBe("VALIDATION_ERROR");
+    }
+
+    expect(await harness.composition.links.list(foreignSource, NOTES_RELATION)).toHaveLength(1);
+  });
 });
 
 /**

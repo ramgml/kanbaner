@@ -11,14 +11,19 @@ interface MarkdownPosition {
 interface MarkdownNode {
   readonly type?: string;
   readonly url?: string;
+  readonly identifier?: string;
   readonly position?: MarkdownPosition;
   readonly children?: readonly MarkdownNode[];
 }
 
 interface ImageReference {
   readonly url: string;
-  readonly start: number;
-  readonly end: number;
+  readonly range: UrlRange | null;
+}
+
+interface DefinitionReference {
+  readonly url: string;
+  readonly range: UrlRange | null;
 }
 
 interface UrlRange {
@@ -37,19 +42,147 @@ function visit(node: MarkdownNode, callback: (node: MarkdownNode) => void): void
   }
 }
 
-function images(markdown: string): readonly ImageReference[] {
-  const references: ImageReference[] = [];
+/**
+ * Находит диапазон destination внутри reference definition.
+ *
+ * Формат `[label]: url "title"` не даёт позиции URL, поэтому метка
+ * пропускается с учётом escape-последовательностей, а destination разбирается
+ * так же, как inline-destination изображения.
+ */
+function locateDefinitionDestination(source: string): UrlRange | null {
+  if (!source.startsWith("[")) {
+    return null;
+  }
 
-  visit(tree(markdown), (node) => {
-    if (node.type !== "image" || typeof node.url !== "string") {
+  let index = 1;
+
+  while (index < source.length) {
+    const character = source[index];
+
+    if (character === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (character === "]") {
+      index += 1;
+      break;
+    }
+
+    index += 1;
+  }
+
+  if (source[index] !== ":") {
+    return null;
+  }
+
+  index += 1;
+  while (index < source.length && /\s/.test(source[index] ?? "")) {
+    index += 1;
+  }
+
+  return locateUrl(source, index, false);
+}
+
+/**
+ * Разбирает destination с позиции `index`.
+ *
+ * `stopAtParenthesis` нужен для inline `![alt](url)`: незакрытая скобка
+ * завершает destination. В definition `)` допустима, поэтому там ограничителем
+ * служит только пробел или конец строки.
+ */
+function locateUrl(source: string, from: number, stopAtParenthesis: boolean): UrlRange | null {
+  let index = from;
+
+  if (source[index] === "<") {
+    const close = source.indexOf(">", index + 1);
+    return close < 0 ? null : { start: index + 1, end: close };
+  }
+
+  const start = index;
+  while (index < source.length) {
+    const character = source[index];
+
+    if (character === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (
+      character === undefined ||
+      /\s/.test(character) ||
+      (stopAtParenthesis && character === ")")
+    ) {
+      break;
+    }
+
+    index += 1;
+  }
+
+  return index <= start ? null : { start, end: index };
+}
+
+function definitionsOf(markdown: string): ReadonlyMap<string, DefinitionReference> {
+  const root = tree(markdown);
+  const definitions = new Map<string, DefinitionReference>();
+
+  visit(root, (node) => {
+    if (
+      node.type !== "definition" ||
+      typeof node.url !== "string" ||
+      typeof node.identifier !== "string" ||
+      definitions.has(node.identifier)
+    ) {
       return;
     }
 
     const start = node.position?.start?.offset;
     const end = node.position?.end?.offset;
+    const range =
+      start === undefined || end === undefined || end <= start
+        ? null
+        : locateDefinitionDestination(markdown.slice(start, end));
 
-    if (start !== undefined && end !== undefined && end > start) {
-      references.push({ url: node.url, start, end });
+    definitions.set(node.identifier, {
+      url: node.url,
+      range:
+        range === null || start === undefined
+          ? null
+          : { start: start + range.start, end: start + range.end },
+    });
+  });
+
+  return definitions;
+}
+
+function images(markdown: string): readonly ImageReference[] {
+  const root = tree(markdown);
+  const definitions = definitionsOf(markdown);
+  const references: ImageReference[] = [];
+
+  visit(root, (node) => {
+    const start = node.position?.start?.offset;
+    const end = node.position?.end?.offset;
+
+    if (start === undefined || end === undefined || end <= start) {
+      return;
+    }
+
+    if (node.type === "image" && typeof node.url === "string") {
+      const range = locateDestination(markdown.slice(start, end));
+      references.push({
+        url: node.url,
+        range: range === null ? null : { start: start + range.start, end: start + range.end },
+      });
+      return;
+    }
+
+    if (node.type === "imageReference" && typeof node.identifier === "string") {
+      const definition = definitions.get(node.identifier);
+
+      if (definition !== undefined) {
+        references.push(definition);
+      }
     }
   });
 
@@ -166,40 +299,43 @@ export function extractAttachmentIds(markdown: string): readonly string[] {
 }
 
 /**
- * Заменяет URL только в AST image-узлах. Позиции узлов позволяют сохранить
- * остальной Markdown побайтово и не трогать похожий текст в коде/тексте.
+ * Заменяет URL только в AST image-узлах и reference definitions. Позиции
+ * узлов позволяют сохранить остальной Markdown побайтово и не трогать похожий
+ * текст в коде/тексте. Несколько ссылок на один definition заменяются один раз.
  *
- * Если URL изменился, но inline-destination не удалось найти (например,
- * reference-style image), выбрасывается `TypeError`: молча вернуть документ с
- * невстроенным вложением нельзя.
+ * Если URL изменился, но destination не удалось найти, выбрасывается
+ * `TypeError`: молча вернуть документ с невстроенным вложением нельзя.
  */
 export function replaceMarkdownImageUrls(
   markdown: string,
   replace: (url: string) => string,
 ): string {
   let result = markdown;
-  const replacements = images(markdown)
-    .map((image) => {
-      const nextUrl = replace(image.url);
-      if (nextUrl === image.url) {
-        return null;
-      }
+  const replacements = new Map<string, { start: number; end: number; nextUrl: string }>();
 
-      const range = locateDestination(markdown.slice(image.start, image.end));
-      if (range === null) {
-        throw new TypeError("Не удалось заменить URL изображения в Markdown");
-      }
+  for (const image of images(markdown)) {
+    const nextUrl = replace(image.url);
+    if (nextUrl === image.url) {
+      continue;
+    }
 
-      return {
-        start: image.start + range.start,
-        end: image.start + range.end,
+    if (image.range === null) {
+      throw new TypeError("Не удалось заменить URL изображения в Markdown");
+    }
+
+    const key = `${image.range.start}:${image.range.end}`;
+    if (!replacements.has(key)) {
+      replacements.set(key, {
+        start: image.range.start,
+        end: image.range.end,
         nextUrl,
-      };
-    })
-    .filter((value): value is { start: number; end: number; nextUrl: string } => value !== null)
-    .sort((left, right) => right.start - left.start);
+      });
+    }
+  }
 
-  for (const replacement of replacements) {
+  const ordered = [...replacements.values()].sort((left, right) => right.start - left.start);
+
+  for (const replacement of ordered) {
     result = `${result.slice(0, replacement.start)}${replacement.nextUrl}${result.slice(replacement.end)}`;
   }
 
