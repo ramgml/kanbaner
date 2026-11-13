@@ -1,7 +1,7 @@
 ---
 id: KAN-037
 title: Notion-подобный плагин заметок
-status: review
+status: done
 stage: 4
 priority: high
 owner: orchestrator
@@ -85,4 +85,12 @@ specs:
 
 ## Итог
 
-Заполняется после независимого ревью и финального интеграционного коммита.
+- Коммиты: каркас `81877d8`, UI runtime merge `fa6b420`, редактор merge
+  `5e5eba3`, домен merge `7f4df3f`, финальная интеграция `61d671b`.
+- Плагин `kanbaner.notes` работает независимо от tasks: визуальный Markdown,
+  дерево, автосохранение, favorite/recent, поиск, attachments/export и связи.
+- Resource opener и публичный slot связывают заметки с задачами без импорта
+  чужих плагинов. Удалённые ресурсы очищаются через события.
+- Проверки на `dev`: полный `pnpm check` — 114 файлов / 1580 тестов;
+  Playwright — 120/120 зелёные.
+- Push не выполнялся. Windows и браузеры кроме Chromium не проверялись.
