@@ -1,38 +1,70 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 
 import { NOTES_COMMAND_IDS, NOTES_QUERY_IDS } from "../constants.ts";
-import type { NoteDetails, NoteListPage, NoteView } from "../model.ts";
+import type {
+  Note,
+  NoteAttachmentDescriptor,
+  NoteDetails,
+  NoteListPage,
+  NoteView,
+} from "../model.ts";
 import { NotesView } from "./notes-view.tsx";
-import type { UiOperationInvoker } from "./runtime.ts";
+import type { UiOperationInvoker, UiOperationResult } from "./runtime.ts";
+
+const editorState = vi.hoisted(() => ({
+  bytes: [137, 80, 78, 71] as number[],
+}));
 
 vi.mock("./editor/markdown-note-editor.tsx", () => ({
   MarkdownNoteEditor: ({
     value,
     onChange,
+    onUploadImage,
     ariaLabel,
   }: {
     value: string;
     onChange: (value: string) => void;
+    onUploadImage?: (file: File) => Promise<string>;
     ariaLabel?: string;
   }) => (
-    <textarea
-      aria-label={ariaLabel ?? "Содержимое заметки"}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-    />
+    <div>
+      <textarea
+        aria-label={ariaLabel ?? "Содержимое заметки"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <button
+        type="button"
+        data-testid="editor-upload"
+        onClick={() => {
+          const file = new File([new Uint8Array(editorState.bytes)], "image.png", {
+            type: "image/png",
+          });
+          void onUploadImage?.(file);
+        }}
+      >
+        upload
+      </button>
+    </div>
   ),
 }));
 
-function success(data: unknown) {
-  return { ok: true as const, data: data as JsonValue };
+const timestamp = "2026-11-13T00:00:00.000Z";
+
+function success(data: unknown): UiOperationResult {
+  return { ok: true, data: data as JsonValue };
 }
 
-function makeDetails(id: string, title = "Без названия"): NoteDetails {
-  const view: NoteView = {
+function failure(code: string, message: string): UiOperationResult {
+  return { ok: false, error: { code, message, retryable: code !== "VERSION_CONFLICT" } };
+}
+
+function noteView(id: string, title = "Без названия", overrides: Partial<Note> = {}): NoteView {
+  return {
     note: {
       id,
       title,
@@ -40,33 +72,67 @@ function makeDetails(id: string, title = "Без названия"): NoteDetails
       parentId: null,
       position: 0,
       version: 1,
-      createdAt: "2026-11-13T00:00:00.000Z",
-      updatedAt: "2026-11-13T00:00:00.000Z",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      ...overrides,
     },
     favorite: false,
     lastOpenedAt: null,
     childCount: 0,
   };
-  return { view, ancestors: [], attachments: [] };
 }
 
-function listOf(details: NoteDetails): NoteListPage {
-  return { items: [details.view], total: 1, nextOffset: null };
+function makeDetails(
+  id: string,
+  title = "Без названия",
+  overrides: Partial<Note> = {},
+): NoteDetails {
+  return { view: noteView(id, title, overrides), ancestors: [], attachments: [] };
 }
+
+function listOf(...views: NoteView[]): NoteListPage {
+  return { items: views, total: views.length, nextOffset: null };
+}
+
+function attachment(id: string, noteId: string): NoteAttachmentDescriptor {
+  return { id, noteId, mimeType: "image/png", sizeBytes: 4, createdAt: timestamp };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function stubObjectUrl() {
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:draft"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+}
+
+beforeEach(() => {
+  editorState.bytes = [137, 80, 78, 71];
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("NotesView autosave", () => {
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
-  });
-
   it("создаёт заметку и сохраняет title/content с expectedVersion", async () => {
     let details = makeDetails("note-1");
     let created = false;
     const updates: Array<Record<string, unknown>> = [];
     const invoke: UiOperationInvoker = async (operationId, input) => {
       if (operationId === NOTES_QUERY_IDS.list) {
-        return success(created ? listOf(details) : { items: [], total: 0, nextOffset: null });
+        return success(created ? listOf(details.view) : listOf());
       }
       if (operationId === NOTES_QUERY_IDS.get) return success(details);
       if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
@@ -119,7 +185,7 @@ describe("NotesView autosave", () => {
     const details = makeDetails("note-1", "Исходная");
     const updates: Array<Record<string, unknown>> = [];
     const invoke: UiOperationInvoker = async (operationId) => {
-      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details));
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
       if (operationId === NOTES_QUERY_IDS.get) return success(details);
       if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
       if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
@@ -142,17 +208,14 @@ describe("NotesView autosave", () => {
   it("при VERSION_CONFLICT сохраняет локальный черновик", async () => {
     const details = makeDetails("note-1", "Серверная");
     const invoke: UiOperationInvoker = async (operationId) => {
-      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details));
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
       if (operationId === NOTES_QUERY_IDS.get) return success(details);
       if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
       if (operationId === NOTES_COMMAND_IDS.recordVisit) {
         return success({ view: details.view });
       }
       if (operationId === NOTES_COMMAND_IDS.update) {
-        return {
-          ok: false,
-          error: { code: "VERSION_CONFLICT", message: "Конфликт версий", retryable: false },
-        };
+        return failure("VERSION_CONFLICT", "Конфликт версий");
       }
       return success({ items: [] });
     };
@@ -165,5 +228,464 @@ describe("NotesView autosave", () => {
     await screen.findByText("Конфликт версий", { exact: false });
     expect(title).toHaveValue("Локальный черновик");
     expect(await screen.findByTestId("note-conflict-reload")).toBeVisible();
+  });
+
+  it("не удаляет вложение, если после сохранения черновик изменился (undo)", async () => {
+    const file = attachment("att-1", "note-1");
+    const details: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [file],
+    };
+    const update = deferred<UiOperationResult>();
+    const deleted: string[] = [];
+    let updateIssued = false;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) {
+        return success({ attachment: { ...file, contentBase64: "iVBORw0KGgo=" } });
+      }
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updateIssued = true;
+        return update.promise;
+      }
+      if (operationId === NOTES_COMMAND_IDS.attachmentDelete) {
+        deleted.push(String((input as { id: string }).id));
+        return success({ deleted: true });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+    await waitFor(() => expect(editor).toHaveValue("![img](data:image/png;base64,iVBORw0KGgo=)"));
+
+    // Удаляем картинку из черновика и запускаем сохранение.
+    fireEvent.change(editor, { target: { value: "" } });
+    await waitFor(() => expect(updateIssued).toBe(true), { timeout: 3000 });
+
+    // Undo возвращает картинку, пока update ещё в полёте.
+    fireEvent.change(editor, {
+      target: { value: "![img](data:image/png;base64,iVBORw0KGgo=)" },
+    });
+    await act(async () => {
+      update.resolve(success(details));
+    });
+
+    await screen.findByText("Есть изменения");
+    expect(deleted).toEqual([]);
+    expect(screen.queryByTestId("note-cleanup-warning")).toBeNull();
+  });
+
+  it("не удаляет вложение, загруженное во время сохранения", async () => {
+    const existing = attachment("att-1", "note-1");
+    const uploaded = attachment("att-2", "note-1");
+    const details: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [existing],
+    };
+    const update = deferred<UiOperationResult>();
+    const deleted: string[] = [];
+    let updateIssued = false;
+    const uploadKeys: Array<string | undefined> = [];
+    const invoke: UiOperationInvoker = async (operationId, _input, options) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) {
+        return success({ attachment: { ...existing, contentBase64: "iVBORw0KGgo=" } });
+      }
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updateIssued = true;
+        return update.promise;
+      }
+      if (operationId === NOTES_COMMAND_IDS.attachmentCreate) {
+        uploadKeys.push(options?.idempotencyKey);
+        return success({ attachment: uploaded });
+      }
+      if (operationId === NOTES_COMMAND_IDS.attachmentDelete) {
+        deleted.push(String((_input as { id: string }).id));
+        return success({ deleted: true });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+    await waitFor(() => expect(editor).toHaveValue("![img](data:image/png;base64,iVBORw0KGgo=)"));
+
+    fireEvent.change(editor, { target: { value: "" } });
+    await waitFor(() => expect(updateIssued).toBe(true), { timeout: 3000 });
+
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(uploadKeys).toHaveLength(1));
+    expect(uploadKeys[0]).toBeTruthy();
+
+    await act(async () => {
+      update.resolve(success(details));
+    });
+
+    await waitFor(() => expect(deleted).toEqual(["att-1"]));
+    expect(deleted).not.toContain("att-2");
+  });
+
+  it("не применяет deferred update к другой открытой заметке", async () => {
+    window.confirm = vi.fn(() => true);
+    const parent = makeDetails("note-1", "Родитель");
+    const child = makeDetails("note-2", "Ребёнок", { parentId: "note-1" });
+    const other = makeDetails("note-3", "Новая", { version: 5 });
+    const notes: NoteDetails[] = [parent, child];
+    const updates: Array<Record<string, unknown>> = [];
+    const versions: Record<string, number> = { "note-1": 1, "note-2": 1, "note-3": 5 };
+    const update = deferred<UiOperationResult>();
+    const remove = deferred<UiOperationResult>();
+    let updateIssued = false;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        const found = [...notes, other].find((details) => details.view.note.id === id);
+        return success(found ?? other);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        const found = [...notes, other].find((details) => details.view.note.id === id);
+        return success({ view: (found ?? other).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.delete) return remove.promise;
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        if (!updateIssued) {
+          updateIssued = true;
+          return update.promise;
+        }
+        updates.push(values);
+        const id = String(values.id);
+        const version = (versions[id] ?? 1) + 1;
+        versions[id] = version;
+        return success(
+          makeDetails(id, String(values.title), {
+            contentMarkdown: String(values.contentMarkdown),
+            version,
+          }),
+        );
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-2" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Ребёнок"));
+
+    fireEvent.change(title, { target: { value: "Черновик" } });
+    fireEvent.click(screen.getByRole("button", { name: "Удалить Родитель" }));
+    await waitFor(() => expect(updateIssued).toBe(true), { timeout: 3000 });
+
+    notes.splice(0, notes.length, other);
+    await act(async () => {
+      remove.resolve(
+        success({
+          deleted: true,
+          deletedNotes: [parent.view.note, child.view.note],
+          deletedAttachmentIds: [],
+          deletedResourceRefs: [],
+        }),
+      );
+    });
+
+    await waitFor(() => expect(title).toHaveValue("Новая"));
+
+    await act(async () => {
+      update.resolve(
+        success({
+          ...child,
+          view: { ...child.view, note: { ...child.view.note, title: "Черновик", version: 2 } },
+        }),
+      );
+    });
+
+    expect(title).toHaveValue("Новая");
+    fireEvent.change(title, { target: { value: "После переключения" } });
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    expect(updates[0]).toMatchObject({ id: "note-3", expectedVersion: 5 });
+  });
+
+  it("не сбрасывает черновик, если ввод начался после старта загрузки", async () => {
+    stubObjectUrl();
+    const server = makeDetails("note-1", "Серверная", { contentMarkdown: "Сервер" });
+    const reloaded = makeDetails("note-1", "Серверная 2", {
+      contentMarkdown: "Новое",
+      version: 2,
+    });
+    const get = deferred<UiOperationResult>();
+    let getCalls = 0;
+    let updateIssued = 0;
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(server.view));
+      if (operationId === NOTES_QUERY_IDS.get) {
+        getCalls += 1;
+        return getCalls === 1 ? success(server) : get.promise;
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: server.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updateIssued += 1;
+        return failure("VERSION_CONFLICT", "Конфликт версий");
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Серверная"));
+    fireEvent.change(title, { target: { value: "Черновик" } });
+    await screen.findByText("Конфликт версий", { exact: false });
+
+    fireEvent.click(screen.getByTestId("note-conflict-reload"));
+    await waitFor(() => expect(title).toBeDisabled());
+    expect(updateIssued).toBe(1);
+
+    const editor = screen.getByRole("textbox", { name: "Содержимое заметки" });
+    fireEvent.change(editor, { target: { value: "Ввод во время загрузки" } });
+
+    await act(async () => {
+      get.resolve(success(reloaded));
+    });
+
+    await waitFor(() => expect(title).toHaveValue("Черновик"));
+    expect(editor).toHaveValue("Ввод во время загрузки");
+    expect(title).not.toBeDisabled();
+    expect(screen.getByTestId("note-save-state")).toHaveTextContent("Есть изменения");
+  });
+
+  it("после move синхронизирует version и порядок без полной перезагрузки", async () => {
+    const first = makeDetails("note-a", "Первая");
+    const second = makeDetails("note-b", "Вторая", { position: 1 });
+    let notes = [first, second];
+    let getCalls = 0;
+    const updates: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        getCalls += 1;
+        const id = (input as { id: string }).id;
+        return success(notes.find((details) => details.view.note.id === id) ?? second);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: (notes.find((item) => item.view.note.id === id) ?? second).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        updates.push(values);
+        const id = String(values.id);
+        const updated = makeDetails(id, String(values.title), {
+          position: id === "note-b" ? 1 : 0,
+          version: (notes.find((item) => item.view.note.id === id)?.view.note.version ?? 1) + 1,
+        });
+        notes = notes.map((item) => (item.view.note.id === id ? updated : item));
+        return success(updated);
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        const moved = makeDetails("note-b", "Черновик", { position: 0, version: 3 });
+        const neighbor = makeDetails("note-a", "Первая", { position: 1, version: 2 });
+        notes = [moved, neighbor];
+        return success({
+          note: moved.view.note,
+          affectedNotes: [neighbor.view.note],
+        });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-b" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Вторая"));
+
+    fireEvent.change(title, { target: { value: "Черновик" } });
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(title).not.toBeDisabled());
+
+    const callsBeforeMove = getCalls;
+    fireEvent.click(screen.getByRole("button", { name: "Переместить Черновик выше" }));
+    await waitFor(() => expect(title).not.toBeDisabled());
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+          item.getAttribute("data-note-tree-item"),
+        ),
+      ).toEqual(["note-b", "note-a"]),
+    );
+
+    // Никакой полной перезагрузки: get вызывался только при открытии заметки.
+    expect(getCalls).toBe(callsBeforeMove);
+    expect(title).toHaveValue("Черновик");
+
+    fireEvent.change(title, { target: { value: "После move" } });
+    await waitFor(() => expect(updates).toHaveLength(2), { timeout: 3000 });
+    expect(updates[1]).toMatchObject({ id: "note-b", expectedVersion: 3 });
+  });
+
+  it("переиспользует idempotency key для того же снимка update", async () => {
+    let details = makeDetails("note-1", "Исходная");
+    const updateKeys: Array<string | undefined> = [];
+    let attempts = 0;
+    const invoke: UiOperationInvoker = async (operationId, input, options) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        attempts += 1;
+        updateKeys.push(options?.idempotencyKey);
+        if (attempts === 1) return failure("STORAGE_ERROR", "Временная ошибка");
+        const values = input as Record<string, unknown>;
+        details = makeDetails("note-1", String(values.title), {
+          contentMarkdown: String(values.contentMarkdown),
+          version: details.view.note.version + 1,
+        });
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Исходная"));
+    fireEvent.change(title, { target: { value: "Первый вариант" } });
+
+    const retry = await screen.findByRole("button", { name: "Повторить" }, { timeout: 3000 });
+    fireEvent.click(retry);
+    await screen.findByText("Сохранено", undefined, { timeout: 3000 });
+    expect(updateKeys).toHaveLength(2);
+    expect(updateKeys[0]).toBeTruthy();
+    expect(updateKeys[1]).toBe(updateKeys[0]);
+
+    fireEvent.change(title, { target: { value: "Второй вариант" } });
+    await waitFor(() => expect(updateKeys).toHaveLength(3), { timeout: 3000 });
+    expect(updateKeys[2]).not.toBe(updateKeys[0]);
+  });
+
+  it("держит idempotency key создания до успеха и меняет после него", async () => {
+    const created: NoteDetails[] = [];
+    const createKeys: Array<string | undefined> = [];
+    const invoke: UiOperationInvoker = async (operationId, input, options) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...created.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(created.find((details) => details.view.note.id === id) ?? created[0]);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        const visited = created.find((details) => details.view.note.id === id) ?? created[0];
+        if (visited === undefined) throw new Error(`заметка ${id} не создана`);
+        return success({ view: visited.view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.create) {
+        createKeys.push(options?.idempotencyKey);
+        if (createKeys.length === 1) return failure("STORAGE_ERROR", "Временная ошибка");
+        const details = makeDetails(`note-${created.length + 1}`);
+        created.push(details);
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="" />);
+    fireEvent.click(await screen.findByTestId("note-create-empty"));
+    await screen.findByText("Временная ошибка");
+    const createTopButton = container.querySelector("[data-note-create-top]");
+    expect(createTopButton).not.toBeNull();
+    fireEvent.click(createTopButton as HTMLElement);
+    await screen.findByTestId("note-title");
+    fireEvent.click(createTopButton as HTMLElement);
+
+    await waitFor(() => expect(createKeys).toHaveLength(3));
+    expect(createKeys[0]).toBeTruthy();
+    expect(createKeys[1]).toBe(createKeys[0]);
+    expect(createKeys[2]).not.toBe(createKeys[0]);
+  });
+
+  it("делает ключ вложения стабильным по снимку note/file", async () => {
+    const details = makeDetails("note-1", "С картинкой");
+    const uploadKeys: Array<string | undefined> = [];
+    let sequence = 0;
+    const invoke: UiOperationInvoker = async (operationId, _input, options) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.attachmentCreate) {
+        uploadKeys.push(options?.idempotencyKey);
+        sequence += 1;
+        return success({ attachment: attachment(`att-${sequence}`, "note-1") });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    await screen.findByTestId("note-title");
+
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(uploadKeys).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(uploadKeys).toHaveLength(2));
+    expect(uploadKeys[1]).toBe(uploadKeys[0]);
+
+    editorState.bytes = [1, 2, 3, 4];
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(uploadKeys).toHaveLength(3));
+    expect(uploadKeys[2]).not.toBe(uploadKeys[0]);
+  });
+
+  it("не использует main, tablist и пересортировывает недавние", async () => {
+    const first = noteView("note-a", "Первая", { position: 0 });
+    const second = noteView("note-b", "Вторая", { position: 1 });
+    const fresh = { ...second, lastOpenedAt: "2026-11-13T12:00:00.000Z" };
+    const older = { ...first, lastOpenedAt: "2026-11-13T10:00:00.000Z" };
+    const details = makeDetails("note-a", "Первая");
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(older, fresh));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-a" />);
+    await screen.findByTestId("note-title");
+
+    expect(screen.getByTestId("notes-view").tagName).toBe("DIV");
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Дерево" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Недавние" }));
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+          item.getAttribute("data-note-tree-item"),
+        ),
+      ).toEqual(["note-b", "note-a"]),
+    );
+    expect(screen.queryByRole("button", { name: /Переместить/ })).toBeNull();
   });
 });

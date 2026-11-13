@@ -48,6 +48,33 @@ describe("NoteTree", () => {
     expect(onSelect).toHaveBeenCalledWith("b");
   });
 
+  it("в flat-режиме сохраняет переданный порядок без иерархии и reorder", () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <NoteTree
+        items={[note("b", "Вторая", null, 7), note("a", "Первая", null, 1)]}
+        flat
+        selectedId={null}
+        onSelect={onSelect}
+        onCreate={vi.fn()}
+        onMove={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(
+      [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+        item.getAttribute("data-note-tree-item"),
+      ),
+    ).toEqual(["b", "a"]);
+    expect(screen.queryByRole("button", { name: /Переместить/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Развернуть|Свернуть/ })).toBeNull();
+    expect(container.querySelector('[draggable="true"]')).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Вторая" }));
+    expect(onSelect).toHaveBeenCalledWith("b");
+  });
+
   it("показывает вложенность после раскрытия", () => {
     render(
       <NoteTree

@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FileText, Plus } from "lucide-react";
 import type { ResourceRef } from "@kanbaner/plugin-sdk";
 
 import { NOTES_COMMAND_IDS, NOTES_QUERY_IDS } from "../constants.ts";
 import type { NoteDetails, ResolvedNoteLink } from "../model.ts";
 import { formatNoteRef, tryParseNoteRef } from "../resources.ts";
-import { invokeNotes, type UiOperationInvoker } from "./runtime.ts";
+import { invokeNotes, newIdempotencyKey, type UiOperationInvoker } from "./runtime.ts";
 
 interface RelatedNotesPanelProps {
   readonly resourceRef: ResourceRef;
@@ -18,9 +18,15 @@ interface RelatedNotesPanelProps {
 export function RelatedNotesPanel({ resourceRef, invoke, openResource }: RelatedNotesPanelProps) {
   const [items, setItems] = useState<readonly ResolvedNoteLink[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [pendingNoteId, setPendingNoteId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Ключ создания живёт до успеха: retry не создаёт вторую заметку. */
+  const createKeyRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  /** Обновление списка не является частью создания связи: его ошибка мягче. */
+  const refresh = useCallback(async (): Promise<void> => {
     try {
       const result = await invokeNotes<{ items: readonly ResolvedNoteLink[] }>(
         invoke,
@@ -34,9 +40,9 @@ export function RelatedNotesPanel({ resourceRef, invoke, openResource }: Related
           ),
         ),
       );
-      setError(null);
+      setRefreshError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось загрузить заметки");
+      setRefreshError(reason instanceof Error ? reason.message : "Не удалось загрузить заметки");
     }
   }, [invoke, resourceRef]);
 
@@ -44,18 +50,68 @@ export function RelatedNotesPanel({ resourceRef, invoke, openResource }: Related
     void Promise.resolve().then(refresh);
   }, [refresh]);
 
-  const createLinkedNote = async () => {
-    setBusy(true);
-    try {
-      const details = await invokeNotes<NoteDetails>(invoke, NOTES_COMMAND_IDS.create, {
-        title: "Заметка к задаче",
-      });
-      const noteId = details.view.note.id;
-      await invokeNotes(invoke, NOTES_COMMAND_IDS.link, { noteId, targetRef: resourceRef });
-      await refresh();
+  const openNote = useCallback(
+    (noteId: string) => {
       openResource?.(formatNoteRef(noteId));
+    },
+    [openResource],
+  );
+
+  const linkNote = useCallback(
+    async (noteId: string): Promise<void> => {
+      await invokeNotes(invoke, NOTES_COMMAND_IDS.link, { noteId, targetRef: resourceRef });
+      setPendingNoteId(null);
+      // Открываем заметку сразу после успешной связи, не дожидаясь refresh.
+      openNote(noteId);
+      void refresh();
+    },
+    [invoke, openNote, refresh, resourceRef],
+  );
+
+  const createLinkedNote = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setLinkError(null);
+    try {
+      let noteId = pendingNoteId;
+      if (noteId === null) {
+        const createKey = createKeyRef.current ?? newIdempotencyKey("related-note-create");
+        createKeyRef.current = createKey;
+        const details = await invokeNotes<NoteDetails>(
+          invoke,
+          NOTES_COMMAND_IDS.create,
+          { title: "Заметка к задаче" },
+          { idempotencyKey: createKey },
+        );
+        createKeyRef.current = null;
+        noteId = details.view.note.id;
+        // Запоминаем созданную заметку до link: при ошибке связи её можно открыть,
+        // а повтор должен доделать только link.
+        setPendingNoteId(noteId);
+      }
+
+      try {
+        await linkNote(noteId);
+      } catch (reason) {
+        setLinkError(reason instanceof Error ? reason.message : "Не удалось создать связь");
+      }
     } catch (reason) {
+      // Сюда попадает только ошибка создания: заметка ещё не существует.
       setError(reason instanceof Error ? reason.message : "Не удалось создать заметку");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryLink = async () => {
+    if (pendingNoteId === null || busy) return;
+    setBusy(true);
+    setLinkError(null);
+    try {
+      await linkNote(pendingNoteId);
+    } catch (reason) {
+      setLinkError(reason instanceof Error ? reason.message : "Не удалось создать связь");
     } finally {
       setBusy(false);
     }
@@ -101,9 +157,42 @@ export function RelatedNotesPanel({ resourceRef, invoke, openResource }: Related
           })}
         </ul>
       )}
+      {linkError && pendingNoteId !== null ? (
+        <div
+          data-testid="related-note-link-retry"
+          role="alert"
+          className="mt-2 flex flex-col gap-1 text-xs text-destructive"
+        >
+          <span>Заметка создана, но связь не создана: {linkError}</span>
+          <span className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-related-note-open-created={pendingNoteId}
+              onClick={() => openNote(pendingNoteId)}
+              className="underline"
+            >
+              Открыть заметку
+            </button>
+            <button
+              type="button"
+              data-related-note-retry
+              disabled={busy}
+              onClick={() => void retryLink()}
+              className="underline disabled:opacity-50"
+            >
+              Повторить связь
+            </button>
+          </span>
+        </div>
+      ) : null}
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}
+        </p>
+      ) : null}
+      {refreshError ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          Список связанных заметок не обновлён: {refreshError}
         </p>
       ) : null}
     </section>
