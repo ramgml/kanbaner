@@ -86,7 +86,8 @@ specs:
 ## Итог
 
 - Коммиты: каркас `81877d8`, UI runtime merge `fa6b420`, редактор merge
-  `5e5eba3`, домен merge `7f4df3f`, финальная интеграция `61d671b`.
+  `5e5eba3`, домен merge `7f4df3f`, финальная интеграция `61d671b`,
+  SPA-autosave fix `3992441`.
 - Плагин `kanbaner.notes` работает независимо от tasks: визуальный Markdown,
   дерево, автосохранение, favorite/recent, поиск, attachments/export и связи.
 - Resource opener и публичный slot связывают заметки с задачами без импорта
