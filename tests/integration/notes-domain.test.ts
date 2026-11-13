@@ -355,6 +355,22 @@ describe("NotesStore", () => {
     expect(await store.deleteAttachment({ id: "attachment-1", confirm: true })).toBe(true);
   });
 
+  it("принимает валидный GIF по сигнатуре GIF87a/89a", async () => {
+    const { store } = await createHarness();
+
+    await store.createNote({ id: "note-gif", title: "GIF", createdAt: timestamp(0) });
+    const attachment = await store.createAttachment({
+      id: "attachment-gif",
+      noteId: "note-gif",
+      mimeType: "image/gif",
+      contentBase64: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+      createdAt: timestamp(1),
+    });
+
+    expect(attachment.mimeType).toBe("image/gif");
+    expect(attachment.sizeBytes).toBeGreaterThan(0);
+  });
+
   it("отклоняет файл, не соответствующий заявленному MIME-типу", async () => {
     const { store } = await createHarness();
 

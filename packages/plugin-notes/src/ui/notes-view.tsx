@@ -177,6 +177,27 @@ export function NotesView(props: NotesViewProps) {
     return saveChainRef.current;
   }, [invoke, refreshNotes]);
 
+  const saveNowRef = useRef(saveNow);
+  useEffect(() => {
+    saveNowRef.current = saveNow;
+  }, [saveNow]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (document.visibilityState === "hidden") {
+        void saveNowRef.current();
+      }
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+      // SPA-навигация не вызывает beforeunload: save command стартует до unmount.
+      void saveNowRef.current();
+    };
+  }, []);
+
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {

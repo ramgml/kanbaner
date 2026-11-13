@@ -115,6 +115,30 @@ describe("NotesView autosave", () => {
     await screen.findByText("Сохранено");
   });
 
+  it("запускает сохранение при unmount до истечения debounce", async () => {
+    const details = makeDetails("note-1", "Исходная");
+    const updates: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updates.push({});
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    const view = render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Исходная"));
+    fireEvent.change(title, { target: { value: "Уход со страницы" } });
+    view.unmount();
+
+    await waitFor(() => expect(updates).toHaveLength(1));
+  });
+
   it("при VERSION_CONFLICT сохраняет локальный черновик", async () => {
     const details = makeDetails("note-1", "Серверная");
     const invoke: UiOperationInvoker = async (operationId) => {
