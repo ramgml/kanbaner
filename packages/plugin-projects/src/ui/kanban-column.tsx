@@ -41,6 +41,8 @@ export interface KanbanColumnProps {
   readonly dropActive: boolean;
   readonly pending: boolean;
   readonly conflict: boolean;
+  /** Нижняя fixed-панель массовых действий требует scroll-space внутри списка. */
+  readonly bulkActionsActive?: boolean;
   readonly canMoveLeft: boolean;
   readonly canMoveRight: boolean;
   readonly canDelete: boolean;
@@ -89,6 +91,7 @@ export function KanbanColumn({
   dropActive,
   pending,
   conflict,
+  bulkActionsActive = false,
   canMoveLeft,
   canMoveRight,
   canDelete,
@@ -240,7 +243,7 @@ export function KanbanColumn({
               <p
                 role="alert"
                 data-testid={`kanban-column-rename-error-${slug}`}
-                className="m-0 text-[11px] text-destructive"
+                className="m-0 text-xs text-destructive"
               >
                 {rename.error}
               </p>
@@ -364,7 +367,7 @@ export function KanbanColumn({
                   data-testid={`kanban-column-color-${slug}`}
                   className="flex flex-col gap-1 border-t border-border/70 pt-1"
                 >
-                  <p className="m-0 px-2 pt-1 text-[11px] font-medium text-muted-foreground">
+                  <p className="m-0 px-2 pt-1 text-xs font-medium text-muted-foreground">
                     Цвет колонки
                   </p>
                   <div className="grid grid-cols-2 gap-1">
@@ -416,7 +419,7 @@ export function KanbanColumn({
                   Удалить колонку
                 </button>
                 {deleteDisabledReason === null ? null : (
-                  <p className="m-0 px-2 pb-1 text-[11px] text-muted-foreground">
+                  <p className="m-0 px-2 pb-1 text-xs text-muted-foreground">
                     {deleteDisabledReason}
                   </p>
                 )}
@@ -430,7 +433,7 @@ export function KanbanColumn({
         <p
           role="alert"
           data-testid={`kanban-column-conflict-${slug}`}
-          className="m-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive"
+          className="m-0 rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive"
         >
           Конфликт версий
         </p>
@@ -440,7 +443,7 @@ export function KanbanColumn({
         <p
           role="alert"
           data-testid={`kanban-column-color-error-${slug}`}
-          className="m-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive"
+          className="m-0 rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive"
         >
           {colorError}
         </p>
@@ -479,7 +482,7 @@ export function KanbanColumn({
 
       <div
         data-testid={`kanban-column-scroll-${slug}`}
-        className="min-h-0 flex-1 overflow-y-auto pr-0.5"
+        className={`min-h-0 flex-1 overflow-y-auto pr-0.5 ${bulkActionsActive ? "pb-[18rem] md:pb-24" : ""}`}
       >
         {!loading && total === 0 && error === null && !dropActive ? (
           <div
@@ -487,7 +490,7 @@ export function KanbanColumn({
             className="flex flex-col items-center gap-1 rounded-lg border border-dashed border-border bg-background/40 p-4 text-center"
           >
             <p className="m-0 text-xs font-medium">Пусто</p>
-            <p className="m-0 text-[11px] text-muted-foreground">
+            <p className="m-0 text-xs text-muted-foreground">
               Перетащите задачу сюда или создайте новую.
             </p>
           </div>

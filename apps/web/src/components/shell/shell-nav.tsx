@@ -54,7 +54,7 @@ function mergeNavItems(pluginItems: readonly ShellNavItem[]): readonly ShellNavI
 
 function navLinkClass(active: boolean, mobile: boolean): string {
   const base = mobile
-    ? "flex min-h-12 min-w-16 flex-1 flex-col items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    ? "flex min-h-12 min-w-16 flex-1 flex-col items-center justify-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
     : "flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
   return `${base} ${

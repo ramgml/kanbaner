@@ -140,7 +140,7 @@ function ProjectSidebarContent({
       <div className="flex items-center justify-between gap-2">
         <h2
           id="projects-sidebar-title"
-          className="m-0 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase"
+          className="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase"
         >
           Проекты
         </h2>

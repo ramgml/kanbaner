@@ -3118,7 +3118,7 @@ export function KanbanView({
             }}
             className="flex shrink-0 flex-wrap items-end gap-2"
           >
-            <label className="flex min-w-[10rem] flex-col gap-0.5 text-[11px] text-muted-foreground">
+            <label className="flex min-w-[10rem] flex-col gap-0.5 text-xs text-muted-foreground">
               Тег
               <input
                 name="tag"
@@ -3180,7 +3180,7 @@ export function KanbanView({
                 Выбрано {bulkSelection.size}
               </p>
 
-              <label className="flex w-full min-w-0 flex-col gap-0.5 text-[11px] text-muted-foreground sm:w-auto sm:flex-row sm:items-center sm:gap-1">
+              <label className="flex w-full min-w-0 flex-col gap-0.5 text-xs text-muted-foreground sm:w-auto sm:flex-row sm:items-center sm:gap-1">
                 <span className="whitespace-nowrap">Переместить в</span>
                 <select
                   data-testid="kanban-bulk-target"
@@ -3372,6 +3372,7 @@ export function KanbanView({
                     dropActive={dropActive}
                     pending={pendingColumn}
                     conflict={columnConflicts.has(column.id)}
+                    bulkActionsActive={bulkSelection.size > 0}
                     canMoveLeft={index > 0}
                     canMoveRight={index >= 0 && index < renderedColumns.order.length - 1}
                     canDelete={!lastOfType}
@@ -3480,7 +3481,7 @@ export function KanbanView({
               <div
                 data-testid="kanban-scroll-hint"
                 aria-hidden="true"
-                className="pointer-events-none absolute right-4 bottom-3 z-20 hidden items-center rounded-full border border-border bg-background/95 px-2.5 py-1 text-[11px] font-medium text-muted-foreground shadow-sm md:flex"
+                className="pointer-events-none absolute right-4 bottom-3 z-20 hidden items-center rounded-full border border-border bg-background/95 px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-sm md:flex"
               >
                 Прокрутите вправо →
               </div>

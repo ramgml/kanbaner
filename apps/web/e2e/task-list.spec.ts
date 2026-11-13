@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { expectModalQuickSaveSettled } from "./modal.ts";
+
 /**
  * Сквозные сценарии списка задач в production shell.
  *
@@ -261,8 +263,7 @@ async function createSubtask(page: Page, seed: TaskSeed): Promise<string> {
 
       await due.fill(seed.dueAt);
       await saveDue.click();
-      await expect(due).toBeEnabled();
-      await expect(saveDue).toBeDisabled();
+      await expectModalQuickSaveSettled(page, "kanban-modal-due", "kanban-modal-due-save");
     }
 
     if (seed.tags !== undefined) {
@@ -271,8 +272,7 @@ async function createSubtask(page: Page, seed: TaskSeed): Promise<string> {
 
       await tags.fill(seed.tags);
       await saveTags.click();
-      await expect(tags).toBeEnabled();
-      await expect(saveTags).toBeDisabled();
+      await expectModalQuickSaveSettled(page, "kanban-modal-tags", "kanban-modal-tags-save");
     }
   }
 

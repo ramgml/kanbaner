@@ -55,6 +55,12 @@
 
 @theme inline {
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-lg: 1.1875rem;
+  --text-xl: 1.3125rem;
+  --text-2xl: 1.5625rem;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -82,9 +88,42 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
+    /* Стандартный thin одинаково включается для страницы и вложенных списков.
+       Свойство не наследуется, поэтому задаётся каждому элементу. */
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-foreground) transparent;
   }
 
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/* Старые WebKit без scrollbar-width: нативная прокрутка, только оформление.
+   auto отменяет inherited scrollbar-color, который отключает pseudo-elements. */
+@supports not (scrollbar-width: thin) {
+  * {
+    scrollbar-color: auto;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--muted-foreground);
+  }
+}
+
+@media (forced-colors: active) {
+  * {
+    scrollbar-color: auto;
   }
 }

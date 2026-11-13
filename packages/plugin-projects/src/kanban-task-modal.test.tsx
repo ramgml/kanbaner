@@ -483,6 +483,42 @@ describe("TaskOverlay Trello-модал", () => {
     expect(window.location.search).not.toContain("task=");
   });
 
+  it("рендерит Markdown и не открывает редактор при активации ссылки", async () => {
+    setDesktopViewport(true);
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", {
+          descriptionMarkdown:
+            "## Контекст\n\n**Важный текст** и [документация](https://example.com/docs).",
+        }),
+      ],
+    };
+
+    renderOverlay(createOperations(board));
+    await openTask("a");
+
+    const description = screen.getByTestId("kanban-modal-description");
+
+    expect(description).toHaveAttribute("role", "group");
+    expect(within(description).getByRole("heading", { name: "Контекст" })).toBeInTheDocument();
+    expect(within(description).getByText("Важный текст")).toHaveProperty("tagName", "STRONG");
+    expect(description).not.toHaveTextContent("## Контекст");
+
+    const link = within(description).getByRole("link", { name: "документация" });
+
+    // jsdom не выполняет навигацию; preventDefault проверяет только обработку клика.
+    link.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(link);
+    expect(screen.queryByTestId("kanban-description-editor")).toBeNull();
+
+    fireEvent.keyDown(link, { key: "Enter" });
+    expect(screen.queryByTestId("kanban-description-editor")).toBeNull();
+
+    fireEvent.click(description);
+    expect(screen.getByTestId("kanban-description-editor")).toBeInTheDocument();
+  });
+
   it("очищает ошибку чтения после retry, не смешивая её с командной", async () => {
     setDesktopViewport(true);
     const board: FakeBoard = {

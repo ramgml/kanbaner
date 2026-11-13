@@ -406,7 +406,7 @@ export function ProjectsOverview({
                     >
                       {TASK_STATUSES.map((status) => (
                         <div key={status} className="flex items-baseline gap-1">
-                          <dt className="text-[11px] text-muted-foreground">
+                          <dt className="text-xs text-muted-foreground">
                             {taskStatusLabel(status)}:
                           </dt>
                           <dd

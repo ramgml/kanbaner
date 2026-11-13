@@ -73,7 +73,7 @@ export function ProjectSwitcher({
   return (
     <div className="flex min-h-0 flex-col gap-1.5">
       {projects.length > SEARCH_THRESHOLD ? (
-        <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
+        <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
           Поиск проектов
           <input
             type="search"

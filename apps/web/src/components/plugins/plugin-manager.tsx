@@ -44,7 +44,7 @@ function SafeModePanel({ state }: { readonly state: PluginManagerState }) {
                   {problem.pluginId ?? "runtime"} · {problem.code} · {problem.status}
                 </p>
                 <p className="mt-1 text-muted-foreground">{problem.message}</p>
-                <p className="mt-1 font-mono text-[11px] text-muted-foreground">{problem.source}</p>
+                <p className="mt-1 font-mono text-xs text-muted-foreground">{problem.source}</p>
               </li>
             ))}
           </ul>

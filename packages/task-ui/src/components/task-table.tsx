@@ -37,7 +37,7 @@ function Tags({ tags }: { readonly tags: readonly string[] }) {
       {tags.map((tag) => (
         <li
           key={tag}
-          className="rounded-md bg-secondary px-1.5 py-0.5 text-[11px] text-secondary-foreground"
+          className="rounded-md bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground"
         >
           {tag}
         </li>

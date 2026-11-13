@@ -30,7 +30,9 @@
     "@kanbaner/plugin-sdk": "workspace:*",
     "@kanbaner/plugin-tasks": "workspace:*",
     "@kanbaner/task-ui": "workspace:*",
-    "lucide-react": "1.70.0"
+    "lucide-react": "1.70.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "peerDependencies": {
     "react": "^19.0.0",

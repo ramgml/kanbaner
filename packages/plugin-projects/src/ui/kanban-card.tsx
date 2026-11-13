@@ -18,6 +18,7 @@ import {
 import type { Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
 import { taskPriorityLabel } from "@kanbaner/task-ui";
 
+import { CardDescriptionTooltip } from "./card-description-tooltip.tsx";
 import { computeMenuPosition, type MenuPosition } from "./card-menu.ts";
 import { describeDue, type DueTone } from "./due.ts";
 
@@ -178,9 +179,13 @@ export function KanbanCard({
 }: KanbanCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
+  const [descriptionTooltipOpen, setDescriptionTooltipOpen] = useState(false);
+  const cardRef = useRef<HTMLElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const focusFirstMenuRef = useRef(false);
+  const descriptionTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const descriptionTooltipHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const menuId = `kanban-card-menu-${task.id}`;
 
   const priorityAccent = PRIORITY_ACCENTS[task.priority];
@@ -189,6 +194,113 @@ export function KanbanCard({
   const visibleTags = task.tags.slice(0, 2);
   const extraTags = task.tags.length - visibleTags.length;
   const moveTargets = columns.filter((column) => column.id !== currentColumnId);
+
+  const hideDescriptionTooltip = useCallback((): void => {
+    if (descriptionTooltipTimerRef.current !== null) {
+      clearTimeout(descriptionTooltipTimerRef.current);
+      descriptionTooltipTimerRef.current = null;
+    }
+
+    if (descriptionTooltipHideTimerRef.current !== null) {
+      clearTimeout(descriptionTooltipHideTimerRef.current);
+      descriptionTooltipHideTimerRef.current = null;
+    }
+
+    setDescriptionTooltipOpen(false);
+  }, []);
+
+  const scheduleDescriptionTooltipHide = useCallback((): void => {
+    if (descriptionTooltipTimerRef.current !== null) {
+      clearTimeout(descriptionTooltipTimerRef.current);
+      descriptionTooltipTimerRef.current = null;
+    }
+
+    if (descriptionTooltipHideTimerRef.current !== null) {
+      clearTimeout(descriptionTooltipHideTimerRef.current);
+    }
+
+    // Небольшая пауза позволяет перевести курсор с карточки на сам tooltip.
+    descriptionTooltipHideTimerRef.current = setTimeout(() => {
+      descriptionTooltipHideTimerRef.current = null;
+      setDescriptionTooltipOpen(false);
+    }, 150);
+  }, []);
+
+  const showDescriptionTooltip = useCallback(
+    (delayed: boolean): void => {
+      if (task.descriptionMarkdown.trim().length === 0) {
+        return;
+      }
+
+      if (descriptionTooltipTimerRef.current !== null) {
+        clearTimeout(descriptionTooltipTimerRef.current);
+        descriptionTooltipTimerRef.current = null;
+      }
+
+      if (descriptionTooltipHideTimerRef.current !== null) {
+        clearTimeout(descriptionTooltipHideTimerRef.current);
+        descriptionTooltipHideTimerRef.current = null;
+      }
+
+      if (!delayed) {
+        setDescriptionTooltipOpen(true);
+
+        return;
+      }
+
+      descriptionTooltipTimerRef.current = setTimeout(() => {
+        descriptionTooltipTimerRef.current = null;
+        setDescriptionTooltipOpen(true);
+      }, 400);
+    },
+    [task.descriptionMarkdown],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (descriptionTooltipTimerRef.current !== null) {
+        clearTimeout(descriptionTooltipTimerRef.current);
+      }
+
+      if (descriptionTooltipHideTimerRef.current !== null) {
+        clearTimeout(descriptionTooltipHideTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!descriptionTooltipOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        // Tooltip не владеет событием: активный редактор/меню тоже получат Escape.
+        hideDescriptionTooltip();
+      }
+    };
+
+    const onScroll = (event: Event): void => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest("[data-card-description-scroll]") !== null
+      ) {
+        return;
+      }
+
+      hideDescriptionTooltip();
+    };
+
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", hideDescriptionTooltip);
+    document.addEventListener("keydown", onKeyDown, true);
+
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", hideDescriptionTooltip);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [descriptionTooltipOpen, hideDescriptionTooltip]);
 
   const closeMenu = useCallback((returnFocus: boolean, preventScroll = false): void => {
     focusFirstMenuRef.current = false;
@@ -378,6 +490,8 @@ export function KanbanCard({
       return;
     }
 
+    hideDescriptionTooltip();
+
     // Любое новое взаимодействие начинается с pointerdown: подавление click
     // относится только к click, сгенерированному завершившимся drag.
     onCardPointerDown?.();
@@ -533,11 +647,22 @@ export function KanbanCard({
 
   return (
     <article
+      ref={cardRef}
       data-testid={`kanban-card-${task.id}`}
       data-card-id={task.id}
       data-priority={task.priority}
       aria-current={selected ? "true" : undefined}
       aria-busy={pending}
+      onPointerEnter={(event) => {
+        if (event.pointerType === "mouse") {
+          showDescriptionTooltip(true);
+        }
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType === "mouse") {
+          scheduleDescriptionTooltipHide();
+        }
+      }}
       onPointerDown={handleArticlePointerDown}
       onClickCapture={(event) => {
         if (shouldSuppressClick?.() === true) {
@@ -596,6 +721,8 @@ export function KanbanCard({
           aria-controls={menuOpen ? menuId : undefined}
           title="Действия карточки"
           onClick={() => {
+            hideDescriptionTooltip();
+
             if (menuOpen) {
               closeMenu(true);
             } else {
@@ -613,12 +740,20 @@ export function KanbanCard({
       <button
         type="button"
         aria-label={`Открыть карточку задачи ${task.title}`}
+        aria-describedby={descriptionTooltipOpen ? `kanban-card-description-${task.id}` : undefined}
         data-testid={`kanban-open-${task.id}`}
         data-card-drag-allow
+        onFocus={(event) => {
+          if (event.currentTarget.matches(":focus-visible")) {
+            showDescriptionTooltip(false);
+          }
+        }}
+        onBlur={scheduleDescriptionTooltipHide}
         onClick={() => {
+          hideDescriptionTooltip();
           onOpen(task);
         }}
-        className="flex min-h-10 w-full min-w-0 items-center rounded-sm text-left text-[13px] leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-7"
+        className="flex min-h-10 w-full min-w-0 items-center rounded-sm text-left text-sm leading-snug font-semibold break-words focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-7"
       >
         {task.title}
       </button>
@@ -628,7 +763,7 @@ export function KanbanCard({
           {visibleTags.map((tag) => (
             <li
               key={tag}
-              className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-secondary-foreground"
+              className="rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground"
             >
               {tag}
             </li>
@@ -636,7 +771,7 @@ export function KanbanCard({
           {extraTags > 0 ? (
             <li
               aria-label={`Ещё тегов: ${String(extraTags)}`}
-              className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+              className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
             >
               +{extraTags}
             </li>
@@ -644,7 +779,7 @@ export function KanbanCard({
         </ul>
       )}
 
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span
           data-testid={`kanban-priority-${task.id}`}
           data-priority={task.priority}
@@ -680,7 +815,7 @@ export function KanbanCard({
             <span
               role="status"
               data-testid={`kanban-pending-${task.id}`}
-              className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+              className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
             >
               Сохранение…
             </span>
@@ -690,12 +825,24 @@ export function KanbanCard({
             <span
               role="alert"
               data-testid={`kanban-conflict-${task.id}`}
-              className="rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive"
+              className="rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive"
             >
               Конфликт версий
             </span>
           ) : null}
         </div>
+      ) : null}
+
+      {descriptionTooltipOpen && !dragging && !menuOpen ? (
+        <CardDescriptionTooltip
+          taskId={task.id}
+          description={task.descriptionMarkdown}
+          anchorRef={cardRef}
+          onKeepOpen={() => {
+            showDescriptionTooltip(false);
+          }}
+          onRequestClose={scheduleDescriptionTooltipHide}
+        />
       ) : null}
 
       {renderMenu()}

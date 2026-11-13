@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { expectModalQuickSaveSettled } from "./modal.ts";
+
 /**
  * Сквозные сценарии канбана в production shell.
  *
@@ -228,8 +230,7 @@ async function editTaskInModal(page: Page, seed: TaskEditSeed): Promise<void> {
 
     await due.fill(seed.dueAt);
     await saveDue.click();
-    await expect(due).toBeEnabled();
-    await expect(saveDue).toBeDisabled();
+    await expectModalQuickSaveSettled(page, "kanban-modal-due", "kanban-modal-due-save");
   }
 
   if (seed.tags !== undefined) {
@@ -238,8 +239,7 @@ async function editTaskInModal(page: Page, seed: TaskEditSeed): Promise<void> {
 
     await tags.fill(seed.tags);
     await saveTags.click();
-    await expect(tags).toBeEnabled();
-    await expect(saveTags).toBeDisabled();
+    await expectModalQuickSaveSettled(page, "kanban-modal-tags", "kanban-modal-tags-save");
   }
 
   if (seed.status !== undefined && seed.status !== "todo") {
@@ -248,8 +248,7 @@ async function editTaskInModal(page: Page, seed: TaskEditSeed): Promise<void> {
 
     await moveField.selectOption({ label: STATUS_LABELS[seed.status] });
     await move.click();
-    await expect(moveField).toBeEnabled();
-    await expect(move).toBeDisabled();
+    await expectModalQuickSaveSettled(page, "kanban-modal-move-field", "kanban-modal-move");
   }
 }
 
@@ -1904,6 +1903,202 @@ test.describe("канбан в production shell", () => {
       );
     });
 
+    test("рендерит Markdown в модале и подсказке, сохраняя hover, клавиатуру и DnD", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект подсказки описания");
+      const taskTitle = uniqueTitle("Карточка с подсказкой");
+      const description = [
+        "## Контекст",
+        "",
+        "**Важный текст** и [документация](https://example.com/docs).",
+        "",
+        "- [x] Markdown готов",
+        "- [ ] Проверить подсказку",
+        "",
+        "[Небезопасная ссылка](javascript:alert(1))",
+        "",
+        '<script>document.body.dataset.markdownXss = "yes"</script>',
+        "",
+        "Подробное описание карточки с контекстом и пояснением. ".repeat(24),
+        "",
+        "Финальная строка описания",
+      ].join("\n");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+      await openCardModal(page, taskId, taskTitle);
+      await page.getByTestId("kanban-modal-description").click();
+      await page.getByTestId("kanban-description-input").fill(description);
+      await page.getByTestId("kanban-modal-project").click();
+
+      const modalDescription = page.getByTestId("kanban-modal-description");
+
+      await expect(modalDescription.getByRole("heading", { name: "Контекст" })).toBeVisible();
+      await expect(modalDescription.getByText("Важный текст", { exact: true })).toHaveJSProperty(
+        "tagName",
+        "STRONG",
+      );
+      await expect(modalDescription).not.toContainText("## Контекст");
+      await expect(modalDescription.locator("script")).toHaveCount(0);
+      await expect(modalDescription.locator('input[type="checkbox"]')).toHaveCount(2);
+      await expect(modalDescription.locator('input[type="checkbox"]').first()).toBeChecked();
+      await expect(modalDescription.locator('input[type="checkbox"]').first()).toBeDisabled();
+
+      const modalLink = modalDescription.getByRole("link", { name: "документация" });
+
+      await expect(modalLink).toHaveAttribute("target", "_blank");
+      await expect(modalLink).toHaveAttribute("rel", "noreferrer nofollow");
+      await expect(modalDescription.getByText("Небезопасная ссылка")).toHaveJSProperty(
+        "tagName",
+        "SPAN",
+      );
+      await expect(modalDescription.getByText("Небезопасная ссылка")).not.toHaveAttribute("href");
+      expect(await page.evaluate(() => document.body.dataset.markdownXss)).toBeUndefined();
+      await closeCardModal(page);
+
+      const card = page.getByTestId(`kanban-card-${taskId}`);
+      const openButton = page.getByTestId(`kanban-open-${taskId}`);
+      const tooltip = page.getByTestId(`kanban-card-description-${taskId}`);
+
+      await card.hover();
+      await expect(tooltip).toHaveCount(0);
+      await expect(tooltip).toBeVisible();
+      await expect(tooltip).toHaveRole("tooltip");
+      await expect(tooltip.getByRole("heading", { name: "Контекст" })).toBeVisible();
+      await expect(tooltip.getByText("Важный текст", { exact: true })).toHaveJSProperty(
+        "tagName",
+        "STRONG",
+      );
+      await expect(tooltip).not.toContainText("## Контекст");
+      await expect(tooltip.locator("script")).toHaveCount(0);
+      await expect(tooltip.getByRole("link", { name: "документация" })).toHaveAttribute(
+        "href",
+        "https://example.com/docs",
+      );
+      await expect(tooltip).toContainText("Финальная строка описания");
+      expect((await tooltip.textContent())?.length ?? 0).toBeGreaterThan(600);
+      await expect(openButton).toHaveAttribute(
+        "aria-describedby",
+        `kanban-card-description-${taskId}`,
+      );
+
+      const tooltipBox = await tooltip.boundingBox();
+      const viewport = page.viewportSize();
+
+      expect(tooltipBox).not.toBeNull();
+      expect(viewport).not.toBeNull();
+
+      if (tooltipBox !== null && viewport !== null) {
+        expect(tooltipBox.x).toBeGreaterThanOrEqual(0);
+        expect(tooltipBox.y).toBeGreaterThanOrEqual(0);
+        expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(viewport.width);
+        expect(tooltipBox.y + tooltipBox.height).toBeLessThanOrEqual(viewport.height);
+      }
+
+      // На сам tooltip можно перейти курсором и прокрутить всё описание.
+      await tooltip.hover();
+      const scrollMetrics = await tooltip.evaluate((element) => ({
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        pointerEvents: getComputedStyle(element).pointerEvents,
+      }));
+
+      expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+      expect(scrollMetrics.pointerEvents).toBe("auto");
+      await tooltip.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      await expect.poll(() => tooltip.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      await page.waitForTimeout(200);
+      await expect(tooltip).toBeVisible();
+      await expect(tooltip).toContainText("Финальная строка описания");
+
+      await page.getByTestId("kanban-board-title").hover();
+      await expect(tooltip).toHaveCount(0);
+
+      await openButton.focus();
+      await page.keyboard.press("Shift+Tab");
+      await expect(page.getByTestId(`kanban-menu-${taskId}`)).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(openButton).toBeFocused();
+      await expect(tooltip).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(tooltip).toHaveCount(0);
+      await expect(page.getByTestId("kanban-details")).toHaveCount(0);
+
+      // Tooltip исчезает на pointerdown и не остаётся поверх drop preview.
+      await card.hover();
+      await expect(tooltip).toBeVisible();
+      await dragCard(page, taskId, "in_progress");
+      await expect(tooltip).toHaveCount(0);
+      await expectCardInColumn(page, taskId, "in_progress");
+    });
+
+    test("увеличивает рабочую типографику без мобильного overflow", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект читаемой типографики");
+      const taskTitle = uniqueTitle("Карточка с крупным текстом");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const taskId = await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+
+      await openKanban(page, projectTitle);
+
+      await expect.poll(() => computedCss(page, `kanban-open-${taskId}`, "font-size")).toBe("15px");
+      await expect
+        .poll(() => computedCss(page, `kanban-priority-${taskId}`, "font-size"))
+        .toBe("13px");
+      await expect
+        .poll(() => computedCss(page, "kanban-column-title-todo", "font-size"))
+        .toBe("15px");
+
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await expect(card(page, taskId)).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("применяет тонкий тематический скроллбар к странице и вложенным спискам", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект тонких скроллбаров");
+      const taskTitle = uniqueTitle("Карточка с тонким скроллбаром");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      await createTask(page, { projectTitle, title: taskTitle, status: "todo" });
+      await openKanban(page, projectTitle);
+
+      const root = page.locator("html");
+      const scrollArea = page.getByTestId("kanban-column-scroll-todo");
+      const lightThumb = await resolvedColorToken(page, "--muted-foreground");
+
+      await expect.poll(() => computedCssOf(root, "scrollbar-width")).toBe("thin");
+      await expect.poll(() => computedCssOf(scrollArea, "scrollbar-width")).toBe("thin");
+
+      const rootColor = await computedCssOf(root, "scrollbar-color");
+      const nestedColor = await computedCssOf(scrollArea, "scrollbar-color");
+
+      expect(rootColor).toContain(lightThumb);
+      expect(nestedColor).toBe(rootColor);
+
+      await page.evaluate(() => document.documentElement.classList.add("dark"));
+      const darkThumb = await resolvedColorToken(page, "--muted-foreground");
+
+      await expect.poll(() => computedCssOf(scrollArea, "scrollbar-color")).toContain(darkThumb);
+
+      // Высокий контраст ОС важнее авторского цвета.
+      await page.emulateMedia({ forcedColors: "active" });
+      await expect.poll(() => computedCssOf(scrollArea, "scrollbar-color")).toBe("auto");
+      await page.emulateMedia({ forcedColors: "none" });
+
+      await page.setViewportSize(MOBILE_VIEWPORT);
+      await expectNoHorizontalOverflow(page);
+    });
+
     test("даёт различимые акценты приоритетов, не заливая карточку", async ({ page }) => {
       const projectTitle = uniqueTitle("Проект приоритетов");
       const highTitle = uniqueTitle("Высокий приоритет");
@@ -2179,6 +2374,7 @@ test.describe("канбан в production shell", () => {
       await page.keyboard.press("Enter");
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(menu).toHaveJSProperty("open", true);
+      await expect(page.getByTestId("kanban-modal-title")).toBeVisible();
 
       await tabUntil("kanban-modal-title");
       await expect(page.getByTestId("kanban-modal-title")).toBeFocused();
@@ -3561,6 +3757,14 @@ test.describe("канбан в production shell", () => {
         "Четвёртая подробная строка с пояснением и дополнительным контекстом задачи.",
         "Пятая подробная строка с пояснением и дополнительным контекстом задачи.",
       ].join("\n");
+      const expectRenderedDescription = async (): Promise<void> => {
+        const display = page.getByTestId("kanban-modal-description");
+
+        await expect(display.getByRole("heading", { name: "Контекст" })).toBeVisible();
+        await expect(display).toContainText("Длинное описание из Trello-модала");
+        await expect(display).toContainText("Пятая подробная строка");
+        await expect(display).not.toContainText("## Контекст");
+      };
 
       await openTaskList(page);
       await createProject(page, projectTitle);
@@ -3645,12 +3849,13 @@ test.describe("канбан в production shell", () => {
         .toBe(true);
       expect((await descriptionInput.boundingBox())?.height).toBeGreaterThan(200);
       await page.getByTestId("kanban-modal-project").click();
-      await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
+      await expectRenderedDescription();
 
-      // При повторном открытии существующий Markdown сразу виден целиком,
-      // без низкого textarea и внутренней полосы прокрутки.
+      // При повторном открытии исходный Markdown сохранился без изменений,
+      // а auto-resize textarea сразу показывает его целиком.
       await page.getByTestId("kanban-modal-description").click();
       await expect(descriptionInput).toBeFocused();
+      await expect(descriptionInput).toHaveValue(description);
       await expect
         .poll(async () =>
           descriptionInput.evaluate((element) => element.scrollHeight <= element.clientHeight + 2),
@@ -3678,11 +3883,11 @@ test.describe("канбан в production shell", () => {
       // Выбранная задача восстанавливается из query string после reload.
       await expect(page.getByTestId("kanban-details")).toBeVisible();
       await expect(page.getByTestId("kanban-modal-title")).toHaveText(updatedTitle);
-      await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
+      await expectRenderedDescription();
 
       await closeCardModal(page);
       await openCardModal(page, taskId, updatedTitle);
-      await expect(page.getByTestId("kanban-modal-description")).toHaveText(description);
+      await expectRenderedDescription();
     });
 
     test("создаёт подзадачу в модале, открывает её и меняет статус", async ({ page }) => {
@@ -4279,8 +4484,7 @@ test.describe("канбан в production shell", () => {
         await expect(details).toBeVisible();
         await page.getByTestId("kanban-modal-due").fill(value);
         await page.getByTestId("kanban-modal-due-save").click();
-        await expect(page.getByTestId("kanban-modal-due")).toBeEnabled();
-        await expect(page.getByTestId("kanban-modal-due-save")).toBeDisabled();
+        await expectModalQuickSaveSettled(page, "kanban-modal-due", "kanban-modal-due-save");
         await page.getByTestId("kanban-details-close").click();
         await expect(details).toHaveCount(0);
       };
@@ -5915,6 +6119,10 @@ test.describe("канбан в production shell", () => {
       await openKanban(page, projectTitle);
       await expect.poll(async () => cardTitles(page, "todo")).toEqual([firstId, secondId]);
 
+      await page.getByTestId(`kanban-card-${secondId}`).scrollIntoViewIfNeeded();
+      // Mobile scroll-snap должен завершиться до измерения точки касания.
+      await page.waitForTimeout(350);
+
       const sourceBox = await page.getByTestId(`kanban-card-${secondId}`).boundingBox();
       const targetBox = await column(page, "todo").locator("header").first().boundingBox();
 
@@ -5926,7 +6134,7 @@ test.describe("канбан в production shell", () => {
       }
 
       const startX = sourceBox.x + sourceBox.width / 2;
-      const startY = sourceBox.y + 10;
+      const startY = sourceBox.y + sourceBox.height / 2;
 
       // Жест начинается в карточке, а не в плавающей мобильной навигации.
       expect(

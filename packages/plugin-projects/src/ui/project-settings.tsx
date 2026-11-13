@@ -1549,7 +1549,7 @@ export function ProjectSettingsButton({
                     <span
                       role="status"
                       data-testid="project-settings-color-pending"
-                      className="text-[11px] text-muted-foreground"
+                      className="text-xs text-muted-foreground"
                     >
                       Сохранение цвета…
                     </span>
@@ -1559,7 +1559,7 @@ export function ProjectSettingsButton({
                     <p
                       role="alert"
                       data-testid="project-settings-color-error"
-                      className="m-0 text-[11px] text-destructive"
+                      className="m-0 text-xs text-destructive"
                     >
                       {projectColorError}
                     </p>
@@ -1569,7 +1569,7 @@ export function ProjectSettingsButton({
                     <p
                       role="status"
                       data-testid="project-settings-color-notice"
-                      className="m-0 text-[11px] text-muted-foreground"
+                      className="m-0 text-xs text-muted-foreground"
                     >
                       {projectColorNotice}
                     </p>
@@ -1588,7 +1588,7 @@ export function ProjectSettingsButton({
                   >
                     Колонки
                   </h3>
-                  <p className="m-0 text-[11px] text-muted-foreground">
+                  <p className="m-0 text-xs text-muted-foreground">
                     Порядок меняется ручкой или кнопками перемещения.
                   </p>
                 </div>
@@ -1734,7 +1734,7 @@ export function ProjectSettingsButton({
                           <span
                             role="status"
                             data-testid={`project-settings-column-pending-${column.id}`}
-                            className="text-[11px] text-muted-foreground"
+                            className="text-xs text-muted-foreground"
                           >
                             Сохранение…
                           </span>
@@ -1744,7 +1744,7 @@ export function ProjectSettingsButton({
                           <p
                             role="alert"
                             data-testid={`project-settings-column-error-${column.id}`}
-                            className="m-0 text-[11px] text-destructive"
+                            className="m-0 text-xs text-destructive"
                           >
                             {error}
                           </p>
@@ -1754,7 +1754,7 @@ export function ProjectSettingsButton({
                           <p
                             role="status"
                             data-testid={`project-settings-column-notice-${column.id}`}
-                            className="m-0 text-[11px] text-muted-foreground"
+                            className="m-0 text-xs text-muted-foreground"
                           >
                             {notice}
                           </p>
@@ -1847,7 +1847,7 @@ export function ProjectSettingsButton({
                     </button>
                   </div>
 
-                  <p className="m-0 text-[11px] text-muted-foreground">
+                  <p className="m-0 text-xs text-muted-foreground">
                     Колонка добавляется в конец порядка. Задачи в Done получают дату завершения.
                   </p>
 

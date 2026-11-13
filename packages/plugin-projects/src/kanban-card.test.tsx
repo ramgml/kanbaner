@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Task, TaskColumn } from "@kanbaner/plugin-tasks/contract";
@@ -76,6 +76,7 @@ function renderCard(task: Task, overrides: Partial<Parameters<typeof KanbanCard>
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("KanbanCard", () => {
@@ -498,6 +499,143 @@ describe("KanbanCard", () => {
     });
 
     expect(onDragStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("показывает Markdown-описание после задержки hover и скрывает по уходу", () => {
+    vi.useFakeTimers();
+    renderCard(makeTask({ descriptionMarkdown: "## Первая строка\n\n**Второй абзац**" }));
+
+    const card = screen.getByTestId("kanban-card-task-1");
+    const childrenBefore = card.childElementCount;
+
+    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(399);
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    const tooltip = screen.getByTestId("kanban-card-description-task-1");
+
+    expect(within(tooltip).getByRole("heading", { name: "Первая строка" })).toBeInTheDocument();
+    expect(within(tooltip).getByText("Второй абзац")).toHaveProperty("tagName", "STRONG");
+    expect(tooltip).not.toHaveTextContent("## Первая строка");
+    expect(tooltip.parentElement).toBe(document.body);
+    expect(card).not.toContainElement(tooltip);
+    expect(card.childElementCount).toBe(childrenBefore);
+    expect(tooltip).toHaveClass("overflow-y-auto");
+
+    fireEvent.pointerLeave(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+  });
+
+  it("позволяет перейти на tooltip и прокрутить полное описание", () => {
+    vi.useFakeTimers();
+    const description = "Длинное описание\n".repeat(80);
+
+    renderCard(makeTask({ descriptionMarkdown: description }));
+
+    const card = screen.getByTestId("kanban-card-task-1");
+
+    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+
+    const tooltip = screen.getByTestId("kanban-card-description-task-1");
+
+    expect(tooltip.textContent).toBe(description.trimEnd());
+
+    fireEvent.pointerLeave(card, { pointerType: "mouse" });
+    fireEvent.pointerEnter(tooltip, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.getByTestId("kanban-card-description-task-1")).toBeInTheDocument();
+
+    fireEvent.scroll(tooltip);
+    expect(screen.getByTestId("kanban-card-description-task-1")).toBeInTheDocument();
+
+    fireEvent.pointerLeave(tooltip, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(149);
+    });
+    expect(screen.getByTestId("kanban-card-description-task-1")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+  });
+
+  it("показывает описание по focus-visible и закрывает по Escape без перехвата", () => {
+    renderCard(makeTask({ descriptionMarkdown: "Описание с клавиатуры" }));
+
+    const title = screen.getByTestId("kanban-open-task-1");
+
+    title.focus();
+    fireEvent.focus(title);
+
+    const tooltip = screen.getByTestId("kanban-card-description-task-1");
+
+    expect(tooltip).toHaveTextContent("Описание с клавиатуры");
+    expect(title).toHaveAttribute("aria-describedby", tooltip.id);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+    expect(title).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("не показывает пустой tooltip или по touch", () => {
+    vi.useFakeTimers();
+    renderCard(makeTask({ descriptionMarkdown: " \n " }));
+
+    const card = screen.getByTestId("kanban-card-task-1");
+
+    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+
+    fireEvent.pointerEnter(card, { pointerType: "touch" });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+  });
+
+  it("скрывает описание при pointerdown, drag и scroll", () => {
+    vi.useFakeTimers();
+    renderCard(makeTask({ descriptionMarkdown: "Скрыть при взаимодействии" }));
+
+    const card = screen.getByTestId("kanban-card-task-1");
+
+    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.getByTestId("kanban-card-description-task-1")).toBeInTheDocument();
+
+    fireEvent.pointerDown(card, {
+      pointerType: "mouse",
+      button: 0,
+      isPrimary: true,
+    });
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
+
+    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    fireEvent.scroll(window);
+    expect(screen.queryByTestId("kanban-card-description-task-1")).toBeNull();
   });
 
   it("показывает приоритет левой полосой и флажком, не заливая карточку", () => {

@@ -43,6 +43,8 @@ const ALLOWED_PROJECTS_DEPENDENCIES = new Set([
   "@kanbaner/plugin-sdk",
   "@kanbaner/plugin-tasks/contract",
   "lucide-react",
+  "react-markdown",
+  "remark-gfm",
   TASK_UI_PACKAGE,
 ]);
 const PROJECTS_SERVER_ENTRYPOINT = "index.ts";
@@ -862,6 +864,8 @@ function analyzeManifests(root, violations) {
         ALLOWED_FIXTURE_DEPENDENCY,
         TASK_UI_PACKAGE,
         "lucide-react",
+        "react-markdown",
+        "remark-gfm",
       ]),
     },
   ];

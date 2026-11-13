@@ -34,6 +34,8 @@ import {
   taskStatusLabel,
 } from "@kanbaner/task-ui";
 
+import { MarkdownContent } from "./markdown-content.tsx";
+
 export interface SubtaskDraft {
   readonly title: string;
   /** Фактическая колонка, в которой создаётся подзадача. */
@@ -49,6 +51,20 @@ export type QuickDraftField = "column" | "due" | "tags";
 
 /** Поле карточки с inline-редактором. */
 export type InlineField = "title" | "description";
+
+/** Markdown-ссылки и контролы внутри display не должны запускать inline-редактор. */
+function isInteractiveInlineTarget(target: EventTarget, currentTarget: HTMLElement): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  // Raw HTML отключён, поэтому Markdown создаёт здесь только ссылки/checkbox.
+  const interactive = target.closest('a, button, input, textarea, [role="button"]');
+
+  return (
+    interactive !== null && interactive !== currentTarget && currentTarget.contains(interactive)
+  );
+}
 
 /**
  * Сессия inline-редактирования.
@@ -561,6 +577,10 @@ export function TaskModal({
   const startTouchTap = (event: ReactPointerEvent<HTMLElement>): void => {
     lastPointerTypeRef.current = event.pointerType;
 
+    if (isInteractiveInlineTarget(event.target, event.currentTarget)) {
+      return;
+    }
+
     if (event.pointerType !== "touch") {
       return;
     }
@@ -619,7 +639,7 @@ export function TaskModal({
 
       touchTapRef.current = null;
 
-      if (confirmed && !busy) {
+      if (confirmed && !busy && !isInteractiveInlineTarget(event.target, event.currentTarget)) {
         event.preventDefault();
         onStartInline(field);
       }
@@ -642,7 +662,7 @@ export function TaskModal({
 
       // Touch-тап уже обработан на pointerup; compatibility click после него,
       // включая отменённый жест, не должен открывать редактор повторно.
-      if (pointerType === "touch") {
+      if (pointerType === "touch" || isInteractiveInlineTarget(event.target, event.currentTarget)) {
         return;
       }
 
@@ -662,6 +682,10 @@ export function TaskModal({
     };
 
   const openInlineOnKey = (field: InlineField) => (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (isInteractiveInlineTarget(event.target, event.currentTarget)) {
+      return;
+    }
+
     if ((event.key === "Enter" || event.key === "F2") && !isComposing(event)) {
       event.preventDefault();
       onStartInline(field);
@@ -750,7 +774,7 @@ export function TaskModal({
                   {inlineError}
                 </p>
               )}
-              <p className="m-0 text-[11px] text-muted-foreground">
+              <p className="m-0 text-xs text-muted-foreground">
                 Enter или клик вне поля — сохранить, Escape — отменить.
               </p>
             </div>
@@ -929,7 +953,7 @@ export function TaskModal({
                   Описание (Markdown)
                 </h3>
                 {inlineSession?.field === "description" ? null : (
-                  <span className="text-[11px] text-muted-foreground">{inlineHint}</span>
+                  <span className="text-xs text-muted-foreground">{inlineHint}</span>
                 )}
               </div>
               {inlineSession?.field === "description" ? (
@@ -964,7 +988,7 @@ export function TaskModal({
                       {inlineError}
                     </p>
                   )}
-                  <p className="m-0 text-[11px] text-muted-foreground">
+                  <p className="m-0 text-xs text-muted-foreground">
                     Клик вне поля или Ctrl/Cmd+Enter — сохранить, Escape — отменить. Markdown
                     сохраняется как текст.
                   </p>
@@ -973,7 +997,7 @@ export function TaskModal({
                 <div
                   ref={descriptionDisplayRef}
                   data-testid="kanban-modal-description"
-                  role="button"
+                  role="group"
                   tabIndex={0}
                   title={inlineHint}
                   aria-label={`Описание задачи. ${inlineHint}`}
@@ -988,9 +1012,7 @@ export function TaskModal({
                   {task.descriptionMarkdown.length === 0 ? (
                     <span className="text-muted-foreground">Добавить описание…</span>
                   ) : (
-                    <p className="m-0 whitespace-pre-wrap break-words">
-                      {task.descriptionMarkdown}
-                    </p>
+                    <MarkdownContent source={task.descriptionMarkdown} />
                   )}
                 </div>
               )}
@@ -1254,7 +1276,7 @@ export function TaskModal({
                 <Check aria-hidden="true" className="size-3.5" />
                 Сохранить срок
               </button>
-              <p className="mt-1 m-0 text-[11px] text-muted-foreground">
+              <p className="mt-1 m-0 text-xs text-muted-foreground">
                 Сейчас: {formatDueAt(task.dueAt)}
               </p>
             </section>
