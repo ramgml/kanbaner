@@ -1,7 +1,7 @@
 ---
 id: KAN-037
 title: Notion-подобный плагин заметок
-status: in_progress
+status: done
 stage: 4
 priority: high
 owner: orchestrator
@@ -85,16 +85,25 @@ specs:
 - 2026-11-13 — Независимое ревью выявило deferred-гонки autosave и ещё 9
   findings. Задача возвращена в `in_progress`; закрытие только после regression
   tests и повторных полных проверок.
+- 2026-11-13 — Все findings и последующие boundary cases устранены. Повторное
+  ревью подтвердило закрытие; 119 файлов / 1619 тестов и 121/121 E2E — зелёные.
+  Задача повторно завершена.
 
 ## Итог
 
 - Коммиты: каркас `81877d8`, UI runtime merge `fa6b420`, редактор merge
   `5e5eba3`, домен merge `7f4df3f`, финальная интеграция `61d671b`,
-  SPA-autosave fix `3992441`.
+  SPA-autosave fix `3992441`, idempotency transport merge `2aac613`,
+  review domain merge `0da9148`, review UI merge `24eddb5`, финальные deferred
+  fixes `8d38974`.
 - Плагин `kanbaner.notes` работает независимо от tasks: визуальный Markdown,
   дерево, автосохранение, favorite/recent, поиск, attachments/export и связи.
 - Resource opener и публичный slot связывают заметки с задачами без импорта
   чужих плагинов. Удалённые ресурсы очищаются через события.
-- Проверки на `dev`: полный `pnpm check` — 114 файлов / 1582 теста;
-  Playwright — 120/120 зелёные.
+- После независимого ревью: deferred autosave, reference images, subtree delete,
+  affectedNotes, idempotency, related links, unlink и accessibility исправлены.
+- Повторное ревью подтвердило закрытие всех blocker/high/medium, включая
+  параллельные upload.
+- Проверки на `dev`: полный `pnpm check` — 119 файлов / 1619 тестов;
+  Playwright — 121/121 зелёные.
 - Push не выполнялся. Windows и браузеры кроме Chromium не проверялись.
