@@ -15,6 +15,7 @@
   "dependencies": {
     "@kanbaner/kernel": "workspace:*",
     "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/plugin-notes": "workspace:*",
     "@kanbaner/plugin-projects": "workspace:*",
     "@kanbaner/storage-sqlite": "workspace:*",
     "@kanbaner/task-ui": "workspace:*",

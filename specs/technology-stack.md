@@ -52,6 +52,8 @@ TypeScript закреплён на `6.0.x`, а не на актуальном 7.
 | Иконки | Lucide React | 1.70.x | Единый набор иконок |
 | HTTP-клиент | встроенный `fetch` | — | Без Axios и аналогичных обёрток |
 | Markdown | `react-markdown` + `remark-gfm` | 10.1.x / 4.0.x | Только React-рендер без raw HTML; исходный Markdown хранится доменом, sanitization URL по умолчанию |
+| Визуальный Markdown-редактор | `@milkdown/kit` | 7.23.x | CommonMark/GFM, toolbar/slash и serializer в `plugin-notes`; Crepe не используется, canonical content остаётся Markdown |
+| Markdown AST | `mdast-util-from-markdown` | 2.1.x | Image-узлы для attachment ownership и экспорта; не заменяет JSON Schema и не допускает raw HTML в UI |
 
 Правила UI-стека:
 

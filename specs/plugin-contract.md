@@ -291,6 +291,24 @@ default | slate | blue | green | yellow | orange | red | purple
 Цвет задачи отдельно не хранится: цветовой акцент карточки вычисляется
 представлением из существующего `Task.priority`.
 
+### Дерево и вложения заметок
+
+`kanbaner.notes` публикует versioned CRUD/move/delete для страниц, отдельные
+команды favorite/visit/link/attachment и queries get/list/search/links/export.
+`note.move` принимает `parentId` и позицию среди siblings, запрещает циклы и
+возвращает затронутые соседей. `note.delete` является destructive, принимает
+`confirm: true` и атомарно удаляет всю ветку, activity и attachments.
+
+`note.update` принимает partial title/contentMarkdown с `expectedVersion`.
+Favorite/visit не меняют версию содержимого. Store-мутации с объявленной
+поддержкой idempotency сохраняют результат ключа в той же транзакции, что и
+изменение данных. События и поисковые эффекты выполняются после коммита.
+
+Attachment-create принимает base64 только поддерживаемого растрового формата;
+домен проверяет размер и сигнатуру. Attachment URL в Markdown должен принадлежать
+той же заметке. Query export является read-only и превращает локальные image
+URL в data URL, не меняя сохранённый Markdown.
+
 ## 7. Запросы
 
 Запрос не изменяет сохраняемое состояние.
@@ -608,6 +626,13 @@ app.overlays
 - Удаление или переименование slot требует major-версии UI-контракта.
 - UI-вклад не должен блокировать активацию остальных плагинов при ошибке рендера.
 - Ошибка плагина показывается в границе ошибки, а не роняет весь интерфейс.
+- `resource-opener` декларирует `resourceType` и `route`; необязательный
+  `resourcePluginId` позволяет открывать ресурс другого плагина без его импорта.
+  Клиентский `openResource(ref)` добавляет `resource=<encoded ResourceRef>` к
+  маршруту активного opener и сообщает о недоступности без падения shell.
+- `renderSlot(slot, context)` рендерит публичный outlet через тот же UI registry.
+  Контекст сериализуем; плагин-владелец outlet не импортирует вкладчика, а вклад
+  получает только свои props и context.
 
 Текущий UI-контракт не предназначен для загрузки недоверенного кода. Для будущей песочницы потребуется отдельный transport и renderer.
 

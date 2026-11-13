@@ -18,9 +18,12 @@ Kanbaner — локальная однопользовательская сис�
 - Lucide-иконки, сохраняемые цвета доски/колонок и акценты приоритетов;
 - тонкие скроллбары с цветом для light/dark темы и системным forced-colors режимом;
 - безопасный CommonMark/GFM в описании карточки и его hover/focus-подсказке;
+- Notion-подобные заметки `kanbaner.notes`: визуальный Markdown, дерево страниц,
+  автосохранение, избранное/недавние, полнотекстовый поиск, связи ResourceRef,
+  локальные изображения и экспорт `.md`;
 - production Playwright-сценарии в Chromium.
 
-Заметки, отдельный поиск, HTTP API и MCP относятся к следующим этапам `specs/roadmap.md` и ещё не входят в текущий рабочий срез.
+Отдельный поиск, HTTP API и MCP относятся к следующим этапам `specs/roadmap.md` и ещё не входят в текущий рабочий срез.
 
 ## Требования
 
@@ -85,7 +88,7 @@ pnpm start
 pnpm check:composition
 ```
 
-Composition root регистрирует SQLite Storage Provider, домен `kanbaner.tasks`, UI `kanbaner.projects` и fixture-плагин для проверки plugin-механизма.
+Composition root регистрирует SQLite Storage Provider, домены `kanbaner.tasks` и `kanbaner.notes`, UI `kanbaner.projects`/`kanbaner.notes` и fixture-плагин для проверки plugin-механизма.
 
 ## Команды
 

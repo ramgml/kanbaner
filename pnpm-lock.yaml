@@ -244,6 +244,9 @@ importers:
       '@kanbaner/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
+      '@kanbaner/plugin-notes':
+        specifier: workspace:*
+        version: link:../../packages/plugin-notes
       '@kanbaner/plugin-projects':
         specifier: workspace:*
         version: link:../../packages/plugin-projects

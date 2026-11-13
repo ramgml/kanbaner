@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 
+import { notesUiPlugin } from "@kanbaner/plugin-notes/ui";
 import { projectsUiPlugin } from "@kanbaner/plugin-projects/ui";
 
 import { useUiRegistry } from "./provider";
@@ -16,7 +17,7 @@ import type { UiComponent } from "./registry";
  * отключённом плагине metadata отсутствует, поэтому наличие кода в бандле не
  * делает вклад видимым.
  */
-export const builtinUiPlugins = [projectsUiPlugin] as const;
+export const builtinUiPlugins = [projectsUiPlugin, notesUiPlugin] as const;
 
 export function BuiltinUiPlugins() {
   const registry = useUiRegistry();

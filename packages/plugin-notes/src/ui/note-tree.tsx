@@ -1,0 +1,224 @@
+"use client";
+
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  GripVertical,
+  Plus,
+  Star,
+  Trash2,
+} from "lucide-react";
+
+import type { NoteView } from "../model.ts";
+
+interface NoteTreeProps {
+  readonly items: readonly NoteView[];
+  readonly selectedId: string | null;
+  readonly onSelect: (id: string) => void;
+  readonly onCreate: (parentId: string | null) => void;
+  readonly onMove: (id: string, parentId: string | null, position?: number) => void;
+  readonly onDelete: (view: NoteView) => void;
+}
+
+const buttonClass =
+  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+export function NoteTree({
+  items,
+  selectedId,
+  onSelect,
+  onCreate,
+  onMove,
+  onDelete,
+}: NoteTreeProps) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const byParent = useMemo(() => {
+    const result = new Map<string | null, NoteView[]>();
+    for (const item of items) {
+      const siblings = result.get(item.note.parentId) ?? [];
+      siblings.push(item);
+      result.set(item.note.parentId, siblings);
+    }
+    for (const siblings of result.values()) {
+      siblings.sort((left, right) => left.note.position - right.note.position);
+    }
+    return result;
+  }, [items]);
+  const visibleIds = useMemo(() => new Set(items.map((item) => item.note.id)), [items]);
+  const roots = useMemo(
+    () =>
+      items
+        .filter((item) => item.note.parentId === null || !visibleIds.has(item.note.parentId))
+        .sort((left, right) => left.note.position - right.note.position),
+    [items, visibleIds],
+  );
+
+  useEffect(() => {
+    if (selectedId === null) {
+      return;
+    }
+    const byId = new Map(items.map((item) => [item.note.id, item.note]));
+    const parents = new Set<string>();
+    let current = byId.get(selectedId)?.parentId ?? null;
+    while (current !== null) {
+      parents.add(current);
+      current = byId.get(current)?.parentId ?? null;
+    }
+    const timer = setTimeout(() => {
+      setExpanded((previous) => new Set([...previous, ...parents]));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [items, selectedId]);
+
+  const renderNode = (view: NoteView, depth: number): ReactNode => {
+    const id = view.note.id;
+    const children = byParent.get(id) ?? [];
+    const isExpanded = expanded.has(id);
+    const siblings = byParent.get(view.note.parentId) ?? roots;
+    const index = siblings.findIndex((item) => item.note.id === id);
+
+    return (
+      <li key={id}>
+        <div
+          data-note-tree-item={id}
+          draggable
+          onDragStart={(event) => {
+            event.dataTransfer.setData("application/x-kanbaner-note", id);
+            event.dataTransfer.effectAllowed = "move";
+          }}
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes("application/x-kanbaner-note")) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+            }
+          }}
+          onDrop={(event) => {
+            const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
+            if (dragged && dragged !== id) {
+              event.preventDefault();
+              onMove(dragged, view.note.parentId, Math.max(0, index));
+            }
+          }}
+          className={`group flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
+            selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+          }`}
+          style={{ paddingLeft: `${depth * 12 + 2}px` }}
+        >
+          <GripVertical aria-hidden="true" className="size-3 shrink-0 text-muted-foreground/50" />
+          <button
+            type="button"
+            aria-label={
+              isExpanded ? `Свернуть ${view.note.title}` : `Развернуть ${view.note.title}`
+            }
+            aria-expanded={children.length > 0 ? isExpanded : undefined}
+            disabled={children.length === 0}
+            onClick={() =>
+              setExpanded((previous) => {
+                const next = new Set(previous);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              })
+            }
+            className={`${buttonClass} ${children.length === 0 ? "invisible" : ""}`}
+          >
+            {isExpanded ? (
+              <ChevronDown aria-hidden="true" className="size-3.5" />
+            ) : (
+              <ChevronRight aria-hidden="true" className="size-3.5" />
+            )}
+          </button>
+          <button
+            type="button"
+            data-note-select={id}
+            onClick={() => onSelect(id)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <FileText aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate">{view.note.title}</span>
+            {view.favorite ? (
+              <Star aria-label="Избранное" className="size-3 shrink-0 fill-current" />
+            ) : null}
+          </button>
+          <div className="flex shrink-0 items-center opacity-100 transition-opacity focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
+            <button
+              type="button"
+              aria-label={`Переместить ${view.note.title} выше`}
+              disabled={index <= 0}
+              onClick={() => onMove(id, view.note.parentId, index - 1)}
+              className={`${buttonClass} text-xs disabled:opacity-30`}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label={`Переместить ${view.note.title} ниже`}
+              disabled={index < 0 || index >= siblings.length - 1}
+              onClick={() => onMove(id, view.note.parentId, index + 1)}
+              className={`${buttonClass} text-xs disabled:opacity-30`}
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              data-note-add-child={id}
+              aria-label={`Создать вложенную страницу в ${view.note.title}`}
+              onClick={() => {
+                setExpanded((previous) => new Set([...previous, id]));
+                onCreate(id);
+              }}
+              className={buttonClass}
+            >
+              <Plus aria-hidden="true" className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              data-note-delete={id}
+              aria-label={`Удалить ${view.note.title}`}
+              onClick={() => onDelete(view)}
+              className={`${buttonClass} hover:text-destructive`}
+            >
+              <Trash2 aria-hidden="true" className="size-3.5" />
+            </button>
+          </div>
+        </div>
+        {children.length > 0 && isExpanded ? (
+          <ul className="m-0 list-none p-0">
+            {children.map((child) => renderNode(child, depth + 1))}
+          </ul>
+        ) : null}
+      </li>
+    );
+  };
+
+  return (
+    <div className="min-w-0">
+      <ul
+        aria-label="Дерево заметок"
+        className="m-0 list-none p-0"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
+          if (dragged && event.target === event.currentTarget) {
+            onMove(dragged, null);
+          }
+        }}
+      >
+        {roots.map((view) => renderNode(view, 0))}
+      </ul>
+      {items.length === 0 ? (
+        <p className="px-2 py-6 text-center text-sm text-muted-foreground">Заметок пока нет</p>
+      ) : null}
+      <button
+        type="button"
+        data-testid="note-create-root"
+        onClick={() => onCreate(null)}
+        className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Plus aria-hidden="true" className="size-4" /> Новая страница
+      </button>
+    </div>
+  );
+}

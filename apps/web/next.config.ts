@@ -7,6 +7,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   outputFileTracingRoot: path.join(import.meta.dirname, "../.."),
   serverExternalPackages: ["better-sqlite3"],
+  experimental: {
+    serverActions: {
+      // 5 MiB raster image + base64 overhead и служебные поля command envelope.
+      bodySizeLimit: "8mb",
+    },
+  },
 };
 
 export default nextConfig;

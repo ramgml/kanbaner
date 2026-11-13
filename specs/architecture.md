@@ -475,22 +475,49 @@ completedAt
 
 ### 8.6. Плагин заметок
 
+Домен использует namespaced коллекции существующего `PluginDocumentStore`:
+
 ```text
-notes_notes
+notes
+note-activity
+note-attachments
+idempotency
 ```
 
-Основные поля:
+Физические имена таблиц остаются деталью провайдера. Логические поля заметки:
 
 ```text
 id
 title
-content_markdown
+contentMarkdown
+parentId
+position
 version
-created_at
-updated_at
+createdAt
+updatedAt
 ```
 
-Связи с проектами, задачами и другими ресурсами не хранятся как внешние ключи. Они создаются через сервис универсальных ссылок ядра.
+- `parentId = null` задаёт корневую страницу; move/reorder запрещает циклы и
+  превышение глубины, а позиции уникальны среди siblings.
+- Favorite и `lastOpenedAt` принадлежат `note-activity` и не увеличивают версию
+  содержимого. Посещение фиксируется отдельной командой, не query с side effect.
+- Вложения до 5 MiB хранятся отдельно в `note-attachments` как base64-документы
+  с MIME, размером и владельцем. В canonical Markdown разрешены только
+  `attachment://<id>` собственной заметки и HTTP(S) image URL; data URL в
+  сохраняемый текст не попадает. Допустимы PNG, JPEG, GIF и WebP с проверкой
+  сигнатуры. Экспорт заменяет attachment URL в AST image-узлах на data URL.
+- CRUD, move и delete используют `expectedVersion` и транзакции плагина. Ветка
+  удаляется каскадно после `confirm`; activity и attachments удаляются вместе с
+  ней. Повторяемые store-мутации сохраняют результат Idempotency-Key в той же
+  транзакции.
+- Визуальный Milkdown-редактор находится в UI-плагине; домен хранит только
+  Markdown. Общий безопасный renderer выделен в `@kanbaner/markdown-ui`, который
+  не является плагином и не содержит доменной логики.
+
+Связи с проектами, задачами и другими ресурсами не хранятся как внешние ключи.
+Они создаются через сервис универсальных ссылок ядра. Плагин регистрирует
+`note` resource adapter, индексирует заголовок и Markdown после коммита и
+выполняет полную переиндексацию при активации.
 
 ### 8.7. Плагин поиска
 

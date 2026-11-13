@@ -1,0 +1,57 @@
+# @kanbaner/plugin-notes
+
+Независимый плагин `kanbaner.notes`: Notion-подобные страницы с визуальным
+Markdown-редактором, иерархией, поиском, связями и локальными изображениями.
+
+## Возможности
+
+- `/view/notes` содержит дерево страниц, редактор и панель универсальных связей.
+- Заголовок и CommonMark/GFM редактируются визуально через Milkdown Kit.
+  Канонический формат хранения — Markdown; форматирование исходника может
+  нормализоваться при сериализации, содержимое не должно теряться.
+- Автосохранение выполняется последовательно через `note.update` с
+  `expectedVersion`; конфликт не перезаписывает черновик, его можно скачать.
+- Страницы имеют `parentId` и уникальную позицию среди siblings. Move запрещает
+  циклы и чрезмерную глубину, доступен через DnD и кнопки/выбор родителя.
+- Favorite и lastOpenedAt хранятся отдельно от содержимого и не увеличивают его
+  версию. Недавние страницы и поиск доступны в левой панели.
+- Полнотекстовый индекс обновляется после коммита и полностью пересобирается
+  при активации плагина.
+- PNG, JPEG, GIF и WebP до 5 MiB хранятся отдельно от текста. В Markdown
+  остаётся `attachment://<id>`; data URL запрещён как canonical image URL.
+  Экспорт создаёт `.md` с data URL в реальных image-узлах.
+- Удаление ветки требует подтверждения и каскадно удаляет потомков, activity,
+  вложения, связи и поисковые документы.
+
+## Архитектурные границы
+
+- Плагин не зависит от `kanbaner.tasks`, kernel или SQLite.
+- Все данные находятся в собственных коллекциях `PluginDocumentStore`:
+  `notes`, `note-activity`, `note-attachments` и `idempotency`.
+- Команды/запросы используют TypeBox/JSON Schema, версии и транзакции. Повторные
+  store-мутации поддерживают `Idempotency-Key` атомарно с результатом.
+- События публикуются после коммита. Удалённые ресурсы очищают универсальные
+  связи через существующий cleanup ядра.
+- `ResourceRef` заметки: `kanbaner.notes:note:<id>`; relation:
+  `kanbaner.notes.references`.
+- UI регистрируется через metadata в `src/metadata.ts`, реальные рендереры —
+  только в `src/ui.tsx`. Связанные заметки в задаче используют публичный slot
+  `kanbaner.projects.task.related`, а не импорт чужого плагина.
+
+## Основные операции
+
+Команды: `note.create`, `note.update`, `note.move`, `note.delete`,
+`note.favorite.set`, `note.visit`, `note.link`, `note.unlink`,
+`note.attachment.create`, `note.attachment.delete`.
+
+Запросы: `note.get`, `note.list`, `note.search`, `note.links`,
+`note.attachment.get`, `note.export`. Полные ID имеют префикс
+`kanbaner.notes.` и версионируются контрактом `kanbaner.notes.*.v1`.
+
+## Проверки
+
+```bash
+pnpm --filter @kanbaner/plugin-notes typecheck
+pnpm exec vitest run packages/plugin-notes/src tests/integration/notes-*.test.ts
+pnpm --filter @kanbaner/web exec playwright test e2e/notes.spec.ts
+```

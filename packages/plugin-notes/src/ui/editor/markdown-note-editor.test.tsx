@@ -219,6 +219,32 @@ describe("MarkdownNoteEditor: изображения", () => {
     });
   });
 
+  it("копирует живой FileList до reset input", async () => {
+    const { container, onUploadImage } = renderEditor({ value: "" });
+    await waitForReady(container);
+
+    const input = screen.getByTestId("note-image-input");
+    const liveFiles = [imageFile()];
+    let value = "";
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      get: () => liveFiles,
+    });
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => value,
+      set: (next: string) => {
+        value = next;
+        if (next === "") liveFiles.splice(0);
+      },
+    });
+
+    fireEvent.change(input);
+
+    await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
+    expect(value).toBe("");
+  });
+
   it("показывает ошибку загрузки и не меняет документ", async () => {
     const onUploadImage = vi.fn<(file: File) => Promise<string>>(async () => {
       throw new Error("Хранилище недоступно");

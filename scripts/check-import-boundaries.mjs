@@ -29,6 +29,8 @@ const TASK_UI_PACKAGE = "@kanbaner/task-ui";
 const MARKDOWN_UI_PACKAGE = "@kanbaner/markdown-ui";
 const PROJECTS_PACKAGE = "@kanbaner/plugin-projects";
 const PROJECTS_UI_ENTRYPOINT = "@kanbaner/plugin-projects/ui";
+const NOTES_PACKAGE = "@kanbaner/plugin-notes";
+const NOTES_UI_ENTRYPOINT = "@kanbaner/plugin-notes/ui";
 const BUILTIN_UI_COMPOSITION = "apps/web/src/ui/builtin-ui-plugins.ts";
 const ALLOWED_TASK_UI_DEPENDENCIES = new Set([
   "react",
@@ -51,6 +53,26 @@ const ALLOWED_PROJECTS_DEPENDENCIES = new Set([
 ]);
 const PROJECTS_SERVER_ENTRYPOINT = "index.ts";
 const PROJECTS_UI_ENTRYPOINT_FILE = "ui.tsx";
+const ALLOWED_MARKDOWN_UI_DEPENDENCIES = new Set([
+  "react",
+  "react/jsx-runtime",
+  "react-markdown",
+  "remark-gfm",
+]);
+const ALLOWED_NOTES_DEPENDENCIES = new Set([
+  "react",
+  "react-dom",
+  "react/jsx-runtime",
+  "@kanbaner/plugin-sdk",
+  "@sinclair/typebox",
+  "lucide-react",
+  "mdast-util-from-markdown",
+  "@milkdown/kit",
+  MARKDOWN_UI_PACKAGE,
+]);
+const NOTES_SERVER_ENTRYPOINT = "index.ts";
+const NOTES_CONTRACT_ENTRYPOINT = "contract.ts";
+const NOTES_UI_ENTRYPOINT_FILE = "ui.tsx";
 
 /**
  * Запрещённые внешние модули fixture-плагина.
@@ -614,6 +636,141 @@ function analyzeProjectsSources(root, violations) {
   }
 }
 
+function analyzeMarkdownUiSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "markdown-ui");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  for (const file of sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file))) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `markdown-ui relative import escapes package (${kind})`,
+          });
+        }
+        continue;
+      }
+      if (!ALLOWED_MARKDOWN_UI_DEPENDENCIES.has(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `markdown-ui не должен импортировать (${kind}): ${specifier}`,
+        });
+      }
+    }
+  }
+}
+
+function analyzeNotesSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "plugin-notes");
+  const sourceRoot = path.join(packageRoot, "src");
+  const serverGraph = entryGraph(sourceRoot, NOTES_SERVER_ENTRYPOINT);
+  const contractGraph = entryGraph(sourceRoot, NOTES_CONTRACT_ENTRYPOINT);
+  const uiGraph = entryGraph(sourceRoot, NOTES_UI_ENTRYPOINT_FILE);
+  const serverOnly = new Set([
+    NOTES_SERVER_ENTRYPOINT,
+    "activation.ts",
+    "store.ts",
+    "operations.ts",
+  ]);
+
+  for (const file of sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file))) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const relativeFile = path.relative(sourceRoot, file).replaceAll(path.sep, "/");
+    const inServer = serverGraph.has(file);
+    const inContract = contractGraph.has(file);
+    const inUi = uiGraph.has(file);
+
+    if (inContract && serverOnly.has(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: "client-safe contract не должен достигать server modules",
+      });
+    }
+    if (inUi && relativeFile === NOTES_SERVER_ENTRYPOINT) {
+      violations.push({
+        file: fileLabel,
+        rule: "notes UI entrypoint не должен достигать server entrypoint",
+      });
+    }
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `notes relative import escapes package (${kind})`,
+          });
+        }
+        continue;
+      }
+
+      if (specifier.startsWith("node:")) {
+        const allowedCrypto =
+          specifier === "node:crypto" &&
+          inServer &&
+          !inContract &&
+          relativeFile.startsWith("activation/");
+        if (!allowedCrypto) {
+          violations.push({
+            file: fileLabel,
+            rule: `notes builtin import запрещён (${kind}): ${specifier}`,
+          });
+        }
+        continue;
+      }
+
+      const forbidden = forbiddenPluginUiImport(specifier);
+      if (forbidden !== null) {
+        violations.push({
+          file: fileLabel,
+          rule: `notes запрещённый импорт (${kind}): ${specifier} [${forbidden}]`,
+        });
+        continue;
+      }
+
+      if (
+        inServer &&
+        (specifier === "react" ||
+          specifier === "react-dom" ||
+          specifier.startsWith("react/") ||
+          specifier === MARKDOWN_UI_PACKAGE ||
+          specifier === "@milkdown/kit" ||
+          specifier.startsWith("@milkdown/kit/"))
+      ) {
+        violations.push({
+          file: fileLabel,
+          rule: `notes server graph не должен импортировать UI (${kind}): ${specifier}`,
+        });
+        continue;
+      }
+
+      const allowedMilkdown =
+        specifier === "@milkdown/kit" || specifier.startsWith("@milkdown/kit/");
+      if (!ALLOWED_NOTES_DEPENDENCIES.has(specifier) && !allowedMilkdown) {
+        violations.push({
+          file: fileLabel,
+          rule: `notes не должен импортировать (${kind}): ${specifier}`,
+        });
+      }
+    }
+
+    for (const rule of SYNC_PATTERNS) {
+      if (rule.pattern.test(source)) {
+        violations.push({ file: fileLabel, rule: `synchronous storage call: ${rule.label}` });
+      }
+    }
+  }
+}
+
 function isTasksServerOnlyRelative(relativeFile) {
   return (
     TASKS_SERVER_ONLY_FILES.has(relativeFile) ||
@@ -796,6 +953,34 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
             rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
           });
         }
+
+        const isNotesUiEntrypoint =
+          specifier === NOTES_UI_ENTRYPOINT ||
+          specifier === `${NOTES_PACKAGE}/ui` ||
+          specifier.startsWith(`${NOTES_PACKAGE}/ui/`) ||
+          (resolved !== null &&
+            isInside(path.join(root, "packages", "plugin-notes", "src"), resolved) &&
+            /(?:^|\/)ui(?:\.tsx?|\/)/u.test(
+              relative(path.join(root, "packages", "plugin-notes", "src"), resolved),
+            ));
+
+        if (isNotesUiEntrypoint && !isBuiltinComposition) {
+          violations.push({
+            file: fileLabel,
+            rule: `UI-entrypoint плагина разрешён только из ${BUILTIN_UI_COMPOSITION} (${kind}): ${specifier}`,
+          });
+        }
+
+        if (
+          (specifier === NOTES_PACKAGE || specifier.startsWith(`${NOTES_PACKAGE}/`)) &&
+          specifier !== NOTES_UI_ENTRYPOINT &&
+          specifier !== `${NOTES_PACKAGE}/ui`
+        ) {
+          violations.push({
+            file: fileLabel,
+            rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
+          });
+        }
       }
 
       // Ссылка в строке ловит случаи, которые не являются import-выражением
@@ -853,6 +1038,23 @@ function analyzeManifests(root, violations) {
   }
 
   const packageDependencyRules = [
+    {
+      file: "packages/markdown-ui/package.json",
+      name: MARKDOWN_UI_PACKAGE,
+      allowed: new Set(["react-markdown", "remark-gfm"]),
+    },
+    {
+      file: "packages/plugin-notes/package.json",
+      name: NOTES_PACKAGE,
+      allowed: new Set([
+        ALLOWED_FIXTURE_DEPENDENCY,
+        "@sinclair/typebox",
+        "lucide-react",
+        "mdast-util-from-markdown",
+        "@milkdown/kit",
+        MARKDOWN_UI_PACKAGE,
+      ]),
+    },
     {
       file: "packages/task-ui/package.json",
       name: TASK_UI_PACKAGE,
@@ -946,6 +1148,10 @@ export function analyzeImportBoundaries(root = ROOT) {
   analyzeTaskUiSources(root, violations);
 
   analyzeProjectsSources(root, violations);
+
+  analyzeMarkdownUiSources(root, violations);
+
+  analyzeNotesSources(root, violations);
 
   analyzeManifests(root, violations);
 

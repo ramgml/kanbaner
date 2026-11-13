@@ -360,11 +360,12 @@ export function MarkdownNoteEditor({
   }, []);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
-    const files = event.currentTarget.files;
+    // FileList в браузере живой: сначала копия, иначе reset очищает и её.
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
 
-    if (files && files.length > 0) {
-      void uploadFiles(Array.from(files));
+    if (files.length > 0) {
+      void uploadFiles(files);
     }
   };
 
