@@ -21,6 +21,11 @@ interface ImageReference {
   readonly end: number;
 }
 
+interface UrlRange {
+  readonly start: number;
+  readonly end: number;
+}
+
 function tree(markdown: string): MarkdownNode {
   return fromMarkdown(markdown) as unknown as MarkdownNode;
 }
@@ -49,6 +54,80 @@ function images(markdown: string): readonly ImageReference[] {
   });
 
   return references;
+}
+
+/**
+ * Находит диапазон destination внутри исходного текста inline image-узла.
+ *
+ * `mdast` сообщает URL, но не его позицию. Простой `indexOf` ошибается, если
+ * тот же текст встречается в alt или title, поэтому разбирается `![alt](...)`
+ * с учётом вложенных скобок в alt и escape-последовательностей.
+ */
+function locateDestination(source: string): UrlRange | null {
+  if (!source.startsWith("![")) {
+    return null;
+  }
+
+  let index = 2;
+  let depth = 1;
+
+  while (index < source.length) {
+    const character = source[index];
+
+    if (character === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (character === "[") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (character === "]") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) {
+        break;
+      }
+      continue;
+    }
+
+    index += 1;
+  }
+
+  if (depth !== 0 || source[index] !== "(") {
+    return null;
+  }
+
+  index += 1;
+  while (index < source.length && /\s/.test(source[index] ?? "")) {
+    index += 1;
+  }
+
+  if (source[index] === "<") {
+    const close = source.indexOf(">", index + 1);
+    return close < 0 ? null : { start: index + 1, end: close };
+  }
+
+  const start = index;
+  while (index < source.length) {
+    const character = source[index];
+
+    if (character === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (character === undefined || /\s/.test(character) || character === ")") {
+      break;
+    }
+
+    index += 1;
+  }
+
+  return index <= start ? null : { start, end: index };
 }
 
 export function attachmentUrl(id: string): string {
@@ -89,6 +168,10 @@ export function extractAttachmentIds(markdown: string): readonly string[] {
 /**
  * Заменяет URL только в AST image-узлах. Позиции узлов позволяют сохранить
  * остальной Markdown побайтово и не трогать похожий текст в коде/тексте.
+ *
+ * Если URL изменился, но inline-destination не удалось найти (например,
+ * reference-style image), выбрасывается `TypeError`: молча вернуть документ с
+ * невстроенным вложением нельзя.
  */
 export function replaceMarkdownImageUrls(
   markdown: string,
@@ -102,15 +185,14 @@ export function replaceMarkdownImageUrls(
         return null;
       }
 
-      const start = markdown.slice(image.start, image.end);
-      const urlOffset = start.indexOf(image.url);
-      if (urlOffset < 0) {
-        return null;
+      const range = locateDestination(markdown.slice(image.start, image.end));
+      if (range === null) {
+        throw new TypeError("Не удалось заменить URL изображения в Markdown");
       }
 
       return {
-        start: image.start + urlOffset,
-        end: image.start + urlOffset + image.url.length,
+        start: image.start + range.start,
+        end: image.start + range.end,
         nextUrl,
       };
     })

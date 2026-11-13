@@ -1,5 +1,6 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TProperties } from "@sinclair/typebox";
 import {
+  createJsonObjectSchema,
   DRAFT_2020_12,
   ResourceDescriptorSchema,
   ResourceLinkSchema,
@@ -19,6 +20,12 @@ const Id = Type.String({ minLength: 1, maxLength: 160 });
 const ExpectedVersion = Type.Integer({ minimum: 0 });
 const Limit = Type.Integer({ minimum: 1, maximum: NOTE_MAX_LIST_LIMIT, default: 50 });
 const Offset = Type.Integer({ minimum: 0, default: 0 });
+
+const INPUT_SCHEMA = { ...DRAFT_2020_12, additionalProperties: false } as const;
+
+function InputObject<Properties extends TProperties>(properties: Properties) {
+  return Type.Object(properties, INPUT_SCHEMA);
+}
 
 export const NoteAttachmentMimeTypeSchema = Type.Union(
   NOTE_ATTACHMENT_MIME_TYPES.map((value) => Type.Literal(value)),
@@ -86,43 +93,31 @@ export const NoteDetailsSchema = Type.Object(
   DRAFT_2020_12,
 );
 
-export const NoteCreateInputSchema = Type.Object(
-  {
-    parentId: Type.Optional(Type.Union([Id, Type.Null()])),
-    title: Type.Optional(Type.String({ maxLength: NOTE_TITLE_MAX_LENGTH })),
-    contentMarkdown: Type.Optional(Type.String({ maxLength: NOTE_CONTENT_MAX_LENGTH })),
-  },
-  DRAFT_2020_12,
-);
+export const NoteCreateInputSchema = InputObject({
+  parentId: Type.Optional(Type.Union([Id, Type.Null()])),
+  title: Type.Optional(Type.String({ maxLength: NOTE_TITLE_MAX_LENGTH })),
+  contentMarkdown: Type.Optional(Type.String({ maxLength: NOTE_CONTENT_MAX_LENGTH })),
+});
 
-export const NoteUpdateInputSchema = Type.Object(
-  {
-    id: Id,
-    expectedVersion: ExpectedVersion,
-    title: Type.Optional(Type.String({ maxLength: NOTE_TITLE_MAX_LENGTH })),
-    contentMarkdown: Type.Optional(Type.String({ maxLength: NOTE_CONTENT_MAX_LENGTH })),
-  },
-  DRAFT_2020_12,
-);
+export const NoteUpdateInputSchema = InputObject({
+  id: Id,
+  expectedVersion: ExpectedVersion,
+  title: Type.Optional(Type.String({ maxLength: NOTE_TITLE_MAX_LENGTH })),
+  contentMarkdown: Type.Optional(Type.String({ maxLength: NOTE_CONTENT_MAX_LENGTH })),
+});
 
-export const NoteMoveInputSchema = Type.Object(
-  {
-    id: Id,
-    expectedVersion: ExpectedVersion,
-    parentId: Type.Union([Id, Type.Null()]),
-    position: Type.Optional(Type.Integer({ minimum: 0 })),
-  },
-  DRAFT_2020_12,
-);
+export const NoteMoveInputSchema = InputObject({
+  id: Id,
+  expectedVersion: ExpectedVersion,
+  parentId: Type.Union([Id, Type.Null()]),
+  position: Type.Optional(Type.Integer({ minimum: 0 })),
+});
 
-export const NoteDeleteInputSchema = Type.Object(
-  {
-    id: Id,
-    expectedVersion: ExpectedVersion,
-    confirm: Type.Literal(true),
-  },
-  DRAFT_2020_12,
-);
+export const NoteDeleteInputSchema = InputObject({
+  id: Id,
+  expectedVersion: ExpectedVersion,
+  confirm: Type.Literal(true),
+});
 
 export const NoteDeleteSuccessSchema = Type.Object(
   {
@@ -140,28 +135,25 @@ export const NoteDeleteOutputSchema = Type.Union([
 ]);
 
 export const NoteMoveOutputSchema = Type.Object(
-  { view: NoteViewSchema, affectedNotes: Type.Array(NoteSchema) },
+  { note: NoteSchema, affectedNotes: Type.Array(NoteSchema) },
   DRAFT_2020_12,
 );
 
-export const NoteFavoriteInputSchema = Type.Object(
-  { id: Id, favorite: Type.Boolean() },
-  DRAFT_2020_12,
-);
+export const NoteFavoriteInputSchema = InputObject({
+  id: Id,
+  favorite: Type.Boolean(),
+});
 
-export const NoteVisitInputSchema = Type.Object({ id: Id }, DRAFT_2020_12);
-export const NoteGetInputSchema = Type.Object({ id: Id }, DRAFT_2020_12);
+export const NoteVisitInputSchema = InputObject({ id: Id });
+export const NoteGetInputSchema = InputObject({ id: Id });
 
-export const NoteListInputSchema = Type.Object(
-  {
-    parentId: Type.Optional(Type.Union([Id, Type.Null()])),
-    favorite: Type.Optional(Type.Boolean()),
-    recent: Type.Optional(Type.Boolean()),
-    limit: Type.Optional(Limit),
-    offset: Type.Optional(Offset),
-  },
-  DRAFT_2020_12,
-);
+export const NoteListInputSchema = InputObject({
+  parentId: Type.Optional(Type.Union([Id, Type.Null()])),
+  favorite: Type.Optional(Type.Boolean()),
+  recent: Type.Optional(Type.Boolean()),
+  limit: Type.Optional(Limit),
+  offset: Type.Optional(Offset),
+});
 
 export const NoteListOutputSchema = Type.Object(
   {
@@ -172,14 +164,11 @@ export const NoteListOutputSchema = Type.Object(
   DRAFT_2020_12,
 );
 
-export const NoteSearchInputSchema = Type.Object(
-  {
-    text: Type.String({ minLength: 1, maxLength: 500 }),
-    limit: Type.Optional(Limit),
-    offset: Type.Optional(Offset),
-  },
-  DRAFT_2020_12,
-);
+export const NoteSearchInputSchema = InputObject({
+  text: Type.String({ minLength: 1, maxLength: 500 }),
+  limit: Type.Optional(Limit),
+  offset: Type.Optional(Offset),
+});
 
 export const NoteSearchHitSchema = Type.Object(
   {
@@ -202,18 +191,37 @@ export const NoteSearchOutputSchema = Type.Object(
   DRAFT_2020_12,
 );
 
-export const NoteLinkInputSchema = Type.Object(
-  { noteId: Id, targetRef: ResourceRefSchema },
-  DRAFT_2020_12,
-);
+export const NoteLinkInputSchema = InputObject({
+  noteId: Id,
+  targetRef: ResourceRefSchema,
+});
 
-export const NoteLinksInputSchema = Type.Object({ ref: ResourceRefSchema }, DRAFT_2020_12);
+export const NoteLinksInputSchema = InputObject({ ref: ResourceRefSchema });
+
+/**
+ * Descriptor с уникальным `$id` вложенной схемы `metadata`.
+ *
+ * Публичная схема `ResourceDescriptorSchema` содержит общий `JsonObjectSchema`
+ * с фиксированным `$id`. Когда descriptor входит в одну схему дважды
+ * (`source`/`target`), AJV отклоняет её с ошибкой «resolves to more than one
+ * schema». Фабрика сохраняет форму descriptor из SDK, но даёт каждой копии
+ * собственную схему метаданных.
+ */
+function createResolvedDescriptorSchema() {
+  return Type.Object(
+    {
+      ...ResourceDescriptorSchema.properties,
+      metadata: Type.Optional(createJsonObjectSchema()),
+    },
+    DRAFT_2020_12,
+  );
+}
 
 export const ResolvedNoteLinkSchema = Type.Object(
   {
     link: ResourceLinkSchema,
-    source: Type.Union([ResourceDescriptorSchema, Type.Null()]),
-    target: Type.Union([ResourceDescriptorSchema, Type.Null()]),
+    source: Type.Union([createResolvedDescriptorSchema(), Type.Null()]),
+    target: Type.Union([createResolvedDescriptorSchema(), Type.Null()]),
   },
   DRAFT_2020_12,
 );
@@ -223,20 +231,17 @@ export const NoteLinksOutputSchema = Type.Object(
   DRAFT_2020_12,
 );
 
-export const NoteAttachmentCreateInputSchema = Type.Object(
-  {
-    noteId: Id,
-    mimeType: NoteAttachmentMimeTypeSchema,
-    contentBase64: Type.String({ minLength: 4 }),
-  },
-  DRAFT_2020_12,
-);
+export const NoteAttachmentCreateInputSchema = InputObject({
+  noteId: Id,
+  mimeType: NoteAttachmentMimeTypeSchema,
+  contentBase64: Type.String({ minLength: 4 }),
+});
 
-export const NoteAttachmentGetInputSchema = Type.Object({ id: Id }, DRAFT_2020_12);
-export const NoteAttachmentDeleteInputSchema = Type.Object(
-  { id: Id, confirm: Type.Literal(true) },
-  DRAFT_2020_12,
-);
+export const NoteAttachmentGetInputSchema = InputObject({ id: Id });
+export const NoteAttachmentDeleteInputSchema = InputObject({
+  id: Id,
+  confirm: Type.Literal(true),
+});
 export const NoteAttachmentOutputSchema = Type.Object(
   { attachment: NoteAttachmentDescriptorSchema },
   DRAFT_2020_12,
@@ -245,7 +250,7 @@ export const NoteAttachmentGetOutputSchema = Type.Object(
   { attachment: NoteAttachmentSchema },
   DRAFT_2020_12,
 );
-export const NoteExportInputSchema = Type.Object({ id: Id }, DRAFT_2020_12);
+export const NoteExportInputSchema = InputObject({ id: Id });
 export const NoteExportOutputSchema = Type.Object(
   {
     fileName: Type.String({ minLength: 1 }),

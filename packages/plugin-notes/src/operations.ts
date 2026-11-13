@@ -1,4 +1,11 @@
-import type { CommandMetadata, JsonObject, QueryMetadata } from "@kanbaner/plugin-sdk";
+import { Type } from "@sinclair/typebox";
+
+import {
+  DRAFT_2020_12,
+  type CommandMetadata,
+  type JsonObject,
+  type QueryMetadata,
+} from "@kanbaner/plugin-sdk";
 
 import {
   NOTES_COMMAND_IDS,
@@ -37,7 +44,10 @@ import {
 } from "./schemas.ts";
 
 const asSchema = (schema: unknown): JsonObject => schema as JsonObject;
-const NoteViewOutputSchema = { ...NoteViewSchema };
+
+const NoteViewOutputSchema = Type.Object({ view: NoteViewSchema }, DRAFT_2020_12);
+const UnlinkOutputSchema = Type.Object({ unlinked: Type.Boolean() }, DRAFT_2020_12);
+const AttachmentDeleteOutputSchema = Type.Object({ deleted: Type.Boolean() }, DRAFT_2020_12);
 
 function command(
   id: string,
@@ -81,15 +91,6 @@ function query(
   };
 }
 
-const ViewOutput = TypeBoxObjectView();
-function TypeBoxObjectView(): JsonObject {
-  return asSchema({
-    type: "object",
-    properties: { view: NoteViewOutputSchema },
-    required: ["view"],
-  });
-}
-
 export const NOTES_COMMAND_LIST: readonly CommandMetadata[] = Object.freeze([
   command(
     NOTES_COMMAND_IDS.create,
@@ -124,14 +125,14 @@ export const NOTES_COMMAND_LIST: readonly CommandMetadata[] = Object.freeze([
     NOTES_COMMAND_IDS.favoriteSet,
     "write",
     NoteFavoriteInputSchema,
-    ViewOutput,
+    NoteViewOutputSchema,
     "Добавляет или убирает страницу из избранного",
   ),
   command(
     NOTES_COMMAND_IDS.recordVisit,
     "write",
     NoteVisitInputSchema,
-    ViewOutput,
+    NoteViewOutputSchema,
     "Фиксирует последнее открытие страницы",
     { mcp: false },
   ),
@@ -147,7 +148,7 @@ export const NOTES_COMMAND_LIST: readonly CommandMetadata[] = Object.freeze([
     NOTES_COMMAND_IDS.unlink,
     "write",
     NoteLinkInputSchema,
-    TypeBoxVoidSchema(),
+    UnlinkOutputSchema,
     "Удаляет универсальную связь",
     { idempotency: "none" },
   ),
@@ -162,26 +163,11 @@ export const NOTES_COMMAND_LIST: readonly CommandMetadata[] = Object.freeze([
     NOTES_COMMAND_IDS.attachmentDelete,
     "destructive",
     NoteAttachmentDeleteInputSchema,
-    TypeBoxDeleteSchema(),
+    AttachmentDeleteOutputSchema,
     "Удаляет неиспользуемое вложение",
     { mcp: false },
   ),
 ]);
-
-function TypeBoxVoidSchema(): JsonObject {
-  return asSchema({
-    type: "object",
-    properties: { unlinked: { type: "boolean" } },
-    required: ["unlinked"],
-  });
-}
-function TypeBoxDeleteSchema(): JsonObject {
-  return asSchema({
-    type: "object",
-    properties: { deleted: { type: "boolean" } },
-    required: ["deleted"],
-  });
-}
 
 export const NOTES_QUERY_LIST: readonly QueryMetadata[] = Object.freeze([
   query(
