@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 
 import { ShieldAlert } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
-import { useUiContributions } from "../../ui/provider";
+import { useUiContributions, UiResourceOpenerRuntime } from "../../ui/provider";
 import { SETTINGS_PLUGINS_HREF } from "./nav-items";
 import { DesktopSidebar, MobileNavigation } from "./shell-nav";
 import { UiSlot } from "./ui-slot";
@@ -111,43 +111,59 @@ export function AppShell({ children, safeMode = false, problemCount = 0 }: AppSh
   const pathname = usePathname() ?? "/";
   const search = useSearchParams()?.toString() ?? "";
   const router = useRouter();
+  const [resourceNotice, setResourceNotice] = useState<string | null>(null);
   const replaceSearch = useCallback(
     (nextSearch: string) => {
       router.replace(`${pathname}${nextSearch}`, { scroll: false });
     },
     [pathname, router],
   );
+  const navigateToResource = useCallback(
+    (href: string) => {
+      setResourceNotice(null);
+      router.push(href, { scroll: false });
+    },
+    [router],
+  );
 
   return (
-    <div className="flex min-h-dvh w-full flex-col bg-background">
-      <a
-        href="#main-content"
-        className="sr-only rounded-md bg-background px-4 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:ring-2 focus:ring-ring"
-      >
-        К содержимому
-      </a>
+    <UiResourceOpenerRuntime navigate={navigateToResource} onUnavailable={setResourceNotice}>
+      <div className="flex min-h-dvh w-full flex-col bg-background">
+        <a
+          href="#main-content"
+          className="sr-only rounded-md bg-background px-4 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:ring-2 focus:ring-ring"
+        >
+          К содержимому
+        </a>
 
-      <div className="flex min-h-0 flex-1">
-        <DesktopSidebar pathname={pathname} safeMode={safeMode} problemCount={problemCount} />
+        <div className="flex min-h-0 flex-1">
+          <DesktopSidebar pathname={pathname} safeMode={safeMode} problemCount={problemCount} />
 
-        {/* details и main — соседние элементы горизонтального flex; колонкой
+          {/* details и main — соседние элементы горизонтального flex; колонкой
             остаётся только основной контент. */}
-        <div className="flex min-w-0 flex-1">
-          <main
-            id="main-content"
-            tabIndex={-1}
-            className="flex min-w-0 flex-1 flex-col px-3 pt-4 pb-24 focus:outline-none sm:px-6 md:pb-6"
-          >
-            {safeMode ? <SafeModeNotice problemCount={problemCount} /> : null}
-            {children}
-          </main>
+          <div className="flex min-w-0 flex-1">
+            <main
+              id="main-content"
+              tabIndex={-1}
+              className="flex min-w-0 flex-1 flex-col px-3 pt-4 pb-24 focus:outline-none sm:px-6 md:pb-6"
+            >
+              {safeMode ? <SafeModeNotice problemCount={problemCount} /> : null}
+              {resourceNotice === null ? null : (
+                <Alert role="status" data-testid="resource-open-notice" className="mb-4">
+                  <AlertTitle>Ресурс недоступен</AlertTitle>
+                  <AlertDescription>{resourceNotice}</AlertDescription>
+                </Alert>
+              )}
+              {children}
+            </main>
 
-          <DetailsSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
+            <DetailsSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
+          </div>
         </div>
-      </div>
 
-      <MobileNavigation pathname={pathname} safeMode={safeMode} />
-      <OverlaysSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
-    </div>
+        <MobileNavigation pathname={pathname} safeMode={safeMode} />
+        <OverlaysSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
+      </div>
+    </UiResourceOpenerRuntime>
   );
 }

@@ -1,8 +1,16 @@
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 
-import type { UiContribution, UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
+import { parseResourceRef } from "@kanbaner/plugin-sdk";
+import type {
+  JsonObject,
+  ResourceRef,
+  UiContribution,
+  UiContributionKind,
+  UiSlotId,
+} from "@kanbaner/plugin-sdk";
 
 import type { UiOperationInvoker } from "./operation-types";
+import type { UiResourceOpenResult } from "./resource-open";
 
 /**
  * Клиентский реестр UI-вкладов Plugin Contract v1.
@@ -40,6 +48,14 @@ export interface UiContributionRegistration {
   readonly render: UiComponent;
 }
 
+/**
+ * Рендер опубликованного плагином слота вместе с сериализуемым контекстом.
+ *
+ * Возвращает React-элемент, а не вызывает hooks: контекст и вклады
+ * разрешаются внутри вложенного `UiSlot`.
+ */
+export type UiSlotRenderer = (slot: UiSlotId, context?: JsonObject) => ReactNode;
+
 export type UiComponent = ComponentType<{
   readonly contribution: RegisteredUiContribution;
   /** Вызов публичной операции через общий OperationBus. */
@@ -50,6 +66,22 @@ export type UiComponent = ComponentType<{
   readonly search?: string | undefined;
   /** Поддерживаемое обновление query string через App Router. */
   readonly replaceSearch?: ((search: string) => void) | undefined;
+  /**
+   * Сериализуемый контекст вложенного слота.
+   *
+   * Вклад не получает DOM или React-объекты родителя: только JSON-значения
+   * вроде `{ resourceRef: "kanbaner.tasks:task:<id>" }`.
+   */
+  readonly context?: JsonObject | undefined;
+  /**
+   * Открывает `ResourceRef` через зарегистрированный resource-opener.
+   *
+   * Возвращает безопасный результат: неизвестный или отключённый ресурс не
+   * бросает исключение и не роняет shell.
+   */
+  readonly openResource?: ((ref: ResourceRef) => UiResourceOpenResult) | undefined;
+  /** Рендерит вклад в опубликованный слот с JSON-контекстом. */
+  readonly renderSlot?: UiSlotRenderer | undefined;
 }>;
 
 export interface UiContributionRegistry {
@@ -77,6 +109,13 @@ export interface UiContributionRegistry {
   list(slot: UiSlotId): readonly RegisteredUiContribution[];
   listAll(): readonly RegisteredUiContribution[];
   resolveRoute(pathname: string): RegisteredUiContribution | null;
+  /**
+   * Находит resource-opener для `ResourceRef`.
+   *
+   * Совпадение строится по `pluginId` и `resourceType` из ссылки. Для вкладов
+   * другого домена используется явное поле `resourcePluginId`.
+   */
+  resolveResourceOpener(ref: ResourceRef): RegisteredUiContribution | null;
   subscribe(listener: () => void): () => void;
   getVersion(): number;
   size(): number;
@@ -195,6 +234,10 @@ function assertContribution(value: UiContribution): UiContribution {
     assertNonEmptyString(value.resourceType, "resourceType");
   }
 
+  if (value.resourcePluginId !== undefined) {
+    assertNonEmptyString(value.resourcePluginId, "resourcePluginId");
+  }
+
   if (value.route !== undefined) {
     assertNonEmptyString(value.route, "route");
     normalizeUiViewRoute(value.route);
@@ -202,6 +245,11 @@ function assertContribution(value: UiContribution): UiContribution {
 
   if (value.kind === "navigation") {
     assertNonEmptyString(value.title, "title");
+    assertNonEmptyString(value.route, "route");
+  }
+
+  if (value.kind === "resource-opener") {
+    assertNonEmptyString(value.resourceType, "resourceType");
     assertNonEmptyString(value.route, "route");
   }
 
@@ -261,7 +309,8 @@ function contributionEquals(left: UiContribution, right: UiContribution): boolea
     left.description === right.description &&
     left.route === right.route &&
     left.commandId === right.commandId &&
-    left.resourceType === right.resourceType
+    left.resourceType === right.resourceType &&
+    left.resourcePluginId === right.resourcePluginId
   );
 }
 
@@ -679,6 +728,27 @@ class UiContributionRegistryImpl implements UiContributionRegistry {
     } catch {
       return null;
     }
+  }
+
+  resolveResourceOpener(ref: ResourceRef): RegisteredUiContribution | null {
+    let parts: ReturnType<typeof parseResourceRef>;
+
+    try {
+      parts = parseResourceRef(ref);
+    } catch {
+      return null;
+    }
+
+    // listAll уже отсортирован по приоритету; первый подходящий вклад
+    // детерминирован при равных приоритетах благодаря сортировке по ID.
+    return (
+      this.listAll().find(
+        (entry) =>
+          entry.contribution.kind === "resource-opener" &&
+          entry.contribution.resourceType === parts.resourceType &&
+          (entry.contribution.resourcePluginId ?? entry.pluginId) === parts.pluginId,
+      ) ?? null
+    );
   }
 
   subscribe(listener: () => void): () => void {

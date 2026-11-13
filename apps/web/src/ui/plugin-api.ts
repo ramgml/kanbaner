@@ -12,7 +12,17 @@ export {
   type UiContributionRegistration,
   type UiContributionRegistry,
   type UiRegistryErrorCode,
+  type UiSlotRenderer,
 } from "./registry";
+
+export {
+  buildResourceHref,
+  resolveResourceOpen,
+  type UiResourceAvailability,
+  type UiResourceOpener,
+  type UiResourceOpenErrorCode,
+  type UiResourceOpenResult,
+} from "./resource-open";
 
 export interface UiPluginContribution {
   readonly metadata: UiContribution;

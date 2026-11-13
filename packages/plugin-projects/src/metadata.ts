@@ -1,6 +1,12 @@
 import type { UiContribution } from "@kanbaner/plugin-sdk";
 
-import { TASK_STATUSES, type TaskStatus } from "@kanbaner/plugin-tasks/contract";
+import {
+  PLUGIN_ID as TASKS_PLUGIN_ID,
+  PROJECT_RESOURCE_TYPE,
+  TASK_RESOURCE_TYPE,
+  TASK_STATUSES,
+  type TaskStatus,
+} from "@kanbaner/plugin-tasks/contract";
 
 /** Глобально уникальный Plugin ID рабочего пространства проектов. */
 export const PROJECTS_PLUGIN_ID = "kanbaner.projects" as const;
@@ -19,6 +25,14 @@ export const PROJECTS_OVERVIEW_ROUTE = "/view/projects" as const;
 
 /** Маршруты, на которых показывается секция «Проекты». */
 export const PROJECT_ROUTES = [KANBAN_ROUTE, TASK_LIST_ROUTE, PROJECTS_OVERVIEW_ROUTE] as const;
+
+/**
+ * Опубликованный слот связанных материалов задачи.
+ *
+ * Плагин-проект только объявляет outlet и передаёт ResourceRef задачи; сам он
+ * не знает и не импортирует плагины, которые его заполняют.
+ */
+export const TASK_RELATED_SLOT = "kanbaner.projects.task.related" as const;
 
 export type ProjectRoute = (typeof PROJECT_ROUTES)[number];
 
@@ -112,5 +126,31 @@ export const projectsUiContributions: readonly UiContribution[] = Object.freeze(
     title: "Проекты",
     description: "Вход в рабочее пространство проектов",
     route: `${PROJECTS_OVERVIEW_ROUTE}?entry=1`,
+  },
+  {
+    // Открытие ресурса чужого домена: shell добавляет к маршруту
+    // `resource=<encoded ResourceRef>`, а KanbanView переводит ссылку в
+    // существующий выбор проекта.
+    id: "kanbaner.projects.resource-opener.project",
+    slot: "app.main",
+    kind: "resource-opener",
+    priority: 90,
+    title: "Открыть проект",
+    description: "Открывает проект задач в рабочем пространстве",
+    route: KANBAN_ROUTE,
+    resourcePluginId: TASKS_PLUGIN_ID,
+    resourceType: PROJECT_RESOURCE_TYPE,
+  },
+  {
+    // Задача открывается в существующем Trello-модале через query `task`.
+    id: "kanbaner.projects.resource-opener.task",
+    slot: "app.main",
+    kind: "resource-opener",
+    priority: 90,
+    title: "Открыть задачу",
+    description: "Открывает задачу задач в канбане проекта",
+    route: KANBAN_ROUTE,
+    resourcePluginId: TASKS_PLUGIN_ID,
+    resourceType: TASK_RESOURCE_TYPE,
   },
 ]);

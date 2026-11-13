@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 
 import type { SortDirection, TaskSortField } from "@kanbaner/plugin-tasks/contract";
 
+import { parseWorkspaceResource } from "../ui/resource-query.ts";
+
 export const TASK_LIST_PAGE_SIZE = 25;
 
 export type TaskListSortField = Extract<
@@ -81,11 +83,12 @@ export function parseTaskListQuery(search: string): TaskListQueryState {
   const params = new URLSearchParams(search);
   const sort = params.get("sort");
   const direction = params.get("dir");
-  const taskId = params.get("task")?.trim() ?? "";
+  const resource = parseWorkspaceResource(params.get("resource"));
+  const taskId = first(params, "task") || resource.taskId || "";
 
   return {
     ...DEFAULT_TASK_LIST_QUERY,
-    projectId: first(params, "project"),
+    projectId: first(params, "project") || resource.projectId || "",
     columnId: first(params, "column"),
     legacyStatus: first(params, "status"),
     priority: first(params, "priority"),

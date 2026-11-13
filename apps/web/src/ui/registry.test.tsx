@@ -641,3 +641,81 @@ describe("синхронизация серверных metadata и привяз
     expect(registry.list("app.main")[0]?.render).toBe(realRender);
   });
 });
+
+describe("resource-opener в реестре", () => {
+  const opener = contribution({
+    id: "kanbaner.projects.resource-opener.task",
+    kind: "resource-opener",
+    resourcePluginId: "kanbaner.tasks",
+    resourceType: "task",
+    route: "/view/kanban",
+  });
+
+  it("находит opener по pluginId и resourceType из ResourceRef", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.register("kanbaner.projects", opener, render);
+
+    expect(registry.resolveResourceOpener("kanbaner.tasks:task:task-1")?.contribution.id).toBe(
+      "kanbaner.projects.resource-opener.task",
+    );
+  });
+
+  it("не подменяет opener при другом типе, плагине или неверной ссылке", () => {
+    const registry = createUiContributionRegistry();
+
+    registry.register("kanbaner.projects", opener, render);
+
+    expect(registry.resolveResourceOpener("kanbaner.tasks:project:project-1")).toBeNull();
+    expect(registry.resolveResourceOpener("kanbaner.notes:task:note-1")).toBeNull();
+    expect(registry.resolveResourceOpener("not-a-ref")).toBeNull();
+  });
+
+  it("по умолчанию считает владельцем ресурса владельца вклада", () => {
+    const registry = createUiContributionRegistry();
+    const ownOpener = contribution({
+      id: "kanbaner.notes.resource-opener.note",
+      kind: "resource-opener",
+      resourceType: "note",
+      route: "/view/notes",
+    });
+
+    registry.register("kanbaner.notes", ownOpener, render);
+
+    expect(registry.resolveResourceOpener("kanbaner.notes:note:note-1")?.contribution.id).toBe(
+      "kanbaner.notes.resource-opener.note",
+    );
+  });
+
+  it("требует route и resourceType у resource-opener", () => {
+    const registry = createUiContributionRegistry();
+
+    expectRegistryError(
+      () =>
+        registry.register(
+          "kanbaner.projects",
+          contribution({
+            id: "missing-route",
+            kind: "resource-opener",
+            resourceType: "task",
+          }),
+          render,
+        ),
+      "INVALID_CONTRIBUTION",
+    );
+
+    expectRegistryError(
+      () =>
+        registry.register(
+          "kanbaner.projects",
+          contribution({
+            id: "missing-type",
+            kind: "resource-opener",
+            route: "/view/kanban",
+          }),
+          render,
+        ),
+      "INVALID_CONTRIBUTION",
+    );
+  });
+});

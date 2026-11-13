@@ -22,6 +22,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 
 import type { Project, Task, TaskColumn, TaskPriority } from "@kanbaner/plugin-tasks/contract";
@@ -125,6 +126,13 @@ export interface TaskModalProps {
   readonly onDelete: () => void;
   readonly onDiscardDraft: () => void;
   readonly onKeepEditing: () => void;
+  /**
+   * Outlet `kanbaner.projects.task.related`.
+   *
+   * Содержимое приходит из чужого UI-плагина через shell; карточка не знает,
+   * какие заметки или другие ресурсы здесь отрисованы.
+   */
+  readonly relatedSlot?: ReactNode;
 }
 
 const actionClass =
@@ -233,6 +241,7 @@ export function TaskModal({
   onDelete,
   onDiscardDraft,
   onKeepEditing,
+  relatedSlot,
 }: TaskModalProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [subtaskError, setSubtaskError] = useState<string | null>(null);
@@ -1311,6 +1320,16 @@ export function TaskModal({
                 Сохранить теги
               </button>
             </section>
+
+            {relatedSlot === undefined || relatedSlot === null ? null : (
+              <section
+                aria-label="Связанные материалы"
+                data-testid="kanban-related-slot"
+                className="flex flex-col gap-2"
+              >
+                {relatedSlot}
+              </section>
+            )}
 
             <section className="rounded-lg border border-destructive/30 p-3">
               {confirmingDelete ? (

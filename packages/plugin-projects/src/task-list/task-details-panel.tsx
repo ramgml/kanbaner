@@ -6,6 +6,7 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  formatTaskRef,
   type Project,
   type ProjectGetOutput,
   type Task,
@@ -27,6 +28,7 @@ import {
   taskToFormValues,
   type TaskFormValues,
   type UiOperationInvoker,
+  type UiSlotRenderer,
 } from "@kanbaner/task-ui";
 
 import {
@@ -43,7 +45,7 @@ import {
   updateTaskListQuery,
   useTaskListQuery,
 } from "./query-state.ts";
-import { TASK_LIST_ROUTE } from "../metadata.ts";
+import { TASK_LIST_ROUTE, TASK_RELATED_SLOT } from "../metadata.ts";
 import { ViewToggle } from "../ui/view-toggle.tsx";
 
 export interface TaskDetailsPanelProps {
@@ -60,6 +62,8 @@ export interface TaskDetailsPanelProps {
   readonly pathname?: string | undefined;
   /** Актуальная query string App Router: синхронизирует list/task состояние. */
   readonly search?: string | undefined;
+  /** Outlet вложенного слота из shell-а. */
+  readonly renderSlot?: UiSlotRenderer | undefined;
 }
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 1280px)";
@@ -114,7 +118,13 @@ function focusableElements(container: HTMLElement): readonly HTMLElement[] {
  * изменения идут через публичные команды; после команды выполняется
  * повторный `task.get` и запрос списка через общую ревизию.
  */
-export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDetailsPanelProps) {
+export function TaskDetailsPanel({
+  invoke,
+  variant,
+  pathname,
+  search,
+  renderSlot,
+}: TaskDetailsPanelProps) {
   const query = useTaskListQuery(search);
   const taskId = query.taskId;
   const workspaceSearch = serializeTaskListQuery(query);
@@ -509,6 +519,11 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
       />
     );
 
+  const relatedSlot =
+    variant === "desktop" && renderSlot !== undefined && task !== null && task.id === taskId
+      ? renderSlot(TASK_RELATED_SLOT, { resourceRef: formatTaskRef(task.id) })
+      : null;
+
   if (variant === "mobile") {
     return (
       <dialog
@@ -539,6 +554,11 @@ export function TaskDetailsPanel({ invoke, variant, pathname, search }: TaskDeta
   return (
     <div data-testid="task-details-desktop" className="flex min-w-0 flex-col gap-2">
       {content}
+      {relatedSlot === null ? null : (
+        <div data-testid="task-details-related-slot" className="flex flex-col gap-2">
+          {relatedSlot}
+        </div>
+      )}
     </div>
   );
 }

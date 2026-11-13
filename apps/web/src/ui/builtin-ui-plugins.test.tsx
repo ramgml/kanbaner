@@ -51,7 +51,12 @@ describe("composition встроенных UI-плагинов", () => {
     );
 
     expect(registry.size()).toBe(plugin.contributions.length);
-    expect(registry.list("app.main")).toHaveLength(3);
+    // Кроме панелей в app.main живут два resource-opener-а проектов: они не
+    // рендерят UI и нужны shell-у только как metadata для открытия ресурсов.
+    expect(registry.list("app.main")).toHaveLength(5);
+    expect(
+      registry.list("app.main").filter((entry) => entry.contribution.kind === "view"),
+    ).toHaveLength(3);
     expect(registry.list("app.sidebar")).toHaveLength(2);
     expect(registry.list("app.details")).toHaveLength(1);
     expect(registry.list("app.overlays")).toHaveLength(3);
