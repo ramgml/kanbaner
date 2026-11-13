@@ -99,10 +99,12 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
     }
   };
 
-  const unlink = async (otherRef: ResourceRef) => {
+  const unlink = async (sourceRef: ResourceRef, targetRef: ResourceRef) => {
     setBusy(true);
     try {
-      await invokeNotes(invoke, NOTES_COMMAND_IDS.unlink, { noteId, targetRef: otherRef });
+      // Удаляем именно фактическую связь, не разворачивая направление:
+      // заметка может быть как source, так и target.
+      await invokeNotes(invoke, NOTES_COMMAND_IDS.unlink, { noteId, sourceRef, targetRef });
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить связь");
@@ -153,7 +155,7 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
                   type="button"
                   aria-label={`Удалить связь с ${descriptor?.title ?? otherRef}`}
                   disabled={busy}
-                  onClick={() => void unlink(otherRef)}
+                  onClick={() => void unlink(item.link.sourceRef, item.link.targetRef)}
                   className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <Unlink aria-hidden="true" className="size-3.5" />

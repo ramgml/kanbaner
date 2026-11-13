@@ -20,6 +20,13 @@ interface NoteTreeProps {
   readonly onCreate: (parentId: string | null) => void;
   readonly onMove: (id: string, parentId: string | null, position?: number) => void;
   readonly onDelete: (view: NoteView) => void;
+  /**
+   * Плоский список в переданном порядке.
+   *
+   * Нужен для «Недавних»: порядок задаёт вызывающий (lastOpenedAt), а дерево
+   * не пересортировывает элементы по position и не показывает иерархию.
+   */
+  readonly flat?: boolean;
 }
 
 const buttonClass =
@@ -32,6 +39,7 @@ export function NoteTree({
   onCreate,
   onMove,
   onDelete,
+  flat = false,
 }: NoteTreeProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const byParent = useMemo(() => {
@@ -74,8 +82,8 @@ export function NoteTree({
 
   const renderNode = (view: NoteView, depth: number): ReactNode => {
     const id = view.note.id;
-    const children = byParent.get(id) ?? [];
-    const isExpanded = expanded.has(id);
+    const children = flat ? [] : (byParent.get(id) ?? []);
+    const isExpanded = !flat && expanded.has(id);
     const siblings = byParent.get(view.note.parentId) ?? roots;
     const index = siblings.findIndex((item) => item.note.id === id);
 
@@ -83,53 +91,69 @@ export function NoteTree({
       <li key={id}>
         <div
           data-note-tree-item={id}
-          draggable
-          onDragStart={(event) => {
-            event.dataTransfer.setData("application/x-kanbaner-note", id);
-            event.dataTransfer.effectAllowed = "move";
-          }}
-          onDragOver={(event) => {
-            if (event.dataTransfer.types.includes("application/x-kanbaner-note")) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-            }
-          }}
-          onDrop={(event) => {
-            const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
-            if (dragged && dragged !== id) {
-              event.preventDefault();
-              onMove(dragged, view.note.parentId, Math.max(0, index));
-            }
-          }}
+          draggable={!flat}
+          onDragStart={
+            flat
+              ? undefined
+              : (event) => {
+                  event.dataTransfer.setData("application/x-kanbaner-note", id);
+                  event.dataTransfer.effectAllowed = "move";
+                }
+          }
+          onDragOver={
+            flat
+              ? undefined
+              : (event) => {
+                  if (event.dataTransfer.types.includes("application/x-kanbaner-note")) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }
+                }
+          }
+          onDrop={
+            flat
+              ? undefined
+              : (event) => {
+                  const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
+                  if (dragged && dragged !== id) {
+                    event.preventDefault();
+                    onMove(dragged, view.note.parentId, Math.max(0, index));
+                  }
+                }
+          }
           className={`group flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
             selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
           }`}
           style={{ paddingLeft: `${depth * 12 + 2}px` }}
         >
-          <GripVertical aria-hidden="true" className="size-3 shrink-0 text-muted-foreground/50" />
-          <button
-            type="button"
-            aria-label={
-              isExpanded ? `Свернуть ${view.note.title}` : `Развернуть ${view.note.title}`
-            }
-            aria-expanded={children.length > 0 ? isExpanded : undefined}
-            disabled={children.length === 0}
-            onClick={() =>
-              setExpanded((previous) => {
-                const next = new Set(previous);
-                if (next.has(id)) next.delete(id);
-                else next.add(id);
-                return next;
-              })
-            }
-            className={`${buttonClass} ${children.length === 0 ? "invisible" : ""}`}
-          >
-            {isExpanded ? (
-              <ChevronDown aria-hidden="true" className="size-3.5" />
-            ) : (
-              <ChevronRight aria-hidden="true" className="size-3.5" />
-            )}
-          </button>
+          {flat ? null : (
+            <GripVertical aria-hidden="true" className="size-3 shrink-0 text-muted-foreground/50" />
+          )}
+          {flat ? null : (
+            <button
+              type="button"
+              aria-label={
+                isExpanded ? `Свернуть ${view.note.title}` : `Развернуть ${view.note.title}`
+              }
+              aria-expanded={children.length > 0 ? isExpanded : undefined}
+              disabled={children.length === 0}
+              onClick={() =>
+                setExpanded((previous) => {
+                  const next = new Set(previous);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                })
+              }
+              className={`${buttonClass} ${children.length === 0 ? "invisible" : ""}`}
+            >
+              {isExpanded ? (
+                <ChevronDown aria-hidden="true" className="size-3.5" />
+              ) : (
+                <ChevronRight aria-hidden="true" className="size-3.5" />
+              )}
+            </button>
+          )}
           <button
             type="button"
             data-note-select={id}
@@ -143,24 +167,28 @@ export function NoteTree({
             ) : null}
           </button>
           <div className="flex shrink-0 items-center opacity-100 transition-opacity focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
-            <button
-              type="button"
-              aria-label={`Переместить ${view.note.title} выше`}
-              disabled={index <= 0}
-              onClick={() => onMove(id, view.note.parentId, index - 1)}
-              className={`${buttonClass} text-xs disabled:opacity-30`}
-            >
-              ↑
-            </button>
-            <button
-              type="button"
-              aria-label={`Переместить ${view.note.title} ниже`}
-              disabled={index < 0 || index >= siblings.length - 1}
-              onClick={() => onMove(id, view.note.parentId, index + 1)}
-              className={`${buttonClass} text-xs disabled:opacity-30`}
-            >
-              ↓
-            </button>
+            {flat ? null : (
+              <>
+                <button
+                  type="button"
+                  aria-label={`Переместить ${view.note.title} выше`}
+                  disabled={index <= 0}
+                  onClick={() => onMove(id, view.note.parentId, index - 1)}
+                  className={`${buttonClass} text-xs disabled:opacity-30`}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Переместить ${view.note.title} ниже`}
+                  disabled={index < 0 || index >= siblings.length - 1}
+                  onClick={() => onMove(id, view.note.parentId, index + 1)}
+                  className={`${buttonClass} text-xs disabled:opacity-30`}
+                >
+                  ↓
+                </button>
+              </>
+            )}
             <button
               type="button"
               data-note-add-child={id}
@@ -196,17 +224,21 @@ export function NoteTree({
   return (
     <div className="min-w-0">
       <ul
-        aria-label="Дерево заметок"
+        aria-label={flat ? "Список заметок" : "Дерево заметок"}
         className="m-0 list-none p-0"
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
-          const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
-          if (dragged && event.target === event.currentTarget) {
-            onMove(dragged, null);
-          }
-        }}
+        onDragOver={flat ? undefined : (event) => event.preventDefault()}
+        onDrop={
+          flat
+            ? undefined
+            : (event) => {
+                const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
+                if (dragged && event.target === event.currentTarget) {
+                  onMove(dragged, null);
+                }
+              }
+        }
       >
-        {roots.map((view) => renderNode(view, 0))}
+        {flat ? items.map((view) => renderNode(view, 0)) : roots.map((view) => renderNode(view, 0))}
       </ul>
       {items.length === 0 ? (
         <p className="px-2 py-6 text-center text-sm text-muted-foreground">Заметок пока нет</p>

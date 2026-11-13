@@ -17,6 +17,7 @@ import type { ResourceRef } from "@kanbaner/plugin-sdk";
 import { NOTES_COMMAND_IDS, NOTES_QUERY_IDS } from "../constants.ts";
 import { extractAttachmentIds } from "../markdown-attachments.ts";
 import type {
+  Note,
   NoteAttachment,
   NoteAttachmentDescriptor,
   NoteAttachmentMimeType,
@@ -36,9 +37,11 @@ import { NoteTree } from "./note-tree.tsx";
 import {
   fileToBase64,
   invokeNotes,
+  newIdempotencyKey,
   noteIdFromSearch,
   NotesUiError,
   searchWithNote,
+  snapshotIdempotencyKey,
   type NotesUiRendererProps,
 } from "./runtime.ts";
 
@@ -52,6 +55,22 @@ const inputClass =
 const buttonClass =
   "inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 
+/** Предки заметки из плоского списка: от корня к родителю. */
+function ancestorsOf(note: Note, items: readonly NoteView[]): readonly Note[] {
+  const byId = new Map(items.map((item) => [item.note.id, item.note] as const));
+  const ancestors: Note[] = [];
+  const seen = new Set([note.id]);
+  let parentId = note.parentId;
+  while (parentId !== null && !seen.has(parentId)) {
+    const parent = byId.get(parentId);
+    if (parent === undefined) break;
+    ancestors.unshift(parent);
+    seen.add(parent.id);
+    parentId = parent.parentId;
+  }
+  return ancestors;
+}
+
 export function NotesView(props: NotesViewProps) {
   const { invoke, search, replaceSearch, openResource } = props;
   const [items, setItems] = useState<readonly NoteView[]>([]);
@@ -64,6 +83,7 @@ export function NotesView(props: NotesViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [conflict, setConflict] = useState(false);
+  const [cleanupWarning, setCleanupWarning] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [editorValue, setEditorValue] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -79,6 +99,12 @@ export function NotesView(props: NotesViewProps) {
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachmentsRef = useRef<readonly NoteAttachmentDescriptor[]>([]);
   const loadSequenceRef = useRef(0);
+  /** Растёт при каждом изменении черновика; защищает ввод от загрузки. */
+  const draftRevisionRef = useRef(0);
+  /** Ключ создания живёт до успеха, чтобы retry не создавал дубль. */
+  const createKeyRef = useRef<{ readonly key: string; readonly parentId: string | null } | null>(
+    null,
+  );
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -109,73 +135,132 @@ export function NotesView(props: NotesViewProps) {
     return all;
   }, [invoke]);
 
+  const cleanupAttachments = useCallback(
+    async (id: string, contentMarkdown: string, snapshot: readonly NoteAttachmentDescriptor[]) => {
+      const referenced = new Set(extractAttachmentIds(contentMarkdown));
+      const currentIds = new Set(attachmentsRef.current.map((attachment) => attachment.id));
+      // Считаем только вложения снимка, которые ещё принадлежат текущей заметке:
+      // загрузка, завершившаяся во время сохранения, не должна быть удалена.
+      const removed = snapshot.filter(
+        (attachment) => currentIds.has(attachment.id) && !referenced.has(attachment.id),
+      );
+      if (removed.length === 0) return;
+
+      const deleted = new Set<string>();
+      const failures: string[] = [];
+      for (const attachment of removed) {
+        try {
+          await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
+            id: attachment.id,
+            confirm: true,
+          });
+          deleted.add(attachment.id);
+        } catch (reason) {
+          failures.push(reason instanceof Error ? reason.message : attachment.id);
+        }
+      }
+
+      if (deleted.size > 0 && selectedIdRef.current === id) {
+        attachmentsRef.current = attachmentsRef.current.filter(
+          (attachment) => !deleted.has(attachment.id),
+        );
+        setDetails((current) =>
+          current?.view.note.id === id
+            ? { ...current, attachments: attachmentsRef.current }
+            : current,
+        );
+      }
+      // Ошибка очистки — отдельное предупреждение, а не ошибка сохранения.
+      setCleanupWarning(
+        failures.length > 0
+          ? `Не удалось удалить неиспользуемые изображения: ${failures[0]}`
+          : null,
+      );
+    },
+    [invoke],
+  );
+
   const saveNow = useCallback((): Promise<void> => {
     if (saveTimerRef.current !== null) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
 
-    saveChainRef.current = saveChainRef.current.then(async () => {
-      const id = selectedIdRef.current;
-      if (id === null || !dirtyRef.current) return;
-      const savedTitle = titleRef.current;
-      const savedContent = contentRef.current;
-      const expectedVersion = versionRef.current;
-      setSaveState("saving");
-      setConflict(false);
-
-      try {
-        const next = await invokeNotes<NoteDetails>(invoke, NOTES_COMMAND_IDS.update, {
+    saveChainRef.current = saveChainRef.current
+      .then(async () => {
+        const id = selectedIdRef.current;
+        if (id === null || !dirtyRef.current) return;
+        // Снимок операции: все решения после await принимаются по этим данным,
+        // а не по refs, которые могла изменить другая открытая заметка.
+        const snapshot = {
           id,
-          expectedVersion,
-          title: savedTitle,
-          contentMarkdown: savedContent,
-        });
+          title: titleRef.current,
+          content: contentRef.current,
+          expectedVersion: versionRef.current,
+          attachments: attachmentsRef.current,
+        };
+        setSaveState("saving");
+        setConflict(false);
+
+        let next: NoteDetails;
+        try {
+          next = await invokeNotes<NoteDetails>(
+            invoke,
+            NOTES_COMMAND_IDS.update,
+            {
+              id: snapshot.id,
+              expectedVersion: snapshot.expectedVersion,
+              title: snapshot.title,
+              contentMarkdown: snapshot.content,
+            },
+            {
+              idempotencyKey: snapshotIdempotencyKey("note-update", {
+                id: snapshot.id,
+                expectedVersion: snapshot.expectedVersion,
+                title: snapshot.title,
+                contentMarkdown: snapshot.content,
+              }),
+            },
+          );
+        } catch (reason) {
+          if (selectedIdRef.current !== snapshot.id) return;
+          setSaveState("error");
+          setConflict(reason instanceof NotesUiError && reason.code === "VERSION_CONFLICT");
+          setError(reason instanceof Error ? reason.message : "Не удалось сохранить заметку");
+          return;
+        }
+
+        // Пока запрос был в полёте, пользователь мог открыть другую заметку:
+        // её refs, details и состояние сохранения менять нельзя.
+        if (selectedIdRef.current !== snapshot.id) return;
+
         versionRef.current = next.view.note.version;
         setError(null);
-        const unchanged =
-          selectedIdRef.current === id &&
-          titleRef.current === savedTitle &&
-          contentRef.current === savedContent;
-        if (unchanged) {
+        const draftUnchanged =
+          titleRef.current === snapshot.title && contentRef.current === snapshot.content;
+        if (draftUnchanged) {
           dirtyRef.current = false;
           setSaveState("saved");
         } else {
           setSaveState("dirty");
         }
         setDetails((current) =>
-          current?.view.note.id === id ? { ...next, attachments: attachmentsRef.current } : current,
+          current?.view.note.id === snapshot.id
+            ? { ...next, attachments: attachmentsRef.current }
+            : current,
         );
-
-        const referenced = new Set(extractAttachmentIds(savedContent));
-        const removed = attachmentsRef.current.filter(
-          (attachment) => !referenced.has(attachment.id),
-        );
-        for (const attachment of removed) {
-          await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
-            id: attachment.id,
-            confirm: true,
-          });
-        }
-        if (removed.length > 0) {
-          attachmentsRef.current = attachmentsRef.current.filter((attachment) =>
-            referenced.has(attachment.id),
-          );
-          setDetails((current) =>
-            current?.view.note.id === id
-              ? { ...current, attachments: attachmentsRef.current }
-              : current,
-          );
-        }
         void refreshNotes().catch(() => undefined);
-      } catch (reason) {
-        setSaveState("error");
-        setConflict(reason instanceof NotesUiError && reason.code === "VERSION_CONFLICT");
-        setError(reason instanceof Error ? reason.message : "Не удалось сохранить заметку");
-      }
-    });
+        setCleanupWarning(null);
+
+        // Если черновик изменился, удалённое изображение могло вернуться
+        // (undo): очистка вложений в этом случае не выполняется.
+        if (!draftUnchanged) return;
+
+        await cleanupAttachments(snapshot.id, snapshot.content, snapshot.attachments);
+      })
+      .catch(() => undefined);
     return saveChainRef.current;
-  }, [invoke, refreshNotes]);
+  }, [cleanupAttachments, invoke, refreshNotes]);
 
   const saveNowRef = useRef(saveNow);
   useEffect(() => {
@@ -208,9 +293,12 @@ export function NotesView(props: NotesViewProps) {
   const loadNote = useCallback(
     async (id: string, updateLocation = true) => {
       const sequence = ++loadSequenceRef.current;
+      const revisionAtStart = draftRevisionRef.current;
+      const sameNoteAtStart = selectedIdRef.current === id;
       setLoading(true);
       setError(null);
       setConflict(false);
+      setCleanupWarning(null);
       try {
         const next = await invokeNotes<NoteDetails>(invoke, NOTES_QUERY_IDS.get, { id });
         const loadedAttachments = await Promise.all(
@@ -225,20 +313,27 @@ export function NotesView(props: NotesViewProps) {
         );
         if (sequence !== loadSequenceRef.current) return;
 
+        // Ввод, начавшийся после старта get/attachmentGet, не затирается:
+        // для той же заметки сохраняем черновик, dirty и состояние сохранения.
+        const draftChanged = draftRevisionRef.current !== revisionAtStart;
+        const keepDraft = sameNoteAtStart && draftChanged;
+
         const cache = new AttachmentUrlCache();
         for (const attachment of loadedAttachments) cache.add(attachment);
         cacheRef.current = cache;
         attachmentsRef.current = next.attachments;
         selectedIdRef.current = id;
-        titleRef.current = next.view.note.title;
-        contentRef.current = next.view.note.contentMarkdown;
         versionRef.current = next.view.note.version;
-        dirtyRef.current = false;
         setSelectedId(id);
         setDetails(next);
-        setTitle(next.view.note.title);
-        setEditorValue(cache.toEditor(next.view.note.contentMarkdown));
-        setSaveState("idle");
+        if (!keepDraft) {
+          titleRef.current = next.view.note.title;
+          contentRef.current = next.view.note.contentMarkdown;
+          dirtyRef.current = false;
+          setTitle(next.view.note.title);
+          setEditorValue(cache.toEditor(next.view.note.contentMarkdown));
+          setSaveState("idle");
+        }
         setSearchResults(null);
         if (updateLocation) updateUrl(id);
         setSidebarOpen(false);
@@ -322,12 +417,25 @@ export function NotesView(props: NotesViewProps) {
     if (dirtyRef.current) return;
     setBusy(true);
     setError(null);
+    const previousKey = createKeyRef.current;
+    const createKey =
+      previousKey !== null && previousKey.parentId === parentId
+        ? previousKey.key
+        : newIdempotencyKey("note-create");
+    // Ключ живёт до успеха: retry той же операции не создаёт второй заметки.
+    createKeyRef.current = { key: createKey, parentId };
     try {
-      const next = await invokeNotes<NoteDetails>(invoke, NOTES_COMMAND_IDS.create, {
-        parentId,
-        title: "Без названия",
-        contentMarkdown: "",
-      });
+      const next = await invokeNotes<NoteDetails>(
+        invoke,
+        NOTES_COMMAND_IDS.create,
+        {
+          parentId,
+          title: "Без названия",
+          contentMarkdown: "",
+        },
+        { idempotencyKey: createKey },
+      );
+      createKeyRef.current = null;
       await refreshNotes();
       await loadNote(next.view.note.id);
     } catch (reason) {
@@ -352,12 +460,24 @@ export function NotesView(props: NotesViewProps) {
         parentId,
         ...(position === undefined ? {} : { position }),
       });
-      await refreshNotes();
-      if (selectedIdRef.current === id) {
-        versionRef.current = result.note.version;
-        contentRef.current = result.note.contentMarkdown;
-        await loadNote(id, false);
-      }
+      const remaining = await refreshNotes();
+      // Полная перезагрузка открытой заметки стёрла бы черновик. Вместо неё
+      // синхронизируем version/позицию из ответа move, включая reorder соседа.
+      const moved = new Map(
+        [result.note, ...result.affectedNotes].map((note) => [note.id, note] as const),
+      );
+      setDetails((current) => {
+        if (current === null) return current;
+        const updated = moved.get(current.view.note.id);
+        if (updated === undefined) return current;
+        const note = { ...current.view.note, ...updated };
+        return {
+          ...current,
+          view: { ...current.view, note },
+          ancestors: ancestorsOf(note, remaining),
+        };
+      });
+      if (selectedIdRef.current === id) versionRef.current = result.note.version;
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось переместить заметку");
@@ -441,16 +561,20 @@ export function NotesView(props: NotesViewProps) {
   const changeTitle = (value: string) => {
     setTitle(value);
     titleRef.current = value;
+    draftRevisionRef.current += 1;
     dirtyRef.current = true;
     setSaveState("dirty");
+    setCleanupWarning(null);
     scheduleSave();
   };
 
   const changeMarkdown = (value: string) => {
     setEditorValue(value);
     contentRef.current = cacheRef.current.toCanonical(value);
+    draftRevisionRef.current += 1;
     dirtyRef.current = true;
     setSaveState("dirty");
+    setCleanupWarning(null);
     scheduleSave();
   };
 
@@ -466,6 +590,13 @@ export function NotesView(props: NotesViewProps) {
       invoke,
       NOTES_COMMAND_IDS.attachmentCreate,
       { noteId, mimeType, contentBase64 },
+      {
+        idempotencyKey: snapshotIdempotencyKey("note-attachment", {
+          noteId,
+          mimeType,
+          contentBase64,
+        }),
+      },
     );
     const dataUrl = cacheRef.current.set(result.attachment.id, mimeType, contentBase64);
     attachmentsRef.current = [...attachmentsRef.current, result.attachment];
@@ -556,7 +687,7 @@ export function NotesView(props: NotesViewProps) {
   };
 
   return (
-    <main
+    <div
       data-testid="notes-view"
       className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row"
     >
@@ -623,15 +754,14 @@ export function NotesView(props: NotesViewProps) {
         </form>
         <div
           className="flex gap-1 border-b border-border p-2"
-          role="tablist"
+          role="group"
           aria-label="Фильтр страниц"
         >
           {(["tree", "favorite", "recent"] as const).map((value) => (
             <button
               key={value}
               type="button"
-              role="tab"
-              aria-selected={filter === value}
+              aria-pressed={filter === value}
               data-note-filter={value}
               onClick={() => {
                 setFilter(value);
@@ -673,6 +803,7 @@ export function NotesView(props: NotesViewProps) {
           ) : (
             <NoteTree
               items={visibleItems}
+              flat={filter === "recent"}
               selectedId={selectedId}
               onSelect={(id) => void selectNote(id)}
               onCreate={(parentId) => void createNote(parentId)}
@@ -774,6 +905,15 @@ export function NotesView(props: NotesViewProps) {
                         : "Сохранено"}
                 </span>
               </div>
+              {cleanupWarning ? (
+                <p
+                  data-testid="note-cleanup-warning"
+                  role="status"
+                  className="mt-2 text-xs text-amber-600"
+                >
+                  {cleanupWarning}
+                </p>
+              ) : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label htmlFor="note-parent" className="text-xs text-muted-foreground">
                   Родительская страница
@@ -835,6 +975,7 @@ export function NotesView(props: NotesViewProps) {
                 aria-label="Заголовок заметки"
                 data-testid="note-title"
                 value={title}
+                disabled={loading || busy}
                 onChange={(event) => changeTitle(event.target.value)}
                 placeholder="Без названия"
                 className="mb-4 w-full rounded-md border border-transparent bg-transparent px-2 py-2 text-2xl font-semibold tracking-tight focus-visible:border-input focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-3xl"
@@ -863,6 +1004,6 @@ export function NotesView(props: NotesViewProps) {
           </p>
         ) : null}
       </section>
-    </main>
+    </div>
   );
 }
