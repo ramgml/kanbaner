@@ -26,6 +26,7 @@ const SERVER_ONLY_TASKS_BUILTINS = new Set(["node:crypto"]);
 const TESTING_TASKS_BUILTINS = new Set(["node:assert/strict"]);
 
 const TASK_UI_PACKAGE = "@kanbaner/task-ui";
+const MARKDOWN_UI_PACKAGE = "@kanbaner/markdown-ui";
 const PROJECTS_PACKAGE = "@kanbaner/plugin-projects";
 const PROJECTS_UI_ENTRYPOINT = "@kanbaner/plugin-projects/ui";
 const BUILTIN_UI_COMPOSITION = "apps/web/src/ui/builtin-ui-plugins.ts";
@@ -45,6 +46,7 @@ const ALLOWED_PROJECTS_DEPENDENCIES = new Set([
   "lucide-react",
   "react-markdown",
   "remark-gfm",
+  MARKDOWN_UI_PACKAGE,
   TASK_UI_PACKAGE,
 ]);
 const PROJECTS_SERVER_ENTRYPOINT = "index.ts";
@@ -866,6 +868,7 @@ function analyzeManifests(root, violations) {
         "lucide-react",
         "react-markdown",
         "remark-gfm",
+        MARKDOWN_UI_PACKAGE,
       ]),
     },
   ];

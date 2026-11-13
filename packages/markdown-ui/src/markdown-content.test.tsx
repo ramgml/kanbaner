@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { MarkdownContent } from "./ui/markdown-content.tsx";
+import { MarkdownContent } from "./markdown-content.tsx";
 
 describe("MarkdownContent", () => {
   it("рендерит CommonMark и GFM с безопасными ссылками и без raw HTML", () => {

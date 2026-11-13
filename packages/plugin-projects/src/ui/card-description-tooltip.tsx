@@ -3,7 +3,7 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
-import { MarkdownContent } from "./markdown-content.tsx";
+import { MarkdownContent } from "@kanbaner/markdown-ui";
 
 const VIEWPORT_MARGIN = 8;
 const TOOLTIP_OFFSET = 8;

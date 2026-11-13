@@ -34,7 +34,7 @@ import {
   taskStatusLabel,
 } from "@kanbaner/task-ui";
 
-import { MarkdownContent } from "./markdown-content.tsx";
+import { MarkdownContent } from "@kanbaner/markdown-ui";
 
 export interface SubtaskDraft {
   readonly title: string;

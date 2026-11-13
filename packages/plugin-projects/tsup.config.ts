@@ -14,6 +14,7 @@ export default defineConfig({
     "react",
     "react-dom",
     "react/jsx-runtime",
+    "@kanbaner/markdown-ui",
     "@kanbaner/plugin-sdk",
     "@kanbaner/plugin-tasks",
     "@kanbaner/task-ui",

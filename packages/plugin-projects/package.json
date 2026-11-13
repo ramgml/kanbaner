@@ -27,12 +27,11 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@kanbaner/markdown-ui": "workspace:*",
     "@kanbaner/plugin-sdk": "workspace:*",
     "@kanbaner/plugin-tasks": "workspace:*",
     "@kanbaner/task-ui": "workspace:*",
-    "lucide-react": "1.70.0",
-    "react-markdown": "10.1.0",
-    "remark-gfm": "4.0.1"
+    "lucide-react": "1.70.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",
