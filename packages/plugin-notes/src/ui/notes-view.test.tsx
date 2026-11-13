@@ -44,7 +44,7 @@ vi.mock("./editor/markdown-note-editor.tsx", () => ({
           const file = new File([new Uint8Array(editorState.bytes)], "image.png", {
             type: "image/png",
           });
-          void onUploadImage?.(file);
+          void onUploadImage?.(file).catch(() => undefined);
         }}
       >
         upload
@@ -334,8 +334,7 @@ describe("NotesView autosave", () => {
       update.resolve(success(details));
     });
 
-    await waitFor(() => expect(deleted).toEqual(["att-1"]));
-    expect(deleted).not.toContain("att-2");
+    expect(deleted).toEqual([]);
   });
 
   it("не применяет deferred update к другой открытой заметке", async () => {
@@ -624,7 +623,7 @@ describe("NotesView autosave", () => {
     expect(createKeys[2]).not.toBe(createKeys[0]);
   });
 
-  it("делает ключ вложения стабильным по снимку note/file", async () => {
+  it("использует ключ upload только для retry после ошибки", async () => {
     const details = makeDetails("note-1", "С картинкой");
     const uploadKeys: Array<string | undefined> = [];
     let sequence = 0;
@@ -636,6 +635,7 @@ describe("NotesView autosave", () => {
       if (operationId === NOTES_COMMAND_IDS.attachmentCreate) {
         uploadKeys.push(options?.idempotencyKey);
         sequence += 1;
+        if (sequence === 1) return failure("STORAGE_ERROR", "Временная ошибка");
         return success({ attachment: attachment(`att-${sequence}`, "note-1") });
       }
       return success({ items: [] });
@@ -650,10 +650,129 @@ describe("NotesView autosave", () => {
     await waitFor(() => expect(uploadKeys).toHaveLength(2));
     expect(uploadKeys[1]).toBe(uploadKeys[0]);
 
-    editorState.bytes = [1, 2, 3, 4];
     fireEvent.click(screen.getByTestId("editor-upload"));
     await waitFor(() => expect(uploadKeys).toHaveLength(3));
     expect(uploadKeys[2]).not.toBe(uploadKeys[0]);
+
+    editorState.bytes = [1, 2, 3, 4];
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(uploadKeys).toHaveLength(4));
+    expect(uploadKeys[3]).not.toBe(uploadKeys[0]);
+  });
+
+  it("сериализует параллельные upload и сохраняет ключ retry", async () => {
+    const details = makeDetails("note-1", "Параллельные изображения");
+    const first = deferred<UiOperationResult>();
+    const second = deferred<UiOperationResult>();
+    const third = deferred<UiOperationResult>();
+    const keys: Array<string | undefined> = [];
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const invoke: UiOperationInvoker = async (operationId, _input, options) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.attachmentCreate) {
+        calls += 1;
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        keys.push(options?.idempotencyKey);
+        const deferred = calls === 1 ? first : calls === 2 ? second : third;
+        return deferred.promise.finally(() => {
+          active -= 1;
+        });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    await screen.findByTestId("note-title");
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(calls).toBe(1));
+
+    editorState.bytes = [1, 2, 3, 4];
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    expect(calls).toBe(1);
+    first.resolve(success({ attachment: attachment("att-first", "note-1") }));
+    await waitFor(() => expect(calls).toBe(2));
+    await act(async () => {
+      second.resolve(failure("STORAGE_ERROR", "Временная ошибка"));
+    });
+
+    fireEvent.click(screen.getByTestId("editor-upload"));
+    await waitFor(() => expect(calls).toBe(3));
+    third.resolve(success({ attachment: attachment("att-retry", "note-1") }));
+    await waitFor(() => expect(maxActive).toBe(1));
+    expect(keys[1]).toBe(keys[2]);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("удаляет неиспользуемое вложение только явным действием", async () => {
+    const file = attachment("att-unused", "note-1");
+    const details: NoteDetails = {
+      ...makeDetails("note-1", "Без изображения"),
+      attachments: [file],
+    };
+    const deleted: string[] = [];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) {
+        return success({ attachment: { ...file, contentBase64: "aGVsbG8=" } });
+      }
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.attachmentDelete) {
+        deleted.push(String((input as { id: string }).id));
+        return success({ deleted: true });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить вложение att-unused" }));
+
+    await waitFor(() => expect(deleted).toEqual(["att-unused"]));
+    expect(screen.queryByRole("button", { name: "Удалить вложение att-unused" })).toBeNull();
+  });
+
+  it("подтверждает удаление по свежему subtree и передаёт expectedDescendants", async () => {
+    const details = makeDetails("note-1", "Удаляемая");
+    const deleteInputs: Array<Record<string, unknown>> = [];
+    let deleted = false;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(deleted ? { items: [], total: 0, nextOffset: null } : listOf(details.view));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_QUERY_IDS.subtree) {
+        return success({ noteId: "note-1", noteCount: 3, attachmentCount: 2 });
+      }
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.delete) {
+        deleted = true;
+        deleteInputs.push(input as Record<string, unknown>);
+        return success({
+          deleted: true,
+          deletedNotes: [details.view.note],
+          deletedAttachmentIds: [],
+          deletedResourceRefs: [],
+        });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить" }));
+
+    await waitFor(() => expect(deleteInputs).toHaveLength(1));
+    expect(deleteInputs[0]).toMatchObject({ expectedDescendants: 3, confirm: true });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Страниц: 3, вложений: 2"));
   });
 
   it("не использует main, tablist и пересортировывает недавние", async () => {

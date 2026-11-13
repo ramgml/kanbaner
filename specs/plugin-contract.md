@@ -302,12 +302,23 @@ default | slate | blue | green | yellow | orange | red | purple
 `note.update` принимает partial title/contentMarkdown с `expectedVersion`.
 Favorite/visit не меняют версию содержимого. Store-мутации с объявленной
 поддержкой idempotency сохраняют результат ключа в той же транзакции, что и
-изменение данных. События и поисковые эффекты выполняются после коммита.
+изменение данных. UI invoker дополнительно принимает необязательный
+`options.idempotencyKey` и передаёт его только mutation в OperationBus.
+
+`note.subtree` возвращает свежий `noteCount` ветки, включая корень, и число
+вложений. `note.delete` дополнительно принимает `expectedDescendants` с этим
+значением и атомарно отклоняет удаление, если размер ветки изменился после
+preview. Legacy-вызов без count остаётся поддерживаемым.
+
+События и поисковые эффекты выполняются после коммита.
 
 Attachment-create принимает base64 только поддерживаемого растрового формата;
 домен проверяет размер и сигнатуру. Attachment URL в Markdown должен принадлежать
-той же заметке. Query export является read-only и превращает локальные image
-URL в data URL, не меняя сохранённый Markdown.
+той же заметке. Поддерживаются inline `image` и `imageReference` через
+`definition`. Query export является read-only и превращает локальные image URL в
+data URL, не меняя сохранённый Markdown. Автоматическая очистка вложений во время
+редактирования запрещена: удаление выполняется только явной командой после
+подтверждения и проверки `ATTACHMENT_IN_USE`.
 
 ## 7. Запросы
 

@@ -194,6 +194,30 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(page.getByTestId("note-title")).toHaveValue("Заметка к задаче");
   });
 
+  test("подтверждает каскадное удаление по свежему subtree preview", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const parentName = title("Ветка удаления");
+    const childName = title("Потомок удаления");
+    await openNotes(page);
+    const parentId = await createNote(page, parentName);
+    await page.locator(`[data-note-tree-item='${parentId}']`).hover();
+    await page.locator(`[data-note-add-child='${parentId}']`).click();
+    await page.getByTestId("note-title").fill(childName);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+    const childId = noteId(page);
+
+    await page.locator(`[data-note-select='${parentId}']`).click();
+    page.once("dialog", (dialog) => {
+      expect(dialog.message()).toContain("Страниц: 2");
+      void dialog.accept();
+    });
+    await page.getByRole("button", { name: "Удалить", exact: true }).click();
+    await expect(page.locator(`[data-note-select='${parentId}']`)).toHaveCount(0);
+    await expect(page.locator(`[data-note-select='${childId}']`)).toHaveCount(0);
+  });
+
   test("сохраняет редактирование и отсутствие overflow на mobile 360", async ({ page }) => {
     await page.setViewportSize(MOBILE);
     await openNotes(page);

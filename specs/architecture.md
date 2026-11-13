@@ -505,7 +505,10 @@ updatedAt
   с MIME, размером и владельцем. В canonical Markdown разрешены только
   `attachment://<id>` собственной заметки и HTTP(S) image URL; data URL в
   сохраняемый текст не попадает. Допустимы PNG, JPEG, GIF и WebP с проверкой
-  сигнатуры. Экспорт заменяет attachment URL в AST image-узлах на data URL.
+  сигнатуры. Inline `image` и `imageReference` через `definition` обрабатываются
+  единым AST-механизмом. Экспорт заменяет attachment URL в image/definition на
+  data URL. Автоматическая очистка во время редактирования не выполняется;
+  неиспользуемое вложение удаляется только явной командой после сохранения.
 - CRUD, move и delete используют `expectedVersion` и транзакции плагина. Ветка
   удаляется каскадно после `confirm`; activity и attachments удаляются вместе с
   ней. Повторяемые store-мутации сохраняют результат Idempotency-Key в той же

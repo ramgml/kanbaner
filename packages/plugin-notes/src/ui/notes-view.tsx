@@ -27,6 +27,7 @@ import type {
   NoteListPage,
   NoteMoveResult,
   NoteSearchPage,
+  NoteSubtree,
   NoteView,
 } from "../model.ts";
 import { AttachmentUrlCache } from "./attachment-cache.ts";
@@ -83,7 +84,6 @@ export function NotesView(props: NotesViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [conflict, setConflict] = useState(false);
-  const [cleanupWarning, setCleanupWarning] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [editorValue, setEditorValue] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -105,6 +105,11 @@ export function NotesView(props: NotesViewProps) {
   const createKeyRef = useRef<{ readonly key: string; readonly parentId: string | null } | null>(
     null,
   );
+  const uploadKeyRef = useRef<{
+    readonly key: string;
+    readonly fingerprint: string;
+  } | null>(null);
+  const uploadChainRef = useRef<Promise<unknown>>(Promise.resolve());
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -135,51 +140,6 @@ export function NotesView(props: NotesViewProps) {
     return all;
   }, [invoke]);
 
-  const cleanupAttachments = useCallback(
-    async (id: string, contentMarkdown: string, snapshot: readonly NoteAttachmentDescriptor[]) => {
-      const referenced = new Set(extractAttachmentIds(contentMarkdown));
-      const currentIds = new Set(attachmentsRef.current.map((attachment) => attachment.id));
-      // Считаем только вложения снимка, которые ещё принадлежат текущей заметке:
-      // загрузка, завершившаяся во время сохранения, не должна быть удалена.
-      const removed = snapshot.filter(
-        (attachment) => currentIds.has(attachment.id) && !referenced.has(attachment.id),
-      );
-      if (removed.length === 0) return;
-
-      const deleted = new Set<string>();
-      const failures: string[] = [];
-      for (const attachment of removed) {
-        try {
-          await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
-            id: attachment.id,
-            confirm: true,
-          });
-          deleted.add(attachment.id);
-        } catch (reason) {
-          failures.push(reason instanceof Error ? reason.message : attachment.id);
-        }
-      }
-
-      if (deleted.size > 0 && selectedIdRef.current === id) {
-        attachmentsRef.current = attachmentsRef.current.filter(
-          (attachment) => !deleted.has(attachment.id),
-        );
-        setDetails((current) =>
-          current?.view.note.id === id
-            ? { ...current, attachments: attachmentsRef.current }
-            : current,
-        );
-      }
-      // Ошибка очистки — отдельное предупреждение, а не ошибка сохранения.
-      setCleanupWarning(
-        failures.length > 0
-          ? `Не удалось удалить неиспользуемые изображения: ${failures[0]}`
-          : null,
-      );
-    },
-    [invoke],
-  );
-
   const saveNow = useCallback((): Promise<void> => {
     if (saveTimerRef.current !== null) {
       clearTimeout(saveTimerRef.current);
@@ -197,7 +157,6 @@ export function NotesView(props: NotesViewProps) {
           title: titleRef.current,
           content: contentRef.current,
           expectedVersion: versionRef.current,
-          attachments: attachmentsRef.current,
         };
         setSaveState("saving");
         setConflict(false);
@@ -250,17 +209,13 @@ export function NotesView(props: NotesViewProps) {
             : current,
         );
         void refreshNotes().catch(() => undefined);
-        setCleanupWarning(null);
-
-        // Если черновик изменился, удалённое изображение могло вернуться
-        // (undo): очистка вложений в этом случае не выполняется.
-        if (!draftUnchanged) return;
-
-        await cleanupAttachments(snapshot.id, snapshot.content, snapshot.attachments);
+        // Автоматическая очистка attachments запрещена: Undo может выполняться
+        // как во время update, так и во время delete. Неиспользуемые файлы
+        // удаляются только явным действием пользователя после сохранения.
       })
       .catch(() => undefined);
     return saveChainRef.current;
-  }, [cleanupAttachments, invoke, refreshNotes]);
+  }, [invoke, refreshNotes]);
 
   const saveNowRef = useRef(saveNow);
   useEffect(() => {
@@ -298,7 +253,6 @@ export function NotesView(props: NotesViewProps) {
       setLoading(true);
       setError(null);
       setConflict(false);
-      setCleanupWarning(null);
       try {
         const next = await invokeNotes<NoteDetails>(invoke, NOTES_QUERY_IDS.get, { id });
         const loadedAttachments = await Promise.all(
@@ -477,7 +431,8 @@ export function NotesView(props: NotesViewProps) {
           ancestors: ancestorsOf(note, remaining),
         };
       });
-      if (selectedIdRef.current === id) versionRef.current = result.note.version;
+      const currentAffected = moved.get(selectedIdRef.current ?? "");
+      if (currentAffected !== undefined) versionRef.current = currentAffected.version;
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось переместить заметку");
@@ -487,42 +442,34 @@ export function NotesView(props: NotesViewProps) {
   };
 
   const deleteNote = async (view: NoteView) => {
-    const descendants = new Set([view.note.id]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const item of items) {
-        if (
-          item.note.parentId !== null &&
-          descendants.has(item.note.parentId) &&
-          !descendants.has(item.note.id)
-        ) {
-          descendants.add(item.note.id);
-          changed = true;
-        }
-      }
-    }
-    if (
-      !window.confirm(
-        `Удалить ветку «${view.note.title}»? Страниц: ${descendants.size}. Действие необратимо.`,
-      )
-    ) {
-      return;
-    }
-    if (selectedIdRef.current === view.note.id) {
-      await saveNow();
-      if (dirtyRef.current) return;
-    }
     setBusy(true);
     try {
-      await invokeNotes<NoteDeleteResult>(invoke, NOTES_COMMAND_IDS.delete, {
+      const preview = await invokeNotes<NoteSubtree>(invoke, NOTES_QUERY_IDS.subtree, {
+        id: view.note.id,
+      });
+      if (
+        !window.confirm(
+          `Удалить ветку «${view.note.title}»? Страниц: ${preview.noteCount}, вложений: ${preview.attachmentCount}. Действие необратимо.`,
+        )
+      ) {
+        return;
+      }
+      if (selectedIdRef.current === view.note.id) {
+        await saveNow();
+        if (dirtyRef.current) return;
+      }
+      const result = await invokeNotes<NoteDeleteResult>(invoke, NOTES_COMMAND_IDS.delete, {
         id: view.note.id,
         expectedVersion:
           selectedIdRef.current === view.note.id ? versionRef.current : view.note.version,
+        expectedDescendants: preview.noteCount,
         confirm: true,
       });
       const remaining = await refreshNotes();
-      if (selectedIdRef.current === view.note.id || descendants.has(selectedIdRef.current ?? "")) {
+      const deletedIds = new Set(
+        result.deleted ? result.deletedNotes.map((note) => note.id) : [view.note.id],
+      );
+      if (selectedIdRef.current !== null && deletedIds.has(selectedIdRef.current)) {
         dirtyRef.current = false;
         if (remaining.length > 0) await loadNote(remaining[0]?.note.id ?? "");
         else {
@@ -564,7 +511,6 @@ export function NotesView(props: NotesViewProps) {
     draftRevisionRef.current += 1;
     dirtyRef.current = true;
     setSaveState("dirty");
-    setCleanupWarning(null);
     scheduleSave();
   };
 
@@ -574,11 +520,10 @@ export function NotesView(props: NotesViewProps) {
     draftRevisionRef.current += 1;
     dirtyRef.current = true;
     setSaveState("dirty");
-    setCleanupWarning(null);
     scheduleSave();
   };
 
-  const uploadImage = async (file: File): Promise<string> => {
+  const uploadImageNow = async (file: File): Promise<string> => {
     const noteId = selectedIdRef.current;
     if (noteId === null) throw new Error("Сначала создайте заметку");
     const mimeType = file.type as NoteAttachmentMimeType;
@@ -586,18 +531,24 @@ export function NotesView(props: NotesViewProps) {
       throw new Error("Поддерживаются только PNG, JPEG, GIF и WebP");
     }
     const contentBase64 = await fileToBase64(file);
+    const fingerprint = snapshotIdempotencyKey("note-attachment-payload", {
+      noteId,
+      mimeType,
+      contentBase64,
+    });
+    const previous = uploadKeyRef.current;
+    const key =
+      previous?.fingerprint === fingerprint ? previous.key : newIdempotencyKey("note-attachment");
+    uploadKeyRef.current = { key, fingerprint };
     const result = await invokeNotes<{ attachment: NoteAttachmentDescriptor }>(
       invoke,
       NOTES_COMMAND_IDS.attachmentCreate,
       { noteId, mimeType, contentBase64 },
-      {
-        idempotencyKey: snapshotIdempotencyKey("note-attachment", {
-          noteId,
-          mimeType,
-          contentBase64,
-        }),
-      },
+      { idempotencyKey: key },
     );
+    // Только неопределённый результат получает retry с тем же ключом. Два
+    // намеренных успешных upload — разные операции и разные ключи.
+    uploadKeyRef.current = null;
     const dataUrl = cacheRef.current.set(result.attachment.id, mimeType, contentBase64);
     attachmentsRef.current = [...attachmentsRef.current, result.attachment];
     setDetails((current) =>
@@ -606,6 +557,41 @@ export function NotesView(props: NotesViewProps) {
         : current,
     );
     return dataUrl;
+  };
+
+  const uploadImage = (file: File): Promise<string> => {
+    const next = uploadChainRef.current.then(
+      () => uploadImageNow(file),
+      () => uploadImageNow(file),
+    );
+    uploadChainRef.current = next.catch(() => undefined);
+    return next;
+  };
+
+  const deleteAttachmentExplicitly = async (attachment: NoteAttachmentDescriptor) => {
+    if (!window.confirm(`Удалить вложение ${attachment.id}? Действие необратимо.`)) return;
+    await saveNow();
+    if (dirtyRef.current) return;
+    setBusy(true);
+    try {
+      await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
+        id: attachment.id,
+        confirm: true,
+      });
+      attachmentsRef.current = attachmentsRef.current.filter(
+        (candidate) => candidate.id !== attachment.id,
+      );
+      setDetails((current) =>
+        current?.view.note.id === attachment.noteId
+          ? { ...current, attachments: attachmentsRef.current }
+          : current,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось удалить вложение");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const exportNote = async () => {
@@ -650,6 +636,10 @@ export function NotesView(props: NotesViewProps) {
       setError(reason instanceof Error ? reason.message : "Поиск не выполнен");
     }
   };
+
+  const referencedAttachmentIds = new Set(
+    extractAttachmentIds(cacheRef.current.toCanonical(editorValue)),
+  );
 
   const visibleItems =
     filter === "favorite"
@@ -905,15 +895,6 @@ export function NotesView(props: NotesViewProps) {
                         : "Сохранено"}
                 </span>
               </div>
-              {cleanupWarning ? (
-                <p
-                  data-testid="note-cleanup-warning"
-                  role="status"
-                  className="mt-2 text-xs text-amber-600"
-                >
-                  {cleanupWarning}
-                </p>
-              ) : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label htmlFor="note-parent" className="text-xs text-muted-foreground">
                   Родительская страница
@@ -989,6 +970,48 @@ export function NotesView(props: NotesViewProps) {
                 ariaLabel="Содержимое заметки"
               />
             </div>
+            {details.attachments.length > 0 ? (
+              <section
+                aria-labelledby="note-attachments-title"
+                className="mx-auto w-full max-w-5xl border-t border-border px-4 py-3 sm:px-6"
+              >
+                <h2 id="note-attachments-title" className="mb-2 text-sm font-medium">
+                  Вложения
+                </h2>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Неиспользуемые файлы можно удалить вручную после сохранения.
+                </p>
+                <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                  {details.attachments.map((attachment, index) => {
+                    const inUse = referencedAttachmentIds.has(attachment.id);
+                    return (
+                      <li
+                        key={attachment.id}
+                        className="flex items-center justify-between gap-2 text-xs"
+                      >
+                        <span className="truncate text-muted-foreground">
+                          Изображение {index + 1} · {attachment.mimeType} ·{" "}
+                          {Math.ceil(attachment.sizeBytes / 1024)} KiB
+                        </span>
+                        <button
+                          type="button"
+                          data-note-attachment-delete={attachment.id}
+                          aria-label={`Удалить вложение ${attachment.id}`}
+                          disabled={busy || inUse}
+                          title={
+                            inUse ? "Сначала удалите изображение из текста" : "Удалить вложение"
+                          }
+                          onClick={() => void deleteAttachmentExplicitly(attachment)}
+                          className="rounded-md px-2 py-1 text-destructive hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
+                        >
+                          Удалить
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ) : null}
             <div className="mx-auto w-full max-w-5xl pb-6">
               <NoteLinks
                 noteId={details.view.note.id}
