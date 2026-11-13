@@ -19,9 +19,20 @@ export type UiOperationResult =
   | { readonly ok: true; readonly data: JsonValue | null }
   | { readonly ok: false; readonly error: UiOperationError };
 
+/**
+ * Необязательные параметры UI-вызова.
+ *
+ * `idempotencyKey` относится только к командам: повтор с тем же ключом и
+ * payload возвращает исходный результат. Запрос ключ не получает.
+ */
+export interface UiOperationInvokeOptions {
+  readonly idempotencyKey?: string;
+}
+
 export type UiOperationInvoker = (
   operationId: string,
   input: JsonValue,
+  options?: UiOperationInvokeOptions,
 ) => Promise<UiOperationResult>;
 
 /**
