@@ -76,7 +76,20 @@ describe("регистрация kanbaner.projects", () => {
       "app.overlays",
       "app.overlays",
       "app.sidebar",
+      "app.main",
+      "app.main",
     ]);
+
+    const openers = projectsUiContributions.filter(
+      (contribution) => contribution.kind === "resource-opener",
+    );
+
+    expect(openers.map((contribution) => contribution.resourceType)).toEqual(["project", "task"]);
+    expect(openers.map((contribution) => contribution.resourcePluginId)).toEqual([
+      "kanbaner.tasks",
+      "kanbaner.tasks",
+    ]);
+    expect(openers.map((contribution) => contribution.route)).toEqual([KANBAN_ROUTE, KANBAN_ROUTE]);
 
     expect(
       projectsUiContributions.find(

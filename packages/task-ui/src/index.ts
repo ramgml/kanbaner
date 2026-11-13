@@ -17,6 +17,9 @@ export {
   type UiPluginDefinition,
   type UiRenderer,
   type UiRendererProps,
+  type UiResourceOpener,
+  type UiResourceOpenResult,
+  type UiSlotRenderer,
 } from "./runtime.ts";
 
 export {

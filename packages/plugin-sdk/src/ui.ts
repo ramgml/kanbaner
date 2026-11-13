@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { DRAFT_2020_12 } from "./contract.ts";
-import { OperationIdSchema } from "./plugin-id.ts";
+import { OperationIdSchema, PluginIdSchema } from "./plugin-id.ts";
 
 /**
  * Базовые слоты ядра Plugin Contract v1.
@@ -65,6 +65,14 @@ export const UiContributionSchema = Type.Object(
     route: Type.Optional(Type.String({ minLength: 1 })),
     commandId: Type.Optional(OperationIdSchema),
     resourceType: Type.Optional(Type.String({ minLength: 1 })),
+    /**
+     * Плагин-владелец открываемого ресурса.
+     *
+     * Для `resource-opener` по умолчанию совпадает с владельцем вклада.
+     * Поле нужно, когда UI-плагин открывает ресурс другого домена: например,
+     * рабочий стол проектов открывает `kanbaner.tasks:task:<id>`.
+     */
+    resourcePluginId: Type.Optional(PluginIdSchema),
   },
   DRAFT_2020_12,
 );

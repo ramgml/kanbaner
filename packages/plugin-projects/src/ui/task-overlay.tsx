@@ -6,6 +6,7 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  formatTaskRef,
   normalizeTags,
   type Project,
   type ProjectGetOutput,
@@ -31,9 +32,10 @@ import {
   tagsToInput,
   useMediaQuery,
   type UiOperationInvoker,
+  type UiSlotRenderer,
 } from "@kanbaner/task-ui";
 
-import { KANBAN_ROUTE } from "../metadata.ts";
+import { KANBAN_ROUTE, TASK_RELATED_SLOT } from "../metadata.ts";
 import { defaultCreateColumnId, effectiveColumnId } from "./board-state.ts";
 import { fetchProjectColumns } from "./load-columns.ts";
 import {
@@ -322,6 +324,8 @@ export interface TaskOverlayProps {
   readonly pathname?: string | undefined;
   readonly search?: string | undefined;
   readonly replaceSearch?: ((search: string) => void) | undefined;
+  /** Outlet вложенного слота из shell-а. */
+  readonly renderSlot?: UiSlotRenderer | undefined;
 }
 
 /**
@@ -332,7 +336,13 @@ export interface TaskOverlayProps {
  * ограничен 860 px. Все команды выполняются только над `currentTask`, у
  * которого `task.id === taskId`.
  */
-export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOverlayProps) {
+export function TaskOverlay({
+  invoke,
+  pathname,
+  search,
+  replaceSearch,
+  renderSlot,
+}: TaskOverlayProps) {
   const query = useKanbanQuery(search);
 
   useEffect(() => {
@@ -1037,6 +1047,11 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
     }
   };
 
+  const relatedSlot =
+    renderSlot === undefined || currentTask === null
+      ? undefined
+      : renderSlot(TASK_RELATED_SLOT, { resourceRef: formatTaskRef(currentTask.id) });
+
   const body =
     loading && currentTask === null ? (
       <div className="p-4">
@@ -1112,6 +1127,7 @@ export function TaskOverlay({ invoke, pathname, search, replaceSearch }: TaskOve
         onKeepEditing={() => {
           setCloseConfirm(false);
         }}
+        relatedSlot={relatedSlot}
       />
     );
 

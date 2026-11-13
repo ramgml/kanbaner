@@ -26,6 +26,7 @@ export {
   PROJECTS_PLUGIN_ID,
   PROJECTS_UI_CONTRACT,
   TASK_LIST_ROUTE,
+  TASK_RELATED_SLOT,
   projectsUiContributions,
   type ProjectRoute,
 } from "./metadata.ts";
@@ -152,6 +153,7 @@ export const projectsUiPlugin = defineUiPlugin({
           pathname={props.pathname}
           search={props.search}
           replaceSearch={props.replaceSearch}
+          renderSlot={props.renderSlot}
         />
       ),
     },
@@ -163,6 +165,16 @@ export const projectsUiPlugin = defineUiPlugin({
       // Навигационный вклад рендерит shell по route; рендерер нужен только
       // для единого контракта UI-плагина.
       metadata: contributionAt(8),
+      render: () => null,
+    },
+    {
+      // Resource-opener-ы не рендерятся в слоте: shell использует только их
+      // metadata для маршрута и resourceType.
+      metadata: contributionAt(9),
+      render: () => null,
+    },
+    {
+      metadata: contributionAt(10),
       render: () => null,
     },
   ],

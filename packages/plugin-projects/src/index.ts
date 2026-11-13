@@ -10,6 +10,7 @@ export {
   PROJECTS_UI_CONTRACT,
   PROJECT_ROUTES,
   TASK_LIST_ROUTE,
+  TASK_RELATED_SLOT,
   projectsUiContributions,
   type ProjectRoute,
 } from "./metadata.ts";

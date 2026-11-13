@@ -1,11 +1,11 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useCallback, type ReactNode } from "react";
 
-import type { UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
+import type { JsonObject, UiContributionKind, UiSlotId } from "@kanbaner/plugin-sdk";
 
-import { useUiContributions, useUiOperationInvoker } from "../../ui/provider";
-import type { RegisteredUiContribution } from "../../ui/registry";
+import { useUiContributions, useUiOperationInvoker, useUiResourceOpener } from "../../ui/provider";
+import type { RegisteredUiContribution, UiSlotRenderer } from "../../ui/registry";
 import { ContributionBoundary } from "./contribution-boundary";
 
 export interface UiSlotProps {
@@ -21,6 +21,13 @@ export interface UiSlotProps {
   readonly search?: string | undefined;
   /** Обновление query string через App Router. */
   readonly replaceSearch?: ((search: string) => void) | undefined;
+  /**
+   * JSON-контекст вложенного слота.
+   *
+   * Передаётся каждому вкладу как `context`; родительский плагин не отдаёт
+   * React-объекты или ссылки на свой DOM.
+   */
+  readonly context?: JsonObject | undefined;
 }
 
 function matchesFilters(
@@ -51,14 +58,36 @@ export function ContributionRenderer({
   pathname,
   search,
   replaceSearch,
+  context,
 }: {
   readonly contribution: RegisteredUiContribution;
   readonly pathname?: string | undefined;
   readonly search?: string | undefined;
   readonly replaceSearch?: ((search: string) => void) | undefined;
+  readonly context?: JsonObject | undefined;
 }) {
   const Component = contribution.render;
   const invoke = useUiOperationInvoker();
+  const openResource = useUiResourceOpener();
+  /**
+   * Outlet вложенного слота.
+   *
+   * Callback только создаёт React-элемент: `UiSlot` сам вызывает hooks и
+   * оборачивает каждый вклад в отдельную границу ошибок. Поэтому hooks не
+   * вызываются условно внутри callback-а.
+   */
+  const renderSlot = useCallback<UiSlotRenderer>(
+    (slot, slotContext) => (
+      <UiSlot
+        slot={slot}
+        context={slotContext}
+        pathname={pathname}
+        search={search}
+        replaceSearch={replaceSearch}
+      />
+    ),
+    [pathname, search, replaceSearch],
+  );
 
   return (
     <Component
@@ -67,6 +96,9 @@ export function ContributionRenderer({
       pathname={pathname}
       search={search}
       replaceSearch={replaceSearch}
+      context={context}
+      openResource={openResource}
+      renderSlot={renderSlot}
     />
   );
 }
@@ -85,6 +117,7 @@ export function UiSlot({
   pathname,
   search,
   replaceSearch,
+  context,
 }: UiSlotProps) {
   const contributions = useUiContributions(slot);
   const visible = contributions.filter((contribution) =>
@@ -104,6 +137,7 @@ export function UiSlot({
             pathname={pathname}
             search={search}
             replaceSearch={replaceSearch}
+            context={context}
           />
         </ContributionBoundary>
       ))}

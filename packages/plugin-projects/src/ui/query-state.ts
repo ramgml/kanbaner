@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { parseWorkspaceResource } from "./resource-query.ts";
+
 export interface KanbanQueryState {
   readonly projectId: string;
   readonly tag: string;
@@ -35,11 +37,15 @@ function first(params: URLSearchParams, key: string): string {
 /** Читает фильтры и выбранную карточку из query string. */
 export function parseKanbanQuery(search: string): KanbanQueryState {
   const params = new URLSearchParams(search);
-  const taskId = first(params, "task");
+  const resource = parseWorkspaceResource(params.get("resource"));
+  // Старые ключи имеют приоритет: новая ссылка `resource` только дополняет
+  // их, поэтому закладки и внешние ссылки с `task`/`project` не ломаются.
+  const taskId = first(params, "task") || resource.taskId || "";
+  const projectId = first(params, "project") || resource.projectId || "";
 
   return {
     ...DEFAULT_KANBAN_QUERY,
-    projectId: first(params, "project"),
+    projectId,
     tag: first(params, "tag"),
     taskId: taskId.length === 0 ? null : taskId,
   };
