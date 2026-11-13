@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PluginRuntimeLogger } from "@kanbaner/kernel";
+import type { JsonValue } from "@kanbaner/plugin-sdk";
 
 import type { PluginManagerState } from "../lib/plugin-manager-types";
 import {
@@ -295,6 +296,69 @@ describe("plugin service", () => {
     expect(first.disabledPluginIds).toEqual(["example.one"]);
     expect(second.disabledPluginIds).toEqual([]);
     expect(second.plugins[0]?.status).toBe("active");
+  });
+
+  it("передаёт Idempotency-Key исполнителю UI-операции", async () => {
+    const root = await createRoot();
+    const calls: Array<{
+      readonly operationId: string;
+      readonly input: JsonValue;
+      readonly options: unknown;
+    }> = [];
+    const service = createService([root], {
+      executeOperation: async (operationId, input, options) => {
+        calls.push({ operationId, input, options });
+
+        return { ok: true, data: { accepted: true } };
+      },
+    });
+
+    const result = await service.executeUiOperation(
+      "kanbaner.test.ui.create",
+      { title: "Идемпотентная" },
+      { idempotencyKey: "ui-key" },
+    );
+
+    expect(calls).toEqual([
+      {
+        operationId: "kanbaner.test.ui.create",
+        input: { title: "Идемпотентная" },
+        options: { idempotencyKey: "ui-key" },
+      },
+    ]);
+    expect(result).toEqual({ ok: true, data: { accepted: true } });
+  });
+
+  it("отбрасывает пустой Idempotency-Key до OperationBus", async () => {
+    const root = await createRoot();
+    const calls: unknown[] = [];
+    const service = createService([root], {
+      executeOperation: async (_operationId, _input, options) => {
+        calls.push(options);
+
+        return { ok: true, data: null };
+      },
+    });
+
+    await service.executeUiOperation("kanbaner.test.ui.create", {}, { idempotencyKey: "" });
+
+    expect(calls).toEqual([undefined]);
+  });
+
+  it("выполняет UI-операцию без ключа как раньше", async () => {
+    const root = await createRoot();
+    const calls: unknown[] = [];
+    const service = createService([root], {
+      executeOperation: async (_operationId, _input, options) => {
+        calls.push(options);
+
+        return { ok: true, data: null };
+      },
+    });
+
+    await service.executeUiOperation("kanbaner.test.ui.create", {});
+
+    expect(calls).toEqual([undefined]);
   });
 
   it("обнаруживает новый плагин после refresh без пересоздания сервиса", async () => {

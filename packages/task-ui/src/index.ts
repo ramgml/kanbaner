@@ -11,6 +11,7 @@ export {
   type RegisteredUiContributionLike,
   type UiContributionDescriptor,
   type UiOperationError,
+  type UiOperationInvokeOptions,
   type UiOperationInvoker,
   type UiOperationResult,
   type UiPluginContribution,

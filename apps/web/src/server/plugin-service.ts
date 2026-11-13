@@ -22,6 +22,7 @@ import {
   type PluginUiContributionRecord,
 } from "./application-composition";
 
+import { sanitizeUiOperationOptions, type UiOperationInvokeOptions } from "../ui/operation-types";
 import type {
   PluginManagerDiagnostic,
   PluginManagerEntry,
@@ -301,6 +302,7 @@ export interface PluginServiceOptions {
   readonly executeOperation?: (
     operationId: string,
     input: JsonValue,
+    options?: UiOperationInvokeOptions,
   ) => Promise<OperationResult<unknown>>;
 }
 
@@ -423,7 +425,12 @@ class PluginService {
   private readonly uiContributionsProvider:
     (() => readonly PluginUiContributionRecord[]) | undefined;
   private readonly operationExecutor:
-    ((operationId: string, input: JsonValue) => Promise<OperationResult<unknown>>) | undefined;
+    | ((
+        operationId: string,
+        input: JsonValue,
+        options?: UiOperationInvokeOptions,
+      ) => Promise<OperationResult<unknown>>)
+    | undefined;
   private runtime: PluginRuntime | null = null;
   private snapshot: PluginRuntimeSnapshot | null = null;
   private bootstrapDone = false;
@@ -526,7 +533,11 @@ class PluginService {
    * Composition root проверяет `exposure.ui`; сервис только сериализует
    * lifecycle и не создаёт отдельную реализацию для UI.
    */
-  executeUiOperation(operationId: string, input: JsonValue): Promise<OperationResult<unknown>> {
+  executeUiOperation(
+    operationId: string,
+    input: JsonValue,
+    options?: UiOperationInvokeOptions,
+  ): Promise<OperationResult<unknown>> {
     return this.enqueue(async () => {
       await this.ensureStarted();
 
@@ -541,7 +552,7 @@ class PluginService {
         };
       }
 
-      return this.operationExecutor(operationId, input);
+      return this.operationExecutor(operationId, input, sanitizeUiOperationOptions(options));
     });
   }
 
@@ -763,7 +774,7 @@ function createDefaultPluginService(): PluginService {
       );
     },
     getUiContributions: () => composition?.listUiContributions() ?? [],
-    executeOperation: async (operationId, input) => {
+    executeOperation: async (operationId, input, options) => {
       if (composition === null) {
         return {
           ok: false,
@@ -775,7 +786,7 @@ function createDefaultPluginService(): PluginService {
         };
       }
 
-      return composition.executeUiOperation(operationId, input);
+      return composition.executeUiOperation(operationId, input, options);
     },
     hooks: {
       migrate: async (context) => {
@@ -814,9 +825,14 @@ export async function getPluginUiContributions(): Promise<readonly PluginUiContr
 export async function executeUiPluginOperation(
   operationId: string,
   input: JsonValue,
+  options?: UiOperationInvokeOptions,
 ): Promise<OperationResult<unknown>> {
   try {
-    return await getPluginService().executeUiOperation(operationId, input);
+    return await getPluginService().executeUiOperation(
+      operationId,
+      input,
+      sanitizeUiOperationOptions(options),
+    );
   } catch {
     return {
       ok: false,

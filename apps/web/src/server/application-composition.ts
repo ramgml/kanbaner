@@ -30,6 +30,8 @@ import {
   type UiContributionRegistrar,
 } from "@kanbaner/plugin-sdk";
 
+import { sanitizeUiOperationOptions, type UiOperationInvokeOptions } from "../ui/operation-types";
+
 const NOOP_LOGGER: PluginLogger = Object.freeze({
   debug(): void {
     // Намеренно пусто.
@@ -140,7 +142,11 @@ export interface ApplicationPluginComposition {
   /** Подписки удаления ресурса для namespace-ов активных плагинов. */
   bindPlugins(pluginIds: readonly PluginId[]): void;
   listUiContributions(): readonly PluginUiContributionRecord[];
-  executeUiOperation(operationId: string, input: JsonValue): Promise<OperationResult<unknown>>;
+  executeUiOperation(
+    operationId: string,
+    input: JsonValue,
+    options?: UiOperationInvokeOptions,
+  ): Promise<OperationResult<unknown>>;
   dispose(): void;
 }
 
@@ -255,6 +261,7 @@ export function createApplicationPluginComposition(
     async executeUiOperation(
       operationId: string,
       input: JsonValue,
+      options?: UiOperationInvokeOptions,
     ): Promise<OperationResult<unknown>> {
       const descriptor = operations.registry.get(operationId);
 
@@ -262,8 +269,16 @@ export function createApplicationPluginComposition(
         return toErrorResult(createPluginError("PLUGIN_UNAVAILABLE", "Операция недоступна для UI"));
       }
 
+      // Ключ идемпотентности относится только к командам. Запрос не получает
+      // его даже если клиент передал лишнее поле.
+      const idempotencyKey =
+        descriptor.kind === "mutation"
+          ? sanitizeUiOperationOptions(options)?.idempotencyKey
+          : undefined;
+
       const executionOptions = {
         source: { type: "ui" as const, id: "web" },
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       };
 
       return descriptor.kind === "mutation"

@@ -2,6 +2,7 @@
 
 import type { JsonValue, OperationResult } from "@kanbaner/plugin-sdk";
 
+import { sanitizeUiOperationOptions, type UiOperationInvokeOptions } from "../ui/operation-types";
 import { executeUiPluginOperation } from "./plugin-service";
 
 export interface UiOperationError {
@@ -33,8 +34,13 @@ function jsonData(value: unknown): JsonValue | null {
 export async function executePluginOperation(
   operationId: string,
   input: JsonValue,
+  options?: UiOperationInvokeOptions,
 ): Promise<UiOperationResult> {
-  const result: OperationResult<unknown> = await executeUiPluginOperation(operationId, input);
+  const result: OperationResult<unknown> = await executeUiPluginOperation(
+    operationId,
+    input,
+    sanitizeUiOperationOptions(options),
+  );
 
   if (!result.ok) {
     return {
