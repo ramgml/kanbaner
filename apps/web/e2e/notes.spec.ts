@@ -100,6 +100,59 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(page.getByTestId("note-title")).toHaveValue(name);
   });
 
+  test("не обрезает название скрытыми действиями и показывает их по hover и focus", async ({
+    page,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const shortName = "Без названия";
+    const id = await createNote(page, shortName);
+    const row = page.locator(`[data-note-tree-item='${id}']`);
+    const label = page.locator(`[data-note-title='${id}']`);
+    await expect(label).toHaveText(shortName);
+
+    // Раньше четыре скрытые кнопки занимали ширину, и «Без названия» обрезалось.
+    await expect
+      .poll(() => label.evaluate((element) => element.scrollWidth <= element.clientWidth + 1))
+      .toBe(true);
+    const share = await page.evaluate((noteId) => {
+      const sidebar = document.querySelector("aside[aria-label='Навигация по заметкам']");
+      const title = document.querySelector(`[data-note-title='${noteId}']`);
+      if (sidebar === null || title === null) return 0;
+      return title.getBoundingClientRect().width / sidebar.getBoundingClientRect().width;
+    }, id);
+    expect(share).toBeGreaterThan(0.6);
+
+    // Длинное название обрезается только при реальной нехватке ширины.
+    const longId = await createNote(page, `${title("Очень длинное название страницы")} и ещё`);
+    await expect
+      .poll(() =>
+        page
+          .locator(`[data-note-title='${longId}']`)
+          .evaluate((element) => element.scrollWidth > element.clientWidth),
+      )
+      .toBe(true);
+    await expectNoOverflow(page);
+
+    const actions = page.locator(`[data-note-actions='${id}']`);
+    const opacity = (): Promise<string> =>
+      actions.evaluate((element) => getComputedStyle(element).opacity);
+
+    await page.mouse.move(5, 5);
+    await expect.poll(opacity).toBe("0");
+    await row.hover();
+    await expect.poll(opacity).toBe("1");
+    await expect(page.locator(`[data-note-add-child='${id}']`)).toBeVisible();
+    await expect(page.locator(`[data-note-delete='${id}']`)).toBeVisible();
+    await expectNoOverflow(page);
+
+    // Скрытие возвращается после ухода курсора, фокус снова показывает действия.
+    await page.mouse.move(5, 5);
+    await expect.poll(opacity).toBe("0");
+    await page.locator(`[data-note-delete='${id}']`).focus();
+    await expect.poll(opacity).toBe("1");
+  });
+
   test("создаёт вложенные страницы и перемещает их без drag-and-drop", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     const parentName = title("Родитель");
@@ -297,13 +350,33 @@ test.describe("kanbaner.notes в production shell", () => {
     await page.setViewportSize(MOBILE);
     await openNotes(page);
     const name = title("Мобильная заметка");
-    await createNote(page, name, "Мобильный текст без горизонтального overflow");
+    const id = await createNote(page, name, "Мобильный текст без горизонтального overflow");
     await expectNoOverflow(page);
     await page.getByRole("button", { name: "Открыть дерево заметок" }).click();
     await expect(page.getByRole("complementary", { name: "Навигация по заметкам" })).toBeVisible();
+
+    // На touch действия видны без hover, название при этом остаётся читаемым.
+    const actions = page.locator(`[data-note-actions='${id}']`);
+    await expect
+      .poll(() => actions.evaluate((element) => getComputedStyle(element).opacity))
+      .toBe("1");
+    const addChild = page.locator(`[data-note-add-child='${id}']`);
+    await expect(addChild).toBeVisible();
+    await expect
+      .poll(() => addChild.evaluate((element) => getComputedStyle(element).pointerEvents))
+      .not.toBe("none");
+    await expect(page.locator(`[data-note-title='${id}']`)).toHaveText(name);
+    await expectNoOverflow(page);
+
     await page.getByRole("button", { name: "Закрыть дерево заметок" }).click();
     await page.getByTestId("note-link-picker-trigger").click();
     await expect(page.getByTestId("note-link-picker")).toBeVisible();
+    await expectNoOverflow(page);
+
+    // Действие создаёт вложенную страницу по touch без hover.
+    await page.getByRole("button", { name: "Открыть дерево заметок" }).click();
+    await page.locator(`[data-note-add-child='${id}']`).click();
+    await expect(page.getByTestId("note-title")).toHaveValue("Без названия");
     await expectNoOverflow(page);
   });
 });
