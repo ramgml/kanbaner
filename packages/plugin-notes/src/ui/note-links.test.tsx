@@ -13,6 +13,13 @@ function success(data: unknown): UiOperationResult {
   return { ok: true, data: data as JsonValue };
 }
 
+function failure(message: string): UiOperationResult {
+  return {
+    ok: false,
+    error: { code: "test.error", message, retryable: false },
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -70,5 +77,77 @@ describe("NoteLinks", () => {
       sourceRef: otherNoteRef,
       targetRef: noteRef,
     });
+  });
+
+  it("добавляет связь с проектом по видимому названию", async () => {
+    const links: ResolvedNoteLink[] = [];
+    const linkInputs: unknown[] = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: links });
+      if (operationId === NOTES_COMMAND_IDS.link) {
+        linkInputs.push(input);
+        return success({ link: { sourceRef: "kanbaner.notes:note:note-1", targetRef: "" } });
+      }
+      if (operationId === "kanbaner.tasks.project.list") {
+        return success({
+          items: [
+            { id: "project-1", title: "Оформление заказа" },
+            { id: "project-2", title: "Личный кабинет" },
+          ],
+          total: 2,
+          nextOffset: null,
+        });
+      }
+      if (operationId === "kanbaner.tasks.task.list") {
+        return success({
+          items: [{ id: "task-1", title: "Починить корзину" }],
+          total: 1,
+          nextOffset: null,
+        });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NoteLinks noteId="note-1" invoke={invoke} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    const search = await screen.findByRole("combobox", { name: "Поиск проекта или задачи" });
+    fireEvent.change(search, { target: { value: "оформ" } });
+
+    const project = await screen.findByRole("option", { name: /Оформление заказа/ });
+    expect(project).toHaveTextContent("Проект");
+    expect(screen.queryByRole("option", { name: /Починить корзину/ })).not.toBeInTheDocument();
+
+    fireEvent.click(project);
+
+    await waitFor(() => expect(linkInputs).toHaveLength(1));
+    expect(linkInputs[0]).toMatchObject({
+      noteId: "note-1",
+      targetRef: "kanbaner.tasks:project:project-1",
+    });
+    await waitFor(() => expect(screen.queryByTestId("note-link-picker")).not.toBeInTheDocument());
+  });
+
+  it("показывает ошибку создания связи и оставляет picker открытым", async () => {
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.link) return failure("Связь уже существует");
+      if (operationId === "kanbaner.tasks.project.list") {
+        return success({
+          items: [{ id: "project-1", title: "Оформление заказа" }],
+          total: 1,
+          nextOffset: null,
+        });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NoteLinks noteId="note-1" invoke={invoke} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    fireEvent.click(await screen.findByRole("option", { name: /Оформление заказа/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Связь уже существует");
+    expect(screen.getByTestId("note-link-picker")).toBeVisible();
   });
 });
