@@ -8,7 +8,11 @@ import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/core/style.css";
 import "@blocknote/shadcn/style.css";
 
-import { prepareMarkdownForBlockNote, serializeBlockNoteMarkdown } from "./blocknote-markdown.ts";
+import {
+  markdownToEditorBlocks,
+  sanitizeImageAlt,
+  serializeBlockNoteMarkdown,
+} from "./blocknote-markdown.ts";
 import {
   imageUploadErrorMessage,
   isImageFile,
@@ -17,6 +21,7 @@ import {
   validateLinkHref,
 } from "./editor-markdown.ts";
 import { NOTE_EDITOR_STYLES } from "./editor-styles.ts";
+import { noteEditorSchema } from "./note-editor-schema.tsx";
 
 export interface MarkdownNoteEditorProps {
   /** Смена ID означает новый документ и пересоздание редактора. */
@@ -33,6 +38,8 @@ export interface MarkdownNoteEditorProps {
 }
 
 const DEFAULT_ARIA_LABEL = "Текст заметки";
+const PREVIEW_PLACEHOLDER =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 interface EditorViewProps {
   readonly editor: object;
@@ -70,6 +77,9 @@ export function MarkdownNoteEditor({
   const lastEmittedRef = useRef(value);
   const initializedRef = useRef(false);
   const suppressChangeRef = useRef(false);
+  const mountedRef = useRef(true);
+  const lockedRef = useRef(readOnly || disabled);
+  const editorRef = useRef<ReturnType<typeof useCreateBlockNote> | null>(null);
   const [ready, setReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +90,15 @@ export function MarkdownNoteEditor({
     valueRef.current = value;
     onChangeRef.current = onChange;
     uploadRef.current = onUploadImage;
+    lockedRef.current = locked;
   });
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const refresh = () => setTheme(currentTheme());
@@ -93,10 +111,88 @@ export function MarkdownNoteEditor({
     return () => observer.disconnect();
   }, []);
 
-  const uploadFile = useCallback(async (file: File) => uploadRef.current(file), []);
+  /** Общая загрузка с проверкой результата; ошибки обрабатывает вызывающий flow. */
+  const uploadImageSource = useCallback(async (file: File): Promise<string> => {
+    if (!isImageFile(file)) throw new Error("Можно загрузить только файл изображения.");
+    const source = sanitizeImageSource(await uploadRef.current(file));
+    if (source === null) throw new Error("Некорректный адрес изображения.");
+    return source;
+  }, []);
+
+  /**
+   * Встроенный upload BlockNote (paste/drop/slash) получает blockId. Если
+   * загрузка не удалась или заметка уже закрыта/заблокирована, placeholder
+   * удаляется до автосохранения, чтобы в Markdown не попала пустая картинка.
+   */
+  const uploadThroughBlockNote = useCallback(
+    async (file: File, blockId?: string): Promise<string> => {
+      const activeEditor = editorRef.current;
+      const cleanup = () => {
+        if (activeEditor === null || blockId === undefined) return;
+        window.setTimeout(() => {
+          try {
+            if (activeEditor.getBlock(blockId) !== undefined) {
+              activeEditor.removeBlocks([blockId]);
+            }
+          } catch {
+            // Блок уже удалён или редактор размонтирован.
+          }
+        }, 0);
+      };
+      const fail = (reason: unknown): string => {
+        cleanup();
+        if (mountedRef.current && editorRef.current === activeEditor) {
+          setError(imageUploadErrorMessage(reason));
+        }
+        return PREVIEW_PLACEHOLDER;
+      };
+      const sanitizeBlockName = (): void => {
+        if (blockId === undefined) return;
+        window.setTimeout(() => {
+          try {
+            const block = activeEditor.getBlock(blockId);
+            if (block?.type !== "image") return;
+            const name = (block.props as { readonly name?: string }).name ?? "";
+            const safeName = sanitizeImageAlt(name);
+            if (safeName !== name) {
+              activeEditor.updateBlock(blockId, { props: { name: safeName } });
+            }
+          } catch {
+            // Блок уже удалён или редактор размонтирован.
+          }
+        }, 0);
+      };
+
+      if (activeEditor === null || lockedRef.current) {
+        return fail(new Error("Редактор недоступен для загрузки изображения."));
+      }
+
+      setError(null);
+      setUploading(true);
+      try {
+        const source = await uploadImageSource(file);
+        if (!mountedRef.current || lockedRef.current || editorRef.current !== activeEditor) {
+          return fail(new Error("Заметка закрыта до завершения загрузки."));
+        }
+        sanitizeBlockName();
+        return source;
+      } catch (reason) {
+        return fail(reason);
+      } finally {
+        if (mountedRef.current) setUploading(false);
+      }
+    },
+    [uploadImageSource],
+  );
+
+  const uploadFile = useCallback(
+    (file: File, blockId?: string) => uploadThroughBlockNote(file, blockId),
+    [uploadThroughBlockNote],
+  );
 
   const editor = useCreateBlockNote(
     {
+      schema: noteEditorSchema,
       dictionary: ru,
       uploadFile,
       links: {
@@ -116,6 +212,9 @@ export function MarkdownNoteEditor({
     },
     [noteId, editorId],
   );
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,10 +229,7 @@ export function MarkdownNoteEditor({
     setUploading(false);
 
     try {
-      const markdown = prepareMarkdownForBlockNote(valueRef.current);
-      const blocks = markdown.length > 0 ? editor.tryParseMarkdownToBlocks(markdown) : [];
-      editor.replaceBlocks(editor.document, blocks);
-      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, valueRef.current));
       initializedRef.current = true;
       if (!cancelled) setReady(true);
     } catch {
@@ -162,10 +258,7 @@ export function MarkdownNoteEditor({
 
     suppressChangeRef.current = true;
     try {
-      editor.replaceBlocks(
-        editor.document,
-        editor.tryParseMarkdownToBlocks(prepareMarkdownForBlockNote(value)),
-      );
+      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, value));
       lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
     } catch {
       queueMicrotask(() => setError("Не удалось обновить содержимое редактора."));
@@ -184,36 +277,46 @@ export function MarkdownNoteEditor({
         return;
       }
 
+      const activeEditor = editor;
       setError(null);
       setUploading(true);
       try {
         for (const file of images) {
-          const source = sanitizeImageSource(await uploadRef.current(file));
-          if (source === null) throw new Error("Некорректный адрес изображения.");
-          const imageBlock = { type: "image", props: { url: source, name: file.name } } as const;
+          const source = await uploadImageSource(file);
+          if (!mountedRef.current || lockedRef.current || editorRef.current !== activeEditor) {
+            return;
+          }
+
+          const imageBlock = {
+            type: "image",
+            props: { url: source, name: sanitizeImageAlt(file.name) },
+          } as const;
           let reference: { readonly id: string } | undefined;
           try {
-            reference = editor.getTextCursorPosition().block;
+            reference = activeEditor.getTextCursorPosition().block;
           } catch {
-            reference = editor.document.at(-1);
+            reference = activeEditor.document.at(-1);
           }
           if (reference === undefined) throw new Error("Не удалось создать блок изображения.");
 
-          const current = editor.getBlock(reference.id);
+          const current = activeEditor.getBlock(reference.id);
           if (current?.type === "paragraph" && current.content.length === 0) {
-            editor.setTextCursorPosition(editor.updateBlock(current, imageBlock), "end");
+            activeEditor.setTextCursorPosition(
+              activeEditor.updateBlock(current, imageBlock),
+              "end",
+            );
           } else {
-            const [inserted] = editor.insertBlocks([imageBlock], reference, "after");
-            if (inserted !== undefined) editor.setTextCursorPosition(inserted, "end");
+            const [inserted] = activeEditor.insertBlocks([imageBlock], reference, "after");
+            if (inserted !== undefined) activeEditor.setTextCursorPosition(inserted, "end");
           }
         }
       } catch (reason) {
-        setError(imageUploadErrorMessage(reason));
+        if (mountedRef.current) setError(imageUploadErrorMessage(reason));
       } finally {
-        setUploading(false);
+        if (mountedRef.current) setUploading(false);
       }
     },
-    [editor, locked],
+    [editor, locked, uploadImageSource],
   );
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
@@ -241,6 +344,7 @@ export function MarkdownNoteEditor({
           onChange={() => {
             if (!initializedRef.current || suppressChangeRef.current) return;
             const markdown = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+            if (markdownDocumentsEqual(markdown, lastEmittedRef.current)) return;
             lastEmittedRef.current = markdown;
             onChangeRef.current(markdown);
           }}

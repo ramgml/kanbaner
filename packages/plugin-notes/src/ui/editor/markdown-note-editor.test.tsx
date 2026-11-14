@@ -57,6 +57,19 @@ function imageFile(name = "схема.png", type = "image/png"): File {
   return new File(["binary"], name, { type });
 }
 
+function pasteFile(element: HTMLElement, file: File): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      types: ["Files"],
+      files: [file],
+      items: [{ type: file.type, getAsFile: () => file }],
+      getData: () => "",
+    },
+  });
+  element.dispatchEvent(event);
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "matchMedia",
@@ -247,6 +260,52 @@ describe("MarkdownNoteEditor: изображения", () => {
     expect(onUploadImage).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it("удаляет placeholder и не сохраняет image после ошибки встроенного upload", async () => {
+    const onUploadImage = vi.fn<(file: File) => Promise<string>>(async () => {
+      throw new Error("Хранилище недоступно");
+    });
+    const { container, onChange } = renderEditor({ value: "", onUploadImage });
+    const content = await waitForReady(container);
+
+    content.focus();
+    pasteFile(content, imageFile());
+
+    await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Не удалось загрузить изображение: Хранилище недоступно",
+    );
+    await waitFor(() => expect(container.querySelector("img")).toBeNull());
+
+    const emitted = onChange.mock.calls.map(([markdown]) => String(markdown));
+    const last = emitted.at(-1) ?? "";
+    expect(last).not.toContain("attachment://");
+    expect(last).not.toContain("data:image/gif");
+  });
+
+  it("не вставляет image, если заметка заблокирована до завершения загрузки", async () => {
+    let resolveUpload: ((url: string) => void) | undefined;
+    const onUploadImage = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    const { container, rerender, onChange } = renderEditor({ value: "", onUploadImage });
+    await waitForReady(container);
+
+    fireEvent.change(screen.getByTestId("note-image-input"), {
+      target: { files: [imageFile()] },
+    });
+    rerender({ readOnly: true });
+    resolveUpload?.("attachment://img-1");
+
+    await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });
 
 describe("MarkdownNoteEditor: raw HTML", () => {
@@ -259,5 +318,24 @@ describe("MarkdownNoteEditor: raw HTML", () => {
     expect(container.querySelector("script")).toBeNull();
     expect(container).toHaveTextContent("Безопасный текст");
     expect(container).not.toContainHTML("<script>window.__noteXss = true</script>");
+  });
+
+  it("показывает raw HTML литерально и сохраняет его при следующем onChange", async () => {
+    const { container, onChange } = renderEditor({
+      value: "<script>window.__noteXss = true</script>\n\nБезопасный текст",
+    });
+    await waitForReady(container);
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container).toHaveTextContent("<script>window.__noteXss = true</script>");
+    expect(container).toHaveTextContent("Безопасный текст");
+
+    fireEvent.change(screen.getByTestId("note-image-input"), {
+      target: { files: [imageFile()] },
+    });
+
+    await waitFor(() => {
+      expect(lastMarkdown(onChange)).toContain("<script>window.__noteXss = true</script>");
+    });
   });
 });

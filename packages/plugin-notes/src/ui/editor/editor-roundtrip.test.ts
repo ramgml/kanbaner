@@ -1,19 +1,34 @@
 import { BlockNoteEditor } from "@blocknote/core";
 import { describe, expect, it } from "vitest";
 
-import { prepareMarkdownForBlockNote, serializeBlockNoteMarkdown } from "./blocknote-markdown.ts";
+import {
+  markdownToEditorBlocks,
+  prepareMarkdownForBlockNote,
+  serializeBlockNoteMarkdown,
+} from "./blocknote-markdown.ts";
+import { noteEditorSchema } from "./note-editor-schema.tsx";
+
+interface InspectableBlock {
+  readonly type: string;
+  readonly props?: Record<string, unknown>;
+  readonly content?: readonly { readonly type: string; readonly props?: Record<string, unknown> }[];
+  readonly children?: readonly InspectableBlock[];
+}
 
 function createEditor() {
-  return BlockNoteEditor.create();
+  return BlockNoteEditor.create({ schema: noteEditorSchema });
 }
 
 function roundtrip(markdown: string): string {
   const editor = createEditor();
   return serializeBlockNoteMarkdown(
-    editor.blocksToMarkdownLossy(
-      editor.tryParseMarkdownToBlocks(prepareMarkdownForBlockNote(markdown)),
-    ),
+    editor.blocksToMarkdownLossy(markdownToEditorBlocks(editor, markdown)),
   );
+}
+
+function blocksOf(markdown: string): readonly InspectableBlock[] {
+  const editor = createEditor();
+  return markdownToEditorBlocks(editor, markdown) as unknown as readonly InspectableBlock[];
 }
 
 const ROUNDTRIP_FIXTURES: readonly (readonly [name: string, input: string, expected: string[]])[] =
@@ -46,71 +61,62 @@ const ROUNDTRIP_FIXTURES: readonly (readonly [name: string, input: string, expec
     [
       "inline image в абзаце",
       "До ![Схема](attachment://img-1) после",
-      ["До", "![Схема](attachment://img-1)", "после"],
+      ["До ![Схема](attachment://img-1) после"],
     ],
     [
       "inline image в элементе списка",
       "- item ![Схема](attachment://img-1) tail",
-      ["item", "![Схема](attachment://img-1)", "tail"],
+      ["* item ![Схема](attachment://img-1) tail"],
     ],
     [
       "image в цитате",
       "> Цитата ![Схема](attachment://img-1) хвост",
-      ["Цитата", "![Схема](attachment://img-1)", "хвост"],
+      ["> Цитата ![Схема](attachment://img-1) хвост"],
     ],
     [
       "image в заголовке",
       "# Заголовок ![Схема](attachment://img-1)",
-      ["# Заголовок", "![Схема](attachment://img-1)"],
+      ["# Заголовок ![Схема](attachment://img-1)"],
     ],
     [
       "image в ячейке таблицы",
       "| A | B |\n| --- | --- |\n| ![Схема](attachment://img-1) | 2 |",
-      ["| A", "| B", "| 2", "![Схема](attachment://img-1)"],
-    ],
-    [
-      "reference image рядом с текстом",
-      "Текст ![Схема][s] хвост\n\n[s]: attachment://img-1",
-      ["Текст", "![Схема][s]", "хвост", "[s]: attachment://img-1"],
+      ["![Схема](attachment://img-1)", "| 2"],
     ],
   ];
 
 describe("prepareMarkdownForBlockNote", () => {
-  it("не меняет документ без изображений", () => {
+  it("не меняет документ без изображений и raw HTML", () => {
     const markdown = "## Заголовок\n\nТекст со [ссылкой](https://example.com) и `![код](x)`.";
     expect(prepareMarkdownForBlockNote(markdown)).toBe(markdown);
   });
 
-  it("выносит inline image из абзаца, списка, цитаты и заголовка", () => {
-    expect(prepareMarkdownForBlockNote("До ![Схема](attachment://img-1) после")).toBe(
-      "До\n\n![Схема](attachment://img-1)\n\nпосле",
-    );
-    expect(prepareMarkdownForBlockNote("- item ![Схема](attachment://img-1) tail")).toBe(
-      "- item\n\n  ![Схема](attachment://img-1)\n\n  tail",
-    );
-    expect(prepareMarkdownForBlockNote("> Цитата ![Схема](attachment://img-1) хвост")).toBe(
-      "> Цитата  хвост\n\n![Схема](attachment://img-1)",
-    );
-    expect(prepareMarkdownForBlockNote("# Заголовок ![Схема](attachment://img-1)")).toBe(
-      "# Заголовок \n\n![Схема](attachment://img-1)",
+  it("разрешает imageReference через definition и удаляет definition", () => {
+    expect(prepareMarkdownForBlockNote("![Схема][s]\n\n[s]: attachment://img-1")).toBe(
+      "![Схема](attachment://img-1)\n\n",
     );
   });
 
-  it("выносит image из ячейки таблицы, сохраняя саму таблицу", () => {
-    const markdown = "| A | B |\n| --- | --- |\n| ![Схема](attachment://img-1) | 2 |";
-
-    expect(prepareMarkdownForBlockNote(markdown)).toBe(
-      "| A | B |\n| --- | --- |\n|  | 2 |\n\n![Схема](attachment://img-1)",
+  it("сохраняет definition, если на него ссылается обычная ссылка", () => {
+    const prepared = prepareMarkdownForBlockNote(
+      "![Схема][s] и [документ][s]\n\n[s]: attachment://img-1",
     );
+    expect(prepared).toContain("![Схема](attachment://img-1)");
+    expect(prepared).toContain("[s]: attachment://img-1");
+  });
+
+  it("превращает raw HTML в литеральный код без исполнения", () => {
+    const prepared = prepareMarkdownForBlockNote("<script>window.__noteXss = true</script>");
+    expect(prepared).toContain("`<script>window.__noteXss = true</script>`");
+    expect(prepared).not.toMatch(/^<script>/u);
   });
 
   it("идемпотентен после первой нормализации", () => {
     const cases = [
       "До ![Схема](attachment://img-1) после",
-      "- item ![Схема](attachment://img-1) tail",
-      "> Цитата ![Схема](attachment://img-1) хвост",
-      "| A | B |\n| --- | --- |\n| ![Схема](attachment://img-1) | 2 |",
-      "Текст ![Схема][s] хвост\n\n[s]: attachment://img-1",
+      "[![Схема](attachment://img-1)](https://example.com)",
+      "![Схема][s]\n\n[s]: attachment://img-1",
+      "<script>alert(1)</script>",
     ];
 
     for (const markdown of cases) {
@@ -124,6 +130,114 @@ describe("roundtrip Markdown через BlockNote", () => {
   it.each(ROUNDTRIP_FIXTURES)("сохраняет %s", (_name, input, expected) => {
     const output = roundtrip(input);
     for (const fragment of expected) expect(output).toContain(fragment);
+  });
+
+  it("сохраняет image, обёрнутый в ссылку, без обрыва Markdown", () => {
+    const markdown = "[![Схема](attachment://a)](https://example.com)";
+    const blocks = blocksOf(markdown);
+    const content = blocks[0]?.content ?? [];
+
+    expect(blocks[0]?.type).toBe("paragraph");
+    expect(content[0]?.type).toBe("linkedImage");
+    expect(content[0]?.props).toMatchObject({
+      url: "attachment://a",
+      name: "Схема",
+      href: "https://example.com",
+    });
+    expect(roundtrip(markdown)).toBe(markdown);
+  });
+
+  it("сохраняет ссылку с текстом и image литеральным кодом без потери Markdown", () => {
+    const markdown = "[до ![Схема](attachment://a) после](https://example.com)";
+    const output = roundtrip(markdown);
+
+    expect(output).toContain("[до ![Схема](attachment://a) после](https://example.com)");
+    expect(output.startsWith("`")).toBe(true);
+    expect(output).not.toContain("linkedImage");
+    expect(roundtrip(output)).toBe(output);
+  });
+
+  it("сохраняет image внутри strong с парными маркерами", () => {
+    const markdown = "**До ![Схема](attachment://a) после**";
+    const blocks = blocksOf(markdown);
+    const content = blocks[0]?.content ?? [];
+
+    expect(blocks[0]?.type).toBe("paragraph");
+    expect(content.map((item) => item.type)).toEqual(["text", "inlineImage", "text"]);
+    expect((content[0] as { styles?: Record<string, unknown> }).styles).toMatchObject({
+      bold: true,
+    });
+
+    const output = roundtrip(markdown);
+    expect(output.match(/\*\*/gu)).toHaveLength(4);
+    expect(output).toContain("![Схема](attachment://a)");
+    expect(roundtrip(output)).toBe(output);
+  });
+
+  it("сохраняет image внутри emphasis с парными маркерами", () => {
+    const markdown = "*До ![Схема](attachment://a) после*";
+    const output = roundtrip(markdown);
+
+    expect(output.match(/(?<!\*)\*(?!\*)/gu)?.length).toBe(4);
+    expect(output).toContain("![Схема](attachment://a)");
+    expect(roundtrip(output)).toBe(output);
+  });
+
+  it("разрешает reference image в image-блок с фактическим URL", () => {
+    const markdown = "![Схема][s]\n\n[s]: attachment://img-1";
+    const blocks = blocksOf(markdown);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe("image");
+    expect(blocks[0]?.props).toMatchObject({
+      url: "attachment://img-1",
+      name: "Схема",
+    });
+    expect(roundtrip(markdown)).toBe("![Схема](attachment://img-1)");
+  });
+
+  it("превращает inline reference image во inline image с фактическим URL", () => {
+    const markdown = "Текст ![Схема][s] хвост\n\n[s]: attachment://img-1";
+    const blocks = blocksOf(markdown);
+    const content = blocks[0]?.content ?? [];
+
+    expect(content.map((item) => item.type)).toEqual(["text", "inlineImage", "text"]);
+    expect(content[1]?.props).toMatchObject({ url: "attachment://img-1" });
+    expect(roundtrip(markdown)).toContain("![Схема](attachment://img-1)");
+    expect(roundtrip(markdown)).not.toContain("[s]:");
+  });
+
+  it("сохраняет raw HTML литеральным текстом", () => {
+    const markdown = "<script>window.__noteXss = true</script>\n\nБезопасный текст";
+    const output = roundtrip(markdown);
+
+    expect(output).toContain("`<script>window.__noteXss = true</script>`");
+    expect(output).toContain("Безопасный текст");
+    expect(roundtrip(output)).toBe(output);
+  });
+
+  it("нормализует alt с квадратной скобкой и переживает повторный разбор", () => {
+    const markdown = "![diagram\\]v2.png](attachment://a)";
+    const first = roundtrip(markdown);
+    const reparsed = blocksOf(first);
+
+    expect(first).toContain("diagram v2.png");
+    expect(first).not.toContain("\\]");
+    expect(reparsed[0]?.type).toBe("image");
+    expect(reparsed[0]?.props).toMatchObject({ url: "attachment://a" });
+    expect(roundtrip(first)).toBe(first);
+  });
+
+  it("нормализует fail-безопасный alt при импорте Markdown", () => {
+    const markdown = "![diagram\\]v2\\\\final\nimage.png](attachment://a)";
+    const first = roundtrip(markdown);
+    const reparsed = blocksOf(first);
+
+    expect(first).not.toContain("\\]");
+    expect(first).not.toContain("\\\\");
+    expect(reparsed[0]?.type).toBe("image");
+    expect(reparsed[0]?.props).toMatchObject({ url: "attachment://a" });
+    expect(roundtrip(first)).toBe(first);
   });
 
   it("идемпотентен после первой нормализации", () => {
@@ -141,19 +255,5 @@ describe("roundtrip Markdown через BlockNote", () => {
     const dataUrl = "data:image/png;base64,aGVsbG8=";
     expect(roundtrip(`![Схема](${dataUrl})`)).toContain(`![Схема](${dataUrl})`);
     expect(roundtrip(`Текст ![Схема](${dataUrl}) хвост`)).toContain(`![Схема](${dataUrl})`);
-  });
-
-  it("вставляет изображение отдельным блоком", () => {
-    const editor = createEditor();
-    const reference = editor.document.at(-1);
-    if (reference === undefined) throw new Error("Пустой редактор не содержит reference block");
-
-    editor.insertBlocks(
-      [{ type: "image", props: { url: "attachment://img-1", name: "Схема" } }],
-      reference,
-      "after",
-    );
-
-    expect(editor.blocksToMarkdownLossy()).toContain("![Схема](attachment://img-1)");
   });
 });

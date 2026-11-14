@@ -95,6 +95,13 @@ export const NOTE_EDITOR_STYLES = `
   height: auto;
 }
 
+.kanbaner-note-editor .kne-inline-image {
+  display: inline-block;
+  max-height: 2.5em;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
 .kanbaner-note-editor table {
   max-width: 100%;
 }
