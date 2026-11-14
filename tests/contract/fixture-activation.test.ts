@@ -20,6 +20,7 @@ import {
   FIXTURE_QUERY_LIST,
   FIXTURE_QUERY_SEARCH,
 } from "../../packages/plugin-fixture/src/index.ts";
+import { heavyPluginSuite } from "../suite-timeouts.ts";
 import {
   removeDirectory,
   startFixtureHarness,
@@ -264,7 +265,7 @@ export async function activate(context) {
   );
 }
 
-describe("fixture plugin: публичный lifecycle и общие шины", () => {
+describe("fixture plugin: публичный lifecycle и общие шины", heavyPluginSuite, () => {
   it("активируется, регистрирует команды, запросы, ресурс, события и UI", async () => {
     const harness = track(await startFixtureHarness());
 

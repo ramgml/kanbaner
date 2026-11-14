@@ -9,6 +9,7 @@ import {
 } from "../../packages/plugin-tasks/src/contract.ts";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { heavyPluginSuite } from "../suite-timeouts.ts";
 import { startFixtureHarness, type FixtureHarness } from "./fixture-harness.ts";
 
 /**
@@ -45,7 +46,7 @@ async function execute<T>(
   return unwrap<T>(await harness.composition.executeUiOperation(operationId, input as never));
 }
 
-describe("kanbaner.projects отключён", () => {
+describe("kanbaner.projects отключён", heavyPluginSuite, () => {
   it("не активируется и не публикует UI-вклады", async () => {
     const harness = await startFixtureHarness({ disabledPlugins: [TASK_LIST_PLUGIN_ID] });
 

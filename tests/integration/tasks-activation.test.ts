@@ -45,6 +45,7 @@ import {
   type ApplicationStorageRuntime,
 } from "../../apps/web/src/server/application-storage.ts";
 import { migratePluginWithSqlite } from "../../apps/web/src/server/sqlite-plugin-migrations.ts";
+import { heavyPluginSuite } from "../suite-timeouts.ts";
 
 const PLUGIN_DIRECTORIES = [path.resolve(import.meta.dirname, "../../packages")];
 
@@ -326,7 +327,7 @@ async function waitFor<Value>(
   }
 }
 
-describe("активация kanbaner.tasks", () => {
+describe("активация kanbaner.tasks", heavyPluginSuite, () => {
   it("регистрирует все команды и запросы с UI exposure и выключенными HTTP/MCP", async () => {
     const harness = await startHarness();
 

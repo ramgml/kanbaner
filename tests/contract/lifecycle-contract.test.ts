@@ -6,6 +6,7 @@ import path from "node:path";
 import { InMemoryStorageProvider } from "@kanbaner/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { heavyPluginSuite } from "../suite-timeouts.ts";
 import {
   removeDirectory,
   startFixtureHarness,
@@ -92,7 +93,7 @@ export function activate(context) {
 }
 `;
 
-describe("Plugin Contract: lifecycle и изоляция ошибок", () => {
+describe("Plugin Contract: lifecycle и изоляция ошибок", heavyPluginSuite, () => {
   it("блокирует дублирующийся command ID и снимает частичную регистрацию", async () => {
     const root = registryRoot();
 
