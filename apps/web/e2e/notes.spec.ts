@@ -50,8 +50,7 @@ async function expectNoOverflow(page: Page): Promise<void> {
   expect(metrics.body).toBeLessThanOrEqual(metrics.width + 1);
 }
 
-async function createTaskForNotes(page: Page, taskTitle: string): Promise<string> {
-  const projectTitle = title("Проект заметок");
+async function createProject(page: Page, projectTitle: string): Promise<string> {
   await page.goto("/view/tasks");
   await expect(page.getByTestId("task-list-view")).toBeVisible();
   await expect(page.getByTestId("task-list-projects-loading")).toHaveText("Проекты загружены");
@@ -61,6 +60,12 @@ async function createTaskForNotes(page: Page, taskTitle: string): Promise<string
   await form.getByRole("button", { name: "Создать проект" }).click();
   await expect(form).toHaveCount(0);
   await expect(page).toHaveURL(/[?&]project=/u);
+  return new URL(page.url()).searchParams.get("project") ?? "";
+}
+
+async function createTaskForNotes(page: Page, taskTitle: string): Promise<string> {
+  const projectTitle = title("Проект заметок");
+  await createProject(page, projectTitle);
   await page.getByTestId("create-task-button").click();
   await page.getByTestId("task-list-create-input").fill(taskTitle);
   await page.getByTestId("task-list-create-submit").click();
@@ -213,20 +218,38 @@ test.describe("kanbaner.notes в production shell", () => {
     expect(markdown).toContain("  * Потомок");
   });
 
-  test("связывает ResourceRef и открывает связанную заметку", async ({ page }) => {
+  test("выбирает проект по названию, открывает и удаляет связь", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
+    const projectTitle = title("Проект связи");
+    const projectId = await createProject(page, projectTitle);
     await openNotes(page);
-    const firstId = await createNote(page, title("Источник"));
-    const secondId = await createNote(page, title("Связанная"));
-    const target = page.getByRole("combobox", { name: "ResourceRef для связи" });
-    await target.fill(`kanbaner.notes:note:${firstId}`);
-    await page.getByTestId("note-link-add").click();
-    await expect(
-      page.locator(`[data-note-open-link='kanbaner.notes:note:${firstId}']`),
-    ).toBeVisible();
-    await page.locator(`[data-note-open-link='kanbaner.notes:note:${firstId}']`).click();
-    await expect(page).toHaveURL(new RegExp(`note=${firstId}`));
-    expect(noteId(page)).not.toBe(secondId);
+    const noteName = title("Заметка со связью");
+    const id = await createNote(page, noteName);
+
+    await page.getByTestId("note-link-picker-trigger").click();
+    const search = page.getByRole("combobox", { name: "Поиск проекта или задачи" });
+    await search.fill("совсем ничего не найдено");
+    await expect(page.getByTestId("note-link-picker-no-results")).toBeVisible();
+
+    await search.fill(projectTitle);
+    const option = page.getByRole("option", { name: new RegExp(projectTitle, "u") });
+    await expect(option).toBeVisible();
+    await expect(option).toContainText("Проект");
+    await search.press("Enter");
+    await expect(page.getByTestId("note-link-picker")).toHaveCount(0);
+
+    const link = page.locator(`[data-note-open-link='kanbaner.tasks:project:${projectId}']`);
+    await expect(link).toBeVisible();
+    await expect(link).toContainText(projectTitle);
+    await link.click();
+    await expect(page).toHaveURL(/resource=kanbaner\.tasks%3Aproject%3A/u);
+
+    await page.goto(`/view/notes?note=${id}`);
+    await expect(page.getByTestId("note-title")).toHaveValue(noteName);
+    const restored = page.locator(`[data-note-open-link='kanbaner.tasks:project:${projectId}']`);
+    await expect(restored).toBeVisible();
+    await page.getByRole("button", { name: `Удалить связь с ${projectTitle}` }).click();
+    await expect(restored).toHaveCount(0);
   });
 
   test("создаёт связанную заметку из задачи через публичный slot", async ({ page }) => {
@@ -279,6 +302,8 @@ test.describe("kanbaner.notes в production shell", () => {
     await page.getByRole("button", { name: "Открыть дерево заметок" }).click();
     await expect(page.getByRole("complementary", { name: "Навигация по заметкам" })).toBeVisible();
     await page.getByRole("button", { name: "Закрыть дерево заметок" }).click();
+    await page.getByTestId("note-link-picker-trigger").click();
+    await expect(page.getByTestId("note-link-picker")).toBeVisible();
     await expectNoOverflow(page);
   });
 });

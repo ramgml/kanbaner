@@ -1,50 +1,36 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ExternalLink, Link2, Plus, Unlink } from "lucide-react";
+import { ExternalLink, Link2, Unlink } from "lucide-react";
 import type { ResourceRef } from "@kanbaner/plugin-sdk";
 
 import { NOTES_COMMAND_IDS, NOTES_QUERY_IDS } from "../constants.ts";
 import type { ResolvedNoteLink } from "../model.ts";
 import { formatNoteRef } from "../resources.ts";
+import { NoteLinkPicker } from "./note-link-picker.tsx";
 import { invokeNotes, type NotesUiRendererProps } from "./runtime.ts";
 
 interface NoteLinksProps extends Pick<NotesUiRendererProps, "invoke" | "openResource"> {
   readonly noteId: string;
 }
 
-interface LinkTarget {
-  readonly ref: ResourceRef;
-  readonly title: string;
-}
-
 interface LinksOutput {
   readonly items: readonly ResolvedNoteLink[];
 }
 
-function taskTargets(value: unknown, resourceType: "task" | "project"): LinkTarget[] {
-  if (typeof value !== "object" || value === null || !("items" in value)) {
-    return [];
-  }
-  const items = (value as { items?: unknown }).items;
-  if (!Array.isArray(items)) {
-    return [];
-  }
-  return items.flatMap((item) => {
-    if (typeof item !== "object" || item === null || !("id" in item) || !("title" in item)) {
-      return [];
-    }
-    const { id, title } = item as { id: unknown; title: unknown };
-    return typeof id === "string" && typeof title === "string"
-      ? [{ ref: `kanbaner.tasks:${resourceType}:${id}`, title }]
-      : [];
-  });
+/**
+ * Связи заметки. Внутренняя панель привязана к `noteId` через `key`: при смене
+ * заметки незавершённые запросы прежней панели больше не могут записать свои
+ * связи, ошибку или состояние picker-а в новую.
+ */
+export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
+  return (
+    <NoteLinksPanel key={noteId} noteId={noteId} invoke={invoke} openResource={openResource} />
+  );
 }
 
-export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
+function NoteLinksPanel({ noteId, invoke, openResource }: NoteLinksProps) {
   const [items, setItems] = useState<readonly ResolvedNoteLink[]>([]);
-  const [targets, setTargets] = useState<readonly LinkTarget[]>([]);
-  const [targetRef, setTargetRef] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const noteRef = formatNoteRef(noteId);
@@ -65,35 +51,16 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
     void Promise.resolve().then(refresh);
   }, [refresh]);
 
-  useEffect(() => {
-    let active = true;
-    void Promise.allSettled([
-      invokeNotes<unknown>(invoke, "kanbaner.tasks.project.list", { limit: 100, offset: 0 }),
-      invokeNotes<unknown>(invoke, "kanbaner.tasks.task.list", { limit: 100, offset: 0 }),
-    ]).then(([projects, tasks]) => {
-      if (!active) return;
-      const next = [
-        ...(projects.status === "fulfilled" ? taskTargets(projects.value, "project") : []),
-        ...(tasks.status === "fulfilled" ? taskTargets(tasks.value, "task") : []),
-      ];
-      setTargets(next);
-      if (next.length > 0) {
-        setTargetRef((current) => current || next[0]?.ref || "");
-      }
-    });
-    return () => {
-      active = false;
-    };
-  }, [invoke]);
-
-  const link = async (ref: string) => {
+  const link = async (targetRef: ResourceRef): Promise<boolean> => {
     setBusy(true);
     setError(null);
     try {
-      await invokeNotes(invoke, NOTES_COMMAND_IDS.link, { noteId, targetRef: ref });
+      await invokeNotes(invoke, NOTES_COMMAND_IDS.link, { noteId, targetRef });
       await refresh();
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось создать связь");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -101,6 +68,7 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
 
   const unlink = async (sourceRef: ResourceRef, targetRef: ResourceRef) => {
     setBusy(true);
+    setError(null);
     try {
       // Удаляем именно фактическую связь, не разворачивая направление:
       // заметка может быть как source, так и target.
@@ -165,34 +133,7 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
           })}
         </ul>
       )}
-      <div className="flex gap-1">
-        <input
-          aria-label="ResourceRef для связи"
-          data-note-link-target
-          list={`note-link-targets-${noteId}`}
-          value={targetRef}
-          onChange={(event) => setTargetRef(event.target.value)}
-          placeholder="plugin:type:id"
-          className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        <datalist id={`note-link-targets-${noteId}`}>
-          {targets.map((target) => (
-            <option key={target.ref} value={target.ref}>
-              {target.title}
-            </option>
-          ))}
-        </datalist>
-        <button
-          type="button"
-          data-testid="note-link-add"
-          aria-label="Добавить связь"
-          disabled={busy || targetRef.trim().length === 0}
-          onClick={() => void link(targetRef.trim())}
-          className="inline-flex size-8 items-center justify-center rounded-md border border-border hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-        >
-          <Plus aria-hidden="true" className="size-4" />
-        </button>
-      </div>
+      <NoteLinkPicker key={noteId} noteId={noteId} invoke={invoke} busy={busy} onLink={link} />
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}
