@@ -32,6 +32,15 @@ interface NoteTreeProps {
 const buttonClass =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+/**
+ * Кнопки overlay-панели действий.
+ *
+ * Панель не участвует в расчёте ширины строки и лежит поверх названия, поэтому
+ * интерактивны только сами кнопки: клик между ними проходит к названию. На
+ * desktop панель скрыта до hover/focus, на touch видна всегда.
+ */
+const actionButtonClass = `${buttonClass} pointer-events-auto lg:size-6 lg:pointer-events-none lg:group-hover:pointer-events-auto lg:focus-within:pointer-events-auto`;
+
 export function NoteTree({
   items,
   selectedId,
@@ -121,7 +130,7 @@ export function NoteTree({
                   }
                 }
           }
-          className={`group flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
+          className={`group relative flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
             selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
           }`}
           style={{ paddingLeft: `${depth * 12 + 2}px` }}
@@ -158,15 +167,22 @@ export function NoteTree({
             type="button"
             data-note-select={id}
             onClick={() => onSelect(id)}
-            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1.5 pr-28 pl-1 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:pr-1"
           >
             <FileText aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1 truncate">{view.note.title}</span>
+            <span data-note-title={id} className="min-w-0 flex-1 truncate">
+              {view.note.title}
+            </span>
             {view.favorite ? (
               <Star aria-label="Избранное" className="size-3 shrink-0 fill-current" />
             ) : null}
           </button>
-          <div className="flex shrink-0 items-center opacity-100 transition-opacity focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
+          <div
+            data-note-actions={id}
+            className={`pointer-events-none absolute inset-y-0 right-0 z-10 flex items-center rounded-r-md bg-gradient-to-l from-70% to-transparent pl-12 pr-1 opacity-100 transition-opacity lg:opacity-0 lg:group-hover:opacity-100 lg:focus-within:opacity-100 ${
+              selectedId === id ? "from-accent" : "from-background lg:group-hover:from-accent"
+            }`}
+          >
             {flat ? null : (
               <>
                 <button
@@ -174,7 +190,7 @@ export function NoteTree({
                   aria-label={`Переместить ${view.note.title} выше`}
                   disabled={index <= 0}
                   onClick={() => onMove(id, view.note.parentId, index - 1)}
-                  className={`${buttonClass} text-xs disabled:opacity-30`}
+                  className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↑
                 </button>
@@ -183,7 +199,7 @@ export function NoteTree({
                   aria-label={`Переместить ${view.note.title} ниже`}
                   disabled={index < 0 || index >= siblings.length - 1}
                   onClick={() => onMove(id, view.note.parentId, index + 1)}
-                  className={`${buttonClass} text-xs disabled:opacity-30`}
+                  className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↓
                 </button>
@@ -197,7 +213,7 @@ export function NoteTree({
                 setExpanded((previous) => new Set([...previous, id]));
                 onCreate(id);
               }}
-              className={buttonClass}
+              className={actionButtonClass}
             >
               <Plus aria-hidden="true" className="size-3.5" />
             </button>
@@ -206,7 +222,7 @@ export function NoteTree({
               data-note-delete={id}
               aria-label={`Удалить ${view.note.title}`}
               onClick={() => onDelete(view)}
-              className={`${buttonClass} hover:text-destructive`}
+              className={`${actionButtonClass} hover:text-destructive`}
             >
               <Trash2 aria-hidden="true" className="size-3.5" />
             </button>

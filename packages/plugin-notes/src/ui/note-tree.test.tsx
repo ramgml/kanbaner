@@ -20,6 +20,12 @@ function note(id: string, title: string, parentId: string | null, position: numb
   return { note: value, favorite: false, lastOpenedAt: null, childCount: 0 };
 }
 
+function required<T extends Element>(root: ParentNode, selector: string): T {
+  const element = root.querySelector<T>(selector);
+  if (element === null) throw new Error(`Не найден элемент ${selector}`);
+  return element;
+}
+
 describe("NoteTree", () => {
   afterEach(cleanup);
 
@@ -73,6 +79,59 @@ describe("NoteTree", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Вторая" }));
     expect(onSelect).toHaveBeenCalledWith("b");
+  });
+
+  it("выносит действия в overlay и не отдаёт им ширину названия", () => {
+    const onDelete = vi.fn();
+    const items = [note("a", "Без названия", null, 0), note("b", "Вторая", null, 1)];
+    const { container } = render(
+      <NoteTree
+        items={items}
+        selectedId="a"
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onMove={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const row = required<HTMLElement>(container, "[data-note-tree-item='a']");
+    const select = required<HTMLElement>(container, "[data-note-select='a']");
+    const label = required<HTMLElement>(container, "[data-note-title='a']");
+    const actions = required<HTMLElement>(container, "[data-note-actions='a']");
+
+    // Строка — точка отсчёта для absolute overlay.
+    expect(row).toHaveClass("relative");
+    expect(select).toHaveClass("flex-1", "min-w-0");
+    expect(label).toHaveClass("truncate");
+    // Действия лежат поверх строки и не участвуют в расчёте её ширины.
+    expect(actions).toHaveClass("absolute", "inset-y-0", "right-0", "z-10");
+    expect(actions).not.toHaveClass("shrink-0", "pointer-events-auto");
+    // Панель не перехватывает клики по названию: интерактивны только кнопки.
+    expect(actions).toHaveClass("pointer-events-none");
+    // Непрозрачная часть overlay закрывает кнопки, слева остаётся мягкий fade.
+    expect(actions).toHaveClass("bg-gradient-to-l", "from-70%", "to-transparent");
+    // На touch действия видны всегда, на desktop — только по hover и focus.
+    expect(actions).toHaveClass("opacity-100", "lg:opacity-0", "lg:group-hover:opacity-100");
+    expect(actions).toHaveClass("lg:focus-within:opacity-100");
+    const addChild = screen.getByRole("button", {
+      name: "Создать вложенную страницу в Без названия",
+    });
+    expect(addChild).toHaveClass(
+      "pointer-events-auto",
+      "lg:size-6",
+      "lg:pointer-events-none",
+      "lg:group-hover:pointer-events-auto",
+      "lg:focus-within:pointer-events-auto",
+    );
+    // Фон overlay семантический: accent для выбранной строки, background для обычной.
+    expect(actions).toHaveClass("from-accent");
+    expect(actions).not.toHaveClass("from-background");
+    const otherActions = required<HTMLElement>(container, "[data-note-actions='b']");
+    expect(otherActions).toHaveClass("from-background");
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить Без названия" }));
+    expect(onDelete).toHaveBeenCalledWith(items[0]);
   });
 
   it("показывает вложенность после раскрытия", () => {
