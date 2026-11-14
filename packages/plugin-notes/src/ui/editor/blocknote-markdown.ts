@@ -64,14 +64,24 @@ export function sanitizeImageAlt(name: string): string {
   return normalized.length > 0 ? normalized.slice(0, 240) : "image";
 }
 
-function escapeDestination(url: string): string {
-  return /[\s()]/u.test(url) ? `<${url.replace(/</gu, "%3C").replace(/>/gu, "%3E")}>` : url;
+const DESTINATION_UNSAFE = /[\u0000-\u0020\u007f()<>\\"]/gu;
+
+function encodeDestinationCharacter(character: string): string {
+  return `%${character.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
+}
+
+/**
+ * Нормализует destination image/link: пробелы, скобки, control-символы и
+ * угловые скобки кодируются, иначе Markdown-сериализатор обрезает URL.
+ */
+export function sanitizeImageUrl(url: string): string {
+  return url.replace(DESTINATION_UNSAFE, encodeDestinationCharacter);
 }
 
 function inlineImageMarkdown(alt: string, url: string, title: string | null | undefined): string {
   const titlePart =
     title === null || title === undefined ? "" : ` "${title.replace(/"/gu, '\\"')}"`;
-  return `![${escapeImageAlt(alt)}](${escapeDestination(url)}${titlePart})`;
+  return `![${escapeImageAlt(alt)}](${sanitizeImageUrl(url)}${titlePart})`;
 }
 
 function codeSpan(source: string): string {
@@ -180,50 +190,6 @@ function literalizeHtml(root: MarkdownNode, markdown: string): Replacement[] {
   return replacements;
 }
 
-/**
- * Ссылка, внутри которой кроме image есть текст, не представима ни inline
- * image, ни image-блоком: BlockNote link допускает только текст. Чтобы не
- * отправить в onChange повреждённый Markdown, сохраняем такую ссылку целиком
- * литеральным кодом.
- */
-function literalizeUnsupportedLinks(root: MarkdownNode, markdown: string): Replacement[] {
-  const replacements: Replacement[] = [];
-
-  visit(root, (node) => {
-    if (node.type !== "link") return;
-    const children = node.children ?? [];
-    const hasImage = children.some((child) => {
-      let found = false;
-      visit(child, (candidate) => {
-        if (candidate.type === "image" || candidate.type === "imageReference") found = true;
-      });
-      return found;
-    });
-    if (!hasImage) return;
-
-    const hasOtherContent = children.some((child) => {
-      if (child.type === "image" || child.type === "imageReference") return false;
-      if (child.type === "text") return (child.value ?? "").trim().length > 0;
-      return true;
-    });
-    if (!hasOtherContent) return;
-
-    const range = offsets(node);
-    if (range === null) return;
-    replacements.push({
-      start: range[0],
-      end: range[1],
-      value: literalHtml(markdown.slice(...range)),
-    });
-  });
-
-  return replacements;
-}
-
-function isInside(replacement: Replacement, range: readonly [number, number]): boolean {
-  return replacement.start >= range[0] && replacement.end <= range[1];
-}
-
 function applyReplacements(markdown: string, replacements: readonly Replacement[]): string {
   if (replacements.length === 0) return markdown;
 
@@ -246,16 +212,8 @@ function applyReplacements(markdown: string, replacements: readonly Replacement[
 export function prepareMarkdownForBlockNote(markdown: string): string {
   if (markdown.length === 0) return markdown;
   const root = parseMarkdown(markdown);
-  const linkReplacements = literalizeUnsupportedLinks(root, markdown);
-  const linkRanges = linkReplacements.map(
-    (replacement) => [replacement.start, replacement.end] as const,
-  );
-  const innerReplacements = [
-    ...resolveImageReferences(root),
-    ...literalizeHtml(root, markdown),
-  ].filter((replacement) => !linkRanges.some((range) => isInside(replacement, range)));
-
-  return applyReplacements(markdown, [...linkReplacements, ...innerReplacements]);
+  const replacements = [...resolveImageReferences(root), ...literalizeHtml(root, markdown)];
+  return applyReplacements(markdown, replacements);
 }
 
 function isStandaloneBlockImage(image: Element): boolean {
@@ -280,6 +238,73 @@ function inlineImageSpan(
   return span;
 }
 
+function linkedImageNode(document: Document, image: Element, href: string): Node {
+  const validation = validateLinkHref(href);
+  const url = sanitizeImageUrl(image.getAttribute("src") ?? "");
+  const name = image.getAttribute("alt") ?? "";
+
+  return validation.ok
+    ? inlineImageSpan(document, LINKED_IMAGE_TYPE, url, name, sanitizeImageUrl(validation.href))
+    : inlineImageSpan(document, INLINE_IMAGE_TYPE, url, name);
+}
+
+/**
+ * Ссылка только вокруг image становится linkedImage. Если внутри ссылки есть
+ * ещё текст, ссылка делится на текстовые сегменты и linkedImage: BlockNote
+ * link не допускает вложенный atom, но и ссылка, и картинка сохраняются.
+ */
+function rewriteAnchors(document: Document): void {
+  for (const anchor of Array.from(document.querySelectorAll("a"))) {
+    const allImages = anchor.querySelectorAll("img");
+    if (allImages.length === 0) continue;
+
+    const directImages = Array.from(anchor.children).filter((child) => child.tagName === "IMG");
+    if (directImages.length === 0) continue;
+
+    const href = anchor.getAttribute("href") ?? "";
+    const validation = validateLinkHref(href);
+
+    if (directImages.length === 1 && anchor.children.length === 1) {
+      anchor.replaceWith(linkedImageNode(document, directImages[0] as Element, href));
+      continue;
+    }
+
+    const fragment = document.createDocumentFragment();
+    let wrapper: HTMLElement | null = null;
+    const flush = (): void => {
+      if (wrapper !== null && (wrapper.textContent ?? "").trim().length > 0) {
+        fragment.append(wrapper);
+      }
+      wrapper = null;
+    };
+
+    for (const child of Array.from(anchor.childNodes)) {
+      if (child.nodeType === 1 && (child as Element).tagName === "IMG") {
+        flush();
+        fragment.append(linkedImageNode(document, child as Element, href));
+        continue;
+      }
+
+      if (wrapper === null) {
+        if (validation.ok) {
+          const link = document.createElement("a");
+          link.setAttribute("href", sanitizeImageUrl(validation.href));
+          anchor.getAttributeNames().forEach((name) => {
+            const value = anchor.getAttribute(name);
+            if (value !== null && name !== "href") link.setAttribute(name, value);
+          });
+          wrapper = link;
+        } else {
+          wrapper = document.createElement("span");
+        }
+      }
+      wrapper.append(child);
+    }
+    flush();
+    anchor.replaceWith(fragment);
+  }
+}
+
 /**
  * Переписывает HTML от `markdownToHTML`: одиночный image верхнего уровня
  * остаётся image-блоком, остальные image становятся inline-контентом схемы,
@@ -288,25 +313,7 @@ function inlineImageSpan(
 function rewriteImageHtml(html: string): string {
   const document = new DOMParser().parseFromString(html, "text/html");
 
-  for (const anchor of Array.from(document.querySelectorAll("a"))) {
-    const images = anchor.querySelectorAll("img");
-    if (images.length !== 1) continue;
-    if ((anchor.textContent ?? "").trim().length > 0) continue;
-    if (anchor.children.length !== 1) continue;
-
-    const image = images[0];
-    if (image === undefined || image.parentElement !== anchor) continue;
-
-    const href = anchor.getAttribute("href") ?? "";
-    const validation = validateLinkHref(href);
-    const url = image.getAttribute("src") ?? "";
-    const name = image.getAttribute("alt") ?? "";
-    anchor.replaceWith(
-      validation.ok
-        ? inlineImageSpan(document, LINKED_IMAGE_TYPE, url, name, validation.href)
-        : inlineImageSpan(document, INLINE_IMAGE_TYPE, url, name),
-    );
-  }
+  rewriteAnchors(document);
 
   for (const image of Array.from(document.querySelectorAll("img"))) {
     if (isStandaloneBlockImage(image)) continue;
@@ -314,7 +321,7 @@ function rewriteImageHtml(html: string): string {
       inlineImageSpan(
         document,
         INLINE_IMAGE_TYPE,
-        image.getAttribute("src") ?? "",
+        sanitizeImageUrl(image.getAttribute("src") ?? ""),
         image.getAttribute("alt") ?? "",
       ),
     );
@@ -323,9 +330,9 @@ function rewriteImageHtml(html: string): string {
   return document.body.innerHTML;
 }
 
-function sanitizeImageNames(value: unknown): void {
+function sanitizeImageProps(value: unknown): void {
   if (Array.isArray(value)) {
-    for (const item of value) sanitizeImageNames(item);
+    for (const item of value) sanitizeImageProps(item);
     return;
   }
   if (typeof value !== "object" || value === null) return;
@@ -338,10 +345,15 @@ function sanitizeImageNames(value: unknown): void {
   ) {
     const props = record.props as Record<string, unknown>;
     if (typeof props.name === "string") props.name = sanitizeImageAlt(props.name);
+    if (typeof props.url === "string") props.url = sanitizeImageUrl(props.url);
+    if (typeof props.href === "string") {
+      const validation = validateLinkHref(props.href);
+      props.href = sanitizeImageUrl(validation.ok ? validation.href : props.href);
+    }
   }
 
   for (const child of Object.values(record)) {
-    if (typeof child === "object" && child !== null) sanitizeImageNames(child);
+    if (typeof child === "object" && child !== null) sanitizeImageProps(child);
   }
 }
 
@@ -361,7 +373,7 @@ export function markdownToEditorBlocks<E extends NoteEditorInstance>(
   const prepared = prepareMarkdownForBlockNote(markdown);
   const html = prepared.length === 0 ? "" : rewriteImageHtml(markdownToHTML(prepared));
   const blocks = editor.tryParseHTMLToBlocks(html) as ReturnType<E["tryParseHTMLToBlocks"]>;
-  sanitizeImageNames(blocks);
+  sanitizeImageProps(blocks);
   return blocks;
 }
 

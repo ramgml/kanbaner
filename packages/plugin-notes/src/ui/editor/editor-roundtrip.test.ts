@@ -1,6 +1,7 @@
 import { BlockNoteEditor } from "@blocknote/core";
 import { describe, expect, it } from "vitest";
 
+import { extractAttachmentIds } from "../../markdown-attachments.ts";
 import {
   markdownToEditorBlocks,
   prepareMarkdownForBlockNote,
@@ -147,14 +148,43 @@ describe("roundtrip Markdown через BlockNote", () => {
     expect(roundtrip(markdown)).toBe(markdown);
   });
 
-  it("сохраняет ссылку с текстом и image литеральным кодом без потери Markdown", () => {
-    const markdown = "[до ![Схема](attachment://a) после](https://example.com)";
+  it("сохраняет текст и image внутри ссылки, включая attachment usage", () => {
+    const markdown = "[до ![Схема][s] после](https://example.com)\n\n[s]: attachment://a";
     const output = roundtrip(markdown);
+    const blocks = blocksOf(output);
+    const content = blocks[0]?.content ?? [];
 
-    expect(output).toContain("[до ![Схема](attachment://a) после](https://example.com)");
-    expect(output.startsWith("`")).toBe(true);
-    expect(output).not.toContain("linkedImage");
+    expect(output).toContain("![Схема](attachment://a)");
+    expect(output).toContain("https://example.com");
+    expect(content.some((item) => item.type === "linkedImage")).toBe(true);
+    expect(extractAttachmentIds(output)).toEqual(["a"]);
     expect(roundtrip(output)).toBe(output);
+  });
+
+  it("не обрезает destination с пробелами, скобками и control-символами", () => {
+    const standalone = "![x](<https://example.com/a b(1).png>)";
+    const first = roundtrip(standalone);
+    expect(first).toContain("https://example.com/a%20b%281%29.png");
+    expect(blocksOf(first)[0]?.props).toMatchObject({
+      url: "https://example.com/a%20b%281%29.png",
+    });
+    expect(roundtrip(first)).toBe(first);
+
+    const inline = "Текст ![x](<https://example.com/a b.png>) хвост";
+    const inlineOutput = roundtrip(inline);
+    expect(inlineOutput).toContain("![x](https://example.com/a%20b.png)");
+    expect(roundtrip(inlineOutput)).toBe(inlineOutput);
+
+    const linked = "[![x](<https://example.com/a b.png>)](<https://example.com/p q>)";
+    const linkedOutput = roundtrip(linked);
+    const linkedContent = blocksOf(linkedOutput)[0]?.content ?? [];
+    expect(linkedOutput).toContain("a%20b.png");
+    expect(linkedOutput).toContain("p%20q");
+    expect(linkedContent[0]?.props).toMatchObject({
+      url: "https://example.com/a%20b.png",
+      href: "https://example.com/p%20q",
+    });
+    expect(roundtrip(linkedOutput)).toBe(linkedOutput);
   });
 
   it("сохраняет image внутри strong с парными маркерами", () => {

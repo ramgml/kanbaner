@@ -261,7 +261,7 @@ describe("MarkdownNoteEditor: изображения", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("удаляет placeholder и не сохраняет image после ошибки встроенного upload", async () => {
+  it("не публикует pending placeholder при ошибке встроенного upload", async () => {
     const onUploadImage = vi.fn<(file: File) => Promise<string>>(async () => {
       throw new Error("Хранилище недоступно");
     });
@@ -269,18 +269,33 @@ describe("MarkdownNoteEditor: изображения", () => {
     const content = await waitForReady(container);
 
     content.focus();
-    pasteFile(content, imageFile());
+    pasteFile(content, imageFile("diagram]v2.png"));
 
     await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Не удалось загрузить изображение: Хранилище недоступно",
     );
     await waitFor(() => expect(container.querySelector("img")).toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const emitted = onChange.mock.calls.map(([markdown]) => String(markdown));
-    const last = emitted.at(-1) ?? "";
-    expect(last).not.toContain("attachment://");
-    expect(last).not.toContain("data:image/gif");
+    // onChange — единственный канал, который запускает note.update/autosave.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("возвращает атомарный url и безопасный alt при успешном встроенном upload", async () => {
+    const { container, onChange } = renderEditor({ value: "" });
+    const content = await waitForReady(container);
+
+    content.focus();
+    pasteFile(content, imageFile("diagram]v2.png"));
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalled();
+      const first = String(onChange.mock.calls[0]?.[0] ?? "");
+      expect(first).toContain("![diagram v2.png](attachment://img-1)");
+      expect(first).not.toContain("]v2");
+    });
+    expect(container.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
   });
 
   it("не вставляет image, если заметка заблокирована до завершения загрузки", async () => {

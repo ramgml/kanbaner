@@ -11,6 +11,7 @@ import "@blocknote/shadcn/style.css";
 import {
   markdownToEditorBlocks,
   sanitizeImageAlt,
+  sanitizeImageUrl,
   serializeBlockNoteMarkdown,
 } from "./blocknote-markdown.ts";
 import {
@@ -80,6 +81,7 @@ export function MarkdownNoteEditor({
   const mountedRef = useRef(true);
   const lockedRef = useRef(readOnly || disabled);
   const editorRef = useRef<ReturnType<typeof useCreateBlockNote> | null>(null);
+  const pendingUploadsRef = useRef<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,20 +118,27 @@ export function MarkdownNoteEditor({
     if (!isImageFile(file)) throw new Error("Можно загрузить только файл изображения.");
     const source = sanitizeImageSource(await uploadRef.current(file));
     if (source === null) throw new Error("Некорректный адрес изображения.");
-    return source;
+    return sanitizeImageUrl(source);
   }, []);
 
   /**
-   * Встроенный upload BlockNote (paste/drop/slash) получает blockId. Если
-   * загрузка не удалась или заметка уже закрыта/заблокирована, placeholder
-   * удаляется до автосохранения, чтобы в Markdown не попала пустая картинка.
+   * Встроенный upload BlockNote (paste/drop/slash) получает blockId. Пока
+   * загрузка не завершена, блок помечается pending: его пустой/placeholder URL
+   * не публикуется в onChange и не запускает автосохранение. При ошибке блок
+   * удаляется, при успехе возвращается атомарный update с url и безопасным alt.
    */
   const uploadThroughBlockNote = useCallback(
-    async (file: File, blockId?: string): Promise<string> => {
+    async (
+      file: File,
+      blockId?: string,
+    ): Promise<string | { readonly props: { readonly url: string; readonly name: string } }> => {
       const activeEditor = editorRef.current;
+      if (blockId !== undefined) pendingUploadsRef.current.add(blockId);
+
       const cleanup = () => {
         if (activeEditor === null || blockId === undefined) return;
         window.setTimeout(() => {
+          pendingUploadsRef.current.delete(blockId);
           try {
             if (activeEditor.getBlock(blockId) !== undefined) {
               activeEditor.removeBlocks([blockId]);
@@ -146,22 +155,6 @@ export function MarkdownNoteEditor({
         }
         return PREVIEW_PLACEHOLDER;
       };
-      const sanitizeBlockName = (): void => {
-        if (blockId === undefined) return;
-        window.setTimeout(() => {
-          try {
-            const block = activeEditor.getBlock(blockId);
-            if (block?.type !== "image") return;
-            const name = (block.props as { readonly name?: string }).name ?? "";
-            const safeName = sanitizeImageAlt(name);
-            if (safeName !== name) {
-              activeEditor.updateBlock(blockId, { props: { name: safeName } });
-            }
-          } catch {
-            // Блок уже удалён или редактор размонтирован.
-          }
-        }, 0);
-      };
 
       if (activeEditor === null || lockedRef.current) {
         return fail(new Error("Редактор недоступен для загрузки изображения."));
@@ -174,8 +167,8 @@ export function MarkdownNoteEditor({
         if (!mountedRef.current || lockedRef.current || editorRef.current !== activeEditor) {
           return fail(new Error("Заметка закрыта до завершения загрузки."));
         }
-        sanitizeBlockName();
-        return source;
+        if (blockId !== undefined) pendingUploadsRef.current.delete(blockId);
+        return { props: { url: source, name: sanitizeImageAlt(file.name) } };
       } catch (reason) {
         return fail(reason);
       } finally {
@@ -325,6 +318,27 @@ export function MarkdownNoteEditor({
     if (files.length > 0) void uploadFiles(files);
   };
 
+  const hasPendingUploadArtifact = (instance: typeof editor): boolean => {
+    for (const id of pendingUploadsRef.current) {
+      const block = instance.getBlock(id);
+      if (block === undefined) {
+        pendingUploadsRef.current.delete(id);
+        continue;
+      }
+      const props = block.props as { readonly url?: string } | undefined;
+      if (
+        block.type === "image" ||
+        block.type === "file" ||
+        block.type === "audio" ||
+        block.type === "video"
+      ) {
+        const url = props?.url ?? "";
+        if (url.length === 0 || url === PREVIEW_PLACEHOLDER) return true;
+      }
+    }
+    return false;
+  };
+
   return (
     <div
       ref={rootRef}
@@ -343,6 +357,7 @@ export function MarkdownNoteEditor({
           className="kne-blocknote"
           onChange={() => {
             if (!initializedRef.current || suppressChangeRef.current) return;
+            if (pendingUploadsRef.current.size > 0 && hasPendingUploadArtifact(editor)) return;
             const markdown = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
             if (markdownDocumentsEqual(markdown, lastEmittedRef.current)) return;
             lastEmittedRef.current = markdown;
