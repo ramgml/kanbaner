@@ -1,7 +1,7 @@
 ---
 id: KAN-038
 title: Блочный BlockNote-редактор заметок
-status: review
+status: done
 stage: 1
 priority: high
 owner: opencode-worker
@@ -29,11 +29,11 @@ specs:
 
 ## Объём работ
 
-- [ ] Заменить Milkdown на BlockNote с shadcn-вариантом UI.
-- [ ] Сохранить Markdown round-trip, включая GFM и локальные изображения.
-- [ ] Сохранить автосохранение, expectedVersion, readOnly/disabled и мобильную доступность.
-- [ ] Обновить unit/E2E-тесты и документацию.
-- [ ] Удалить неиспользуемый Milkdown-код и зависимости.
+- [x] Заменить Milkdown на BlockNote с shadcn-вариантом UI.
+- [x] Сохранить Markdown round-trip, включая GFM и локальные изображения.
+- [x] Сохранить автосохранение, expectedVersion, readOnly/disabled и мобильную доступность.
+- [x] Обновить unit/E2E-тесты и документацию.
+- [x] Удалить неиспользуемый Milkdown-код и зависимости.
 
 ## Владение файлами
 
@@ -68,20 +68,20 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Стандартные меню блоков, slash-меню и formatting toolbar доступны.
-- [ ] Markdown не теряет заголовки, форматирование, списки, чекбоксы, таблицы, код, ссылки и изображения.
-- [ ] Инициализация и внешнее обновление не вызывают ложное автосохранение.
-- [ ] Изображения сохраняются через существующий attachment flow.
-- [ ] Основные действия доступны с клавиатуры и на мобильном viewport.
-- [ ] Тесты и проверки зелёные, границы импортов соблюдены.
+- [x] Стандартные меню блоков, slash-меню и formatting toolbar доступны.
+- [x] Markdown не теряет заголовки, форматирование, списки, чекбоксы, таблицы, код, ссылки и изображения.
+- [x] Инициализация и внешнее обновление не вызывают ложное автосохранение.
+- [x] Изображения сохраняются через существующий attachment flow.
+- [x] Основные действия доступны с клавиатуры и на мобильном viewport.
+- [x] Тесты и проверки зелёные, границы импортов соблюдены.
 
 ## Проверки
 
-- [ ] `pnpm --filter @kanbaner/plugin-notes typecheck`
-- [ ] Релевантные unit/integration-тесты заметок.
-- [ ] `pnpm check:imports`
-- [ ] `pnpm check`
-- [ ] `pnpm --filter @kanbaner/web test:e2e -- e2e/notes.spec.ts`
+- [x] `pnpm --filter @kanbaner/plugin-notes typecheck`
+- [x] Релевантные unit/integration-тесты заметок.
+- [x] `pnpm check:imports`
+- [x] `pnpm check`
+- [x] `pnpm --filter @kanbaner/web exec playwright test e2e/notes.spec.ts`
 
 ## Риски
 
@@ -91,12 +91,12 @@ specs:
 ## Журнал
 
 - 2026-11-14 — Задача создана; начальная реализация перенесена из основного checkout в выделенный worktree и передана OpenCode worker.
+- 2026-11-14 — Worker реализовал редактор; независимое ревью выявило потери Markdown и гонки upload, исправленные follow-up коммитами. Повторное ревью разрешило merge.
+- 2026-11-14 — Ветка интегрирована в `dev` через merge queue; `pnpm check` на `dev` зелёный, worktree и feature-ветка удалены.
 
 ## Итог
 
-Заполняется оркестратором после интеграции:
-
-- Коммит:
-- Ветка:
-- Проверки:
-- Остаточные риски:
+- Коммит: merge `2b322aa4f16d2fc88e31d1c7fb5b688f73c1a95f`; рабочие коммиты `a5a30e4`, `261f6d3`, `d2d7b13`, `9c5358d`.
+- Ветка: `feat/kan-038-blocknote-editor` → `dev`.
+- Проверки: `pnpm check` на `dev`; notes unit 114/114; notes E2E 9/9; `pnpm check:imports`; typecheck.
+- Остаточные риски: BlockNote нормализует Markdown и alt/URL; pending image не входит в промежуточные автосохранения; реальный DnD блоков не автоматизирован; проверено в Chromium/Linux, Windows и другие браузеры отдельно не запускались. Push не выполнялся.
