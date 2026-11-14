@@ -161,6 +161,58 @@ test.describe("kanbaner.notes в production shell", () => {
     expect(markdown).not.toContain("attachment://");
   });
 
+  test("показывает slash-меню, side menu и formatting toolbar", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Блочный редактор"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.click();
+    await page.keyboard.type("/");
+    const headingOption = page.getByRole("option", { name: /Заголовок 1 уровня/u });
+    await expect(headingOption).toBeVisible();
+    await headingOption.click();
+    await page.keyboard.type("Раздел");
+    await expect(editor.locator("h1")).toHaveText("Раздел");
+
+    await editor.locator(".bn-block-outer").first().hover();
+    await expect(page.getByRole("button", { name: "Добавить блок" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Открыть меню блока" })).toBeVisible();
+
+    await editor.locator("h1").click();
+    await page.keyboard.press("Control+A");
+    await expect(page.locator(".bn-formatting-toolbar")).toBeVisible();
+    await page.getByRole("button", { name: "Жирный" }).click();
+    await expect(editor.locator("h1 strong")).toContainText("Раздел");
+
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+  });
+
+  test("сохраняет вложенность списка, созданную Tab", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Вложенные блоки"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.click();
+    await page.keyboard.type("- Родитель");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Потомок");
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByTestId("note-export").click();
+    const download = await downloadPromise;
+    const markdown = await readFile((await download.path()) ?? "", "utf8");
+    expect(markdown).toContain("* Родитель");
+    expect(markdown).toContain("  * Потомок");
+  });
+
   test("связывает ResourceRef и открывает связанную заметку", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     await openNotes(page);
