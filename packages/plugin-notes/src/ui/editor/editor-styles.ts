@@ -4,8 +4,10 @@
  */
 export const NOTE_EDITOR_STYLES = `
 .kanbaner-note-editor {
+  --kne-bg: var(--background, #ffffff);
   --kne-fg: var(--foreground, #18181b);
   --kne-muted: var(--muted-foreground, #6b7280);
+  --kne-border: var(--border, #d4d4d8);
   --kne-surface: var(--muted, #f4f4f5);
   --kne-accent: var(--accent, #eef2ff);
   --kne-ring: var(--ring, #6366f1);
@@ -14,6 +16,9 @@ export const NOTE_EDITOR_STYLES = `
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  border: 1px solid var(--kne-border);
+  border-radius: 0.75rem;
+  background: var(--kne-bg);
   color: var(--kne-fg);
   overflow: visible;
 }
@@ -22,6 +27,11 @@ export const NOTE_EDITOR_STYLES = `
 .kanbaner-note-editor *::before,
 .kanbaner-note-editor *::after {
   box-sizing: border-box;
+}
+
+.kanbaner-note-editor:focus-within {
+  border-color: var(--kne-ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kne-ring) 22%, transparent);
 }
 
 .kanbaner-note-editor .kne-surface {
