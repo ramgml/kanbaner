@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JsonValue, ResourceRef } from "@kanbaner/plugin-sdk";
 
@@ -217,6 +217,52 @@ describe("NoteLinkPicker", () => {
     expect(await screen.findByRole("option", { name: /Личный кабинет/ })).toBeVisible();
     expect(projectOffsets).toEqual([0, 100]);
     expect(screen.queryByTestId("note-link-picker-no-results")).not.toBeInTheDocument();
+  });
+
+  it("останавливает автодогрузку после ошибки второй страницы", async () => {
+    let invocations = 0;
+    let failedPageCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      invocations += 1;
+      if (operationId === "kanbaner.tasks.project.list") {
+        const offset = (input as { readonly offset: number }).offset;
+        if (offset === 0) {
+          return success({
+            items: [{ id: "project-1", title: "Оформление заказа" }],
+            total: 2,
+            nextOffset: 100,
+          });
+        }
+        failedPageCalls += 1;
+        return failure("Сеть недоступна");
+      }
+      return success({ items: [], nextOffset: null });
+    };
+    render(<NoteLinkPicker noteId="note-1" invoke={invoke} busy={false} onLink={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    await screen.findByRole("option", { name: /Оформление заказа/ });
+    fireEvent.change(screen.getByRole("combobox", { name: "Поиск проекта или задачи" }), {
+      target: { value: "Нет такого названия" },
+    });
+
+    const alert = await screen.findByTestId("note-link-picker-error");
+    expect(alert).toHaveTextContent("Проекты: Сеть недоступна");
+    expect(screen.getByTestId("note-link-picker-retry")).toBeVisible();
+    expect(failedPageCalls).toBe(1);
+
+    const stableCount = invocations;
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    });
+
+    expect(failedPageCalls).toBe(1);
+    expect(invocations).toBe(stableCount);
+    expect(screen.getByTestId("note-link-picker-error")).toHaveTextContent(
+      "Проекты: Сеть недоступна",
+    );
   });
 
   it("не уводит Tab в options и сохраняет фокус combobox при неуспешном выборе", async () => {

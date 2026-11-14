@@ -350,12 +350,14 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
   const error = errorMessages.length > 0 ? errorMessages.join(" ") : null;
 
   // Поиск идёт по уже загруженным страницам. Пока совпадений нет, а страницы
-  // остались, догружаем их; иначе «Ничего не найдено» было бы ложным.
+  // остались и ошибок нет, догружаем их; иначе «Ничего не найдено» было бы
+  // ложным. После ошибки страницы автодогрузка останавливается: повторять
+  // упавший offset можно только явной кнопкой «Повторить».
   useEffect(() => {
     if (!open || normalized.length === 0) return;
-    if (filtered.length > 0 || !hasMore || loading || loadingMore) return;
+    if (filtered.length > 0 || !hasMore || loading || loadingMore || error !== null) return;
     void Promise.resolve().then(loadMore);
-  }, [filtered.length, hasMore, loadMore, loading, loadingMore, normalized, open]);
+  }, [error, filtered.length, hasMore, loadMore, loading, loadingMore, normalized, open]);
 
   const activeTarget = filtered[activeIndex];
   const activeDescendant =
