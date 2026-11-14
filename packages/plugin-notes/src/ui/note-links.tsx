@@ -18,7 +18,18 @@ interface LinksOutput {
   readonly items: readonly ResolvedNoteLink[];
 }
 
+/**
+ * Связи заметки. Внутренняя панель привязана к `noteId` через `key`: при смене
+ * заметки незавершённые запросы прежней панели больше не могут записать свои
+ * связи, ошибку или состояние picker-а в новую.
+ */
 export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
+  return (
+    <NoteLinksPanel key={noteId} noteId={noteId} invoke={invoke} openResource={openResource} />
+  );
+}
+
+function NoteLinksPanel({ noteId, invoke, openResource }: NoteLinksProps) {
   const [items, setItems] = useState<readonly ResolvedNoteLink[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -122,7 +133,7 @@ export function NoteLinks({ noteId, invoke, openResource }: NoteLinksProps) {
           })}
         </ul>
       )}
-      <NoteLinkPicker noteId={noteId} invoke={invoke} busy={busy} onLink={link} />
+      <NoteLinkPicker key={noteId} noteId={noteId} invoke={invoke} busy={busy} onLink={link} />
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}

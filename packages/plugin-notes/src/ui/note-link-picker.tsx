@@ -41,6 +41,11 @@ interface TargetPage {
   readonly nextOffset: number | null;
 }
 
+interface SourceErrors {
+  project: string | null;
+  task: string | null;
+}
+
 interface NoteLinkPickerProps {
   readonly noteId: string;
   readonly invoke: UiOperationInvoker;
@@ -117,7 +122,7 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
   }>({ project: 0, task: 0 });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<SourceErrors>({ project: null, task: null });
   const [activeIndexState, setActiveIndex] = useState(0);
   const [selecting, setSelecting] = useState(false);
 
@@ -125,6 +130,11 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
   const inputRef = useRef<HTMLInputElement>(null);
   const requestRef = useRef(0);
   const selectingRef = useRef(false);
+  const noteIdRef = useRef(noteId);
+
+  useEffect(() => {
+    noteIdRef.current = noteId;
+  }, [noteId]);
 
   const listboxId = `note-link-targets-${noteId}`;
   const panelId = `note-link-picker-${noteId}`;
@@ -133,7 +143,7 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
     const request = requestRef.current + 1;
     requestRef.current = request;
     setLoading(true);
-    setError(null);
+    setErrors({ project: null, task: null });
 
     const [projects, tasks] = await Promise.allSettled([
       requestPage(invoke, "project", 0),
@@ -141,30 +151,30 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
     ]);
     if (requestRef.current !== request) return;
 
-    const failures: string[] = [];
     const nextItems: LinkTarget[] = [];
     const nextOffsets: { project: number | null; task: number | null } = {
       project: null,
       task: null,
     };
+    const nextErrors: SourceErrors = { project: null, task: null };
 
     if (projects.status === "fulfilled") {
       nextItems.push(...projects.value.items);
       nextOffsets.project = projects.value.nextOffset;
     } else {
-      failures.push(errorMessage(projects.reason, "Проекты"));
+      nextErrors.project = errorMessage(projects.reason, "Проекты");
     }
 
     if (tasks.status === "fulfilled") {
       nextItems.push(...tasks.value.items);
       nextOffsets.task = tasks.value.nextOffset;
     } else {
-      failures.push(errorMessage(tasks.reason, "Задачи"));
+      nextErrors.task = errorMessage(tasks.reason, "Задачи");
     }
 
     setItems(nextItems);
     setOffsets(nextOffsets);
-    setError(failures.length > 0 ? failures.join(" ") : null);
+    setErrors(nextErrors);
     setLoading(false);
   }, [invoke]);
 
@@ -182,44 +192,52 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
     if (loading || loadingMore) return;
     const projectOffset = offsets.project;
     const taskOffset = offsets.task;
-    if (projectOffset === null && taskOffset === null) return;
+    const requestProject = projectOffset !== null;
+    const requestTask = taskOffset !== null;
+    if (!requestProject && !requestTask) return;
 
     const request = requestRef.current;
     setLoadingMore(true);
     const [projects, tasks] = await Promise.allSettled([
-      projectOffset === null
-        ? Promise.resolve({ items: [], nextOffset: null })
-        : requestPage(invoke, "project", projectOffset),
-      taskOffset === null
-        ? Promise.resolve({ items: [], nextOffset: null })
-        : requestPage(invoke, "task", taskOffset),
+      requestProject ? requestPage(invoke, "project", projectOffset) : Promise.resolve(null),
+      requestTask ? requestPage(invoke, "task", taskOffset) : Promise.resolve(null),
     ]);
     if (requestRef.current !== request) {
       setLoadingMore(false);
       return;
     }
 
-    const failures: string[] = [];
     const added: LinkTarget[] = [];
     const nextOffsets: { project: number | null; task: number | null } = {
       project: null,
       task: null,
     };
+    const nextErrors: SourceErrors = { project: null, task: null };
 
-    if (projects.status === "fulfilled") {
-      added.push(...projects.value.items);
-      nextOffsets.project = projects.value.nextOffset;
-    } else {
-      nextOffsets.project = projectOffset;
-      failures.push(errorMessage(projects.reason, "Проекты"));
+    if (requestProject) {
+      if (projects.status === "fulfilled" && projects.value !== null) {
+        added.push(...projects.value.items);
+        nextOffsets.project =
+          projects.value.nextOffset !== null && projects.value.nextOffset > projectOffset
+            ? projects.value.nextOffset
+            : null;
+      } else if (projects.status === "rejected") {
+        nextOffsets.project = projectOffset;
+        nextErrors.project = errorMessage(projects.reason, "Проекты");
+      }
     }
 
-    if (tasks.status === "fulfilled") {
-      added.push(...tasks.value.items);
-      nextOffsets.task = tasks.value.nextOffset;
-    } else {
-      nextOffsets.task = taskOffset;
-      failures.push(errorMessage(tasks.reason, "Задачи"));
+    if (requestTask) {
+      if (tasks.status === "fulfilled" && tasks.value !== null) {
+        added.push(...tasks.value.items);
+        nextOffsets.task =
+          tasks.value.nextOffset !== null && tasks.value.nextOffset > taskOffset
+            ? tasks.value.nextOffset
+            : null;
+      } else if (tasks.status === "rejected") {
+        nextOffsets.task = taskOffset;
+        nextErrors.task = errorMessage(tasks.reason, "Задачи");
+      }
     }
 
     setItems((current) => {
@@ -227,7 +245,11 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
       return [...current, ...added.filter((item) => !seen.has(item.ref))];
     });
     setOffsets(nextOffsets);
-    setError(failures.length > 0 ? failures.join(" ") : null);
+    // Незапрошенный источник сохраняет свою прежнюю ошибку и retry.
+    setErrors((current) => ({
+      project: projectOffset === null ? current.project : nextErrors.project,
+      task: taskOffset === null ? current.task : nextErrors.task,
+    }));
     setLoadingMore(false);
   }, [invoke, loading, loadingMore, offsets]);
 
@@ -250,18 +272,25 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
 
   const choose = async (target: LinkTarget) => {
     if (selectingRef.current || busy) return;
+    const activeNoteId = noteId;
     selectingRef.current = true;
     setSelecting(true);
     try {
       const linked = await onLink(target.ref);
+      if (noteIdRef.current !== activeNoteId) return;
       if (linked) {
         setOpen(false);
         setSearch("");
         triggerRef.current?.focus();
+      } else {
+        // Неуспешное добавление не должно уводить фокус из combobox.
+        inputRef.current?.focus();
       }
     } finally {
-      selectingRef.current = false;
-      setSelecting(false);
+      if (noteIdRef.current === activeNoteId) {
+        selectingRef.current = false;
+        setSelecting(false);
+      }
     }
   };
 
@@ -315,6 +344,19 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
   };
 
   const hasMore = offsets.project !== null || offsets.task !== null;
+  const errorMessages = [errors.project, errors.task].filter(
+    (message): message is string => message !== null,
+  );
+  const error = errorMessages.length > 0 ? errorMessages.join(" ") : null;
+
+  // Поиск идёт по уже загруженным страницам. Пока совпадений нет, а страницы
+  // остались, догружаем их; иначе «Ничего не найдено» было бы ложным.
+  useEffect(() => {
+    if (!open || normalized.length === 0) return;
+    if (filtered.length > 0 || !hasMore || loading || loadingMore) return;
+    void Promise.resolve().then(loadMore);
+  }, [filtered.length, hasMore, loadMore, loading, loadingMore, normalized, open]);
+
   const activeTarget = filtered[activeIndex];
   const activeDescendant =
     open && activeTarget !== undefined ? `${listboxId}-option-${activeIndex}` : undefined;
@@ -419,7 +461,23 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
             </p>
           ) : null}
 
-          {items.length > 0 && filtered.length === 0 ? (
+          {loadingMore && normalized.length > 0 && filtered.length === 0 ? (
+            <p
+              role="status"
+              data-testid="note-link-picker-searching"
+              className="m-0 flex items-center gap-1.5 px-1 py-1 text-xs text-muted-foreground"
+            >
+              <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+              Ищем на остальных страницах…
+            </p>
+          ) : null}
+
+          {items.length > 0 &&
+          filtered.length === 0 &&
+          !hasMore &&
+          error === null &&
+          !loading &&
+          !loadingMore ? (
             <p
               role="status"
               data-testid="note-link-picker-no-results"
@@ -446,9 +504,15 @@ export function NoteLinkPicker({ noteId, invoke, busy, onLink }: NoteLinkPickerP
                     role="option"
                     id={`${listboxId}-option-${index}`}
                     aria-selected={active}
+                    tabIndex={-1}
                     data-testid={`note-link-option-${target.kind}-${target.id}`}
                     data-note-link-target={target.ref}
                     disabled={busy || selecting}
+                    onMouseDown={(event) => {
+                      // Указатель не должен уводить DOM-фокус из combobox:
+                      // клавиатурная навигация продолжает работать сразу.
+                      event.preventDefault();
+                    }}
                     onMouseEnter={() => {
                       setActiveIndex(index);
                     }}

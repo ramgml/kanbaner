@@ -140,4 +140,130 @@ describe("NoteLinkPicker", () => {
       expect(screen.queryByTestId("note-link-picker-error")).not.toBeInTheDocument(),
     );
   });
+
+  it("сохраняет ошибку незапрошенного источника после «Показать ещё»", async () => {
+    const taskCalls: number[] = [];
+    const projectCalls: number[] = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        const offset = (input as { readonly offset: number }).offset;
+        projectCalls.push(offset);
+        return offset === 0
+          ? success({
+              items: [{ id: "project-1", title: "Оформление заказа" }],
+              total: 2,
+              nextOffset: 100,
+            })
+          : success({
+              items: [{ id: "project-2", title: "Личный кабинет" }],
+              total: 2,
+              nextOffset: null,
+            });
+      }
+      if (operationId === "kanbaner.tasks.task.list") {
+        taskCalls.push(0);
+        return failure("Сеть недоступна");
+      }
+      return success({ items: [] });
+    };
+    render(<NoteLinkPicker noteId="note-1" invoke={invoke} busy={false} onLink={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    await screen.findByRole("option", { name: /Оформление заказа/ });
+    expect(screen.getByTestId("note-link-picker-error")).toHaveTextContent(
+      "Задачи: Сеть недоступна",
+    );
+
+    fireEvent.click(screen.getByTestId("note-link-picker-more"));
+    expect(await screen.findByRole("option", { name: /Личный кабинет/ })).toBeVisible();
+
+    expect(projectCalls).toEqual([0, 100]);
+    expect(taskCalls).toHaveLength(1);
+    const alert = await screen.findByTestId("note-link-picker-error");
+    expect(alert).toHaveTextContent("Задачи: Сеть недоступна");
+    expect(screen.getByTestId("note-link-picker-retry")).toBeVisible();
+  });
+
+  it("догружает вторую страницу для поиска и не показывает ложное «Ничего не найдено»", async () => {
+    const projectOffsets: number[] = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === "kanbaner.tasks.project.list") {
+        const offset = (input as { readonly offset: number }).offset;
+        projectOffsets.push(offset);
+        return offset === 0
+          ? success({
+              items: [{ id: "project-1", title: "Оформление заказа" }],
+              total: 2,
+              nextOffset: 100,
+            })
+          : success({
+              items: [{ id: "project-2", title: "Личный кабинет" }],
+              total: 2,
+              nextOffset: null,
+            });
+      }
+      return success({ items: [], nextOffset: null });
+    };
+    render(<NoteLinkPicker noteId="note-1" invoke={invoke} busy={false} onLink={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    await screen.findByRole("option", { name: /Оформление заказа/ });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Поиск проекта или задачи" }), {
+      target: { value: "Личный кабинет" },
+    });
+
+    expect(screen.queryByTestId("note-link-picker-no-results")).not.toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Личный кабинет/ })).toBeVisible();
+    expect(projectOffsets).toEqual([0, 100]);
+    expect(screen.queryByTestId("note-link-picker-no-results")).not.toBeInTheDocument();
+  });
+
+  it("не уводит Tab в options и сохраняет фокус combobox при неуспешном выборе", async () => {
+    const onLink = vi.fn(async () => false);
+    const invoke: UiOperationInvoker = async (operationId) =>
+      operationId === "kanbaner.tasks.project.list" ? success(PROJECTS) : success(TASKS);
+    render(<NoteLinkPicker noteId="note-1" invoke={invoke} busy={false} onLink={onLink} />);
+
+    fireEvent.click(screen.getByTestId("note-link-picker-trigger"));
+    const search = await screen.findByRole("combobox", { name: "Поиск проекта или задачи" });
+    const option = await screen.findByRole("option", { name: /Оформление заказа/ });
+    expect(option).toHaveAttribute("tabindex", "-1");
+
+    option.focus();
+    expect(option).toHaveFocus();
+    fireEvent.mouseDown(option);
+    fireEvent.click(option);
+
+    await waitFor(() => expect(onLink).toHaveBeenCalledTimes(1));
+    expect(search).toHaveFocus();
+    expect(screen.getByTestId("note-link-picker")).toBeVisible();
+  });
+
+  it("поддерживает Home и End в списке вариантов", async () => {
+    const onLink = vi.fn(async () => true);
+    const invoke: UiOperationInvoker = async (operationId) =>
+      operationId === "kanbaner.tasks.project.list" ? success(PROJECTS) : success(TASKS);
+    render(<NoteLinkPicker noteId="note-1" invoke={invoke} busy={false} onLink={onLink} />);
+
+    const trigger = screen.getByTestId("note-link-picker-trigger");
+    fireEvent.click(trigger);
+    let search = await screen.findByRole("combobox", { name: "Поиск проекта или задачи" });
+    await screen.findByRole("option", { name: /Оформление заказа/ });
+
+    fireEvent.keyDown(search, { key: "End" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(onLink).toHaveBeenLastCalledWith("kanbaner.tasks:task:task-2" as ResourceRef),
+    );
+
+    fireEvent.click(trigger);
+    search = await screen.findByRole("combobox", { name: "Поиск проекта или задачи" });
+    await screen.findByRole("option", { name: /Оформление заказа/ });
+    fireEvent.keyDown(search, { key: "Home" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(onLink).toHaveBeenLastCalledWith("kanbaner.tasks:project:project-1" as ResourceRef),
+    );
+  });
 });
