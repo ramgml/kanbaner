@@ -16,6 +16,10 @@ export default defineConfig({
     "@kanbaner/markdown-ui",
     "@sinclair/typebox",
     "mdast-util-from-markdown",
-    "@milkdown/kit",
+    "mdast-util-gfm",
+    "micromark-extension-gfm",
+    "@blocknote/core",
+    "@blocknote/react",
+    "@blocknote/shadcn",
   ],
 });

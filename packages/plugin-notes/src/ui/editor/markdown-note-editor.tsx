@@ -1,39 +1,28 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type {
-  ChangeEvent,
-  ClipboardEvent,
-  DragEvent,
-  KeyboardEvent,
-  MouseEvent,
-  PointerEvent,
-} from "react";
-import type { Editor } from "@milkdown/kit/core";
-import { editorViewCtx } from "@milkdown/kit/core";
+import type { ChangeEvent, ComponentType } from "react";
+import { ru } from "@blocknote/core/locales";
+import { useCreateBlockNote } from "@blocknote/react";
+import { BlockNoteView } from "@blocknote/shadcn";
+import "@blocknote/core/style.css";
+import "@blocknote/shadcn/style.css";
 
 import {
-  EMPTY_NOTE_EDITOR_TOOLBAR_STATE,
-  NOTE_EDITOR_ACTIONS,
-  applyNoteEditorLink,
-  currentLinkHref,
-  focusNoteEditor,
-  insertNoteEditorImage,
-  isCaretInEmptyBlock,
-  readNoteEditorToolbarState,
-  replaceNoteMarkdown,
-  runNoteEditorAction,
-  serializeNoteMarkdown,
-  setNoteEditorReadOnly,
-  toggleNoteEditorTaskAtPosition,
-  type NoteEditorActionId,
-  type NoteEditorToolbarState,
-} from "./editor-actions.ts";
-import { imageUploadErrorMessage, isImageFile, markdownDocumentsEqual } from "./editor-markdown.ts";
+  markdownToEditorBlocks,
+  sanitizeImageAlt,
+  sanitizeImageUrl,
+  serializeBlockNoteMarkdown,
+} from "./blocknote-markdown.ts";
+import {
+  imageUploadErrorMessage,
+  isImageFile,
+  markdownDocumentsEqual,
+  sanitizeImageSource,
+  validateLinkHref,
+} from "./editor-markdown.ts";
 import { NOTE_EDITOR_STYLES } from "./editor-styles.ts";
-import { NoteEditorToolbar } from "./editor-toolbar.tsx";
-import { createNoteEditor, destroyNoteEditor } from "./create-note-editor.ts";
-import { NoteEditorSlashMenu } from "./slash-menu.tsx";
+import { noteEditorSchema } from "./note-editor-schema.tsx";
 
 export interface MarkdownNoteEditorProps {
   /** Смена ID означает новый документ и пересоздание редактора. */
@@ -50,7 +39,54 @@ export interface MarkdownNoteEditorProps {
 }
 
 const DEFAULT_ARIA_LABEL = "Текст заметки";
+const PREVIEW_PLACEHOLDER =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+const FILE_BLOCK_TYPES = new Set(["image", "file", "audio", "video"]);
 
+interface EditorBlockLike {
+  readonly id: string;
+  readonly type: string;
+  readonly props?: unknown;
+  readonly children?: readonly EditorBlockLike[];
+}
+
+/**
+ * Убирает из сериализации только pending/пустые file-блоки. Остальной
+ * документ, включая текст, набранный во время загрузки, публикуется как есть.
+ */
+function stripUploadArtifacts(
+  blocks: readonly EditorBlockLike[],
+  pending: ReadonlySet<string>,
+): EditorBlockLike[] {
+  return blocks
+    .filter((block) => {
+      if (pending.has(block.id)) return false;
+      if (!FILE_BLOCK_TYPES.has(block.type)) return true;
+      const props = block.props as { readonly url?: string } | undefined;
+      const url = props?.url ?? "";
+      return url.length > 0 && url !== PREVIEW_PLACEHOLDER;
+    })
+    .map((block) => ({ ...block, children: stripUploadArtifacts(block.children ?? [], pending) }));
+}
+
+interface EditorViewProps {
+  readonly editor: object;
+  readonly theme: "light" | "dark";
+  readonly editable: boolean;
+  readonly className: string;
+  readonly onChange: () => void;
+}
+
+// BlockNote 0.54 не проходит exactOptionalPropertyTypes в собственных generic-типах.
+// Приведение ограничено props представления; editor остаётся строго типизирован выше.
+const EditorView = BlockNoteView as unknown as ComponentType<EditorViewProps>;
+
+function currentTheme(): "light" | "dark" {
+  if (typeof document === "undefined") return "light";
+  return document.documentElement.classList.contains("dark") ? "dark" : "light";
+}
+
+/** BlockNote редактирует дерево блоков, но наружу уходит канонический Markdown. */
 export function MarkdownNoteEditor({
   noteId,
   value,
@@ -61,542 +97,306 @@ export function MarkdownNoteEditor({
   ariaLabel = DEFAULT_ARIA_LABEL,
 }: MarkdownNoteEditorProps) {
   const editorId = useId();
-  const linkInputId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<Editor | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const linkInputRef = useRef<HTMLInputElement>(null);
   const valueRef = useRef(value);
   const onChangeRef = useRef(onChange);
   const uploadRef = useRef(onUploadImage);
-  const readOnlyRef = useRef(readOnly);
-  const disabledRef = useRef(disabled);
-  const lockedRef = useRef(readOnly || disabled);
-  const ariaLabelRef = useRef(ariaLabel);
   const lastEmittedRef = useRef(value);
+  const appliedValueRef = useRef(value);
+  const initializedRef = useRef(false);
   const suppressChangeRef = useRef(false);
+  const mountedRef = useRef(true);
+  const lockedRef = useRef(readOnly || disabled);
+  const editorRef = useRef<ReturnType<typeof useCreateBlockNote> | null>(null);
+  const pendingUploadsRef = useRef<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
-  const [toolbarState, setToolbarState] = useState<NoteEditorToolbarState>(
-    EMPTY_NOTE_EDITOR_TOOLBAR_STATE,
-  );
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [linkOpen, setLinkOpen] = useState(false);
-  const [linkHref, setLinkHref] = useState("");
-  const [linkError, setLinkError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [menuLocked, setMenuLocked] = useState(readOnly || disabled);
+  const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
   const locked = readOnly || disabled;
 
   useEffect(() => {
     valueRef.current = value;
     onChangeRef.current = onChange;
     uploadRef.current = onUploadImage;
-    readOnlyRef.current = readOnly;
-    disabledRef.current = disabled;
     lockedRef.current = locked;
-    ariaLabelRef.current = ariaLabel;
   });
 
-  // Реакция на смену readOnly/disabled: закрываем открытые меню один раз.
-  if (menuLocked !== locked) {
-    setMenuLocked(locked);
-
-    if (locked) {
-      setSlashOpen(false);
-      setLinkOpen(false);
-    }
-  }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
-    const root = rootRef.current;
+    const refresh = () => setTheme(currentTheme());
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    refresh();
+    return () => observer.disconnect();
+  }, []);
 
-    if (!root) {
-      return;
-    }
+  /** Общая загрузка с проверкой результата; ошибки обрабатывает вызывающий flow. */
+  const uploadImageSource = useCallback(async (file: File): Promise<string> => {
+    if (!isImageFile(file)) throw new Error("Можно загрузить только файл изображения.");
+    const source = sanitizeImageSource(await uploadRef.current(file));
+    if (source === null) throw new Error("Некорректный адрес изображения.");
+    return sanitizeImageUrl(source);
+  }, []);
 
-    let disposed = false;
-    let created: Editor | null = null;
+  /**
+   * Встроенный upload BlockNote (paste/drop/slash) получает blockId. Пока
+   * загрузка не завершена, блок помечается pending: его пустой/placeholder URL
+   * не публикуется в onChange и не запускает автосохранение. При ошибке блок
+   * удаляется, при успехе возвращается атомарный update с url и безопасным alt.
+   */
+  const uploadThroughBlockNote = useCallback(
+    async (
+      file: File,
+      blockId?: string,
+    ): Promise<string | { readonly props: { readonly url: string; readonly name: string } }> => {
+      const activeEditor = editorRef.current;
+      if (blockId !== undefined) pendingUploadsRef.current.add(blockId);
 
+      const cleanup = () => {
+        if (activeEditor === null || blockId === undefined) return;
+        window.setTimeout(() => {
+          pendingUploadsRef.current.delete(blockId);
+          try {
+            if (activeEditor.getBlock(blockId) !== undefined) {
+              activeEditor.removeBlocks([blockId]);
+            }
+          } catch {
+            // Блок уже удалён или редактор размонтирован.
+          }
+        }, 0);
+      };
+      const fail = (reason: unknown): string => {
+        cleanup();
+        if (mountedRef.current && editorRef.current === activeEditor) {
+          setError(imageUploadErrorMessage(reason));
+        }
+        return PREVIEW_PLACEHOLDER;
+      };
+
+      if (activeEditor === null || lockedRef.current) {
+        return fail(new Error("Редактор недоступен для загрузки изображения."));
+      }
+
+      setError(null);
+      setUploading(true);
+      try {
+        const source = await uploadImageSource(file);
+        if (!mountedRef.current || lockedRef.current || editorRef.current !== activeEditor) {
+          return fail(new Error("Заметка закрыта до завершения загрузки."));
+        }
+        if (blockId !== undefined) pendingUploadsRef.current.delete(blockId);
+        return { props: { url: source, name: sanitizeImageAlt(file.name) } };
+      } catch (reason) {
+        return fail(reason);
+      } finally {
+        if (mountedRef.current) setUploading(false);
+      }
+    },
+    [uploadImageSource],
+  );
+
+  const uploadFile = useCallback(
+    (file: File, blockId?: string) => uploadThroughBlockNote(file, blockId),
+    [uploadThroughBlockNote],
+  );
+
+  const editor = useCreateBlockNote(
+    {
+      schema: noteEditorSchema,
+      dictionary: ru,
+      uploadFile,
+      links: {
+        isValidLink: (href) => validateLinkHref(href).ok,
+      },
+      domAttributes: {
+        editor: {
+          id: editorId,
+          class: "kne-content",
+          role: "textbox",
+          "aria-multiline": "true",
+          "aria-label": ariaLabel,
+          spellcheck: "true",
+          autocapitalize: "sentences",
+        },
+      },
+    },
+    [noteId, editorId],
+  );
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
+
+  useEffect(() => {
+    let cancelled = false;
+    initializedRef.current = false;
+    suppressChangeRef.current = false;
+    appliedValueRef.current = valueRef.current;
+    // Новый экземпляр BlockNote требует сброса внешнего состояния редактора;
+    // это синхронизация с imperative-объектом, а не derived state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setReady(false);
-    setToolbarState(EMPTY_NOTE_EDITOR_TOOLBAR_STATE);
-    setSlashOpen(false);
-    setLinkOpen(false);
-    setLinkError(null);
-    setUploadError(null);
+    setError(null);
     setUploading(false);
-    root.replaceChildren();
-    lastEmittedRef.current = valueRef.current;
 
-    void createNoteEditor({
-      root,
-      markdown: valueRef.current,
-      readOnly: readOnlyRef.current,
-      disabled: disabledRef.current,
-      ariaLabel: ariaLabelRef.current,
-      editorId,
-      onMarkdownChange: (markdown) => {
-        lastEmittedRef.current = markdown;
-
-        if (!suppressChangeRef.current) {
-          onChangeRef.current(markdown);
-        }
-      },
-      onToolbarStateChange: (next) => {
-        if (!disposed) {
-          setToolbarState(next);
-        }
-      },
-    })
-      .then((editor) => {
-        created = editor;
-
-        if (disposed) {
-          void destroyNoteEditor(editor);
-          return;
-        }
-
-        editorRef.current = editor;
-        setNoteEditorReadOnly(editor, {
-          readOnly: readOnlyRef.current,
-          disabled: disabledRef.current,
-          ariaLabel: ariaLabelRef.current,
-        });
-        setToolbarState(readNoteEditorToolbarState(editor));
-        setReady(true);
-      })
-      .catch(() => {
-        if (!disposed) {
-          setUploadError("Не удалось создать редактор заметки.");
-        }
-      });
+    try {
+      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, valueRef.current));
+      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      initializedRef.current = true;
+      if (!cancelled) setReady(true);
+    } catch {
+      if (!cancelled) setError("Не удалось создать редактор заметки.");
+    }
 
     return () => {
-      disposed = true;
-      const editor = editorRef.current;
-      editorRef.current = null;
-
-      if (editor) {
-        void destroyNoteEditor(editor);
-      } else if (created) {
-        void destroyNoteEditor(created);
-      }
+      cancelled = true;
     };
-  }, [noteId, editorId]);
+  }, [editor]);
 
   useEffect(() => {
-    const editor = editorRef.current;
-
-    if (!editor || !ready) {
-      return;
-    }
-
-    setNoteEditorReadOnly(editor, { readOnly, disabled, ariaLabel });
-  }, [ariaLabel, disabled, readOnly, ready]);
+    const content = rootRef.current?.querySelector<HTMLElement>(".bn-editor");
+    content?.setAttribute("aria-readonly", String(readOnly));
+    content?.setAttribute("aria-disabled", String(disabled));
+  }, [disabled, readOnly, ready]);
 
   useEffect(() => {
-    const editor = editorRef.current;
+    if (!ready || markdownDocumentsEqual(value, appliedValueRef.current)) return;
 
-    if (!editor || !ready) {
-      return;
-    }
-
-    if (markdownDocumentsEqual(value, lastEmittedRef.current)) {
-      return;
-    }
-
-    const current = serializeNoteMarkdown(editor);
-
+    const current = serializeBlockNoteMarkdown(
+      editor.blocksToMarkdownLossy(
+        stripUploadArtifacts(editor.document, pendingUploadsRef.current) as unknown as Parameters<
+          typeof editor.blocksToMarkdownLossy
+        >[0],
+      ),
+    );
     if (markdownDocumentsEqual(value, current)) {
       lastEmittedRef.current = current;
+      appliedValueRef.current = value;
       return;
     }
 
     suppressChangeRef.current = true;
-
     try {
-      replaceNoteMarkdown(editor, value);
+      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, value));
+      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      appliedValueRef.current = value;
+    } catch {
+      queueMicrotask(() => setError("Не удалось обновить содержимое редактора."));
     } finally {
       suppressChangeRef.current = false;
     }
-  }, [noteId, ready, value]);
+  }, [editor, ready, value]);
 
-  useEffect(() => {
-    if (linkOpen) {
-      linkInputRef.current?.focus();
-      linkInputRef.current?.select();
-    }
-  }, [linkOpen]);
-
-  const openSlash = useCallback(() => {
-    if (lockedRef.current || !editorRef.current) {
-      return;
-    }
-
-    setLinkOpen(false);
-    setLinkError(null);
-    setUploadError(null);
-    setSlashOpen(true);
-  }, []);
-
-  const closeSlash = useCallback(() => {
-    setSlashOpen(false);
-    const editor = editorRef.current;
-
-    if (editor && !lockedRef.current) {
-      focusNoteEditor(editor);
-    }
-  }, []);
-
-  const openLink = useCallback(() => {
-    const editor = editorRef.current;
-
-    if (!editor || lockedRef.current) {
-      return;
-    }
-
-    setLinkHref(currentLinkHref(editor));
-    setLinkError(null);
-    setSlashOpen(false);
-    setUploadError(null);
-    setLinkOpen(true);
-  }, []);
-
-  const closeLink = useCallback((restoreFocus = true) => {
-    setLinkOpen(false);
-    setLinkError(null);
-    const editor = editorRef.current;
-
-    if (restoreFocus && editor && !lockedRef.current) {
-      focusNoteEditor(editor);
-    }
-  }, []);
-
-  const applyLink = useCallback(() => {
-    const editor = editorRef.current;
-
-    if (!editor || lockedRef.current) {
-      return;
-    }
-
-    const result = applyNoteEditorLink(editor, linkHref);
-
-    if (!result.ok) {
-      setLinkError(result.error);
-      return;
-    }
-
-    setLinkOpen(false);
-    setLinkError(null);
-    focusNoteEditor(editor);
-  }, [linkHref]);
-
-  const runAction = useCallback(
-    (action: NoteEditorActionId) => {
-      const editor = editorRef.current;
-
-      if (!editor || lockedRef.current) {
+  const uploadFiles = useCallback(
+    async (files: readonly File[]) => {
+      const images = files.filter(isImageFile);
+      if (locked || images.length === 0) {
+        if (files.length > 0 && images.length === 0) {
+          setError("Можно загрузить только файл изображения.");
+        }
         return;
       }
 
-      setUploadError(null);
+      const activeEditor = editor;
+      setError(null);
+      setUploading(true);
+      try {
+        for (const file of images) {
+          const source = await uploadImageSource(file);
+          if (!mountedRef.current || lockedRef.current || editorRef.current !== activeEditor) {
+            return;
+          }
 
-      if (action === "link") {
-        openLink();
-        return;
+          const imageBlock = {
+            type: "image",
+            props: { url: source, name: sanitizeImageAlt(file.name) },
+          } as const;
+          let reference: { readonly id: string } | undefined;
+          try {
+            reference = activeEditor.getTextCursorPosition().block;
+          } catch {
+            reference = activeEditor.document.at(-1);
+          }
+          if (reference === undefined) throw new Error("Не удалось создать блок изображения.");
+
+          const current = activeEditor.getBlock(reference.id);
+          if (current?.type === "paragraph" && current.content.length === 0) {
+            activeEditor.setTextCursorPosition(
+              activeEditor.updateBlock(current, imageBlock),
+              "end",
+            );
+          } else {
+            const [inserted] = activeEditor.insertBlocks([imageBlock], reference, "after");
+            if (inserted !== undefined) activeEditor.setTextCursorPosition(inserted, "end");
+          }
+        }
+      } catch (reason) {
+        if (mountedRef.current) setError(imageUploadErrorMessage(reason));
+      } finally {
+        if (mountedRef.current) setUploading(false);
       }
-
-      if (action === "image") {
-        setSlashOpen(false);
-        imageInputRef.current?.click();
-        return;
-      }
-
-      setSlashOpen(false);
-      setLinkOpen(false);
-      runNoteEditorAction(editor, action);
-      focusNoteEditor(editor);
     },
-    [openLink],
+    [editor, locked, uploadImageSource],
   );
 
-  const uploadFiles = useCallback(async (files: readonly File[]) => {
-    const editor = editorRef.current;
-    const images = files.filter(isImageFile);
-
-    if (!editor || lockedRef.current) {
-      return;
-    }
-
-    if (images.length === 0) {
-      setUploadError("Можно загрузить только файл изображения.");
-      return;
-    }
-
-    setUploadError(null);
-    setUploading(true);
-
-    try {
-      for (const file of images) {
-        const url = await uploadRef.current(file);
-
-        if (editorRef.current !== editor || lockedRef.current) {
-          return;
-        }
-
-        if (!insertNoteEditorImage(editor, url, file.name)) {
-          throw new Error("Некорректный адрес изображения.");
-        }
-      }
-    } catch (error) {
-      setUploadError(imageUploadErrorMessage(error));
-    } finally {
-      setUploading(false);
-
-      if (editorRef.current === editor && !lockedRef.current) {
-        focusNoteEditor(editor);
-      }
-    }
-  }, []);
-
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
-    // FileList в браузере живой: сначала копия, иначе reset очищает и её.
     const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-
-    if (files.length > 0) {
-      void uploadFiles(files);
-    }
-  };
-
-  const handlePaste = (event: ClipboardEvent<HTMLDivElement>): void => {
-    if (lockedRef.current) {
-      return;
-    }
-
-    const target = event.target;
-
-    if (target instanceof HTMLElement && target.closest("input, textarea")) {
-      return;
-    }
-
-    const images = Array.from(event.clipboardData.files).filter(isImageFile);
-
-    if (images.length > 0) {
-      event.preventDefault();
-      void uploadFiles(images);
-    }
-  };
-
-  const handleDrop = (event: DragEvent<HTMLDivElement>): void => {
-    if (lockedRef.current) {
-      return;
-    }
-
-    const target = event.target;
-
-    if (target instanceof HTMLElement && target.closest("input, textarea")) {
-      return;
-    }
-
-    const images = Array.from(event.dataTransfer.files).filter(isImageFile);
-
-    if (images.length > 0) {
-      event.preventDefault();
-      void uploadFiles(images);
-    }
-  };
-
-  const handleDragOver = (event: DragEvent<HTMLDivElement>): void => {
-    if (!lockedRef.current && event.dataTransfer.types.includes("Files")) {
-      event.preventDefault();
-    }
-  };
-
-  const handleKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const target = event.target;
-
-    if (
-      target instanceof HTMLElement &&
-      target.closest("input, textarea, select, [role='dialog']")
-    ) {
-      return;
-    }
-
-    if (event.key === "Escape" && slashOpen) {
-      event.preventDefault();
-      closeSlash();
-      return;
-    }
-
-    if (
-      event.key === "/" &&
-      !slashOpen &&
-      !linkOpen &&
-      !lockedRef.current &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.altKey
-    ) {
-      const editor = editorRef.current;
-
-      if (editor && isCaretInEmptyBlock(editor)) {
-        event.preventDefault();
-        openSlash();
-      }
-    }
-  };
-
-  const handlePointerDownCapture = (event: PointerEvent<HTMLDivElement>): void => {
-    const target = event.target;
-
-    if (!(target instanceof Element)) {
-      return;
-    }
-
-    if (slashOpen && !target.closest(".kne-slash")) {
-      setSlashOpen(false);
-    }
-
-    if (linkOpen && !target.closest(".kne-link-dialog")) {
-      setLinkOpen(false);
-    }
-  };
-
-  const handleSurfaceClick = (event: MouseEvent<HTMLDivElement>): void => {
-    if (lockedRef.current) {
-      return;
-    }
-
-    const target = event.target;
-
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-
-    const item = target.closest<HTMLElement>('li[data-item-type="task"]');
-
-    if (!item || item !== target) {
-      return;
-    }
-
-    const editor = editorRef.current;
-
-    if (!editor) {
-      return;
-    }
-
-    try {
-      const position = editor.action((ctx) => ctx.get(editorViewCtx).posAtDOM(item, 0) + 1);
-      const checked = item.dataset.checked === "true";
-
-      if (toggleNoteEditorTaskAtPosition(editor, position, !checked)) {
-        focusNoteEditor(editor);
-      }
-    } catch {
-      // Если DOM-узел задачи уже перестроен, клик игнорируется.
-    }
-  };
-
-  const handleLinkKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      applyLink();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      closeLink();
-    }
+    if (files.length > 0) void uploadFiles(files);
   };
 
   return (
     <div
+      ref={rootRef}
       className="kanbaner-note-editor"
+      data-note-id={noteId}
       data-read-only={readOnly ? "true" : "false"}
       data-disabled={disabled ? "true" : "false"}
       data-ready={ready ? "true" : "false"}
-      onKeyDownCapture={handleKeyDownCapture}
-      onPointerDownCapture={handlePointerDownCapture}
-      onPaste={handlePaste}
-      onDrop={handleDrop}
-      onDragOver={handleDragOver}
     >
       <style data-kanbaner-note-editor-styles="true">{NOTE_EDITOR_STYLES}</style>
-      <NoteEditorToolbar
-        state={toolbarState}
-        disabled={!ready || locked}
-        editorId={editorId}
-        slashOpen={slashOpen}
-        onAction={runAction}
-        onLink={openLink}
-        onImage={() => {
-          runAction("image");
-        }}
-        onOpenSlash={openSlash}
-      />
-      <div className="kne-surface" onClick={handleSurfaceClick}>
-        <div ref={rootRef} />
-        {!ready && (
-          <p className="kne-slash-empty" role="status">
+      <div className="kne-surface">
+        <EditorView
+          editor={editor}
+          theme={theme}
+          editable={!locked}
+          className="kne-blocknote"
+          onChange={() => {
+            if (!initializedRef.current || suppressChangeRef.current) return;
+            const blocks = stripUploadArtifacts(editor.document, pendingUploadsRef.current);
+            const markdown = serializeBlockNoteMarkdown(
+              editor.blocksToMarkdownLossy(
+                blocks as unknown as Parameters<typeof editor.blocksToMarkdownLossy>[0],
+              ),
+            );
+            if (markdownDocumentsEqual(markdown, lastEmittedRef.current)) return;
+            lastEmittedRef.current = markdown;
+            onChangeRef.current(markdown);
+          }}
+        />
+        {!ready && error === null ? (
+          <p className="kne-loading" role="status">
             Загрузка редактора…
           </p>
-        )}
-        {slashOpen && (
-          <NoteEditorSlashMenu
-            actions={NOTE_EDITOR_ACTIONS}
-            onSelect={(action) => {
-              setSlashOpen(false);
-              runAction(action);
-            }}
-            onClose={closeSlash}
-          />
-        )}
-        {linkOpen && (
-          <div className="kne-link-dialog" role="dialog" aria-label="Ссылка">
-            <label className="kne-sr-only" htmlFor={linkInputId}>
-              Адрес ссылки
-            </label>
-            <input
-              ref={linkInputRef}
-              id={linkInputId}
-              type="text"
-              inputMode="url"
-              placeholder="https://example.com"
-              value={linkHref}
-              aria-invalid={linkError ? "true" : "false"}
-              onChange={(event) => {
-                setLinkHref(event.target.value);
-                setLinkError(null);
-              }}
-              onKeyDown={handleLinkKeyDown}
-            />
-            {linkError !== null && (
-              <p className="kne-link-error" role="alert">
-                {linkError}
-              </p>
-            )}
-            <div className="kne-link-dialog-actions">
-              <button type="button" data-primary="true" onClick={applyLink}>
-                Применить
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  closeLink();
-                }}
-              >
-                Отмена
-              </button>
-            </div>
-          </div>
-        )}
+        ) : null}
       </div>
       <div className="kne-status" role="status" aria-live="polite">
-        {uploading && <span>Загрузка изображения…</span>}
-        {uploadError !== null && (
+        {uploading ? <span>Загрузка изображения…</span> : null}
+        {error !== null ? (
           <span className="kne-status-error" role="alert">
-            {uploadError}
+            {error}
           </span>
-        )}
+        ) : null}
       </div>
       <input
         ref={imageInputRef}
@@ -605,6 +405,7 @@ export function MarkdownNoteEditor({
         accept="image/*"
         tabIndex={-1}
         aria-hidden="true"
+        disabled={locked}
         hidden
         onChange={handleFileChange}
       />

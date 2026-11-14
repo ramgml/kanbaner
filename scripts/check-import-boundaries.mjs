@@ -67,12 +67,23 @@ const ALLOWED_NOTES_DEPENDENCIES = new Set([
   "@sinclair/typebox",
   "lucide-react",
   "mdast-util-from-markdown",
-  "@milkdown/kit",
+  "mdast-util-gfm",
+  "micromark-extension-gfm",
+  "@blocknote/core",
+  "@blocknote/react",
+  "@blocknote/shadcn",
   MARKDOWN_UI_PACKAGE,
 ]);
 const NOTES_SERVER_ENTRYPOINT = "index.ts";
 const NOTES_CONTRACT_ENTRYPOINT = "contract.ts";
 const NOTES_UI_ENTRYPOINT_FILE = "ui.tsx";
+const NOTES_UI_PACKAGE_PREFIXES = ["@blocknote/core", "@blocknote/react", "@blocknote/shadcn"];
+
+function isNotesUiSpecifier(specifier) {
+  return NOTES_UI_PACKAGE_PREFIXES.some(
+    (packageName) => specifier === packageName || specifier.startsWith(`${packageName}/`),
+  );
+}
 
 /**
  * Запрещённые внешние модули fixture-плагина.
@@ -743,8 +754,7 @@ function analyzeNotesSources(root, violations) {
           specifier === "react-dom" ||
           specifier.startsWith("react/") ||
           specifier === MARKDOWN_UI_PACKAGE ||
-          specifier === "@milkdown/kit" ||
-          specifier.startsWith("@milkdown/kit/"))
+          isNotesUiSpecifier(specifier))
       ) {
         violations.push({
           file: fileLabel,
@@ -753,9 +763,7 @@ function analyzeNotesSources(root, violations) {
         continue;
       }
 
-      const allowedMilkdown =
-        specifier === "@milkdown/kit" || specifier.startsWith("@milkdown/kit/");
-      if (!ALLOWED_NOTES_DEPENDENCIES.has(specifier) && !allowedMilkdown) {
+      if (!ALLOWED_NOTES_DEPENDENCIES.has(specifier) && !isNotesUiSpecifier(specifier)) {
         violations.push({
           file: fileLabel,
           rule: `notes не должен импортировать (${kind}): ${specifier}`,
@@ -1051,7 +1059,11 @@ function analyzeManifests(root, violations) {
         "@sinclair/typebox",
         "lucide-react",
         "mdast-util-from-markdown",
-        "@milkdown/kit",
+        "mdast-util-gfm",
+        "micromark-extension-gfm",
+        "@blocknote/core",
+        "@blocknote/react",
+        "@blocknote/shadcn",
         MARKDOWN_UI_PACKAGE,
       ]),
     },

@@ -9,6 +9,7 @@
 @source "../../../../packages/markdown-ui/src";
 @source "../../../../packages/plugin-projects/src";
 @source "../../../../packages/plugin-notes/src";
+@source "../../../../packages/plugin-notes/node_modules/@blocknote/shadcn";
 
 @custom-variant dark (&:is(.dark *));
 
