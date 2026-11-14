@@ -84,6 +84,59 @@ beforeEach(() => {
       dispatchEvent: vi.fn(),
     })),
   );
+  class ClipboardEventStub extends Event {
+    readonly clipboardData: unknown;
+
+    constructor(type: string, init?: { readonly clipboardData?: unknown }) {
+      super(type);
+      this.clipboardData = init?.clipboardData;
+    }
+  }
+  vi.stubGlobal("ClipboardEvent", ClipboardEventStub);
+  if (!("getClientRects" in Node.prototype)) {
+    Object.defineProperty(Node.prototype, "getClientRects", {
+      configurable: true,
+      value: () => [],
+    });
+  }
+  if (!("getClientRects" in Range.prototype)) {
+    Object.defineProperty(Range.prototype, "getClientRects", {
+      configurable: true,
+      value: () => [],
+    });
+  }
+  if (!("getBoundingClientRect" in Range.prototype)) {
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        toJSON: () => ({}),
+      }),
+    });
+  }
+  if (!("getBoundingClientRect" in Node.prototype)) {
+    Object.defineProperty(Node.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        toJSON: () => ({}),
+      }),
+    });
+  }
 });
 
 afterEach(() => {
@@ -296,6 +349,80 @@ describe("MarkdownNoteEditor: изображения", () => {
       expect(first).not.toContain("]v2");
     });
     expect(container.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
+  });
+
+  it("публикует текст, введённый во время загрузки, без pending image", async () => {
+    let resolveUpload: ((url: string) => void) | undefined;
+    const onUploadImage = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    const { container, rerender, onChange } = renderEditor({
+      value: "- пункт",
+      onUploadImage,
+    });
+    const content = await waitForReady(container);
+
+    content.focus();
+    pasteFile(content, imageFile());
+    await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
+
+    const paragraph = content.querySelector("p");
+    const textNode = paragraph?.firstChild;
+    if (textNode !== null && textNode !== undefined) {
+      textNode.textContent = `${textNode.textContent ?? ""} Дописанный текст`;
+    } else {
+      paragraph?.append(" Дописанный текст");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitFor(() => {
+      const markdown = lastMarkdown(onChange);
+      expect(markdown).toContain("Дописанный текст");
+      expect(markdown).not.toContain("data:image/gif");
+      expect(markdown).not.toContain("attachment://");
+    });
+
+    const draft = lastMarkdown(onChange);
+    rerender({ value: draft });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lastMarkdown(onChange)).toBe(draft);
+
+    rerender({ noteId: "note-2", value: "Другая заметка" });
+    resolveUpload?.("attachment://img-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container).toHaveTextContent("Другая заметка");
+    const emitted = onChange.mock.calls.map(([markdown]) => String(markdown));
+    expect(emitted.some((markdown) => markdown.includes("Дописанный текст"))).toBe(true);
+    expect(emitted.at(-1) ?? "").not.toContain("attachment://img-1");
+  });
+
+  it("не публикует failed upload на документе, требующем нормализации", async () => {
+    const onUploadImage = vi.fn<(file: File) => Promise<string>>(async () => {
+      throw new Error("Хранилище недоступно");
+    });
+    const { container, onChange } = renderEditor({
+      value: "<div>raw</div>\n\n- пункт\n\n![ref][s]\n\n[s]: attachment://a",
+      onUploadImage,
+    });
+    const content = await waitForReady(container);
+
+    content.focus();
+    pasteFile(content, imageFile());
+
+    await waitFor(() => expect(onUploadImage).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Не удалось загрузить изображение: Хранилище недоступно",
+    );
+    await waitFor(() => {
+      expect(container.querySelector('img[src=""]')).toBeNull();
+      expect(container.querySelector('img[src^="data:image/gif"]')).toBeNull();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("не вставляет image, если заметка заблокирована до завершения загрузки", async () => {

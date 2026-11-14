@@ -41,6 +41,33 @@ export interface MarkdownNoteEditorProps {
 const DEFAULT_ARIA_LABEL = "Текст заметки";
 const PREVIEW_PLACEHOLDER =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+const FILE_BLOCK_TYPES = new Set(["image", "file", "audio", "video"]);
+
+interface EditorBlockLike {
+  readonly id: string;
+  readonly type: string;
+  readonly props?: unknown;
+  readonly children?: readonly EditorBlockLike[];
+}
+
+/**
+ * Убирает из сериализации только pending/пустые file-блоки. Остальной
+ * документ, включая текст, набранный во время загрузки, публикуется как есть.
+ */
+function stripUploadArtifacts(
+  blocks: readonly EditorBlockLike[],
+  pending: ReadonlySet<string>,
+): EditorBlockLike[] {
+  return blocks
+    .filter((block) => {
+      if (pending.has(block.id)) return false;
+      if (!FILE_BLOCK_TYPES.has(block.type)) return true;
+      const props = block.props as { readonly url?: string } | undefined;
+      const url = props?.url ?? "";
+      return url.length > 0 && url !== PREVIEW_PLACEHOLDER;
+    })
+    .map((block) => ({ ...block, children: stripUploadArtifacts(block.children ?? [], pending) }));
+}
 
 interface EditorViewProps {
   readonly editor: object;
@@ -76,6 +103,7 @@ export function MarkdownNoteEditor({
   const onChangeRef = useRef(onChange);
   const uploadRef = useRef(onUploadImage);
   const lastEmittedRef = useRef(value);
+  const appliedValueRef = useRef(value);
   const initializedRef = useRef(false);
   const suppressChangeRef = useRef(false);
   const mountedRef = useRef(true);
@@ -213,7 +241,7 @@ export function MarkdownNoteEditor({
     let cancelled = false;
     initializedRef.current = false;
     suppressChangeRef.current = false;
-    lastEmittedRef.current = valueRef.current;
+    appliedValueRef.current = valueRef.current;
     // Новый экземпляр BlockNote требует сброса внешнего состояния редактора;
     // это синхронизация с imperative-объектом, а не derived state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -223,6 +251,7 @@ export function MarkdownNoteEditor({
 
     try {
       editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, valueRef.current));
+      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
       initializedRef.current = true;
       if (!cancelled) setReady(true);
     } catch {
@@ -241,11 +270,18 @@ export function MarkdownNoteEditor({
   }, [disabled, readOnly, ready]);
 
   useEffect(() => {
-    if (!ready || markdownDocumentsEqual(value, lastEmittedRef.current)) return;
+    if (!ready || markdownDocumentsEqual(value, appliedValueRef.current)) return;
 
-    const current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+    const current = serializeBlockNoteMarkdown(
+      editor.blocksToMarkdownLossy(
+        stripUploadArtifacts(editor.document, pendingUploadsRef.current) as unknown as Parameters<
+          typeof editor.blocksToMarkdownLossy
+        >[0],
+      ),
+    );
     if (markdownDocumentsEqual(value, current)) {
       lastEmittedRef.current = current;
+      appliedValueRef.current = value;
       return;
     }
 
@@ -253,6 +289,7 @@ export function MarkdownNoteEditor({
     try {
       editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, value));
       lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      appliedValueRef.current = value;
     } catch {
       queueMicrotask(() => setError("Не удалось обновить содержимое редактора."));
     } finally {
@@ -318,27 +355,6 @@ export function MarkdownNoteEditor({
     if (files.length > 0) void uploadFiles(files);
   };
 
-  const hasPendingUploadArtifact = (instance: typeof editor): boolean => {
-    for (const id of pendingUploadsRef.current) {
-      const block = instance.getBlock(id);
-      if (block === undefined) {
-        pendingUploadsRef.current.delete(id);
-        continue;
-      }
-      const props = block.props as { readonly url?: string } | undefined;
-      if (
-        block.type === "image" ||
-        block.type === "file" ||
-        block.type === "audio" ||
-        block.type === "video"
-      ) {
-        const url = props?.url ?? "";
-        if (url.length === 0 || url === PREVIEW_PLACEHOLDER) return true;
-      }
-    }
-    return false;
-  };
-
   return (
     <div
       ref={rootRef}
@@ -357,8 +373,12 @@ export function MarkdownNoteEditor({
           className="kne-blocknote"
           onChange={() => {
             if (!initializedRef.current || suppressChangeRef.current) return;
-            if (pendingUploadsRef.current.size > 0 && hasPendingUploadArtifact(editor)) return;
-            const markdown = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+            const blocks = stripUploadArtifacts(editor.document, pendingUploadsRef.current);
+            const markdown = serializeBlockNoteMarkdown(
+              editor.blocksToMarkdownLossy(
+                blocks as unknown as Parameters<typeof editor.blocksToMarkdownLossy>[0],
+              ),
+            );
             if (markdownDocumentsEqual(markdown, lastEmittedRef.current)) return;
             lastEmittedRef.current = markdown;
             onChangeRef.current(markdown);
