@@ -67,8 +67,20 @@ function success(data: unknown): UiOperationResult {
   return { ok: true, data: data as JsonValue };
 }
 
-function failure(code: string, message: string): UiOperationResult {
-  return { ok: false, error: { code, message, retryable: code !== "VERSION_CONFLICT" } };
+function failure(
+  code: string,
+  message: string,
+  details?: { readonly reason: string },
+): UiOperationResult {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+      retryable: code !== "VERSION_CONFLICT" && code !== "VALIDATION_ERROR",
+      ...(details === undefined ? {} : { details }),
+    },
+  };
 }
 
 function noteView(id: string, title = "Без названия", overrides: Partial<Note> = {}): NoteView {
@@ -1062,8 +1074,12 @@ describe("NotesView autosave", () => {
       if (operationId === NOTES_COMMAND_IDS.move) {
         moves.push(input as Record<string, unknown>);
         return moveFailure === "NOTE_TREE_CYCLE"
-          ? failure("NOTE_TREE_CYCLE", "Нельзя переместить страницу внутрь самой себя")
-          : failure("NOTE_TREE_TOO_DEEP", "Превышена максимальная глубина дерева");
+          ? failure("VALIDATION_ERROR", "Нельзя переместить страницу внутрь самой себя", {
+              reason: "NOTE_TREE_CYCLE",
+            })
+          : failure("VALIDATION_ERROR", "Превышена максимальная глубина дерева", {
+              reason: "NOTE_TREE_TOO_DEEP",
+            });
       }
       return success({ items: [] });
     };
@@ -1092,6 +1108,10 @@ describe("NotesView autosave", () => {
     expect(
       await screen.findByText("Нельзя переместить страницу внутрь её собственной ветки"),
     ).toBeVisible();
+    expect(screen.getByTestId("note-move-error")).toBeVisible();
+    // Цикл не даёт повода повторять move или save.
+    expect(screen.queryByTestId("note-move-retry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
     // Серверный отказ не перезагружает список и не меняет путь к странице.
     expect(listCalls).toBe(callsBeforeMove);
     expect(screen.getByRole("navigation", { name: "Путь к странице" })).not.toHaveTextContent(
@@ -1117,7 +1137,312 @@ describe("NotesView autosave", () => {
     fireDrop(required<HTMLElement>(container, "[data-note-tree-item='note-b']"), dataTransfer, 20);
     await waitFor(() => expect(moves).toHaveLength(2));
     expect(await screen.findByText("Превышена максимальная глубина дерева")).toBeVisible();
+    expect(screen.queryByTestId("note-move-retry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
     expect(listCalls).toBe(callsBeforeMove);
     expect(title).toHaveValue("Родитель");
+  });
+
+  it("при конфликте move перечитывает данные и предлагает повторить move", async () => {
+    const first = makeDetails("note-a", "Первая");
+    let second = makeDetails("note-b", "Исходная");
+    let notes = [first, second];
+    let getCalls = 0;
+    let listCalls = 0;
+    let conflictOnce = true;
+    const moves: Array<Record<string, unknown>> = [];
+    const updates: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        listCalls += 1;
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        getCalls += 1;
+        const id = (input as { id: string }).id;
+        return success(notes.find((details) => details.view.note.id === id) ?? second);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: (notes.find((item) => item.view.note.id === id) ?? second).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        updates.push(values);
+        second = makeDetails("note-b", String(values.title), {
+          contentMarkdown: String(values.contentMarkdown),
+          version: second.view.note.version + 1,
+        });
+        notes = [first, second];
+        return success(second);
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        moves.push(input as Record<string, unknown>);
+        if (conflictOnce) {
+          conflictOnce = false;
+          // Пока move летел, сосед и открытая страница получили новые версии.
+          notes = [
+            makeDetails("note-a", "Первая", { version: 2 }),
+            makeDetails("note-b", "Серверная", { version: 5 }),
+          ];
+          return failure("VERSION_CONFLICT", "Заметка была изменена другой операцией");
+        }
+        return success({
+          note: makeDetails("note-a", "Первая", { parentId: "note-b", version: 3 }).view.note,
+          affectedNotes: [makeDetails("note-b", "Серверная", { version: 6 }).view.note],
+        });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-b" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Исходная"));
+    fireEvent.change(title, { target: { value: "Локальный черновик" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Содержимое заметки" }), {
+      target: { value: "Черновик не должен сброситься" },
+    });
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(title).not.toBeDisabled());
+
+    const callsBeforeMove = { get: getCalls, list: listCalls };
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    fireEvent.dragStart(required<HTMLElement>(container, "[data-note-tree-item='note-a']"), {
+      dataTransfer,
+    });
+    fireDragOver(
+      required<HTMLElement>(container, "[data-note-tree-item='note-b']"),
+      dataTransfer,
+      20,
+    );
+    fireDrop(required<HTMLElement>(container, "[data-note-tree-item='note-b']"), dataTransfer, 20);
+
+    await waitFor(() => expect(moves).toHaveLength(1));
+    const moveAlert = await screen.findByTestId("note-move-error");
+    expect(moveAlert).toHaveTextContent("Данные перечитаны — повторите перемещение");
+    // Черновик, dirty и selection не сброшены; save-conflict UI не показан.
+    expect(title).toHaveValue("Локальный черновик");
+    expect(screen.getByRole("textbox", { name: "Содержимое заметки" })).toHaveValue(
+      "Черновик не должен сброситься",
+    );
+    expect(screen.queryByTestId("note-conflict-reload")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
+    expect(getCalls).toBeGreaterThan(callsBeforeMove.get);
+    expect(listCalls).toBeGreaterThan(callsBeforeMove.list);
+
+    // Повтор — именно move с expectedVersion из перечитанного списка (A → 2).
+    fireEvent.click(screen.getByTestId("note-move-retry"));
+    await waitFor(() => expect(moves).toHaveLength(2));
+    expect(moves[1]).toMatchObject({
+      id: "note-a",
+      expectedVersion: 2,
+      parentId: "note-b",
+    });
+    await waitFor(() => expect(screen.queryByTestId("note-move-error")).toBeNull());
+    expect(title).toHaveValue("Локальный черновик");
+  });
+
+  it("сериализует два move и ждёт autosave открытого sibling", async () => {
+    const first = makeDetails("note-a", "Перетаскиваемая");
+    const second = makeDetails("note-b", "Черновик", { position: 1 });
+    let notes = [first, second];
+    const updateDeferred = deferred<UiOperationResult>();
+    const moveDeferred = deferred<UiOperationResult>();
+    const moves: Array<Record<string, unknown>> = [];
+    let updateIssued = false;
+    let moveCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(notes.find((details) => details.view.note.id === id) ?? second);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: (notes.find((item) => item.view.note.id === id) ?? second).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updateIssued = true;
+        return updateDeferred.promise;
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        moveCalls += 1;
+        moves.push(input as Record<string, unknown>);
+        if (moveCalls === 1) {
+          return moveDeferred.promise.then((result) => {
+            notes = [
+              makeDetails("note-a", "Перетаскиваемая", {
+                parentId: "note-b",
+                position: 0,
+                version: 2,
+              }),
+              makeDetails("note-b", "Черновик", { position: 0, version: 3 }),
+            ];
+            return result;
+          });
+        }
+        return success({
+          note: makeDetails("note-a", "Перетаскиваемая", {
+            parentId: "note-b",
+            position: 0,
+            version: 3,
+          }).view.note,
+          affectedNotes: [],
+        });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-b" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Черновик"));
+    fireEvent.change(title, { target: { value: "Несохранённый черновик" } });
+    await waitFor(() => expect(updateIssued).toBe(true), { timeout: 3000 });
+
+    // Два drop приходят до завершения autosave и до перерисовки pending.
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    const source = required<HTMLElement>(container, "[data-note-tree-item='note-a']");
+    const target = required<HTMLElement>(container, "[data-note-tree-item='note-b']");
+    act(() => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        fireEvent.dragStart(source, { dataTransfer });
+        fireDragOver(target, dataTransfer, 20);
+        fireDrop(target, dataTransfer, 20);
+      }
+    });
+
+    // Move не стартует, пока saveNow не завершил autosave открытого sibling.
+    expect(moves).toHaveLength(0);
+    expect(source).toHaveAttribute("draggable", "false");
+    expect(source).toHaveAttribute("data-note-move-pending", "true");
+    expect(screen.getByRole("button", { name: "Переместить Черновик выше" })).toBeDisabled();
+    expect(required<HTMLElement>(container, "[data-note-root-drop]")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+
+    await act(async () => {
+      updateDeferred.resolve(
+        success(makeDetails("note-b", "Несохранённый черновик", { version: 2 })),
+      );
+    });
+
+    await waitFor(() => expect(moves).toHaveLength(1));
+    expect(moves[0]).toMatchObject({
+      id: "note-a",
+      expectedVersion: 1,
+      parentId: "note-b",
+    });
+
+    // Вторая операция ждёт завершения первой: invoke+refresh не пересекаются.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(moves).toHaveLength(1);
+
+    await act(async () => {
+      moveDeferred.resolve(
+        success({
+          note: makeDetails("note-a", "Перетаскиваемая", {
+            parentId: "note-b",
+            position: 0,
+            version: 2,
+          }).view.note,
+          affectedNotes: [makeDetails("note-b", "Черновик", { position: 0, version: 3 }).view.note],
+        }),
+      );
+    });
+
+    await waitFor(() => expect(moves).toHaveLength(2));
+    expect(moves[1]).toMatchObject({
+      id: "note-a",
+      expectedVersion: 2,
+      parentId: "note-b",
+    });
+    await waitFor(() =>
+      expect(required<HTMLElement>(container, "[data-note-tree-item='note-a']")).toHaveAttribute(
+        "draggable",
+        "true",
+      ),
+    );
+    expect(title).toHaveValue("Несохранённый черновик");
+  });
+
+  it("считает favorite reorder и drop по полному набору siblings", async () => {
+    const a = { ...noteView("note-a", "A", { position: 0 }), favorite: true };
+    const x = noteView("note-x", "X", { position: 1 });
+    const b = { ...noteView("note-b", "B", { position: 2 }), favorite: true };
+    const c = { ...noteView("note-c", "C", { position: 3 }), favorite: true };
+    let all = [a, x, b, c];
+    const moves: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(...all));
+      if (operationId === NOTES_QUERY_IDS.get) return success(makeDetails("note-a", "A"));
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: a });
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        const values = input as Record<string, unknown>;
+        moves.push(values);
+        const found = all.find((item) => item.note.id === values.id) ?? a;
+        if (values.id === "note-a") {
+          // Полный порядок после drop A после B: X,B,A,C; видимы B,A,C.
+          all = [
+            { ...x, note: { ...x.note, position: 0 } },
+            { ...b, note: { ...b.note, position: 1 } },
+            { ...a, note: { ...a.note, position: 2 } },
+            { ...c, note: { ...c.note, position: 3 } },
+          ];
+        }
+        return success({ note: found.note, affectedNotes: [] });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-a" />);
+    await screen.findByTestId("note-title");
+    fireEvent.click(screen.getByRole("button", { name: "Избранное" }));
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+          item.getAttribute("data-note-tree-item"),
+        ),
+      ).toEqual(["note-a", "note-b", "note-c"]),
+    );
+
+    // В полном наборе A,X,B,C кнопка ↑ у B даёт позицию 1, а не 0.
+    fireEvent.click(screen.getByRole("button", { name: "Переместить B выше" }));
+    await waitFor(() => expect(moves).toHaveLength(1));
+    expect(moves[0]).toMatchObject({ id: "note-b", parentId: null, position: 1 });
+    await waitFor(() =>
+      expect(required<HTMLElement>(container, "[data-note-tree-item='note-a']")).toHaveAttribute(
+        "draggable",
+        "true",
+      ),
+    );
+
+    // Drop A после B: A,X,B,C → position 2, видимый порядок B,A,C.
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    fireEvent.dragStart(required<HTMLElement>(container, "[data-note-tree-item='note-a']"), {
+      dataTransfer,
+    });
+    const target = required<HTMLElement>(container, "[data-note-tree-item='note-b']");
+    fireDragOver(target, dataTransfer, 38);
+    fireDrop(target, dataTransfer, 38);
+    await waitFor(() => expect(moves).toHaveLength(2));
+    expect(moves[1]).toMatchObject({ id: "note-a", parentId: null, position: 2 });
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+          item.getAttribute("data-note-tree-item"),
+        ),
+      ).toEqual(["note-b", "note-a", "note-c"]),
+    );
   });
 });

@@ -29,6 +29,7 @@ const PACKAGES_DIRECTORY = path.resolve(import.meta.dirname, "../../../../packag
  */
 const NOTES_PLUGIN_ID = "kanbaner.notes";
 const NOTES_COMMAND_CREATE = "kanbaner.notes.note.create";
+const NOTES_COMMAND_MOVE = "kanbaner.notes.note.move";
 const NOTES_QUERY_LIST = "kanbaner.notes.note.list";
 const NOTES_EVENT_CREATED = "kanbaner.notes.note.created";
 
@@ -256,6 +257,40 @@ describe("Idempotency-Key в UI transport", () => {
           await harness.composition.executeUiOperation(NOTES_QUERY_LIST, {}),
         ).total,
       ).toBe(2);
+    },
+  );
+
+  it(
+    "возвращает реальный details.reason доменного цикла без расширения схемы",
+    { timeout: 20_000 },
+    async () => {
+      const harness = await startHarness();
+      const parent = expectData<{ readonly view: { readonly note: { readonly id: string } } }>(
+        await harness.composition.executeUiOperation(NOTES_COMMAND_CREATE, {
+          title: "Родитель",
+        }),
+      );
+      const child = expectData<{ readonly view: { readonly note: { readonly id: string } } }>(
+        await harness.composition.executeUiOperation(NOTES_COMMAND_CREATE, {
+          title: "Ребёнок",
+          parentId: parent.view.note.id,
+        }),
+      );
+
+      const result = await harness.composition.executeUiOperation(NOTES_COMMAND_MOVE, {
+        id: parent.view.note.id,
+        expectedVersion: 1,
+        parentId: child.view.note.id,
+      });
+
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        // Конверт OperationBus до UI transport: reason уже лежит в details.
+        expect(result.error.code).toBe("VALIDATION_ERROR");
+        expect(result.error.retryable).toBe(false);
+        expect(result.error.details).toMatchObject({ reason: "NOTE_TREE_CYCLE" });
+      }
     },
   );
 });

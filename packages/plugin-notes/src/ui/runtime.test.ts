@@ -4,6 +4,7 @@ import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   invokeNotes,
   noteIdFromSearch,
+  NotesUiError,
   searchWithNote,
   snapshotIdempotencyKey,
   type UiOperationInvoker,
@@ -40,6 +41,32 @@ describe("idempotency ключи UI", () => {
         options: { idempotencyKey: "key-1" },
       },
     ]);
+  });
+
+  it("сохраняет безопасный details.reason в NotesUiError", async () => {
+    // Реальный конверт UI transport после whitelisting сервером.
+    const invoke: UiOperationInvoker = async () => ({
+      ok: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Превышена максимальная глубина дерева",
+        retryable: false,
+        details: { reason: "NOTE_TREE_TOO_DEEP" },
+      },
+    });
+
+    try {
+      await invokeNotes(invoke, "note.move", { id: "note-1", parentId: "note-2" });
+      throw new Error("Ожидалась ошибка операции");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NotesUiError);
+      expect(error).toMatchObject({
+        code: "VALIDATION_ERROR",
+        retryable: false,
+        reason: "NOTE_TREE_TOO_DEEP",
+        details: { reason: "NOTE_TREE_TOO_DEEP" },
+      });
+    }
   });
 });
 

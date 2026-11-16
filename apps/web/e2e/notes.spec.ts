@@ -50,6 +50,10 @@ type NoteDropZone = "before" | "inside" | "after" | "root";
  * обработчики синтетическими DragEvent с настоящим DataTransfer.
  */
 async function beginNoteDrag(page: Page, sourceId: string): Promise<void> {
+  const row = page.locator(`[data-note-tree-item='${sourceId}']`);
+  // Предыдущий move мог ещё не завершиться: пока pending, DnD выключен.
+  await expect(row).toHaveAttribute("draggable", "true");
+  await expect(row).not.toHaveAttribute("data-note-move-pending", "true");
   await page.evaluate((id) => {
     const source = document.querySelector<HTMLElement>(`[data-note-tree-item='${id}']`);
     if (source === null) throw new Error(`Нет строки заметки ${id}`);
@@ -595,13 +599,27 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
     await expect(page.locator("nav[aria-label='Путь к странице']")).toContainText(parentName);
 
-    // Drop ниже ребёнка ставит страницу после него среди siblings.
+    // Drop выше ребёнка ставит страницу перед ним среди siblings.
+    await beginNoteDrag(page, moverId);
+    await noteDragOver(page, childId, "before");
+    await expect(page.locator("[data-note-drop-indicator='before']")).toContainText("Перед");
+    await finishNoteDrag(page, moverId, childId, "before");
+    await expectNoteRowsInOrder(page, [moverId, childId]);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+
+    // Затем drop ниже ребёнка возвращает обратный порядок.
     await beginNoteDrag(page, moverId);
     await noteDragOver(page, childId, "after");
     await expect(page.locator("[data-note-drop-indicator='after']")).toContainText("После");
     await finishNoteDrag(page, moverId, childId, "after");
     await expectNoteRowsInOrder(page, [childId, moverId]);
     await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+
+    // Порядок siblings сохраняется после перезагрузки.
+    await page.reload();
+    await expect(page.getByTestId("note-title")).toHaveValue(moverName);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+    await expectNoteRowsInOrder(page, [childId, moverId]);
 
     // Отдельная корневая зона убирает parentId.
     await beginNoteDrag(page, moverId);

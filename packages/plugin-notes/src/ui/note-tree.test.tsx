@@ -363,6 +363,45 @@ describe("NoteTree", () => {
     expect(row("b")).not.toHaveAttribute("data-note-dragging");
   });
 
+  it("считает позиции по полному набору siblings для filtered subset", () => {
+    stubRowRect(40);
+    const onMove = vi.fn();
+    const full = [
+      note("a", "Избранная A", null, 0),
+      note("x", "Скрытая X", null, 1),
+      note("b", "Избранная B", null, 2),
+      note("c", "Избранная C", null, 3),
+    ];
+    const { container } = render(
+      <NoteTree
+        items={full.filter((item) => item.note.id !== "x")}
+        positionItems={full}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onMove={onMove}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    // В дереве нет X, но B выше X → позиция 1 в полном наборе, не 0.
+    fireEvent.click(screen.getByRole("button", { name: "Переместить Избранная B выше" }));
+    expect(onMove).toHaveBeenLastCalledWith("b", null, 1);
+
+    // Drop A после B тоже считается по полному набору: A,X,B,C → position 2.
+    const dataTransfer = dragData();
+    fireEvent.dragStart(required<HTMLElement>(container, "[data-note-tree-item='a']"), {
+      dataTransfer,
+    });
+    const target = required<HTMLElement>(container, "[data-note-tree-item='b']");
+    fireDragOver(target, dataTransfer, 38);
+    expect(
+      required<HTMLElement>(container, "[data-note-drop-indicator='after']"),
+    ).toHaveTextContent("После");
+    fireDrop(target, dataTransfer, 38);
+    expect(onMove).toHaveBeenLastCalledWith("a", null, 2);
+  });
+
   it("не показывает drop-подсказку при наведении на себя и сбрасывает её по dragend", () => {
     stubRowRect(40);
     const items = [note("a", "Первая", null, 0), note("b", "Вторая", null, 1)];
@@ -393,5 +432,35 @@ describe("NoteTree", () => {
     expect(required<HTMLElement>(container, "[data-note-root-drop]")).not.toHaveAttribute(
       "data-note-drop-indicator",
     );
+  });
+
+  it("отключает DnD, reorder и корневую зону на время move", () => {
+    const onMove = vi.fn();
+    const items = [note("a", "Первая", null, 0), note("b", "Вторая", null, 1)];
+    const { container } = render(
+      <NoteTree
+        items={items}
+        movePending
+        selectedId={null}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onMove={onMove}
+        onDelete={vi.fn()}
+      />,
+    );
+    const first = required<HTMLElement>(container, "[data-note-tree-item='a']");
+    expect(first).toHaveAttribute("draggable", "false");
+    expect(first).toHaveAttribute("data-note-move-pending", "true");
+    expect(screen.getByRole("button", { name: "Переместить Первая ниже" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Переместить Вторая выше" })).toBeDisabled();
+    const rootZone = required<HTMLElement>(container, "[data-note-root-drop]");
+    expect(rootZone).toHaveAttribute("aria-disabled", "true");
+    expect(rootZone).toHaveTextContent("Перемещение выполняется…");
+
+    const dataTransfer = dragData();
+    fireEvent.dragStart(first, { dataTransfer });
+    expect(first).not.toHaveAttribute("data-note-dragging");
+    fireDrop(first, dataTransfer, 20);
+    expect(onMove).not.toHaveBeenCalled();
   });
 });

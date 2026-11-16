@@ -19,6 +19,16 @@ interface NoteTreeProps {
    * не пересортировывает элементы по position и не показывает иерархию.
    */
   readonly flat?: boolean;
+  /**
+   * Полный набор страниц для расчёта siblings и позиций.
+   *
+   * Нужен фильтру «Избранное»: в дереве видны только избранные страницы, но
+   * `note.move` и кнопки порядка обязаны считать позицию по полному набору
+   * соседей, иначе скрытые страницы дадут неверный порядок.
+   */
+  readonly positionItems?: readonly NoteView[];
+  /** Пока move в полёте, DnD, reorder и корневая зона недоступны. */
+  readonly movePending?: boolean;
 }
 
 /** MIME-тип собственного drag-and-drop дерева заметок. */
@@ -129,7 +139,10 @@ export function NoteTree({
   onMove,
   onDelete,
   flat = false,
+  positionItems,
+  movePending = false,
 }: NoteTreeProps) {
+  const allItems = positionItems ?? items;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<DropHint | null>(null);
@@ -153,6 +166,30 @@ export function NoteTree({
         .sort((left, right) => left.note.position - right.note.position),
     [items, visibleIds],
   );
+  const fullById = useMemo(
+    () => new Map(allItems.map((item) => [item.note.id, item] as const)),
+    [allItems],
+  );
+  const fullByParent = useMemo(() => {
+    const result = new Map<string | null, NoteView[]>();
+    for (const item of allItems) {
+      const siblings = result.get(item.note.parentId) ?? [];
+      siblings.push(item);
+      result.set(item.note.parentId, siblings);
+    }
+    for (const siblings of result.values()) {
+      siblings.sort((left, right) => left.note.position - right.note.position);
+    }
+    return result;
+  }, [allItems]);
+  const fullRoots = useMemo(
+    () =>
+      allItems
+        .filter((item) => item.note.parentId === null || !fullById.has(item.note.parentId))
+        .sort((left, right) => left.note.position - right.note.position),
+    [allItems, fullById],
+  );
+  const dndDisabled = flat || movePending;
 
   useEffect(() => {
     if (selectedId === null) {
@@ -177,7 +214,7 @@ export function NoteTree({
   };
 
   const dropOnItem = (dragged: string, targetId: string, zone: NoteDropZone) => {
-    const request = noteMoveRequest(items, dragged, targetId, zone);
+    const request = noteMoveRequest(allItems, dragged, targetId, zone);
     clearDrag();
     if (request === null) return;
     // Цель раскрывается до обновления items: перенесённая страница сразу видна
@@ -235,8 +272,9 @@ export function NoteTree({
     const id = view.note.id;
     const children = flat ? [] : (byParent.get(id) ?? []);
     const isExpanded = !flat && expanded.has(id);
-    const siblings = byParent.get(view.note.parentId) ?? roots;
+    const siblings = fullByParent.get(view.note.parentId) ?? fullRoots;
     const index = siblings.findIndex((item) => item.note.id === id);
+    const fullView = fullById.get(id) ?? view;
     const hint = dropHintFor(id);
 
     return (
@@ -244,9 +282,10 @@ export function NoteTree({
         <div
           data-note-tree-item={id}
           data-note-dragging={draggedId === id ? "true" : undefined}
-          draggable={!flat}
+          data-note-move-pending={movePending ? "true" : undefined}
+          draggable={!dndDisabled}
           onDragStart={
-            flat
+            dndDisabled
               ? undefined
               : (event) => {
                   event.dataTransfer.setData(NOTE_DRAG_TYPE, id);
@@ -255,10 +294,10 @@ export function NoteTree({
                   setDropHint(null);
                 }
           }
-          onDragEnd={flat ? undefined : clearDrag}
-          onDragOver={flat ? undefined : (event) => itemDragOver(event, id)}
+          onDragEnd={dndDisabled ? undefined : clearDrag}
+          onDragOver={dndDisabled ? undefined : (event) => itemDragOver(event, id)}
           onDragLeave={
-            flat
+            dndDisabled
               ? undefined
               : (event) => {
                   const next = event.relatedTarget;
@@ -268,7 +307,7 @@ export function NoteTree({
                   );
                 }
           }
-          onDrop={flat ? undefined : (event) => itemDrop(event, id)}
+          onDrop={dndDisabled ? undefined : (event) => itemDrop(event, id)}
           className={`group relative flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
             selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
           }${flat ? "" : " cursor-grab active:cursor-grabbing"}${draggedId === id ? " opacity-60" : ""}`}
@@ -353,8 +392,8 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} выше`}
-                  disabled={index <= 0}
-                  onClick={() => onMove(id, view.note.parentId, index - 1)}
+                  disabled={movePending || index <= 0}
+                  onClick={() => onMove(id, fullView.note.parentId, index - 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↑
@@ -362,8 +401,8 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} ниже`}
-                  disabled={index < 0 || index >= siblings.length - 1}
-                  onClick={() => onMove(id, view.note.parentId, index + 1)}
+                  disabled={movePending || index < 0 || index >= siblings.length - 1}
+                  onClick={() => onMove(id, fullView.note.parentId, index + 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↓
@@ -407,9 +446,9 @@ export function NoteTree({
       <ul
         aria-label={flat ? "Список заметок" : "Дерево заметок"}
         className="m-0 list-none p-0"
-        onDragOver={flat ? undefined : (event) => event.preventDefault()}
+        onDragOver={dndDisabled ? undefined : (event) => event.preventDefault()}
         onDragLeave={
-          flat
+          dndDisabled
             ? undefined
             : (event) => {
                 const next = event.relatedTarget;
@@ -418,7 +457,7 @@ export function NoteTree({
               }
         }
         onDrop={
-          flat
+          dndDisabled
             ? undefined
             : (event) => {
                 if (event.target !== event.currentTarget) return;
@@ -432,26 +471,33 @@ export function NoteTree({
         <div
           data-note-root-drop
           data-note-drop-indicator={dropHint?.kind === "root" ? "root" : undefined}
-          onDragOver={rootDragOver}
-          onDragLeave={(event) => {
-            const next = event.relatedTarget;
-            if (next instanceof Node && event.currentTarget.contains(next)) return;
-            setDropHint((current) => (current?.kind === "root" ? null : current));
-          }}
-          onDrop={rootDrop}
+          aria-disabled={movePending ? "true" : undefined}
+          onDragOver={movePending ? undefined : rootDragOver}
+          onDragLeave={
+            movePending
+              ? undefined
+              : (event) => {
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.contains(next)) return;
+                  setDropHint((current) => (current?.kind === "root" ? null : current));
+                }
+          }
+          onDrop={movePending ? undefined : rootDrop}
           className={`mt-1 flex min-w-0 items-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-xs ${
             dropHint?.kind === "root"
               ? "border-primary bg-primary/10 text-foreground"
               : "border-border text-muted-foreground"
-          }`}
+          }${movePending ? " cursor-not-allowed opacity-50" : ""}`}
         >
           <span aria-hidden="true" className="text-sm leading-none">
             ↳
           </span>
           <span className="min-w-0 flex-1 truncate">
-            {dropHint?.kind === "root"
-              ? "Отпустите, чтобы сделать корневой"
-              : "Сюда — переместить в корень"}
+            {movePending
+              ? "Перемещение выполняется…"
+              : dropHint?.kind === "root"
+                ? "Отпустите, чтобы сделать корневой"
+                : "Сюда — переместить в корень"}
           </span>
         </div>
       )}
