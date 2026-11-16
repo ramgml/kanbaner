@@ -76,6 +76,7 @@ describe("NoteTree", () => {
     expect(screen.queryByRole("button", { name: /Переместить/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Развернуть|Свернуть/ })).toBeNull();
     expect(container.querySelector('[draggable="true"]')).toBeNull();
+    expect(container.querySelector("[data-note-expand-spacer]")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Вторая" }));
     expect(onSelect).toHaveBeenCalledWith("b");
@@ -149,5 +150,51 @@ describe("NoteTree", () => {
     expect(screen.queryByRole("button", { name: "Ребёнок" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Развернуть Родитель" }));
     expect(screen.getByRole("button", { name: "Ребёнок" })).toBeInTheDocument();
+  });
+
+  it("держит корневые строки компактными, не ломая выравнивание и DnD", () => {
+    const { container } = render(
+      <NoteTree
+        items={[
+          note("p", "Родитель", null, 0),
+          note("c", "Ребёнок", "p", 0),
+          note("l", "Лист", null, 1),
+        ]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onMove={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const parent = required<HTMLElement>(container, "[data-note-tree-item='p']");
+    const leaf = required<HTMLElement>(container, "[data-note-tree-item='l']");
+
+    // Слева от названия больше нет grip: строка начинается почти от края.
+    expect(parent.style.paddingLeft).toBe("2px");
+    expect(leaf.style.paddingLeft).toBe("2px");
+    expect(parent.querySelector(".lucide-grip-vertical")).toBeNull();
+    expect(leaf.querySelector(".lucide-grip-vertical")).toBeNull();
+
+    // Перетаскивание осталось на всей строке и подсказано курсором.
+    expect(parent).toHaveAttribute("draggable", "true");
+    expect(parent).toHaveClass("cursor-grab", "active:cursor-grabbing");
+
+    // У ветки — компактная кнопка раскрытия, у листа — только выравнивающий резерв.
+    const toggle = screen.getByRole("button", { name: "Развернуть Родитель" });
+    expect(toggle).toHaveClass("size-5", "before:w-6");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Развернуть Лист" })).toBeNull();
+    const spacer = required<HTMLElement>(container, "[data-note-expand-spacer='l']");
+    expect(spacer).toHaveClass("size-5");
+    expect(spacer).toHaveAttribute("aria-hidden", "true");
+
+    // Вложенный уровень по-прежнему сдвинут вправо.
+    fireEvent.click(toggle);
+    const child = required<HTMLElement>(container, "[data-note-tree-item='c']");
+    expect(child.style.paddingLeft).toBe("14px");
   });
 });
