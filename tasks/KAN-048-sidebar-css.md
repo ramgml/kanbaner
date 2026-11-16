@@ -1,7 +1,7 @@
 ---
 id: KAN-048
 title: Исправить CSS resize sidebar
-status: in_progress
+status: done
 stage: 1
 priority: high
 owner: opencode-worker
@@ -26,9 +26,9 @@ PostCSS/Turbopack генерирует валидный CSS, sidebar продо�
 
 ## Объём работ
 
-- [ ] Заменить проблемную arbitrary value запись на валидный arbitrary property или inline CSS.
-- [ ] Проверить отсутствие `var(...)` в сгенерированном CSS.
-- [ ] Прогнать dev smoke и существующие resize проверки.
+- [x] Заменить проблемную arbitrary value запись на валидный arbitrary property или inline CSS.
+- [x] Проверить отсутствие `var(...)` в сгенерированном CSS.
+- [x] Прогнать dev smoke и существующие resize проверки.
 
 ## Владение файлами
 
@@ -42,15 +42,16 @@ PostCSS/Turbopack генерирует валидный CSS, sidebar продо�
 
 ## Критерии приёмки
 
-- [ ] `pnpm dev` открывает notes без CSS Build Error.
-- [ ] Production build и resize E2E зелёные.
-- [ ] Сгенерированный CSS не содержит `width: var(...)`.
+- [x] `pnpm dev` открывает notes без CSS Build Error.
+- [x] Production build и resize E2E зелёные.
+- [x] Сгенерированный CSS не содержит `width: var(...)`.
 
 ## Журнал
 
 - 2026-11-16 — Задача создана по Build Error пользователя.
+- 2026-11-16 — Причина устранена: Tailwind сканировал комментарий `lg:w-[var(...)]` и генерировал `width: var(...)`; комментарий исправлен, класс переведён на arbitrary property. Dev smoke и E2E зелёные, ветка влита в `dev`.
 
 ## Итог
 
-- Коммит:
-- Проверки:
+- Коммит: worker `f116cec`, merge `b87b4284913973511e4164435a185c76fd9a996b`.
+- Проверки: dev `/view/notes` 200 без CSS error, `pnpm check` 1686 тестов, resize E2E 16/16, production CSS без `var(...)`. Push не выполнялся.
