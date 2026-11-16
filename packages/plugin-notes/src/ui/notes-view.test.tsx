@@ -210,6 +210,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("NotesView autosave", () => {
@@ -1637,7 +1638,8 @@ describe("NotesView autosave", () => {
   });
 });
 
-type PointerName = "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel";
+type PointerName =
+  "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel" | "lostPointerCapture";
 
 /**
  * jsdom не создаёт PointerEvent с нужными полями, поэтому значения задаются
@@ -1647,7 +1649,7 @@ function firePointer(
   element: Element,
   name: PointerName,
   options: {
-    readonly clientX: number;
+    readonly clientX?: number;
     readonly pointerId?: number;
     readonly pointerType?: string;
     readonly button?: number;
@@ -1655,7 +1657,7 @@ function firePointer(
 ): void {
   const event = createEvent[name](element, { bubbles: true, cancelable: true });
   Object.defineProperties(event, {
-    clientX: { value: options.clientX },
+    clientX: { value: options.clientX ?? 0 },
     clientY: { value: 0 },
     pointerId: { value: options.pointerId ?? 1 },
     pointerType: { value: options.pointerType ?? "mouse" },
@@ -1694,6 +1696,35 @@ async function openResizableNotes() {
     view,
     handle: screen.getByRole("separator", { name: "Ширина дерева заметок" }),
   };
+}
+
+/** jsdom не реализует ResizeObserver: тест управляет измерением вручную. */
+class ControlledResizeObserver {
+  static readonly instances: ControlledResizeObserver[] = [];
+  readonly targets: Element[] = [];
+  private readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    ControlledResizeObserver.instances.push(this);
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target);
+  }
+
+  unobserve(target: Element): void {
+    const index = this.targets.indexOf(target);
+    if (index >= 0) this.targets.splice(index, 1);
+  }
+
+  disconnect(): void {
+    this.targets.length = 0;
+  }
+
+  trigger(): void {
+    this.callback([], this as unknown as ResizeObserver);
+  }
 }
 
 describe("NotesView resize дерева заметок", () => {
@@ -1783,6 +1814,99 @@ describe("NotesView resize дерева заметок", () => {
     expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBeNull();
   });
 
+  it("не завершает drag чужим pointerup и отпускает захват один раз", async () => {
+    const { handle } = await openResizableNotes();
+    const setCapture = vi.fn();
+    const releaseCapture = vi.fn();
+    Object.defineProperties(handle, {
+      setPointerCapture: { configurable: true, value: setCapture },
+      releasePointerCapture: { configurable: true, value: releaseCapture },
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    firePointer(handle, "pointerDown", { pointerId: 1, clientX: 300 });
+    expect(setCapture).toHaveBeenCalledTimes(1);
+    expect(setCapture).toHaveBeenCalledWith(1);
+
+    // Второй pointerdown не перезаписывает стартовое состояние активного drag.
+    firePointer(handle, "pointerDown", { pointerId: 2, clientX: 500 });
+    expect(setCapture).toHaveBeenCalledTimes(1);
+    firePointer(handle, "pointerMove", { pointerId: 2, clientX: 900 });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+
+    // Чужие up/cancel/lostcapture — no-op: drag pointer-а 1 продолжается.
+    firePointer(handle, "pointerUp", { pointerId: 2, clientX: 900 });
+    firePointer(handle, "pointerCancel", { pointerId: 2 });
+    firePointer(handle, "lostPointerCapture", { pointerId: 2 });
+    expect(handle).toHaveAttribute("data-resizing", "true");
+    expect(releaseCapture).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+
+    firePointer(handle, "pointerMove", { pointerId: 1, clientX: 420 });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 120);
+    firePointer(handle, "pointerUp", { pointerId: 1, clientX: 420 });
+    expect(handle).not.toHaveAttribute("data-resizing");
+    expect(releaseCapture).toHaveBeenCalledTimes(1);
+    expect(releaseCapture).toHaveBeenCalledWith(1);
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(NOTE_SIDEBAR_DEFAULT_WIDTH + 120),
+    );
+
+    // Повторный up после завершения не отпускает захват и ничего не пишет.
+    firePointer(handle, "pointerUp", { pointerId: 1, clientX: 500 });
+    expect(releaseCapture).toHaveBeenCalledTimes(1);
+    expect(setItem).toHaveBeenCalledTimes(1);
+  });
+
+  it("пересчитывает максимум по контейнеру и возвращает желаемую ширину", async () => {
+    ControlledResizeObserver.instances.length = 0;
+    vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, String(NOTE_SIDEBAR_MAX_WIDTH));
+    const { handle } = await openResizableNotes();
+    const container = screen.getByTestId("notes-view");
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+
+    // Свой ResizeObserver есть и у NoteTitleField: берём тот, что следит за
+    // контейнером представления.
+    const observer = ControlledResizeObserver.instances.find((candidate) =>
+      candidate.targets.includes(container),
+    );
+    if (observer === undefined) throw new Error("ResizeObserver контейнера не создан");
+    const setContainerWidth = (width: number): void => {
+      Object.defineProperty(container, "clientWidth", { configurable: true, value: width });
+      act(() => observer.trigger());
+    };
+
+    // Узкий контейнер опускает максимум, фактическая ширина ужимается.
+    setContainerWidth(700);
+    expect(sidebarWidth()).toBe(380);
+    expect(handle).toHaveAttribute("aria-valuemax", "380");
+    expect(handle).toHaveAttribute("aria-valuenow", "380");
+    // Желаемая ширина не перезаписана ужатием.
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(NOTE_SIDEBAR_MAX_WIDTH),
+    );
+
+    // При возврате широкого контейнера восстанавливается желаемая ширина.
+    setContainerWidth(1440);
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+    expect(handle).toHaveAttribute("aria-valuemax", String(NOTE_SIDEBAR_MAX_WIDTH));
+
+    // widthRef/maxWidthRef актуальны: клавиатура и drag считают от новой ширины
+    // и нового максимума, а не от значений до resize.
+    setContainerWidth(700);
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(sidebarWidth()).toBe(380 - 16);
+    expect(handle).toHaveAttribute("aria-valuenow", "364");
+
+    firePointer(handle, "pointerDown", { clientX: 300 });
+    firePointer(handle, "pointerMove", { clientX: 900 });
+    expect(sidebarWidth()).toBe(380);
+    firePointer(handle, "pointerUp", { clientX: 900 });
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe("380");
+  });
+
   it("вычисляет допустимый максимум и читает только корректную ширину", () => {
     expect(sidebarMaxWidthFor(1440)).toBe(NOTE_SIDEBAR_MAX_WIDTH);
     expect(sidebarMaxWidthFor(800)).toBe(480);
@@ -1796,8 +1920,25 @@ describe("NotesView resize дерева заметок", () => {
     expect(clampSidebarWidth(350, 300)).toBe(300);
     expect(clampSidebarWidth(350, 100)).toBe(NOTE_SIDEBAR_MIN_WIDTH);
 
-    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "сломано");
-    expect(readStoredSidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    // Только целое число, занимающее строку целиком: хвосты и дроби — брак.
+    for (const broken of [
+      "408junk",
+      "100.5",
+      "408.0",
+      " 408",
+      "408 ",
+      "0x10",
+      "1e2",
+      "",
+      "сломано",
+      "999999999999999999999999",
+    ]) {
+      window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, broken);
+      expect(readStoredSidebarWidth(), broken).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    }
+
+    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "408");
+    expect(readStoredSidebarWidth()).toBe(408);
     window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "9999");
     expect(readStoredSidebarWidth()).toBe(NOTE_SIDEBAR_MAX_WIDTH);
     window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "100");

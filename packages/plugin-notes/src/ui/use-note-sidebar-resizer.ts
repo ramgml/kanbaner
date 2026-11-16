@@ -51,15 +51,23 @@ function safeStorage(): Storage | null {
   }
 }
 
+/** Строгий формат сохранённой ширины: только целое неотрицательное число. */
+const STORED_WIDTH_PATTERN = /^\d+$/u;
+
 /** Читает сохранённую ширину; любое повреждённое значение даёт стандарт. */
 export function readStoredSidebarWidth(
   storage: Pick<Storage, "getItem"> | null = safeStorage(),
 ): number {
   try {
     const raw = storage?.getItem(NOTE_SIDEBAR_STORAGE_KEY);
-    if (raw === null || raw === undefined) return NOTE_SIDEBAR_DEFAULT_WIDTH;
-    const value = Number.parseInt(raw, 10);
-    return Number.isFinite(value) ? clampSidebarWidth(value) : NOTE_SIDEBAR_DEFAULT_WIDTH;
+    // Number.parseInt принял бы "408junk" и "100.5"; формат проверяется целиком,
+    // иначе повреждённое значение молча превращалось в другую ширину.
+    if (raw === null || raw === undefined || !STORED_WIDTH_PATTERN.test(raw)) {
+      return NOTE_SIDEBAR_DEFAULT_WIDTH;
+    }
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value)) return NOTE_SIDEBAR_DEFAULT_WIDTH;
+    return clampSidebarWidth(value);
   } catch {
     return NOTE_SIDEBAR_DEFAULT_WIDTH;
   }
@@ -184,6 +192,9 @@ export function useNoteSidebarResizer(): NoteSidebarResizer {
   }, [applyWidth]);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    // Активный drag владеет handle до pointerup: второй указатель не должен
+    // перезаписывать стартовое состояние и «уводить» ширину.
+    if (dragRef.current !== null) return;
     // Только основная кнопка мыши/пера: touch на мобильном не ресайзит,
     // правая кнопка не должна запускать захват.
     if ((event.button ?? 0) !== 0 || event.pointerType === "touch") return;
@@ -219,14 +230,15 @@ export function useNoteSidebarResizer(): NoteSidebarResizer {
   const finishDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (drag === null) return;
+    // Чужой pointerup/cancel/lostpointercapture не завершает активный drag:
+    // сначала сверяем pointerId, и только потом снимаем захват и сохраняем.
+    if (drag.pointerId !== (event.pointerId ?? 0)) return;
     dragRef.current = null;
     setDragging(false);
-    if (drag.pointerId === (event.pointerId ?? 0)) {
-      try {
-        event.currentTarget.releasePointerCapture(drag.pointerId);
-      } catch {
-        // Захват мог быть уже снят браузером.
-      }
+    try {
+      event.currentTarget.releasePointerCapture(drag.pointerId);
+    } catch {
+      // Захват мог быть уже снят браузером.
     }
     // Записываем один раз за drag, а не на каждый pointermove.
     persistSidebarWidth(widthRef.current);

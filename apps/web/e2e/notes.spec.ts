@@ -689,6 +689,21 @@ async function noteEditorWidth(page: Page): Promise<number> {
     .evaluate((element) => Math.round(element.getBoundingClientRect().width));
 }
 
+/** Границы синхронизированы с `use-note-sidebar-resizer.ts`. */
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 560;
+const SIDEBAR_MIN_EDITOR_WIDTH = 320;
+
+async function expectedSidebarMax(page: Page): Promise<number> {
+  return page.getByTestId("notes-view").evaluate(
+    (element, limits) => {
+      const width = Math.round(element.getBoundingClientRect().width);
+      return Math.max(limits.min, Math.min(limits.max, width - limits.editor));
+    },
+    { min: SIDEBAR_MIN_WIDTH, max: SIDEBAR_MAX_WIDTH, editor: SIDEBAR_MIN_EDITOR_WIDTH },
+  );
+}
+
 test.describe("kanbaner.notes resize дерева заметок", () => {
   test("меняет ширину мышью, клавиатурой и сохраняет после reload", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
@@ -759,6 +774,49 @@ test.describe("kanbaner.notes resize дерева заметок", () => {
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.notes.sidebarWidth")))
       .toBe("288");
+    await expectNoOverflow(page);
+  });
+
+  test("ужимает дерево по viewport и восстанавливает ширину после расширения", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const handle = page.locator("[data-note-sidebar-resizer]");
+    await handle.focus();
+    await page.keyboard.press("End");
+
+    const wide = await expectedSidebarMax(page);
+    expect(wide).toBeGreaterThan(288);
+    await expect.poll(() => noteSidebarWidth(page)).toBe(wide);
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.notes.sidebarWidth")))
+      .toBe(String(wide));
+
+    // 1280 всё ещё шире потолка 560 px: ширина не меняется.
+    await page.setViewportSize({ width: 1280, height: DESKTOP.height });
+    const at1280 = await expectedSidebarMax(page);
+    await expect.poll(() => noteSidebarWidth(page)).toBe(at1280);
+    await expect(handle).toHaveAttribute("aria-valuemax", String(at1280));
+    await expectNoOverflow(page);
+
+    // 1152 — ещё desktop, но контейнер уже: максимум опускается, фактическая
+    // ширина ужимается, редактор сохраняет минимум.
+    await page.setViewportSize({ width: 1152, height: DESKTOP.height });
+    const narrow = await expectedSidebarMax(page);
+    expect(narrow).toBeLessThan(wide);
+    await expect.poll(() => noteSidebarWidth(page)).toBe(narrow);
+    await expect(handle).toHaveAttribute("aria-valuemax", String(narrow));
+    await expect(handle).toHaveAttribute("aria-valuenow", String(narrow));
+    expect(await noteEditorWidth(page)).toBeGreaterThanOrEqual(320);
+    await expectNoOverflow(page);
+    // Ужатие не перезаписывает желаемую ширину.
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.notes.sidebarWidth")))
+      .toBe(String(wide));
+
+    // Возврат к 1440 восстанавливает желаемую ширину.
+    await page.setViewportSize(DESKTOP);
+    await expect.poll(() => noteSidebarWidth(page)).toBe(wide);
+    await expect(handle).toHaveAttribute("aria-valuenow", String(wide));
     await expectNoOverflow(page);
   });
 
