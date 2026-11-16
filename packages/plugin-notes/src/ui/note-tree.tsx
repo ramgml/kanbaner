@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, FileText, Plus, Star, Trash2 } from "lucide-react";
 
 import type { NoteView } from "../model.ts";
@@ -19,7 +19,41 @@ interface NoteTreeProps {
    * не пересортировывает элементы по position и не показывает иерархию.
    */
   readonly flat?: boolean;
+  /**
+   * Полный набор страниц для расчёта siblings и позиций.
+   *
+   * Нужен фильтру «Избранное»: в дереве видны только избранные страницы, но
+   * `note.move` и кнопки порядка обязаны считать позицию по полному набору
+   * соседей, иначе скрытые страницы дадут неверный порядок.
+   */
+  readonly positionItems?: readonly NoteView[];
+  /** Пока move в полёте, DnD, reorder и корневая зона недоступны. */
+  readonly movePending?: boolean;
+  /** Пока идёт любая мутация, create/delete в дереве недоступны. */
+  readonly actionsDisabled?: boolean;
 }
+
+/** MIME-тип собственного drag-and-drop дерева заметок. */
+const NOTE_DRAG_TYPE = "application/x-kanbaner-note";
+
+/**
+ * Зона drop относительно строки-цели.
+ *
+ * `inside` делает страницу ребёнком цели, `before`/`after` — соседом
+ * (sibling) сверху или снизу. Зона в корне обрабатывается отдельной областью
+ * и не является зоной строки.
+ */
+export type NoteDropZone = "before" | "inside" | "after";
+
+/** Аргументы `note.move`, выведенные из зоны drop. */
+export interface NoteMoveRequest {
+  readonly parentId: string | null;
+  readonly position?: number;
+}
+
+type DropHint =
+  | { readonly kind: "item"; readonly id: string; readonly zone: NoteDropZone }
+  | { readonly kind: "root" };
 
 const buttonClass =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -45,6 +79,60 @@ const disclosureButtonClass =
  */
 const actionButtonClass = `${buttonClass} pointer-events-auto lg:size-6 lg:pointer-events-none lg:group-hover:pointer-events-auto lg:focus-within:pointer-events-auto`;
 
+/**
+ * Зона drop по вертикали внутри строки: верхняя четверть — перед, нижняя —
+ * после, середина — внутрь. При неизвестной высоте (например, в jsdom без
+ * layout) безопасно выбирается «внутрь».
+ */
+export function noteDropZone(clientY: number, top: number, height: number): NoteDropZone {
+  if (!Number.isFinite(height) || height <= 0) return "inside";
+  const ratio = (clientY - top) / height;
+  if (ratio < 0.25) return "before";
+  if (ratio > 0.75) return "after";
+  return "inside";
+}
+
+/**
+ * Переводит drop в аргументы `note.move`.
+ *
+ * Позиция считается среди siblings цели без самой перемещаемой страницы, как
+ * и в домене: `position` — индекс вставки в этот список. Для `inside`
+ * возвращается `parentId` без `position`, то есть добавление в конец ветки.
+ * `null` означает недопустимый drop (сама страница или неизвестная цель).
+ */
+export function noteMoveRequest(
+  items: readonly NoteView[],
+  draggedId: string,
+  targetId: string,
+  zone: NoteDropZone,
+): NoteMoveRequest | null {
+  if (draggedId === targetId) return null;
+  if (!items.some((item) => item.note.id === draggedId)) return null;
+  const target = items.find((item) => item.note.id === targetId);
+  if (target === undefined) return null;
+  if (zone === "inside") return { parentId: targetId };
+
+  const siblings = items
+    .filter((item) => item.note.parentId === target.note.parentId && item.note.id !== draggedId)
+    .sort((left, right) => left.note.position - right.note.position);
+  const index = siblings.findIndex((item) => item.note.id === targetId);
+  if (index === -1) return null;
+
+  return {
+    parentId: target.note.parentId,
+    position: zone === "before" ? index : index + 1,
+  };
+}
+
+/** Текст drop-подсказки: дублирует цвет и форму визуального индикатора. */
+function hintLabel(hint: DropHint): string {
+  if (hint.kind === "root") return "Перемещение в корень: страница станет корневой";
+  if (hint.zone === "inside") return "Перемещение внутрь: страница станет вложенной";
+  return hint.zone === "before"
+    ? "Перемещение перед страницей: порядок среди соседей"
+    : "Перемещение после страницы: порядок среди соседей";
+}
+
 export function NoteTree({
   items,
   selectedId,
@@ -53,8 +141,14 @@ export function NoteTree({
   onMove,
   onDelete,
   flat = false,
+  positionItems,
+  movePending = false,
+  actionsDisabled = false,
 }: NoteTreeProps) {
+  const allItems = positionItems ?? items;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropHint, setDropHint] = useState<DropHint | null>(null);
   const byParent = useMemo(() => {
     const result = new Map<string | null, NoteView[]>();
     for (const item of items) {
@@ -75,6 +169,30 @@ export function NoteTree({
         .sort((left, right) => left.note.position - right.note.position),
     [items, visibleIds],
   );
+  const fullById = useMemo(
+    () => new Map(allItems.map((item) => [item.note.id, item] as const)),
+    [allItems],
+  );
+  const fullByParent = useMemo(() => {
+    const result = new Map<string | null, NoteView[]>();
+    for (const item of allItems) {
+      const siblings = result.get(item.note.parentId) ?? [];
+      siblings.push(item);
+      result.set(item.note.parentId, siblings);
+    }
+    for (const siblings of result.values()) {
+      siblings.sort((left, right) => left.note.position - right.note.position);
+    }
+    return result;
+  }, [allItems]);
+  const fullRoots = useMemo(
+    () =>
+      allItems
+        .filter((item) => item.note.parentId === null || !fullById.has(item.note.parentId))
+        .sort((left, right) => left.note.position - right.note.position),
+    [allItems, fullById],
+  );
+  const dndDisabled = flat || movePending;
 
   useEffect(() => {
     if (selectedId === null) {
@@ -93,52 +211,136 @@ export function NoteTree({
     return () => clearTimeout(timer);
   }, [items, selectedId]);
 
+  const clearDrag = () => {
+    setDraggedId(null);
+    setDropHint(null);
+  };
+
+  const dropOnItem = (dragged: string, targetId: string, zone: NoteDropZone) => {
+    const request = noteMoveRequest(allItems, dragged, targetId, zone);
+    clearDrag();
+    if (request === null) return;
+    // Цель раскрывается до обновления items: перенесённая страница сразу видна
+    // внутри ветки, даже если до drop ветка была свёрнута.
+    if (zone === "inside") {
+      setExpanded((previous) => new Set([...previous, targetId]));
+    }
+    if (request.position === undefined) onMove(dragged, request.parentId);
+    else onMove(dragged, request.parentId, request.position);
+  };
+
+  const itemDragOver = (event: DragEvent<HTMLElement>, id: string) => {
+    if (!event.dataTransfer.types.includes(NOTE_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    // На себя drop не даёт содержательного результата, поэтому индикатор не
+    // показывается, хотя событие остаётся отменённым для совместимости.
+    if (draggedId === id) {
+      setDropHint(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setDropHint({ kind: "item", id, zone: noteDropZone(event.clientY, rect.top, rect.height) });
+  };
+
+  const itemDrop = (event: DragEvent<HTMLElement>, id: string) => {
+    const dragged = event.dataTransfer.getData(NOTE_DRAG_TYPE);
+    if (dragged.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    dropOnItem(dragged, id, noteDropZone(event.clientY, rect.top, rect.height));
+  };
+
+  const rootDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes(NOTE_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropHint({ kind: "root" });
+  };
+
+  const rootDrop = (event: DragEvent<HTMLElement>) => {
+    const dragged = event.dataTransfer.getData(NOTE_DRAG_TYPE);
+    if (dragged.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    clearDrag();
+    onMove(dragged, null);
+  };
+
+  const dropHintFor = (id: string): NoteDropZone | null =>
+    dropHint?.kind === "item" && dropHint.id === id ? dropHint.zone : null;
+
   const renderNode = (view: NoteView, depth: number): ReactNode => {
     const id = view.note.id;
     const children = flat ? [] : (byParent.get(id) ?? []);
     const isExpanded = !flat && expanded.has(id);
-    const siblings = byParent.get(view.note.parentId) ?? roots;
+    const siblings = fullByParent.get(view.note.parentId) ?? fullRoots;
     const index = siblings.findIndex((item) => item.note.id === id);
+    const fullView = fullById.get(id) ?? view;
+    const hint = dropHintFor(id);
 
     return (
       <li key={id}>
         <div
           data-note-tree-item={id}
-          draggable={!flat}
+          data-note-dragging={draggedId === id ? "true" : undefined}
+          data-note-move-pending={movePending ? "true" : undefined}
+          draggable={!dndDisabled}
           onDragStart={
-            flat
+            dndDisabled
               ? undefined
               : (event) => {
-                  event.dataTransfer.setData("application/x-kanbaner-note", id);
+                  event.dataTransfer.setData(NOTE_DRAG_TYPE, id);
                   event.dataTransfer.effectAllowed = "move";
+                  setDraggedId(id);
+                  setDropHint(null);
                 }
           }
-          onDragOver={
-            flat
+          onDragEnd={dndDisabled ? undefined : clearDrag}
+          onDragOver={dndDisabled ? undefined : (event) => itemDragOver(event, id)}
+          onDragLeave={
+            dndDisabled
               ? undefined
               : (event) => {
-                  if (event.dataTransfer.types.includes("application/x-kanbaner-note")) {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.contains(next)) return;
+                  setDropHint((current) =>
+                    current?.kind === "item" && current.id === id ? null : current,
+                  );
                 }
           }
-          onDrop={
-            flat
-              ? undefined
-              : (event) => {
-                  const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
-                  if (dragged && dragged !== id) {
-                    event.preventDefault();
-                    onMove(dragged, view.note.parentId, Math.max(0, index));
-                  }
-                }
-          }
+          onDrop={dndDisabled ? undefined : (event) => itemDrop(event, id)}
           className={`group relative flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
             selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
-          }${flat ? "" : " cursor-grab active:cursor-grabbing"}`}
+          }${flat ? "" : " cursor-grab active:cursor-grabbing"}${draggedId === id ? " opacity-60" : ""}`}
           style={{ paddingLeft: `${depth * 12 + 2}px` }}
         >
+          {hint === "before" || hint === "after" ? (
+            <div
+              data-note-drop-indicator={hint}
+              aria-hidden="true"
+              className={`pointer-events-none absolute inset-x-0 z-20 flex items-center gap-1 ${
+                hint === "before" ? "-top-1" : "-bottom-1"
+              }`}
+            >
+              <span className="h-0.5 flex-1 rounded bg-primary" />
+              <span className="rounded bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground">
+                {hint === "before" ? "Перед" : "После"}
+              </span>
+            </div>
+          ) : null}
+          {hint === "inside" ? (
+            <div
+              data-note-drop-indicator="inside"
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 z-20 rounded-md ring-2 ring-primary ring-inset"
+            >
+              <span className="absolute -top-2 right-1 rounded bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground">
+                Внутрь
+              </span>
+            </div>
+          ) : null}
           {flat ? null : children.length > 0 ? (
             <button
               type="button"
@@ -193,8 +395,8 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} выше`}
-                  disabled={index <= 0}
-                  onClick={() => onMove(id, view.note.parentId, index - 1)}
+                  disabled={movePending || actionsDisabled || index <= 0}
+                  onClick={() => onMove(id, fullView.note.parentId, index - 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↑
@@ -202,8 +404,10 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} ниже`}
-                  disabled={index < 0 || index >= siblings.length - 1}
-                  onClick={() => onMove(id, view.note.parentId, index + 1)}
+                  disabled={
+                    movePending || actionsDisabled || index < 0 || index >= siblings.length - 1
+                  }
+                  onClick={() => onMove(id, fullView.note.parentId, index + 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
                   ↓
@@ -214,11 +418,12 @@ export function NoteTree({
               type="button"
               data-note-add-child={id}
               aria-label={`Создать вложенную страницу в ${view.note.title}`}
+              disabled={actionsDisabled}
               onClick={() => {
                 setExpanded((previous) => new Set([...previous, id]));
                 onCreate(id);
               }}
-              className={actionButtonClass}
+              className={`${actionButtonClass} disabled:opacity-40`}
             >
               <Plus aria-hidden="true" className="size-3.5" />
             </button>
@@ -226,8 +431,9 @@ export function NoteTree({
               type="button"
               data-note-delete={id}
               aria-label={`Удалить ${view.note.title}`}
+              disabled={actionsDisabled}
               onClick={() => onDelete(view)}
-              className={`${actionButtonClass} hover:text-destructive`}
+              className={`${actionButtonClass} hover:text-destructive disabled:opacity-40`}
             >
               <Trash2 aria-hidden="true" className="size-3.5" />
             </button>
@@ -247,26 +453,71 @@ export function NoteTree({
       <ul
         aria-label={flat ? "Список заметок" : "Дерево заметок"}
         className="m-0 list-none p-0"
-        onDragOver={flat ? undefined : (event) => event.preventDefault()}
-        onDrop={
-          flat
+        onDragOver={dndDisabled ? undefined : (event) => event.preventDefault()}
+        onDragLeave={
+          dndDisabled
             ? undefined
             : (event) => {
-                const dragged = event.dataTransfer.getData("application/x-kanbaner-note");
-                if (dragged && event.target === event.currentTarget) {
-                  onMove(dragged, null);
-                }
+                const next = event.relatedTarget;
+                if (next instanceof Node && event.currentTarget.contains(next)) return;
+                setDropHint(null);
+              }
+        }
+        onDrop={
+          dndDisabled
+            ? undefined
+            : (event) => {
+                if (event.target !== event.currentTarget) return;
+                rootDrop(event);
               }
         }
       >
         {flat ? items.map((view) => renderNode(view, 0)) : roots.map((view) => renderNode(view, 0))}
       </ul>
+      {flat || items.length === 0 ? null : (
+        <div
+          data-note-root-drop
+          data-note-drop-indicator={dropHint?.kind === "root" ? "root" : undefined}
+          aria-disabled={movePending ? "true" : undefined}
+          onDragOver={movePending ? undefined : rootDragOver}
+          onDragLeave={
+            movePending
+              ? undefined
+              : (event) => {
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.contains(next)) return;
+                  setDropHint((current) => (current?.kind === "root" ? null : current));
+                }
+          }
+          onDrop={movePending ? undefined : rootDrop}
+          className={`mt-1 flex min-w-0 items-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-xs ${
+            dropHint?.kind === "root"
+              ? "border-primary bg-primary/10 text-foreground"
+              : "border-border text-muted-foreground"
+          }${movePending ? " cursor-not-allowed opacity-50" : ""}`}
+        >
+          <span aria-hidden="true" className="text-sm leading-none">
+            ↳
+          </span>
+          <span className="min-w-0 flex-1 truncate">
+            {movePending
+              ? "Перемещение выполняется…"
+              : dropHint?.kind === "root"
+                ? "Отпустите, чтобы сделать корневой"
+                : "Сюда — переместить в корень"}
+          </span>
+        </div>
+      )}
       {items.length === 0 ? (
         <p className="px-2 py-6 text-center text-sm text-muted-foreground">Заметок пока нет</p>
       ) : null}
+      <span className="sr-only" role="status" aria-live="polite" data-note-drop-status>
+        {dropHint === null ? "" : hintLabel(dropHint)}
+      </span>
       <button
         type="button"
         data-testid="note-create-root"
+        disabled={actionsDisabled}
         onClick={() => onCreate(null)}
         className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >

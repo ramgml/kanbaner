@@ -1,4 +1,4 @@
-import type { JsonValue } from "@kanbaner/plugin-sdk";
+import type { JsonObject, JsonValue } from "@kanbaner/plugin-sdk";
 
 /**
  * Контракт вызова публичной операции из UI-вклада.
@@ -11,6 +11,8 @@ export interface UiOperationError {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+  /** Whitelisted безопасные детали; сейчас только доменный `reason`. */
+  readonly details?: JsonObject;
 }
 
 export type UiOperationResult =

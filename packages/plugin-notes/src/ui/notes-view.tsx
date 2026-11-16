@@ -50,6 +50,18 @@ import {
 type Filter = "tree" | "favorite" | "recent";
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
+interface MoveRequest {
+  readonly id: string;
+  readonly parentId: string | null;
+  readonly position?: number;
+}
+
+interface MoveFailure {
+  readonly message: string;
+  /** Повтор именно move; `null`, если повтор бессмысленен (цикл, глубина). */
+  readonly retry: MoveRequest | null;
+}
+
 type NotesViewProps = NotesUiRendererProps;
 
 const inputClass =
@@ -81,8 +93,10 @@ export function NotesView(props: NotesViewProps) {
   const [filter, setFilter] = useState<Filter>("tree");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<MoveFailure | null>(null);
+  const [movePending, setMovePending] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [conflict, setConflict] = useState(false);
   const [title, setTitle] = useState("");
@@ -111,6 +125,27 @@ export function NotesView(props: NotesViewProps) {
     readonly fingerprint: string;
   } | null>(null);
   const uploadChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const itemsRef = useRef<readonly NoteView[]>([]);
+  /** Монотонное поколение list-запросов: старый ответ не перетирает новый. */
+  const listGenerationRef = useRef(0);
+  /** Единый счётчик мутаций: busy не снимается, пока хоть одна в полёте. */
+  const pendingCountRef = useRef(0);
+  const moveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const activeMovesRef = useRef(0);
+  /** Номер актуальной move-операции: старый результат не перетирает новый. */
+  const moveAttemptRef = useRef(0);
+
+  const beginPending = useCallback(() => {
+    pendingCountRef.current += 1;
+    setPendingCount(pendingCountRef.current);
+  }, []);
+
+  const endPending = useCallback(() => {
+    pendingCountRef.current = Math.max(0, pendingCountRef.current - 1);
+    setPendingCount(pendingCountRef.current);
+  }, []);
+
+  const busy = pendingCount > 0;
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -126,6 +161,7 @@ export function NotesView(props: NotesViewProps) {
   );
 
   const refreshNotes = useCallback(async (): Promise<readonly NoteView[]> => {
+    const generation = ++listGenerationRef.current;
     const all: NoteView[] = [];
     let offset = 0;
     for (;;) {
@@ -137,9 +173,34 @@ export function NotesView(props: NotesViewProps) {
       if (page.nextOffset === null) break;
       offset = page.nextOffset;
     }
-    setItems(all);
+    // Ответ старого запроса мог прийти после нового: применяем только
+    // актуальное поколение, иначе дерево и itemsRef откатятся назад.
+    if (generation === listGenerationRef.current) {
+      itemsRef.current = all;
+      setItems(all);
+    }
     return all;
   }, [invoke]);
+
+  /**
+   * Перечитывает открытую страницу после конфликта move.
+   *
+   * Обновляет view/ancestors/version и список, но не трогает локальные title,
+   * editorValue, dirty и saveState: черновик не должен потеряться.
+   */
+  const resyncOpenNote = useCallback(async (): Promise<void> => {
+    const id = selectedIdRef.current;
+    if (id === null) return;
+    const [next] = await Promise.all([
+      invokeNotes<NoteDetails>(invoke, NOTES_QUERY_IDS.get, { id }),
+      refreshNotes(),
+    ]);
+    if (selectedIdRef.current !== id) return;
+    versionRef.current = next.view.note.version;
+    setDetails((current) =>
+      current?.view.note.id === id ? { ...next, attachments: current.attachments } : current,
+    );
+  }, [invoke, refreshNotes]);
 
   const saveNow = useCallback((): Promise<void> => {
     if (saveTimerRef.current !== null) {
@@ -209,7 +270,7 @@ export function NotesView(props: NotesViewProps) {
             ? { ...next, attachments: attachmentsRef.current }
             : current,
         );
-        void refreshNotes().catch(() => undefined);
+        await refreshNotes().catch(() => undefined);
         // Автоматическая очистка attachments запрещена: Undo может выполняться
         // как во время update, так и во время delete. Неиспользуемые файлы
         // удаляются только явным действием пользователя после сохранения.
@@ -370,7 +431,7 @@ export function NotesView(props: NotesViewProps) {
   const createNote = async (parentId: string | null) => {
     await saveNow();
     if (dirtyRef.current) return;
-    setBusy(true);
+    beginPending();
     setError(null);
     const previousKey = createKeyRef.current;
     const createKey =
@@ -396,24 +457,35 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось создать заметку");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
-  const moveNote = async (id: string, parentId: string | null, position?: number) => {
-    const item = items.find((candidate) => candidate.note.id === id);
-    if (item === undefined) return;
-    if (selectedIdRef.current === id) {
-      await saveNow();
-      if (dirtyRef.current) return;
-    }
-    setBusy(true);
+  const performMove = async (request: MoveRequest): Promise<void> => {
+    const attempt = ++moveAttemptRef.current;
     try {
+      // Открытая страница может быть affected sibling: сохраняем её черновик
+      // до любого move, иначе ответ домена перезапишет более новую версию.
+      await saveNow();
+      if (dirtyRef.current) {
+        if (attempt === moveAttemptRef.current) {
+          setMoveError({
+            message: "Сначала исправьте ошибку сохранения текущей заметки",
+            retry: request,
+          });
+        }
+        return;
+      }
+
+      const item = itemsRef.current.find((candidate) => candidate.note.id === request.id);
+      if (item === undefined) return;
+
       const result = await invokeNotes<NoteMoveResult>(invoke, NOTES_COMMAND_IDS.move, {
-        id,
-        expectedVersion: selectedIdRef.current === id ? versionRef.current : item.note.version,
-        parentId,
-        ...(position === undefined ? {} : { position }),
+        id: request.id,
+        expectedVersion:
+          selectedIdRef.current === request.id ? versionRef.current : item.note.version,
+        parentId: request.parentId,
+        ...(request.position === undefined ? {} : { position: request.position }),
       });
       const remaining = await refreshNotes();
       // Полная перезагрузка открытой заметки стёрла бы черновик. Вместо неё
@@ -434,16 +506,71 @@ export function NotesView(props: NotesViewProps) {
       });
       const currentAffected = moved.get(selectedIdRef.current ?? "");
       if (currentAffected !== undefined) versionRef.current = currentAffected.version;
-      setError(null);
+      if (attempt === moveAttemptRef.current) setMoveError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось переместить заметку");
-    } finally {
-      setBusy(false);
+      // Старая операция не должна перетирать ошибку новой.
+      if (attempt !== moveAttemptRef.current) return;
+      if (reason instanceof NotesUiError && reason.code === "VERSION_CONFLICT") {
+        setMoveError({
+          message:
+            "Страница изменилась другой операцией. Данные перечитаны — повторите перемещение.",
+          retry: request,
+        });
+        // Перечитываем список/details/version, не трогая черновик.
+        await resyncOpenNote().catch(() => undefined);
+        return;
+      }
+      const domainReason = reason instanceof NotesUiError ? reason.reason : undefined;
+      if (domainReason === "NOTE_TREE_CYCLE") {
+        setMoveError({
+          message: "Нельзя переместить страницу внутрь её собственной ветки",
+          retry: null,
+        });
+        return;
+      }
+      if (domainReason === "NOTE_TREE_TOO_DEEP") {
+        setMoveError({ message: "Превышена максимальная глубина дерева", retry: null });
+        return;
+      }
+      setMoveError({
+        message: reason instanceof Error ? reason.message : "Не удалось переместить заметку",
+        retry: reason instanceof NotesUiError && reason.retryable ? request : null,
+      });
     }
   };
 
+  /**
+   * Ставит move в очередь.
+   *
+   * invoke + refresh + affected updates выполняются строго последовательно:
+   * вторая операция не может прочитать старое дерево и перезаписать версии
+   * первой. На всё время очереди DnD/reorder/root drop отключены.
+   */
+  const moveNote = (id: string, parentId: string | null, position?: number): Promise<void> => {
+    const request: MoveRequest =
+      position === undefined ? { id, parentId } : { id, parentId, position };
+    activeMovesRef.current += 1;
+    setMovePending(true);
+    beginPending();
+    const next = moveChainRef.current.then(() => performMove(request));
+    moveChainRef.current = next.catch(() => undefined);
+    const settle = () => {
+      activeMovesRef.current -= 1;
+      endPending();
+      if (activeMovesRef.current === 0) setMovePending(false);
+    };
+    void next.then(settle, settle);
+    return next;
+  };
+
+  const retryMove = () => {
+    const request = moveError?.retry ?? null;
+    if (request === null) return;
+    void moveNote(request.id, request.parentId, request.position);
+  };
+
   const deleteNote = async (view: NoteView) => {
-    setBusy(true);
+    beginPending();
     try {
       const preview = await invokeNotes<NoteSubtree>(invoke, NOTES_QUERY_IDS.subtree, {
         id: view.note.id,
@@ -483,7 +610,7 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить заметку");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
@@ -573,7 +700,7 @@ export function NotesView(props: NotesViewProps) {
     if (!window.confirm(`Удалить вложение ${attachment.id}? Действие необратимо.`)) return;
     await saveNow();
     if (dirtyRef.current) return;
-    setBusy(true);
+    beginPending();
     try {
       await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
         id: attachment.id,
@@ -591,7 +718,7 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить вложение");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
@@ -794,7 +921,10 @@ export function NotesView(props: NotesViewProps) {
           ) : (
             <NoteTree
               items={visibleItems}
+              positionItems={items}
               flat={filter === "recent"}
+              movePending={movePending}
+              actionsDisabled={busy}
               selectedId={selectedId}
               onSelect={(id) => void selectNote(id)}
               onCreate={(parentId) => void createNote(parentId)}
@@ -904,7 +1034,7 @@ export function NotesView(props: NotesViewProps) {
                   id="note-parent"
                   data-testid="note-parent"
                   value={details.view.note.parentId ?? ""}
-                  disabled={busy}
+                  disabled={busy || movePending}
                   onChange={(event) =>
                     void moveNote(details.view.note.id, event.target.value || null)
                   }
@@ -946,6 +1076,29 @@ export function NotesView(props: NotesViewProps) {
                       className="underline"
                     >
                       Повторить
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {moveError ? (
+              <div
+                role="alert"
+                data-testid="note-move-error"
+                className="mx-4 mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive sm:mx-6"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>{moveError.message}</span>
+                  {moveError.retry === null ? null : (
+                    <button
+                      type="button"
+                      data-testid="note-move-retry"
+                      disabled={movePending}
+                      onClick={retryMove}
+                      className="underline disabled:opacity-50"
+                    >
+                      Повторить перемещение
                     </button>
                   )}
                 </div>

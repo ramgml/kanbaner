@@ -2,28 +2,13 @@
 
 import type { JsonValue, OperationResult } from "@kanbaner/plugin-sdk";
 
-import { sanitizeUiOperationOptions, type UiOperationInvokeOptions } from "../ui/operation-types";
+import {
+  sanitizeUiOperationOptions,
+  type UiOperationInvokeOptions,
+  type UiOperationResult,
+} from "../ui/operation-types";
+import { toUiOperationResult } from "./plugin-operation-result";
 import { executeUiPluginOperation } from "./plugin-service";
-
-export interface UiOperationError {
-  readonly code: string;
-  readonly message: string;
-  readonly retryable: boolean;
-}
-
-export type UiOperationResult =
-  | { readonly ok: true; readonly data: JsonValue | null }
-  | { readonly ok: false; readonly error: UiOperationError };
-
-function jsonData(value: unknown): JsonValue | null {
-  if (value === undefined) {
-    return null;
-  }
-
-  // Данные операции уже сериализуемы по контракту; structuredClone защищает
-  // от передачи ссылок на внутренние объекты в клиентский компонент.
-  return structuredClone(value) as JsonValue;
-}
 
 /**
  * Выполняет UI-операцию через общий composition root.
@@ -42,16 +27,5 @@ export async function executePluginOperation(
     sanitizeUiOperationOptions(options),
   );
 
-  if (!result.ok) {
-    return {
-      ok: false,
-      error: {
-        code: result.error.code,
-        message: result.error.message,
-        retryable: result.error.retryable,
-      },
-    };
-  }
-
-  return { ok: true, data: jsonData(result.data) };
+  return toUiOperationResult(result);
 }

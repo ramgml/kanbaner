@@ -4,6 +4,13 @@ export interface UiOperationError {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+  /**
+   * Безопасные детали ошибки от транспорта.
+   *
+   * Сервер передаёт только whitelisted-поля (сейчас `reason`), без issues,
+   * содержимого заметок и внутренних путей.
+   */
+  readonly details?: JsonObject;
 }
 
 export type UiOperationResult =
@@ -42,8 +49,15 @@ export class NotesUiError extends Error {
     readonly code: string,
     message: string,
     readonly retryable: boolean,
+    readonly details?: JsonObject,
   ) {
     super(message);
+  }
+
+  /** Доменная причина отказа (`NOTE_TREE_CYCLE`, `NOTE_TREE_TOO_DEEP`, ...). */
+  get reason(): string | undefined {
+    const reason = this.details?.reason;
+    return typeof reason === "string" ? reason : undefined;
   }
 }
 
@@ -55,7 +69,12 @@ export async function invokeNotes<T>(
 ): Promise<T> {
   const result = await invoke(operationId, input, options);
   if (!result.ok) {
-    throw new NotesUiError(result.error.code, result.error.message, result.error.retryable);
+    throw new NotesUiError(
+      result.error.code,
+      result.error.message,
+      result.error.retryable,
+      result.error.details,
+    );
   }
   return result.data as T;
 }
