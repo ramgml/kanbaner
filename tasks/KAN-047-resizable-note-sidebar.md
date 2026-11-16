@@ -1,7 +1,7 @@
 ---
 id: KAN-047
 title: Изменение ширины дерева заметок мышью
-status: in_progress
+status: done
 stage: 1
 priority: medium
 owner: opencode-worker
@@ -26,12 +26,12 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить visible/hover resize handle с Pointer Events и pointer capture.
-- [ ] Ограничить ширину разумными min/max с учётом viewport.
-- [ ] Сохранить выбранную ширину локально между перезагрузками.
-- [ ] Добавить accessible separator с клавишами Arrow/Home/End и double-click reset.
-- [ ] Не применять resize к мобильному полноэкранному sidebar.
-- [ ] Добавить unit/E2E для mouse, persistence, keyboard и mobile.
+- [x] Добавить visible/hover resize handle с Pointer Events и pointer capture.
+- [x] Ограничить ширину разумными min/max с учётом viewport.
+- [x] Сохранить выбранную ширину локально между перезагрузками.
+- [x] Добавить accessible separator с клавишами Arrow/Home/End и double-click reset.
+- [x] Не применять resize к мобильному полноэкранному sidebar.
+- [x] Добавить unit/E2E для mouse, persistence, keyboard и mobile.
 
 ## Владение файлами
 
@@ -47,18 +47,20 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Desktop sidebar меняет ширину мышью.
-- [ ] Ширина ограничена и не создаёт горизонтальный overflow.
-- [ ] Ширина восстанавливается после reload.
-- [ ] Размер можно изменить с клавиатуры и сбросить double-click.
-- [ ] Mobile 360 не получает resize UI и не ломается.
-- [ ] Проверки зелёные.
+- [x] Desktop sidebar меняет ширину мышью.
+- [x] Ширина ограничена и не создаёт горизонтальный overflow.
+- [x] Ширина восстанавливается после reload.
+- [x] Размер можно изменить с клавиатуры и сбросить double-click.
+- [x] Mobile 360 не получает resize UI и не ломается.
+- [x] Проверки зелёные.
 
 ## Журнал
 
 - 2026-11-16 — Задача создана по запросу пользователя и передана OpenCode worker.
+- 2026-11-16 — Реализован resize 240–560 px с viewport clamp, persistence и keyboard. Ревью выявило pointer ownership/parse/resize недочёты, исправленные follow-up; повторное ревью разрешило merge.
+- 2026-11-16 — Ветка влита в `dev`; финальный `pnpm check` зелёный, worktree и feature-ветка удалены.
 
 ## Итог
 
-- Коммит:
-- Проверки:
+- Коммит: worker `f56e01d`, follow-up `ee4c8b5`; merge `ff1027a65eb88304e1868dc3a04cffb254639a44`.
+- Проверки: focused 31/31, `pnpm check` 1684 теста, notes E2E 16/16, viewport resize 1440→1280→1152→1440 и mobile 360. Push не выполнялся.
