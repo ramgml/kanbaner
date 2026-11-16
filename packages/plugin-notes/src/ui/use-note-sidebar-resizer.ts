@@ -132,7 +132,12 @@ export interface NoteSidebarResizer {
   readonly minWidth: number;
   readonly maxWidth: number;
   readonly dragging: boolean;
-  /** CSS-переменная ширины: применяется только к desktop-классу `lg:w-[var(...)]`. */
+  /**
+   * CSS-переменная ширины: применяется только к desktop-классу ширины в
+   * `notes-view.tsx`. Готовую запись класса здесь не приводим: Tailwind
+   * собирает кандидаты из комментариев и плейсхолдер в `var()` ломает парсер
+   * CSS.
+   */
   readonly asideStyle: CSSProperties;
   readonly separatorProps: NoteSidebarResizerProps;
 }

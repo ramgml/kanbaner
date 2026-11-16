@@ -1,5 +1,8 @@
 import "@testing-library/jest-dom/vitest";
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+
 import {
   act,
   cleanup,
@@ -1727,7 +1730,37 @@ class ControlledResizeObserver {
   }
 }
 
+function listSourceFiles(directory: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...listSourceFiles(fullPath));
+    else if (/\.(ts|tsx|css)$/.test(entry.name)) files.push(fullPath);
+  }
+  return files;
+}
+
 describe("NotesView resize дерева заметок", () => {
+  it("не оставляет в исходниках Tailwind-кандидатов с плейсхолдером", () => {
+    // Tailwind сканирует и комментарии: кандидат со служебным плейсхолдером
+    // внутри квадратных скобок даёт невалидное правило `width: var(...)` и
+    // роняет PostCSS на `apps/web/src/app/globals.css`.
+    const placeholderCandidate = new RegExp(String.raw`\w+-\[[^\]]*\.\.\.[^\]]*\]`);
+    const sourceRoot = join(import.meta.dirname, "..");
+    const offenders: string[] = [];
+    for (const file of listSourceFiles(sourceRoot)) {
+      if (placeholderCandidate.test(readFileSync(file, "utf8"))) {
+        offenders.push(relative(sourceRoot, file));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("задаёт ширину дерева desktop-классом arbitrary property", async () => {
+    await openResizableNotes();
+    expect(sidebarElement().className).toContain("lg:[width:var(--note-sidebar-width)]");
+  });
+
   it("меняет ширину мышью и восстанавливает её после повторного монтирования", async () => {
     const { view, handle } = await openResizableNotes();
     expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
