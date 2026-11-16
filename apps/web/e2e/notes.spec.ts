@@ -676,3 +676,106 @@ test.describe("kanbaner.notes в production shell", () => {
     await expectNoOverflow(page);
   });
 });
+
+async function noteSidebarWidth(page: Page): Promise<number> {
+  return page
+    .getByRole("complementary", { name: "Навигация по заметкам" })
+    .evaluate((element) => Math.round(element.getBoundingClientRect().width));
+}
+
+async function noteEditorWidth(page: Page): Promise<number> {
+  return page
+    .locator("section[aria-label='Редактор заметки']")
+    .evaluate((element) => Math.round(element.getBoundingClientRect().width));
+}
+
+test.describe("kanbaner.notes resize дерева заметок", () => {
+  test("меняет ширину мышью, клавиатурой и сохраняет после reload", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Ресайз дерева"));
+
+    const handle = page.locator("[data-note-sidebar-resizer]");
+    const line = page.locator("[data-note-sidebar-resizer-line]");
+    await expect(handle).toBeVisible();
+    await expect(handle).toHaveCSS("cursor", "col-resize");
+    await expect(line).toBeVisible();
+    await expect(handle).toHaveAttribute("aria-valuenow", "288");
+    await expect.poll(() => noteSidebarWidth(page)).toBe(288);
+
+    // Handle виден постоянно, но заметнее при наведении.
+    const idleColor = await line.evaluate((element) => getComputedStyle(element).backgroundColor);
+    await handle.hover();
+    await expect
+      .poll(() => line.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .not.toBe(idleColor);
+
+    // Тянем правую границу мышью через Pointer Events.
+    const box = await handle.boundingBox();
+    if (box === null) throw new Error("Resize handle не найден");
+    const startX = box.x + box.width / 2;
+    const startY = box.y + box.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + 120, startY, { steps: 8 });
+    await page.mouse.up();
+
+    await expect.poll(() => noteSidebarWidth(page)).toBe(408);
+    await expect(handle).toHaveAttribute("aria-valuenow", "408");
+    expect(await noteEditorWidth(page)).toBeGreaterThanOrEqual(320);
+    await expectNoOverflow(page);
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.notes.sidebarWidth")))
+      .toBe("408");
+
+    // Ширина переживает перезагрузку страницы.
+    await page.reload();
+    await expect(page.getByTestId("notes-view")).toBeVisible();
+    await expect.poll(() => noteSidebarWidth(page)).toBe(408);
+    await expect(handle).toHaveAttribute("aria-valuenow", "408");
+    await expectNoOverflow(page);
+
+    // Клавиатура: шаг, Home/End и double-click reset.
+    await handle.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(handle).toHaveAttribute("aria-valuenow", "424");
+    await page.keyboard.press("ArrowLeft");
+    await expect(handle).toHaveAttribute("aria-valuenow", "408");
+
+    const maxWidth = Number(await handle.getAttribute("aria-valuemax"));
+    expect(maxWidth).toBeGreaterThanOrEqual(408);
+    await page.keyboard.press("End");
+    await expect.poll(() => noteSidebarWidth(page)).toBe(maxWidth);
+    expect(await noteEditorWidth(page)).toBeGreaterThanOrEqual(320);
+    await expectNoOverflow(page);
+
+    await page.keyboard.press("Home");
+    await expect.poll(() => noteSidebarWidth(page)).toBe(240);
+    await expectNoOverflow(page);
+
+    await handle.dblclick();
+    await expect.poll(() => noteSidebarWidth(page)).toBe(288);
+    await expect(handle).toHaveAttribute("aria-valuenow", "288");
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.notes.sidebarWidth")))
+      .toBe("288");
+    await expectNoOverflow(page);
+  });
+
+  test("не показывает resize на mobile 360 и не ломает полноэкранное дерево", async ({ page }) => {
+    await page.setViewportSize(MOBILE);
+    await openNotes(page);
+    const id = await createNote(page, title("Мобильное дерево"));
+
+    const handle = page.locator("[data-note-sidebar-resizer]");
+    await expect(handle).toBeHidden();
+    await page.getByRole("button", { name: "Открыть дерево заметок" }).click();
+    const sidebar = page.getByRole("complementary", { name: "Навигация по заметкам" });
+    await expect(sidebar).toBeVisible();
+    // Мобильный sidebar занимает весь экран и не получает resize UI.
+    await expect(handle).toBeHidden();
+    await expect.poll(() => noteSidebarWidth(page)).toBe(MOBILE.width);
+    await expect(page.locator(`[data-note-select='${id}']`)).toBeVisible();
+    await expectNoOverflow(page);
+  });
+});

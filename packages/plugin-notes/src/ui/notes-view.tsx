@@ -36,6 +36,7 @@ import { MarkdownNoteEditor } from "./editor/markdown-note-editor.tsx";
 import { NoteLinks } from "./note-links.tsx";
 import { NoteTitleField } from "./note-title-field.tsx";
 import { NoteTree } from "./note-tree.tsx";
+import { useNoteSidebarResizer } from "./use-note-sidebar-resizer.ts";
 import {
   fileToBase64,
   invokeNotes,
@@ -103,6 +104,7 @@ export function NotesView(props: NotesViewProps) {
   const [editorValue, setEditorValue] = useState("");
   const [searchText, setSearchText] = useState("");
   const [searchResults, setSearchResults] = useState<NoteSearchPage | null>(null);
+  const sidebarResizer = useNoteSidebarResizer();
 
   const cacheRef = useRef(new AttachmentUrlCache());
   const selectedIdRef = useRef(selectedId);
@@ -806,6 +808,7 @@ export function NotesView(props: NotesViewProps) {
 
   return (
     <div
+      ref={sidebarResizer.containerRef}
       data-testid="notes-view"
       className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row"
     >
@@ -832,7 +835,9 @@ export function NotesView(props: NotesViewProps) {
 
       <aside
         aria-label="Навигация по заметкам"
-        className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:static lg:flex lg:w-72`}
+        id="notes-sidebar"
+        style={sidebarResizer.asideStyle}
+        className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:relative lg:flex lg:w-[var(--note-sidebar-width)]`}
       >
         <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-3">
           <h1 className="text-base font-semibold">Заметки</h1>
@@ -932,6 +937,23 @@ export function NotesView(props: NotesViewProps) {
               onDelete={(view) => void deleteNote(view)}
             />
           )}
+        </div>
+        <div
+          {...sidebarResizer.separatorProps}
+          aria-label="Ширина дерева заметок"
+          aria-controls="notes-sidebar"
+          title="Потяните за границу, используйте стрелки, Home/End; двойной клик сбрасывает ширину"
+          className="group absolute inset-y-0 -right-1 z-10 hidden w-2 cursor-col-resize touch-none select-none focus-visible:bg-accent/60 focus-visible:outline-none lg:block"
+        >
+          <span
+            aria-hidden="true"
+            data-note-sidebar-resizer-line
+            className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+              sidebarResizer.dragging
+                ? "bg-primary"
+                : "bg-border group-hover:bg-primary/60 group-focus-visible:bg-primary"
+            }`}
+          />
         </div>
       </aside>
 

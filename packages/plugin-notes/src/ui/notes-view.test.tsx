@@ -22,6 +22,15 @@ import type {
 } from "../model.ts";
 import { NotesView } from "./notes-view.tsx";
 import type { UiOperationInvoker, UiOperationResult } from "./runtime.ts";
+import {
+  NOTE_SIDEBAR_DEFAULT_WIDTH,
+  NOTE_SIDEBAR_MAX_WIDTH,
+  NOTE_SIDEBAR_MIN_WIDTH,
+  NOTE_SIDEBAR_STORAGE_KEY,
+  clampSidebarWidth,
+  readStoredSidebarWidth,
+  sidebarMaxWidthFor,
+} from "./use-note-sidebar-resizer.ts";
 
 const editorState = vi.hoisted(() => ({
   bytes: [137, 80, 78, 71] as number[],
@@ -195,6 +204,7 @@ function required<T extends Element>(root: ParentNode, selector: string): T {
 
 beforeEach(() => {
   editorState.bytes = [137, 80, 78, 71];
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -1624,5 +1634,173 @@ describe("NotesView autosave", () => {
       ),
     ).toEqual(["note-b", "note-a"]);
     expect(screen.getByTestId("note-title")).toHaveValue("Вторая");
+  });
+});
+
+type PointerName = "pointerDown" | "pointerMove" | "pointerUp" | "pointerCancel";
+
+/**
+ * jsdom не создаёт PointerEvent с нужными полями, поэтому значения задаются
+ * явно. React читает их из нативного события и передаёт в обработчики.
+ */
+function firePointer(
+  element: Element,
+  name: PointerName,
+  options: {
+    readonly clientX: number;
+    readonly pointerId?: number;
+    readonly pointerType?: string;
+    readonly button?: number;
+  },
+): void {
+  const event = createEvent[name](element, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    clientX: { value: options.clientX },
+    clientY: { value: 0 },
+    pointerId: { value: options.pointerId ?? 1 },
+    pointerType: { value: options.pointerType ?? "mouse" },
+    button: { value: options.button ?? 0 },
+  });
+  fireEvent(element, event);
+}
+
+function resizeSetup() {
+  const details = makeDetails("note-1", "Ресайз");
+  const invoke: UiOperationInvoker = async (operationId) => {
+    if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+    if (operationId === NOTES_QUERY_IDS.get) return success(details);
+    if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+    if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+    return success({ items: [] });
+  };
+  return render(<NotesView invoke={invoke} search="?note=note-1" />);
+}
+
+function sidebarElement(): HTMLElement {
+  return screen.getByRole("complementary", { name: "Навигация по заметкам" });
+}
+
+function sidebarWidth(): number {
+  return Number.parseInt(
+    sidebarElement().style.getPropertyValue("--note-sidebar-width").replace("px", ""),
+    10,
+  );
+}
+
+async function openResizableNotes() {
+  const view = resizeSetup();
+  await screen.findByTestId("note-title");
+  return {
+    view,
+    handle: screen.getByRole("separator", { name: "Ширина дерева заметок" }),
+  };
+}
+
+describe("NotesView resize дерева заметок", () => {
+  it("меняет ширину мышью и восстанавливает её после повторного монтирования", async () => {
+    const { view, handle } = await openResizableNotes();
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    expect(handle).toHaveAttribute("aria-valuenow", String(NOTE_SIDEBAR_DEFAULT_WIDTH));
+
+    firePointer(handle, "pointerDown", { clientX: 300 });
+    expect(handle).toHaveAttribute("data-resizing", "true");
+    firePointer(handle, "pointerMove", { clientX: 420 });
+
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 120);
+    expect(handle).toHaveAttribute("aria-valuenow", String(NOTE_SIDEBAR_DEFAULT_WIDTH + 120));
+    // Во время drag localStorage не дёргается на каждый pointermove.
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBeNull();
+
+    firePointer(handle, "pointerUp", { clientX: 420 });
+    expect(handle).not.toHaveAttribute("data-resizing");
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(NOTE_SIDEBAR_DEFAULT_WIDTH + 120),
+    );
+
+    view.unmount();
+    resizeSetup();
+    await screen.findByTestId("note-title");
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 120);
+  });
+
+  it("ограничивает ширину минимумом, максимумом и шириной viewport", async () => {
+    const { handle } = await openResizableNotes();
+    expect(handle).toHaveAttribute("aria-valuemin", String(NOTE_SIDEBAR_MIN_WIDTH));
+    expect(handle).toHaveAttribute("aria-valuemax", String(sidebarMaxWidthFor(null)));
+
+    firePointer(handle, "pointerDown", { clientX: 200 });
+    firePointer(handle, "pointerMove", { clientX: 2000 });
+    expect(sidebarWidth()).toBe(sidebarMaxWidthFor(null));
+    expect(sidebarWidth()).toBeLessThanOrEqual(NOTE_SIDEBAR_MAX_WIDTH);
+
+    firePointer(handle, "pointerMove", { clientX: -2000 });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_MIN_WIDTH);
+    firePointer(handle, "pointerUp", { clientX: -2000 });
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(NOTE_SIDEBAR_MIN_WIDTH),
+    );
+  });
+
+  it("меняет ширину клавиатурой и сбрасывает double-click к стандарту", async () => {
+    const { handle } = await openResizableNotes();
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 16);
+
+    fireEvent.keyDown(handle, { key: "ArrowRight", shiftKey: true });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 16 + 48);
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH + 48);
+
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_MIN_WIDTH);
+
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(sidebarWidth()).toBe(sidebarMaxWidthFor(null));
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(sidebarMaxWidthFor(null)),
+    );
+
+    fireEvent.doubleClick(handle);
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBe(
+      String(NOTE_SIDEBAR_DEFAULT_WIDTH),
+    );
+  });
+
+  it("игнорирует touch и не запускает drag правой кнопкой", async () => {
+    const { handle } = await openResizableNotes();
+
+    firePointer(handle, "pointerDown", { clientX: 300, pointerType: "touch" });
+    firePointer(handle, "pointerMove", { clientX: 900, pointerType: "touch" });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    expect(handle).not.toHaveAttribute("data-resizing");
+
+    firePointer(handle, "pointerDown", { clientX: 300, button: 2 });
+    firePointer(handle, "pointerMove", { clientX: 900 });
+    expect(sidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    expect(window.localStorage.getItem(NOTE_SIDEBAR_STORAGE_KEY)).toBeNull();
+  });
+
+  it("вычисляет допустимый максимум и читает только корректную ширину", () => {
+    expect(sidebarMaxWidthFor(1440)).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+    expect(sidebarMaxWidthFor(800)).toBe(480);
+    expect(sidebarMaxWidthFor(700)).toBe(380);
+    expect(sidebarMaxWidthFor(400)).toBe(NOTE_SIDEBAR_MIN_WIDTH);
+    expect(sidebarMaxWidthFor(null)).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+
+    expect(clampSidebarWidth(100)).toBe(NOTE_SIDEBAR_MIN_WIDTH);
+    expect(clampSidebarWidth(9999)).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+    expect(clampSidebarWidth(Number.NaN)).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    expect(clampSidebarWidth(350, 300)).toBe(300);
+    expect(clampSidebarWidth(350, 100)).toBe(NOTE_SIDEBAR_MIN_WIDTH);
+
+    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "сломано");
+    expect(readStoredSidebarWidth()).toBe(NOTE_SIDEBAR_DEFAULT_WIDTH);
+    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "9999");
+    expect(readStoredSidebarWidth()).toBe(NOTE_SIDEBAR_MAX_WIDTH);
+    window.localStorage.setItem(NOTE_SIDEBAR_STORAGE_KEY, "100");
+    expect(readStoredSidebarWidth()).toBe(NOTE_SIDEBAR_MIN_WIDTH);
   });
 });
