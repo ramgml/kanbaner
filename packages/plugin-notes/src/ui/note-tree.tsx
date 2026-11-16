@@ -1,15 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  FileText,
-  GripVertical,
-  Plus,
-  Star,
-  Trash2,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Plus, Star, Trash2 } from "lucide-react";
 
 import type { NoteView } from "../model.ts";
 
@@ -31,6 +23,18 @@ interface NoteTreeProps {
 
 const buttonClass =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+/**
+ * Кнопка раскрытия ветки.
+ *
+ * Уже `buttonClass`: слева от названия помещается только она, поэтому компактный
+ * размер уменьшает отступ корневых строк. Псевдоэлемент расширяет область
+ * нажатия до 24×28 px, не занимая места в раскладке и не перекрывая название.
+ * Для листьев тот же размер занимает невидимый spacer, чтобы названия соседей
+ * оставались на одной вертикали.
+ */
+const disclosureButtonClass =
+  "relative inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground before:absolute before:-inset-y-1 before:-left-1 before:w-6 before:content-[''] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /**
  * Кнопки overlay-панели действий.
@@ -132,20 +136,17 @@ export function NoteTree({
           }
           className={`group relative flex min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 ${
             selectedId === id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
-          }`}
+          }${flat ? "" : " cursor-grab active:cursor-grabbing"}`}
           style={{ paddingLeft: `${depth * 12 + 2}px` }}
         >
-          {flat ? null : (
-            <GripVertical aria-hidden="true" className="size-3 shrink-0 text-muted-foreground/50" />
-          )}
-          {flat ? null : (
+          {flat ? null : children.length > 0 ? (
             <button
               type="button"
+              data-note-expand={id}
               aria-label={
                 isExpanded ? `Свернуть ${view.note.title}` : `Развернуть ${view.note.title}`
               }
-              aria-expanded={children.length > 0 ? isExpanded : undefined}
-              disabled={children.length === 0}
+              aria-expanded={isExpanded}
               onClick={() =>
                 setExpanded((previous) => {
                   const next = new Set(previous);
@@ -154,7 +155,7 @@ export function NoteTree({
                   return next;
                 })
               }
-              className={`${buttonClass} ${children.length === 0 ? "invisible" : ""}`}
+              className={disclosureButtonClass}
             >
               {isExpanded ? (
                 <ChevronDown aria-hidden="true" className="size-3.5" />
@@ -162,6 +163,10 @@ export function NoteTree({
                 <ChevronRight aria-hidden="true" className="size-3.5" />
               )}
             </button>
+          ) : (
+            // Лист не тратит место на неактивную кнопку, но сохраняет ширину
+            // раскрытия, иначе его название «прыгает» влево относительно веток.
+            <span aria-hidden="true" data-note-expand-spacer={id} className="size-5 shrink-0" />
           )}
           <button
             type="button"
