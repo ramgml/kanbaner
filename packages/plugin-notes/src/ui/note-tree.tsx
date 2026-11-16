@@ -29,6 +29,8 @@ interface NoteTreeProps {
   readonly positionItems?: readonly NoteView[];
   /** Пока move в полёте, DnD, reorder и корневая зона недоступны. */
   readonly movePending?: boolean;
+  /** Пока идёт любая мутация, create/delete в дереве недоступны. */
+  readonly actionsDisabled?: boolean;
 }
 
 /** MIME-тип собственного drag-and-drop дерева заметок. */
@@ -141,6 +143,7 @@ export function NoteTree({
   flat = false,
   positionItems,
   movePending = false,
+  actionsDisabled = false,
 }: NoteTreeProps) {
   const allItems = positionItems ?? items;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -392,7 +395,7 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} выше`}
-                  disabled={movePending || index <= 0}
+                  disabled={movePending || actionsDisabled || index <= 0}
                   onClick={() => onMove(id, fullView.note.parentId, index - 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
@@ -401,7 +404,9 @@ export function NoteTree({
                 <button
                   type="button"
                   aria-label={`Переместить ${view.note.title} ниже`}
-                  disabled={movePending || index < 0 || index >= siblings.length - 1}
+                  disabled={
+                    movePending || actionsDisabled || index < 0 || index >= siblings.length - 1
+                  }
                   onClick={() => onMove(id, fullView.note.parentId, index + 1)}
                   className={`${actionButtonClass} text-xs disabled:opacity-30`}
                 >
@@ -413,11 +418,12 @@ export function NoteTree({
               type="button"
               data-note-add-child={id}
               aria-label={`Создать вложенную страницу в ${view.note.title}`}
+              disabled={actionsDisabled}
               onClick={() => {
                 setExpanded((previous) => new Set([...previous, id]));
                 onCreate(id);
               }}
-              className={actionButtonClass}
+              className={`${actionButtonClass} disabled:opacity-40`}
             >
               <Plus aria-hidden="true" className="size-3.5" />
             </button>
@@ -425,8 +431,9 @@ export function NoteTree({
               type="button"
               data-note-delete={id}
               aria-label={`Удалить ${view.note.title}`}
+              disabled={actionsDisabled}
               onClick={() => onDelete(view)}
-              className={`${actionButtonClass} hover:text-destructive`}
+              className={`${actionButtonClass} hover:text-destructive disabled:opacity-40`}
             >
               <Trash2 aria-hidden="true" className="size-3.5" />
             </button>
@@ -510,6 +517,7 @@ export function NoteTree({
       <button
         type="button"
         data-testid="note-create-root"
+        disabled={actionsDisabled}
         onClick={() => onCreate(null)}
         className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >

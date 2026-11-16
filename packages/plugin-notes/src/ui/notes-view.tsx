@@ -93,7 +93,7 @@ export function NotesView(props: NotesViewProps) {
   const [filter, setFilter] = useState<Filter>("tree");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<MoveFailure | null>(null);
   const [movePending, setMovePending] = useState(false);
@@ -126,10 +126,26 @@ export function NotesView(props: NotesViewProps) {
   } | null>(null);
   const uploadChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const itemsRef = useRef<readonly NoteView[]>([]);
+  /** Монотонное поколение list-запросов: старый ответ не перетирает новый. */
+  const listGenerationRef = useRef(0);
+  /** Единый счётчик мутаций: busy не снимается, пока хоть одна в полёте. */
+  const pendingCountRef = useRef(0);
   const moveChainRef = useRef<Promise<void>>(Promise.resolve());
   const activeMovesRef = useRef(0);
   /** Номер актуальной move-операции: старый результат не перетирает новый. */
   const moveAttemptRef = useRef(0);
+
+  const beginPending = useCallback(() => {
+    pendingCountRef.current += 1;
+    setPendingCount(pendingCountRef.current);
+  }, []);
+
+  const endPending = useCallback(() => {
+    pendingCountRef.current = Math.max(0, pendingCountRef.current - 1);
+    setPendingCount(pendingCountRef.current);
+  }, []);
+
+  const busy = pendingCount > 0;
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -145,6 +161,7 @@ export function NotesView(props: NotesViewProps) {
   );
 
   const refreshNotes = useCallback(async (): Promise<readonly NoteView[]> => {
+    const generation = ++listGenerationRef.current;
     const all: NoteView[] = [];
     let offset = 0;
     for (;;) {
@@ -156,8 +173,12 @@ export function NotesView(props: NotesViewProps) {
       if (page.nextOffset === null) break;
       offset = page.nextOffset;
     }
-    itemsRef.current = all;
-    setItems(all);
+    // Ответ старого запроса мог прийти после нового: применяем только
+    // актуальное поколение, иначе дерево и itemsRef откатятся назад.
+    if (generation === listGenerationRef.current) {
+      itemsRef.current = all;
+      setItems(all);
+    }
     return all;
   }, [invoke]);
 
@@ -410,7 +431,7 @@ export function NotesView(props: NotesViewProps) {
   const createNote = async (parentId: string | null) => {
     await saveNow();
     if (dirtyRef.current) return;
-    setBusy(true);
+    beginPending();
     setError(null);
     const previousKey = createKeyRef.current;
     const createKey =
@@ -436,7 +457,7 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось создать заметку");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
@@ -530,15 +551,13 @@ export function NotesView(props: NotesViewProps) {
       position === undefined ? { id, parentId } : { id, parentId, position };
     activeMovesRef.current += 1;
     setMovePending(true);
-    setBusy(true);
+    beginPending();
     const next = moveChainRef.current.then(() => performMove(request));
     moveChainRef.current = next.catch(() => undefined);
     const settle = () => {
       activeMovesRef.current -= 1;
-      if (activeMovesRef.current === 0) {
-        setMovePending(false);
-        setBusy(false);
-      }
+      endPending();
+      if (activeMovesRef.current === 0) setMovePending(false);
     };
     void next.then(settle, settle);
     return next;
@@ -551,7 +570,7 @@ export function NotesView(props: NotesViewProps) {
   };
 
   const deleteNote = async (view: NoteView) => {
-    setBusy(true);
+    beginPending();
     try {
       const preview = await invokeNotes<NoteSubtree>(invoke, NOTES_QUERY_IDS.subtree, {
         id: view.note.id,
@@ -591,7 +610,7 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить заметку");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
@@ -681,7 +700,7 @@ export function NotesView(props: NotesViewProps) {
     if (!window.confirm(`Удалить вложение ${attachment.id}? Действие необратимо.`)) return;
     await saveNow();
     if (dirtyRef.current) return;
-    setBusy(true);
+    beginPending();
     try {
       await invokeNotes(invoke, NOTES_COMMAND_IDS.attachmentDelete, {
         id: attachment.id,
@@ -699,7 +718,7 @@ export function NotesView(props: NotesViewProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить вложение");
     } finally {
-      setBusy(false);
+      endPending();
     }
   };
 
@@ -905,6 +924,7 @@ export function NotesView(props: NotesViewProps) {
               positionItems={items}
               flat={filter === "recent"}
               movePending={movePending}
+              actionsDisabled={busy}
               selectedId={selectedId}
               onSelect={(id) => void selectNote(id)}
               onCreate={(parentId) => void createNote(parentId)}

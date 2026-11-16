@@ -441,6 +441,7 @@ describe("NoteTree", () => {
       <NoteTree
         items={items}
         movePending
+        actionsDisabled
         selectedId={null}
         onSelect={vi.fn()}
         onCreate={vi.fn()}
@@ -453,6 +454,11 @@ describe("NoteTree", () => {
     expect(first).toHaveAttribute("data-note-move-pending", "true");
     expect(screen.getByRole("button", { name: "Переместить Первая ниже" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Переместить Вторая выше" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Создать вложенную страницу в Первая" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Удалить Первая" })).toBeDisabled();
+    expect(screen.getByTestId("note-create-root")).toBeDisabled();
     const rootZone = required<HTMLElement>(container, "[data-note-root-drop]");
     expect(rootZone).toHaveAttribute("aria-disabled", "true");
     expect(rootZone).toHaveTextContent("Перемещение выполняется…");

@@ -32,17 +32,20 @@ vi.mock("./editor/markdown-note-editor.tsx", () => ({
     value,
     onChange,
     onUploadImage,
+    readOnly,
     ariaLabel,
   }: {
     value: string;
     onChange: (value: string) => void;
     onUploadImage?: (file: File) => Promise<string>;
+    readOnly?: boolean;
     ariaLabel?: string;
   }) => (
     <div>
       <textarea
         aria-label={ariaLabel ?? "Содержимое заметки"}
         value={value}
+        readOnly={readOnly}
         onChange={(event) => onChange(event.target.value)}
       />
       <button
@@ -1444,5 +1447,182 @@ describe("NotesView autosave", () => {
         ),
       ).toEqual(["note-b", "note-a", "note-c"]),
     );
+  });
+
+  it("держит редактор locked при пересечении move и create до loadNote новой страницы", async () => {
+    let first = makeDetails("note-a", "Исходная");
+    const second = makeDetails("note-b", "Вторая", { position: 1 });
+    const created = makeDetails("note-new", "Без названия", { position: 2 });
+    let notes = [first, second];
+    const createDeferred = deferred<UiOperationResult>();
+    const moveDeferred = deferred<UiOperationResult>();
+    const newGetDeferred = deferred<UiOperationResult>();
+    const updates: Array<Record<string, unknown>> = [];
+    let createIssued = false;
+    let moveIssued = false;
+    let loadNewIssued = false;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        if (id === "note-new") {
+          loadNewIssued = true;
+          return newGetDeferred.promise;
+        }
+        return success(notes.find((details) => details.view.note.id === id) ?? first);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: (notes.find((item) => item.view.note.id === id) ?? first).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        updates.push(values);
+        first = makeDetails("note-a", String(values.title), {
+          contentMarkdown: String(values.contentMarkdown),
+          version: first.view.note.version + 1,
+        });
+        notes = [first, second];
+        return success(first);
+      }
+      if (operationId === NOTES_COMMAND_IDS.create) {
+        createIssued = true;
+        return createDeferred.promise.then((result) => {
+          notes = [first, second, created];
+          return result;
+        });
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        moveIssued = true;
+        return moveDeferred.promise;
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-a" />);
+    const title = await screen.findByTestId("note-title");
+    const editor = screen.getByRole("textbox", { name: "Содержимое заметки" });
+    await waitFor(() => expect(title).toHaveValue("Исходная"));
+    fireEvent.change(title, { target: { value: "Локальный черновик" } });
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(title).not.toBeDisabled());
+
+    fireEvent.click(screen.getByTestId("note-create-root"));
+    await waitFor(() => expect(createIssued).toBe(true));
+
+    // Move стартует, пока create ещё в полёте.
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    fireEvent.dragStart(required<HTMLElement>(document.body, "[data-note-tree-item='note-a']"), {
+      dataTransfer,
+    });
+    fireDragOver(
+      required<HTMLElement>(document.body, "[data-note-tree-item='note-b']"),
+      dataTransfer,
+      20,
+    );
+    fireDrop(
+      required<HTMLElement>(document.body, "[data-note-tree-item='note-b']"),
+      dataTransfer,
+      20,
+    );
+    await waitFor(() => expect(moveIssued).toBe(true));
+
+    // Move завершился первым: busy остаётся из-за незавершённого create.
+    await act(async () => {
+      moveDeferred.resolve(
+        success({
+          note: makeDetails("note-a", "Локальный черновик", {
+            parentId: "note-b",
+            version: 3,
+          }).view.note,
+          affectedNotes: [makeDetails("note-b", "Вторая", { version: 2 }).view.note],
+        }),
+      );
+    });
+    await waitFor(() => expect(moveIssued).toBe(true));
+    expect(title).toBeDisabled();
+    expect(editor).toHaveAttribute("readonly");
+    expect(title).toHaveValue("Локальный черновик");
+
+    // create перешёл к loadNote новой страницы: редактор всё ещё locked.
+    await act(async () => {
+      createDeferred.resolve(success(created));
+    });
+    await waitFor(() => expect(loadNewIssued).toBe(true));
+    expect(title).toBeDisabled();
+    expect(editor).toHaveAttribute("readonly");
+    expect(title).toHaveValue("Локальный черновик");
+
+    await act(async () => {
+      newGetDeferred.resolve(success(created));
+    });
+    await waitFor(() => expect(title).toHaveValue("Без названия"));
+    await waitFor(() => expect(title).not.toBeDisabled());
+    expect(editor).not.toHaveAttribute("readonly");
+  });
+
+  it("не применяет старый ответ refreshNotes после нового", async () => {
+    const a = noteView("note-a", "Первая", { position: 0 });
+    const b = noteView("note-b", "Вторая", { position: 1 });
+    const oldRefresh = deferred<UiOperationResult>();
+    let listCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        listCalls += 1;
+        if (listCalls === 1) return success(listOf(a, b));
+        if (listCalls === 2) return oldRefresh.promise;
+        return success(
+          listOf(
+            { ...b, note: { ...b.note, position: 0 } },
+            { ...a, note: { ...a.note, position: 1 } },
+          ),
+        );
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(makeDetails(id, id === "note-b" ? "Вторая" : "Первая"));
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({
+          view: id === "note-b" ? b : a,
+        });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-a" />);
+    await screen.findByTestId("note-title");
+    await waitFor(() => expect(listCalls).toBe(2));
+
+    // Новое открытие запускает более свежий list и получает порядок B,A.
+    fireEvent.click(required<HTMLElement>(container, "[data-note-select='note-b']"));
+    await waitFor(() => expect(listCalls).toBe(3));
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+          item.getAttribute("data-note-tree-item"),
+        ),
+      ).toEqual(["note-b", "note-a"]),
+    );
+
+    // Старый ответ приходит последним и не должен откатить items/itemsRef.
+    await act(async () => {
+      oldRefresh.resolve(success(listOf(a, b)));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+        item.getAttribute("data-note-tree-item"),
+      ),
+    ).toEqual(["note-b", "note-a"]);
+    expect(screen.getByTestId("note-title")).toHaveValue("Вторая");
   });
 });
