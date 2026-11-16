@@ -837,7 +837,7 @@ export function NotesView(props: NotesViewProps) {
         aria-label="Навигация по заметкам"
         id="notes-sidebar"
         style={sidebarResizer.asideStyle}
-        className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:relative lg:flex lg:w-[var(--note-sidebar-width)]`}
+        className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:relative lg:flex lg:[width:var(--note-sidebar-width)]`}
       >
         <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-3">
           <h1 className="text-base font-semibold">Заметки</h1>
