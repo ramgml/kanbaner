@@ -1,6 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 
@@ -773,6 +781,75 @@ describe("NotesView autosave", () => {
     await waitFor(() => expect(deleteInputs).toHaveLength(1));
     expect(deleteInputs[0]).toMatchObject({ expectedDescendants: 3, confirm: true });
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Страниц: 3, вложений: 2"));
+  });
+
+  it("показывает длинный заголовок в многострочном поле и сохраняет его без переводов строк", async () => {
+    const longTitle = `Заголовок ${"сверхдлинноесловобезпробелов".repeat(2)}`;
+    let details = makeDetails("note-1", longTitle);
+    const updates: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        updates.push(values);
+        details = makeDetails("note-1", String(values.title), {
+          contentMarkdown: String(values.contentMarkdown),
+          version: details.view.note.version + 1,
+        });
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const title = await screen.findByTestId("note-title");
+
+    expect(title.tagName).toBe("TEXTAREA");
+    expect(title).toHaveAttribute("aria-label", "Заголовок заметки");
+    await waitFor(() => expect(title).toHaveValue(longTitle));
+
+    const enter = createEvent.keyDown(title, { key: "Enter" });
+    fireEvent(title, enter);
+    expect(enter.defaultPrevented).toBe(true);
+
+    fireEvent.change(title, { target: { value: "Первая строка\nВторая строка" } });
+    await waitFor(() => expect(title).toHaveValue("Первая строка Вторая строка"));
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    expect(updates[0]).toMatchObject({
+      id: "note-1",
+      title: "Первая строка Вторая строка",
+    });
+  });
+
+  it("обновляет многострочный заголовок при переключении заметки", async () => {
+    const first = makeDetails("note-a", "Первая");
+    const second = makeDetails("note-b", `Вторая ${"длинноеслово".repeat(5)}`);
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(first.view, second.view));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(id === "note-b" ? second : first);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: id === "note-b" ? second.view : first.view });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-a" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Первая"));
+
+    fireEvent.click(screen.getByRole("button", { name: second.view.note.title }));
+    await waitFor(() => expect(title).toHaveValue(second.view.note.title));
+    expect(title).toHaveValue(`Вторая ${"длинноеслово".repeat(5)}`);
   });
 
   it("не использует main, tablist и пересортировывает недавние", async () => {

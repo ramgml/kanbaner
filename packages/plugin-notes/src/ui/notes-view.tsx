@@ -34,6 +34,7 @@ import { AttachmentUrlCache } from "./attachment-cache.ts";
 import { downloadMarkdownExport } from "./download.ts";
 import { MarkdownNoteEditor } from "./editor/markdown-note-editor.tsx";
 import { NoteLinks } from "./note-links.tsx";
+import { NoteTitleField } from "./note-title-field.tsx";
 import { NoteTree } from "./note-tree.tsx";
 import {
   fileToBase64,
@@ -952,15 +953,7 @@ export function NotesView(props: NotesViewProps) {
             ) : null}
 
             <div className="mx-auto w-full max-w-5xl flex-1 px-4 py-5 sm:px-6">
-              <input
-                aria-label="Заголовок заметки"
-                data-testid="note-title"
-                value={title}
-                disabled={loading || busy}
-                onChange={(event) => changeTitle(event.target.value)}
-                placeholder="Без названия"
-                className="mb-4 w-full rounded-md border border-transparent bg-transparent px-2 py-2 text-2xl font-semibold tracking-tight focus-visible:border-input focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-3xl"
-              />
+              <NoteTitleField value={title} disabled={loading || busy} onChange={changeTitle} />
               <MarkdownNoteEditor
                 noteId={details.view.note.id}
                 value={editorValue}

@@ -50,6 +50,42 @@ async function expectNoOverflow(page: Page): Promise<void> {
   expect(metrics.body).toBeLessThanOrEqual(metrics.width + 1);
 }
 
+async function expectTitleFits(page: Page): Promise<void> {
+  await expect
+    .poll(async () => {
+      const metrics = await page.getByTestId("note-title").evaluate((element) => {
+        const field = element as HTMLTextAreaElement;
+        const style = getComputedStyle(field);
+        return {
+          tag: field.tagName,
+          scrollWidth: field.scrollWidth,
+          clientWidth: field.clientWidth,
+          scrollHeight: field.scrollHeight,
+          clientHeight: field.clientHeight,
+          height: field.getBoundingClientRect().height,
+          lineHeight:
+            Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.2,
+          overflowX: style.overflowX,
+        };
+      });
+      return {
+        tag: metrics.tag,
+        overflowX: metrics.overflowX,
+        fitsWidth: metrics.scrollWidth <= metrics.clientWidth + 1,
+        fitsHeight: metrics.scrollHeight <= metrics.clientHeight + 1,
+        wrapped: metrics.height > metrics.lineHeight * 1.8,
+        height: metrics.height,
+      };
+    })
+    .toMatchObject({
+      tag: "TEXTAREA",
+      overflowX: "hidden",
+      fitsWidth: true,
+      fitsHeight: true,
+      wrapped: true,
+    });
+}
+
 async function createProject(page: Page, projectTitle: string): Promise<string> {
   await page.goto("/view/tasks");
   await expect(page.getByTestId("task-list-view")).toBeVisible();
@@ -344,6 +380,42 @@ test.describe("kanbaner.notes в production shell", () => {
     await page.getByRole("button", { name: "Удалить", exact: true }).click();
     await expect(page.locator(`[data-note-select='${parentId}']`)).toHaveCount(0);
     await expect(page.locator(`[data-note-select='${childId}']`)).toHaveCount(0);
+  });
+
+  test("переносит длинный заголовок заметки без внутреннего и внешнего overflow", async ({
+    page,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const longName = `${title("Длинный заголовок")} ${"сверхдлинноесловобезпробелов".repeat(3)}`;
+    expect(longName.length).toBeLessThanOrEqual(200);
+    await createNote(page, longName, "Текст под длинным заголовком");
+
+    const field = page.getByTestId("note-title");
+    await expect(field).toHaveValue(longName);
+    await expectTitleFits(page);
+    await expectNoOverflow(page);
+    const desktopHeight = await field.evaluate((element) => element.getBoundingClientRect().height);
+
+    // Enter завершает редактирование, но не добавляет перевод строки:
+    // домен запрещает многострочные заголовки.
+    await field.press("Enter");
+    await expect(field).not.toBeFocused();
+    await expect(field).toHaveValue(longName);
+
+    // На узком экране текст переносится чаще, и поле становится выше.
+    await page.setViewportSize(MOBILE);
+    await expectTitleFits(page);
+    await expect
+      .poll(() => field.evaluate((element) => element.getBoundingClientRect().height))
+      .toBeGreaterThan(desktopHeight);
+    await expectNoOverflow(page);
+
+    // После перезагрузки высота восстанавливается из загруженного заголовка.
+    await page.reload();
+    await expect(field).toHaveValue(longName);
+    await expectTitleFits(page);
+    await expectNoOverflow(page);
   });
 
   test("сохраняет редактирование и отсутствие overflow на mobile 360", async ({ page }) => {
