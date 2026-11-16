@@ -1,13 +1,13 @@
 ---
 id: KAN-046
 title: Полноценное дерево заметок с переносом во вложенные
-status: ready
+status: in_progress
 stage: 1
 priority: medium
-owner: unassigned
+owner: opencode-worker
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-046-full-note-tree
+worktree: .worktrees/kan-046-full-note-tree
 created: 2026-11-16
 updated: 2026-11-16
 specs:
