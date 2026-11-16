@@ -40,6 +40,111 @@ async function createNote(page: Page, name: string, body = "Содержимое
   return noteId(page);
 }
 
+type NoteDropZone = "before" | "inside" | "after" | "root";
+
+/**
+ * Запускает HTML5 drag строки дерева и хранит DataTransfer между шагами.
+ *
+ * Реальный mouse-drag HTML5 в Playwright Chromium не воспроизводится (см.
+ * KAN-045), поэтому сценарий проверяет те же dragstart/dragover/drop
+ * обработчики синтетическими DragEvent с настоящим DataTransfer.
+ */
+async function beginNoteDrag(page: Page, sourceId: string): Promise<void> {
+  await page.evaluate((id) => {
+    const source = document.querySelector<HTMLElement>(`[data-note-tree-item='${id}']`);
+    if (source === null) throw new Error(`Нет строки заметки ${id}`);
+    const dataTransfer = new DataTransfer();
+    (window as unknown as { __noteDrag?: DataTransfer }).__noteDrag = dataTransfer;
+    source.dispatchEvent(
+      new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer }),
+    );
+  }, sourceId);
+  await expect(page.locator(`[data-note-tree-item='${sourceId}']`)).toHaveAttribute(
+    "data-note-dragging",
+    "true",
+  );
+}
+
+async function noteDragOver(
+  page: Page,
+  targetId: string | null,
+  zone: NoteDropZone,
+): Promise<void> {
+  await page.evaluate(
+    ({ id, targetZone }) => {
+      const dataTransfer = (window as unknown as { __noteDrag?: DataTransfer }).__noteDrag;
+      if (dataTransfer === undefined) throw new Error("Drag не начат");
+      const target =
+        targetZone === "root"
+          ? document.querySelector<HTMLElement>("[data-note-root-drop]")
+          : document.querySelector<HTMLElement>(`[data-note-tree-item='${id}']`);
+      if (target === null) throw new Error(`Нет цели drop ${String(id)}`);
+      const rect = target.getBoundingClientRect();
+      const clientY =
+        targetZone === "before"
+          ? rect.top + 2
+          : targetZone === "after"
+            ? rect.bottom - 2
+            : rect.top + rect.height / 2;
+      target.dispatchEvent(
+        new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer, clientY }),
+      );
+    },
+    { id: targetId, targetZone: zone },
+  );
+}
+
+async function finishNoteDrag(
+  page: Page,
+  sourceId: string,
+  targetId: string | null,
+  zone: NoteDropZone,
+): Promise<void> {
+  await page.evaluate(
+    ({ source, id, targetZone }) => {
+      const dataTransfer = (window as unknown as { __noteDrag?: DataTransfer }).__noteDrag;
+      if (dataTransfer === undefined) throw new Error("Drag не начат");
+      const target =
+        targetZone === "root"
+          ? document.querySelector<HTMLElement>("[data-note-root-drop]")
+          : document.querySelector<HTMLElement>(`[data-note-tree-item='${id}']`);
+      if (target === null) throw new Error(`Нет цели drop ${String(id)}`);
+      const rect = target.getBoundingClientRect();
+      const clientY =
+        targetZone === "before"
+          ? rect.top + 2
+          : targetZone === "after"
+            ? rect.bottom - 2
+            : rect.top + rect.height / 2;
+      target.dispatchEvent(
+        new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer, clientY }),
+      );
+      document
+        .querySelector<HTMLElement>(`[data-note-tree-item='${source}']`)
+        ?.dispatchEvent(
+          new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer }),
+        );
+      delete (window as unknown as { __noteDrag?: DataTransfer }).__noteDrag;
+    },
+    { source: sourceId, id: targetId, targetZone: zone },
+  );
+}
+
+/** Дожидается, что строки идут сверху вниз в указанном порядке. */
+async function expectNoteRowsInOrder(page: Page, ids: readonly string[]): Promise<void> {
+  await expect
+    .poll(async () => {
+      const positions: number[] = [];
+      for (const id of ids) {
+        const box = await page.locator(`[data-note-tree-item='${id}']`).boundingBox();
+        if (box === null) return false;
+        positions.push(box.y);
+      }
+      return positions.every((y, index) => index === 0 || y > (positions[index - 1] ?? 0));
+    })
+    .toBe(true);
+}
+
 async function expectNoOverflow(page: Page): Promise<void> {
   const metrics = await page.evaluate(() => ({
     width: window.innerWidth,
@@ -449,6 +554,107 @@ test.describe("kanbaner.notes в production shell", () => {
     await page.getByRole("button", { name: "Открыть дерево заметок" }).click();
     await page.locator(`[data-note-add-child='${id}']`).click();
     await expect(page.getByTestId("note-title")).toHaveValue("Без названия");
+    await expectNoOverflow(page);
+
+    // Без DnD вложенную страницу можно вернуть в корень селектором родителя.
+    await page.getByTestId("note-parent").selectOption("");
+    await expect(page.getByTestId("note-parent")).toHaveValue("");
+    await expectNoOverflow(page);
+  });
+
+  test("переносит строку внутрь, между соседями и в корень drag-and-drop", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const parentName = title("Ветка переноса");
+    const childName = title("Существующий ребёнок");
+    const moverName = title("Перетаскиваемая страница");
+    await openNotes(page);
+    const parentId = await createNote(page, parentName);
+    await page.locator(`[data-note-tree-item='${parentId}']`).hover();
+    await page.locator(`[data-note-add-child='${parentId}']`).click();
+    await page.getByTestId("note-title").fill(childName);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+    const childId = noteId(page);
+
+    // Свёрнутая ветка должна раскрыться после переноса внутрь.
+    await page.getByRole("button", { name: `Свернуть ${parentName}` }).click();
+    await expect(page.locator(`[data-note-select='${childId}']`)).toHaveCount(0);
+    const moverId = await createNote(page, moverName);
+
+    await beginNoteDrag(page, moverId);
+    await noteDragOver(page, parentId, "inside");
+    const inside = page.locator("[data-note-drop-indicator='inside']");
+    await expect(inside).toBeVisible();
+    await expect(inside).toContainText("Внутрь");
+    await finishNoteDrag(page, moverId, parentId, "inside");
+
+    // Ветка раскрыта, selection и заголовок сохранены, путь показывает родителя.
+    await expect(page.locator(`[data-note-select='${moverId}']`)).toBeVisible();
+    await expect(page.getByTestId("note-title")).toHaveValue(moverName);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+    await expect(page.locator("nav[aria-label='Путь к странице']")).toContainText(parentName);
+
+    // Drop ниже ребёнка ставит страницу после него среди siblings.
+    await beginNoteDrag(page, moverId);
+    await noteDragOver(page, childId, "after");
+    await expect(page.locator("[data-note-drop-indicator='after']")).toContainText("После");
+    await finishNoteDrag(page, moverId, childId, "after");
+    await expectNoteRowsInOrder(page, [childId, moverId]);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+
+    // Отдельная корневая зона убирает parentId.
+    await beginNoteDrag(page, moverId);
+    await noteDragOver(page, null, "root");
+    const rootZone = page.locator("[data-note-root-drop][data-note-drop-indicator='root']");
+    await expect(rootZone).toBeVisible();
+    await expect(rootZone).toContainText("Отпустите, чтобы сделать корневой");
+    await finishNoteDrag(page, moverId, null, "root");
+    await expect(page.getByTestId("note-parent")).toHaveValue("");
+    await expect(page.getByTestId("note-title")).toHaveValue(moverName);
+    await expect(page.locator("nav[aria-label='Путь к странице']")).not.toContainText(parentName);
+
+    await page.reload();
+    await expect(page.getByTestId("note-title")).toHaveValue(moverName);
+    await expect(page.getByTestId("note-parent")).toHaveValue("");
+    await expectNoOverflow(page);
+  });
+
+  test("переносит страницы селектором родителя и кнопками порядка без DnD", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    const parentName = title("Родитель клавиатуры");
+    const firstChildName = title("Первый ребёнок");
+    const secondChildName = title("Второй ребёнок");
+    await openNotes(page);
+    const parentId = await createNote(page, parentName);
+    await page.locator(`[data-note-tree-item='${parentId}']`).hover();
+    await page.locator(`[data-note-add-child='${parentId}']`).click();
+    await page.getByTestId("note-title").fill(firstChildName);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+    const firstId = noteId(page);
+
+    // Parent select убирает вложенность и возвращает её обратно.
+    await page.getByTestId("note-parent").selectOption("");
+    await expect(page.getByTestId("note-parent")).toHaveValue("");
+    await page.getByTestId("note-parent").selectOption(parentId);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+    await expect(page.locator("nav[aria-label='Путь к странице']")).toContainText(parentName);
+
+    const secondId = await createNote(page, secondChildName);
+    await page.getByTestId("note-parent").selectOption(parentId);
+    await expect(page.getByTestId("note-parent")).toHaveValue(parentId);
+
+    // Кнопка ↑ меняет порядок среди siblings и доступна с клавиатуры.
+    const up = page.getByRole("button", { name: `Переместить ${secondChildName} выше` });
+    await up.focus();
+    await page.keyboard.press("Enter");
+    await expectNoteRowsInOrder(page, [secondId, firstId]);
+
+    await page.getByTestId("note-parent").selectOption("");
+    await expect(page.getByTestId("note-parent")).toHaveValue("");
+    await expect(page.locator("nav[aria-label='Путь к странице']")).not.toContainText(parentName);
     await expectNoOverflow(page);
   });
 });

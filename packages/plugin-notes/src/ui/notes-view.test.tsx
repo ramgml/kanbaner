@@ -124,6 +124,60 @@ function stubObjectUrl() {
   Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
 }
 
+const DRAG_TYPE = "application/x-kanbaner-note";
+
+function dragData() {
+  const store = new Map<string, string>();
+  return {
+    types: [DRAG_TYPE],
+    effectAllowed: "none",
+    dropEffect: "none",
+    setData(type: string, value: string) {
+      store.set(type, value);
+    },
+    getData(type: string) {
+      return store.get(type) ?? "";
+    },
+  };
+}
+
+/** jsdom не считает layout, поэтому высота строки задаётся явно. */
+function stubRowRect(height = 40): void {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 200,
+    bottom: height,
+    width: 200,
+    height,
+    toJSON: () => ({}),
+  });
+}
+
+function fireDragOver(
+  element: Element,
+  dataTransfer: ReturnType<typeof dragData>,
+  clientY: number,
+) {
+  const event = createEvent.dragOver(element, { dataTransfer });
+  Object.defineProperty(event, "clientY", { value: clientY });
+  fireEvent(element, event);
+}
+
+function fireDrop(element: Element, dataTransfer: ReturnType<typeof dragData>, clientY: number) {
+  const event = createEvent.drop(element, { dataTransfer });
+  Object.defineProperty(event, "clientY", { value: clientY });
+  fireEvent(element, event);
+}
+
+function required<T extends Element>(root: ParentNode, selector: string): T {
+  const element = root.querySelector<T>(selector);
+  if (element === null) throw new Error(`Не найден элемент ${selector}`);
+  return element;
+}
+
 beforeEach(() => {
   editorState.bytes = [137, 80, 78, 71];
 });
@@ -883,5 +937,187 @@ describe("NotesView autosave", () => {
       ).toEqual(["note-b", "note-a"]),
     );
     expect(screen.queryByRole("button", { name: /Переместить/ })).toBeNull();
+  });
+
+  it("переносит страницу внутрь drop-ом, сохраняя черновик, предков и версии", async () => {
+    const first = makeDetails("note-a", "Первая");
+    const second = makeDetails("note-b", "Черновик", { position: 1 });
+    let notes = [first, second];
+    let versionB = 1;
+    const moves: Array<Record<string, unknown>> = [];
+    const updates: Array<Record<string, unknown>> = [];
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        return success(listOf(...notes.map((details) => details.view)));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(notes.find((details) => details.view.note.id === id) ?? second);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: (notes.find((item) => item.view.note.id === id) ?? second).view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        const values = input as Record<string, unknown>;
+        updates.push(values);
+        versionB += 1;
+        const current = notes.find((item) => item.view.note.id === "note-b") ?? second;
+        const updated = makeDetails("note-b", String(values.title), {
+          contentMarkdown: String(values.contentMarkdown),
+          parentId: current.view.note.parentId,
+          position: current.view.note.position,
+          version: versionB,
+        });
+        notes = notes.map((item) => (item.view.note.id === "note-b" ? updated : item));
+        return success(updated);
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        const values = input as Record<string, unknown>;
+        moves.push(values);
+        versionB += 1;
+        const moved = makeDetails("note-b", "Черновик", {
+          contentMarkdown: "Текст черновика",
+          parentId: "note-a",
+          position: 0,
+          version: versionB,
+        });
+        const parent = makeDetails("note-a", "Первая", { version: 2 });
+        notes = [parent, moved];
+        return success({ note: moved.view.note, affectedNotes: [parent.view.note] });
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-b" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Черновик"));
+
+    fireEvent.change(title, { target: { value: "Черновик" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Содержимое заметки" }), {
+      target: { value: "Текст черновика" },
+    });
+    await waitFor(() => expect(updates).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(title).not.toBeDisabled());
+
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    const source = required<HTMLElement>(container, "[data-note-tree-item='note-b']");
+    const target = required<HTMLElement>(container, "[data-note-tree-item='note-a']");
+    fireEvent.dragStart(source, { dataTransfer });
+    fireDragOver(target, dataTransfer, 20);
+    expect(
+      required<HTMLElement>(container, "[data-note-drop-indicator='inside']"),
+    ).toHaveTextContent("Внутрь");
+    fireDrop(target, dataTransfer, 20);
+
+    await waitFor(() => expect(moves).toHaveLength(1));
+    expect(moves[0]).toMatchObject({
+      id: "note-b",
+      expectedVersion: 2,
+      parentId: "note-a",
+    });
+    expect(moves[0]).not.toHaveProperty("position");
+
+    // Ancestors и version пересчитаны из ответа move, черновик не перезагружен.
+    await waitFor(() =>
+      expect(screen.getByRole("navigation", { name: "Путь к странице" })).toHaveTextContent(
+        "Первая",
+      ),
+    );
+    expect(title).toHaveValue("Черновик");
+    expect(screen.getByRole("textbox", { name: "Содержимое заметки" })).toHaveValue(
+      "Текст черновика",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Следующее сохранение использует version из ответа move, а не старую.
+    await waitFor(() => expect(title).not.toBeDisabled());
+    fireEvent.change(title, { target: { value: "После переноса" } });
+    await waitFor(() => expect(updates).toHaveLength(2), { timeout: 3000 });
+    expect(updates[1]).toMatchObject({ id: "note-b", expectedVersion: 3 });
+  });
+
+  it("показывает ошибку цикла без оптимистичного изменения дерева", async () => {
+    const parent = makeDetails("note-a", "Родитель");
+    const child = makeDetails("note-b", "Ребёнок", { parentId: "note-a", position: 0 });
+    const moves: Array<Record<string, unknown>> = [];
+    let moveFailure = "NOTE_TREE_CYCLE";
+    let listCalls = 0;
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) {
+        listCalls += 1;
+        return success(listOf(parent.view, child.view));
+      }
+      if (operationId === NOTES_QUERY_IDS.get) {
+        const id = (input as { id: string }).id;
+        return success(id === "note-b" ? child : parent);
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) {
+        const id = (input as { id: string }).id;
+        return success({ view: id === "note-b" ? child.view : parent.view });
+      }
+      if (operationId === NOTES_COMMAND_IDS.move) {
+        moves.push(input as Record<string, unknown>);
+        return moveFailure === "NOTE_TREE_CYCLE"
+          ? failure("NOTE_TREE_CYCLE", "Нельзя переместить страницу внутрь самой себя")
+          : failure("NOTE_TREE_TOO_DEEP", "Превышена максимальная глубина дерева");
+      }
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-a" />);
+    const title = await screen.findByTestId("note-title");
+    await waitFor(() => expect(title).toHaveValue("Родитель"));
+    fireEvent.click(screen.getByRole("button", { name: "Развернуть Родитель" }));
+    await screen.findByRole("button", { name: "Ребёнок" });
+
+    const callsBeforeMove = listCalls;
+    stubRowRect(40);
+    const dataTransfer = dragData();
+    fireEvent.dragStart(required<HTMLElement>(container, "[data-note-tree-item='note-a']"), {
+      dataTransfer,
+    });
+    fireDragOver(
+      required<HTMLElement>(container, "[data-note-tree-item='note-b']"),
+      dataTransfer,
+      20,
+    );
+    fireDrop(required<HTMLElement>(container, "[data-note-tree-item='note-b']"), dataTransfer, 20);
+
+    await waitFor(() => expect(moves).toHaveLength(1));
+    expect(moves[0]).toMatchObject({ id: "note-a", parentId: "note-b" });
+    expect(
+      await screen.findByText("Нельзя переместить страницу внутрь её собственной ветки"),
+    ).toBeVisible();
+    // Серверный отказ не перезагружает список и не меняет путь к странице.
+    expect(listCalls).toBe(callsBeforeMove);
+    expect(screen.getByRole("navigation", { name: "Путь к странице" })).not.toHaveTextContent(
+      "Ребёнок",
+    );
+    expect(title).toHaveValue("Родитель");
+    expect(
+      [...container.querySelectorAll("[data-note-tree-item]")].map((item) =>
+        item.getAttribute("data-note-tree-item"),
+      ),
+    ).toEqual(["note-a", "note-b"]);
+
+    // Превышение глубины тоже показывается понятным текстом и не меняет дерево.
+    moveFailure = "NOTE_TREE_TOO_DEEP";
+    fireEvent.dragStart(required<HTMLElement>(container, "[data-note-tree-item='note-a']"), {
+      dataTransfer,
+    });
+    fireDragOver(
+      required<HTMLElement>(container, "[data-note-tree-item='note-b']"),
+      dataTransfer,
+      20,
+    );
+    fireDrop(required<HTMLElement>(container, "[data-note-tree-item='note-b']"), dataTransfer, 20);
+    await waitFor(() => expect(moves).toHaveLength(2));
+    expect(await screen.findByText("Превышена максимальная глубина дерева")).toBeVisible();
+    expect(listCalls).toBe(callsBeforeMove);
+    expect(title).toHaveValue("Родитель");
   });
 });

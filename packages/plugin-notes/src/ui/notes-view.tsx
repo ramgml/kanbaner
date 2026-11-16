@@ -405,7 +405,10 @@ export function NotesView(props: NotesViewProps) {
     if (item === undefined) return;
     if (selectedIdRef.current === id) {
       await saveNow();
-      if (dirtyRef.current) return;
+      if (dirtyRef.current) {
+        setError("Сначала исправьте ошибку сохранения текущей заметки");
+        return;
+      }
     }
     setBusy(true);
     try {
@@ -436,7 +439,17 @@ export function NotesView(props: NotesViewProps) {
       if (currentAffected !== undefined) versionRef.current = currentAffected.version;
       setError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось переместить заметку");
+      // Домен отклоняет цикл/глубину до записи, а UI не применяет move
+      // оптимистично: список и открытая страница остаются прежними.
+      const message =
+        reason instanceof NotesUiError && reason.code === "NOTE_TREE_CYCLE"
+          ? "Нельзя переместить страницу внутрь её собственной ветки"
+          : reason instanceof NotesUiError && reason.code === "NOTE_TREE_TOO_DEEP"
+            ? "Превышена максимальная глубина дерева"
+            : reason instanceof Error
+              ? reason.message
+              : "Не удалось переместить заметку";
+      setError(message);
     } finally {
       setBusy(false);
     }
