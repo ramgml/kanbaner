@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
   TASKS_COMMAND_IDS,
+  matchesTaskText,
   type Project,
   type Task,
   type TaskColumn,
@@ -202,6 +203,10 @@ function listTasks(board: FakeBoard, input: JsonValue): UiOperationResult {
 
   if (typeof filters.tag === "string") {
     items = items.filter((task) => task.tags.includes(filters.tag as string));
+  }
+
+  if (typeof filters.text === "string") {
+    items = items.filter((task) => matchesTaskText(task, filters.text as string));
   }
 
   if ("parentTaskId" in filters) {
@@ -583,6 +588,200 @@ describe("KanbanView", () => {
       expect(screen.getByTestId("kanban-subtasks-child")).toHaveTextContent("Подзадачи: 0");
     });
     expect(cardTitles("todo")).toEqual(["Задача todo-task"]);
+  });
+
+  it("ищет по названию и описанию, скрывает неподходящие карточки и очищает q", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("release", { title: "Релизная задача", status: "todo", position: 0 }),
+        makeTask("backend", { title: "Бэкенд задача", status: "todo", position: 1 }),
+        makeTask("docs", {
+          title: "Документация",
+          descriptionMarkdown: "Инструкция по релизу",
+          status: "in_progress",
+          position: 0,
+        }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    window.history.replaceState(
+      null,
+      "",
+      "/view/kanban?project=project-1&q=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7",
+    );
+    resetKanbanQueryForTests("?project=project-1&q=релиз");
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-release");
+    await screen.findByTestId("kanban-card-docs");
+    expect(screen.queryByTestId("kanban-card-backend")).toBeNull();
+
+    const columnCalls = operations.calls.filter((call) => {
+      const input = inputOf(call.input);
+
+      return call.operationId === "kanbaner.tasks.task.list" && !("parentTaskId" in input);
+    });
+
+    expect(columnCalls.length).toBeGreaterThan(0);
+    expect(columnCalls.every((call) => inputOf(call.input).text === "релиз")).toBe(true);
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: "бэкенд" } });
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("q")).toBe("бэкенд");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-backend")).toBeVisible();
+    });
+    expect(screen.queryByTestId("kanban-card-release")).toBeNull();
+    expect(screen.queryByTestId("kanban-card-docs")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("q")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-release")).toBeVisible();
+      expect(screen.getByTestId("kanban-card-docs")).toBeVisible();
+      expect(screen.getByTestId("kanban-card-backend")).toBeVisible();
+    });
+    expect(screen.getByRole("searchbox", { name: "Поиск задач" })).toHaveValue("");
+  });
+
+  it("сочетает поиск с тегом и очищает оба фильтра", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("release-a", {
+          title: "Релиз A",
+          status: "todo",
+          position: 0,
+          tags: ["release"],
+        }),
+        makeTask("release-b", {
+          title: "Релиз B",
+          status: "todo",
+          position: 1,
+          tags: ["backend"],
+        }),
+        makeTask("other", { title: "Другое", status: "todo", position: 2, tags: ["release"] }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    window.history.replaceState(
+      null,
+      "",
+      "/view/kanban?project=project-1&q=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7",
+    );
+    resetKanbanQueryForTests("?project=project-1&q=релиз");
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-release-a");
+    expect(screen.getByTestId("kanban-card-release-b")).toBeVisible();
+    expect(screen.queryByTestId("kanban-card-other")).toBeNull();
+
+    fireEvent.focus(screen.getByRole("searchbox", { name: "Тег" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Тег" }), {
+      target: { value: "release" },
+    });
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("tag")).toBe("release");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-card-release-b")).toBeNull();
+    });
+    expect(screen.getByTestId("kanban-card-release-a")).toBeVisible();
+    expect(screen.queryByTestId("kanban-card-other")).toBeNull();
+
+    await waitFor(() => {
+      const last = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .filter((call) => !("parentTaskId" in inputOf(call.input)))
+        .at(-1);
+
+      expect(inputOf(last?.input ?? {})).toMatchObject({ tag: "release", text: "релиз" });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("tag")).toBeNull();
+      expect(new URLSearchParams(window.location.search).get("q")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-card-release-b")).toBeVisible();
+      expect(screen.getByTestId("kanban-card-other")).toBeVisible();
+    });
+  });
+
+  it("переставляет filtered-карточку по полному scope, не теряя скрытого поиском соседа", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [
+        makeTask("a", { title: "Релиз A", status: "todo", position: 0 }),
+        makeTask("b", { title: "Скрытая B", status: "todo", position: 1 }),
+        makeTask("c", { title: "Релиз C", status: "todo", position: 2 }),
+      ],
+    };
+    const operations = createOperations(board);
+
+    window.history.replaceState(
+      null,
+      "",
+      "/view/kanban?project=project-1&q=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7",
+    );
+    resetKanbanQueryForTests("?project=project-1&q=релиз");
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-a");
+    await screen.findByTestId("kanban-card-c");
+    expect(screen.queryByTestId("kanban-card-b")).toBeNull();
+    expect(cardTitles("todo")).toEqual(["Релиз A", "Релиз C"]);
+
+    clickCardAction("a", "В конец");
+
+    await waitFor(() => {
+      const lastMove = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.move")
+        .at(-1);
+
+      expect(inputOf(lastMove?.input ?? {})).toMatchObject({
+        id: "a",
+        expectedVersion: 1,
+        position: 2,
+      });
+    });
+
+    const scopeCall = operations.calls.find((call) => {
+      const input = inputOf(call.input);
+
+      return (
+        call.operationId === "kanbaner.tasks.task.list" &&
+        input.limit === 200 &&
+        !("parentTaskId" in input)
+      );
+    });
+
+    // Полный scope для position считается без поиска: скрытый сосед учтён.
+    expect(inputOf(scopeCall?.input ?? {})).toMatchObject({
+      columnId: "column-project-1-legacy-todo",
+    });
+    expect(inputOf(scopeCall?.input ?? {})).not.toHaveProperty("text");
+
+    await waitFor(() => {
+      expect(cardTitles("todo")).toEqual(["Релиз C", "Релиз A"]);
+    });
   });
 
   it("перемещает через меню с expectedVersion, статусом и позицией", async () => {

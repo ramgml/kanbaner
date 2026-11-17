@@ -7,8 +7,10 @@ import { Plus, RotateCcw, Trash2, X } from "lucide-react";
 
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 import {
+  MAX_SEARCH_TEXT_LENGTH,
   TASKS_COMMAND_IDS,
   TASKS_QUERY_IDS,
+  matchesTaskText,
   normalizeTag,
   type BoardColor,
   type ColumnMutationOutput,
@@ -79,6 +81,7 @@ import {
   useKanbanQuery,
 } from "./query-state.ts";
 import { ProjectHeader } from "./project-header.tsx";
+import { TaskSearch } from "./task-search.tsx";
 import { useProjectsData } from "./use-projects.ts";
 import { useProjectSummary } from "./use-project-summary.ts";
 import {
@@ -144,10 +147,21 @@ function normalizeFilterTag(value: string): string {
   }
 }
 
+/** Нормализует поиск для task.list: без пробелов по краям и сверх лимита. */
+function searchText(value: string): string {
+  return value.trim().slice(0, MAX_SEARCH_TEXT_LENGTH);
+}
+
+/** Идентичность активных фильтров доски: проект, тег и поиск. */
+function filterKeyFor(projectId: string, tag: string, text: string): string {
+  return `${projectId}\u0000${tag}\u0000${text}`;
+}
+
 function listInput(
   columnId: string,
   projectId: string,
   tag: string,
+  text: string,
   limit: number,
   offset: number,
 ): JsonValue {
@@ -155,6 +169,7 @@ function listInput(
     columnId,
     projectId,
     ...(tag.length === 0 ? {} : { tag }),
+    ...(text.length === 0 ? {} : { text }),
     sort: { field: "position", direction: "asc" },
     limit,
     offset,
@@ -168,6 +183,7 @@ async function fetchColumnPage(
   columnId: string,
   projectId: string,
   tag: string,
+  text: string,
   targetCount: number,
   mustIncludeIds: readonly string[] = [],
 ): Promise<ColumnPage> {
@@ -182,7 +198,7 @@ async function fetchColumnPage(
     const data = await invokeJson<TaskListOutput>(
       invoke,
       TASKS_QUERY_IDS.taskList,
-      listInput(columnId, projectId, tag, limit, items.length),
+      listInput(columnId, projectId, tag, text, limit, items.length),
     );
 
     total = data.total;
@@ -215,7 +231,7 @@ async function fetchAllScopeTasks(
     const data = await invokeJson<TaskListOutput>(
       invoke,
       TASKS_QUERY_IDS.taskList,
-      listInput(columnId, projectId, "", MAX_LIST_LIMIT, offset),
+      listInput(columnId, projectId, "", "", MAX_LIST_LIMIT, offset),
     );
 
     items.push(...data.items);
@@ -390,7 +406,7 @@ export function KanbanView({
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const loadedCountsRef = useRef<Record<string, number>>({});
   const filterKeyRef = useRef<string>("\u0000");
-  const filtersRef = useRef({ projectId: effectiveProjectId, tag: query.tag });
+  const filtersRef = useRef({ projectId: effectiveProjectId, tag: query.tag, q: query.q });
   const reloadSequenceRef = useRef(0);
   const reloadBoardIdRef = useRef(0);
   const boardReloadRef = useRef<{
@@ -432,7 +448,7 @@ export function KanbanView({
   const bulkRequestRef = useRef(0);
   /** После неудачной перечитки повтор запрещён до успешного reload. */
   const bulkNeedsRefreshRef = useRef(false);
-  const bulkFilterTagRef = useRef(query.tag);
+  const bulkFilterTagRef = useRef(filterKeyFor("", query.tag, query.q));
 
   effectiveProjectIdRef.current = effectiveProjectId;
 
@@ -610,7 +626,9 @@ export function KanbanView({
   const revealCreatedTask = async (task: Task, columnId: string): Promise<void> => {
     const normalizedTag = normalizeFilterTag(query.tag);
     const nextTag = query.tag.length === 0 || task.tags.includes(normalizedTag) ? query.tag : "";
-    const filterKey = `${effectiveProjectId}\u0000${nextTag}`;
+    const text = searchText(query.q);
+    const nextSearch = text.length === 0 || matchesTaskText(task, text) ? query.q : "";
+    const filterKey = filterKeyFor(effectiveProjectId, nextTag, nextSearch);
 
     loadedCountsRef.current[columnId] = Math.max(
       loadedCountsRef.current[columnId] ?? KANBAN_PAGE_SIZE,
@@ -623,8 +641,8 @@ export function KanbanView({
       filterKey,
     });
 
-    if (nextTag !== query.tag) {
-      updateKanbanQuery({ tag: nextTag, taskId: null });
+    if (nextTag !== query.tag || nextSearch !== query.q) {
+      updateKanbanQuery({ tag: nextTag, q: nextSearch, taskId: null });
       bumpKanbanRevision();
 
       return;
@@ -762,6 +780,7 @@ export function KanbanView({
               column.id,
               filters.projectId,
               filters.tag,
+              searchText(filters.q),
               targetCount,
               requiredIds,
             );
@@ -787,9 +806,11 @@ export function KanbanView({
       // актуальных версий, а исчезнувшие/скрытые задачи из выбора убираются.
       if (bulkSelectionRef.current.size > 0) {
         const normalizedTag = normalizeFilterTag(filters.tag);
+        const normalizedText = searchText(filters.q);
         const matchesActiveFilter = (task: Task): boolean =>
           task.projectId === filters.projectId &&
-          (normalizedTag.length === 0 || task.tags.includes(normalizedTag));
+          (normalizedTag.length === 0 || task.tags.includes(normalizedTag)) &&
+          (normalizedText.length === 0 || matchesTaskText(task, normalizedText));
         const freshTasks = new Map<string, Task>();
 
         for (const result of results) {
@@ -961,9 +982,9 @@ export function KanbanView({
   }, [invoke]);
 
   useEffect(() => {
-    const filterKey = `${effectiveProjectId}\u0000${query.tag}`;
+    const filterKey = filterKeyFor(effectiveProjectId, query.tag, query.q);
 
-    filtersRef.current = { projectId: effectiveProjectId, tag: query.tag };
+    filtersRef.current = { projectId: effectiveProjectId, tag: query.tag, q: query.q };
 
     if (filterKeyRef.current !== filterKey) {
       filterKeyRef.current = filterKey;
@@ -971,23 +992,29 @@ export function KanbanView({
     }
 
     void reloadBoard();
-  }, [reloadBoard, effectiveProjectId, query.tag, query.revision]);
+  }, [reloadBoard, effectiveProjectId, query.tag, query.q, query.revision]);
 
-  // Смена tag не должна оставлять в массовом выборе скрытые фильтром задачи:
-  // пользователь не видит их на доске, но действие затронуло бы.
+  // Смена tag или поиска не должна оставлять в массовом выборе скрытые
+  // фильтром задачи: пользователь не видит их на доске, но действие затронуло бы.
   useEffect(() => {
-    if (bulkFilterTagRef.current === query.tag) {
+    const filterKey = filterKeyFor("", query.tag, query.q);
+
+    if (bulkFilterTagRef.current === filterKey) {
       return;
     }
 
-    bulkFilterTagRef.current = query.tag;
+    bulkFilterTagRef.current = filterKey;
 
     const tag = normalizeFilterTag(query.tag);
+    const text = searchText(query.q);
     const current = bulkSelectionRef.current;
     const next = new Map<string, Task>();
 
     for (const [id, task] of current) {
-      if (tag.length === 0 || task.tags.includes(tag)) {
+      if (
+        (tag.length === 0 || task.tags.includes(tag)) &&
+        (text.length === 0 || matchesTaskText(task, text))
+      ) {
         next.set(id, task);
       }
     }
@@ -1005,7 +1032,7 @@ export function KanbanView({
       setBulkDeleteOpen(false);
       setBulkDeleteError(null);
     }
-  }, [query.tag]);
+  }, [query.tag, query.q]);
 
   // Target обязан быть фактической колонкой текущего проекта.
   useEffect(() => {
@@ -1107,7 +1134,7 @@ export function KanbanView({
       return;
     }
 
-    const key = `${effectiveProjectId}\u0000${query.tag}`;
+    const key = filterKeyFor(effectiveProjectId, query.tag, query.q);
 
     if (initialColumnKeyRef.current === key) {
       return;
@@ -1130,7 +1157,7 @@ export function KanbanView({
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [boardColumns.order, effectiveProjectId, query.tag]);
+  }, [boardColumns.order, effectiveProjectId, query.tag, query.q]);
 
   // Активная вкладка всегда указывает на существующую колонку.
   useEffect(() => {
@@ -1620,11 +1647,13 @@ export function KanbanView({
       // лишние required IDs и полную догрузку.
       const filterKey = filterKeyRef.current;
       const activeTag = normalizeFilterTag(filtersRef.current.tag);
+      const activeText = searchText(filtersRef.current.q);
 
       for (const moved of data.tasks) {
         if (
           moved.projectId !== context.projectId ||
-          (activeTag.length > 0 && !moved.tags.includes(activeTag))
+          (activeTag.length > 0 && !moved.tags.includes(activeTag)) ||
+          (activeText.length > 0 && !matchesTaskText(moved, activeText))
         ) {
           continue;
         }
@@ -1924,7 +1953,14 @@ export function KanbanView({
         const data = await invokeJson<TaskListOutput>(
           invoke,
           TASKS_QUERY_IDS.taskList,
-          listInput(columnId, filters.projectId, filters.tag, KANBAN_PAGE_SIZE, cursor),
+          listInput(
+            columnId,
+            filters.projectId,
+            filters.tag,
+            searchText(filters.q),
+            KANBAN_PAGE_SIZE,
+            cursor,
+          ),
         );
 
         const items = data.items.map(
@@ -2921,7 +2957,7 @@ export function KanbanView({
 
   const showBoard = onKanbanRoute && effectiveProjectId.length > 0;
   const boardSurface = boardColorSurface(selectedProject?.color);
-  const hasFilters = query.tag.length > 0;
+  const hasFilters = query.tag.length > 0 || query.q.trim().length > 0;
   const visibleTotal = renderedColumnList.reduce((sum, column) => sum + column.total, 0);
   const formColumn = currentColumn(formColumnId);
   const deletingColumn = deletingColumnId === null ? null : currentColumn(deletingColumnId);
@@ -3132,24 +3168,49 @@ export function KanbanView({
               />
             </label>
 
+            <TaskSearch
+              value={query.q}
+              onChange={(q) => {
+                updateKanbanQuery({ q, taskId: null });
+              }}
+              className="min-w-0 flex-1 sm:max-w-sm"
+            />
+
             {hasFilters ? (
               <div
                 data-testid="kanban-active-filters"
                 aria-label="Активные фильтры"
                 className="flex flex-wrap items-center gap-1.5"
               >
-                <button
-                  type="button"
-                  data-testid="kanban-filter-chip-tag"
-                  aria-label={`Сбросить фильтр тега «${query.tag}»`}
-                  onClick={() => {
-                    updateKanbanQuery({ tag: "", taskId: null });
-                  }}
-                  className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
-                >
-                  Тег: {query.tag}
-                  <X aria-hidden="true" className="size-3.5 shrink-0" />
-                </button>
+                {query.tag.length === 0 ? null : (
+                  <button
+                    type="button"
+                    data-testid="kanban-filter-chip-tag"
+                    aria-label={`Сбросить фильтр тега «${query.tag}»`}
+                    onClick={() => {
+                      updateKanbanQuery({ tag: "", taskId: null });
+                    }}
+                    className="inline-flex min-h-10 items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                  >
+                    Тег: {query.tag}
+                    <X aria-hidden="true" className="size-3.5 shrink-0" />
+                  </button>
+                )}
+
+                {query.q.trim().length === 0 ? null : (
+                  <button
+                    type="button"
+                    data-testid="kanban-filter-chip-search"
+                    aria-label={`Сбросить поиск «${query.q}»`}
+                    onClick={() => {
+                      updateKanbanQuery({ q: "", taskId: null });
+                    }}
+                    className="inline-flex min-h-10 max-w-full items-center gap-1 rounded-full border border-border bg-background px-3 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:min-h-8"
+                  >
+                    <span className="truncate">Поиск: {query.q}</span>
+                    <X aria-hidden="true" className="size-3.5 shrink-0" />
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -3286,7 +3347,7 @@ export function KanbanView({
               <div className="flex min-w-0 flex-col gap-0.5">
                 <p className="m-0 text-sm font-medium">По фильтрам ничего не найдено</p>
                 <p className="m-0 text-xs text-muted-foreground">
-                  Измените тег, чтобы увидеть задачи.
+                  Измените тег или поиск, чтобы увидеть задачи.
                 </p>
               </div>
               <button

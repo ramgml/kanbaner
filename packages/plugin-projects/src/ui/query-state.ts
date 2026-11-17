@@ -2,11 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { MAX_SEARCH_TEXT_LENGTH } from "@kanbaner/plugin-tasks/contract";
+
 import { parseWorkspaceResource } from "./resource-query.ts";
 
 export interface KanbanQueryState {
   readonly projectId: string;
   readonly tag: string;
+  /** Поиск по названию и описанию; хранится в URL как `q`. */
+  readonly q: string;
   readonly taskId: string | null;
   /** Локальная ревизия данных; не сериализуется в URL. */
   readonly revision: number;
@@ -15,6 +19,7 @@ export interface KanbanQueryState {
 export const DEFAULT_KANBAN_QUERY: KanbanQueryState = Object.freeze({
   projectId: "",
   tag: "",
+  q: "",
   taskId: null,
   revision: 0,
 });
@@ -34,6 +39,11 @@ function first(params: URLSearchParams, key: string): string {
   return params.get(key)?.trim() ?? "";
 }
 
+/** Поиск не trim-ится: пробел посреди ввода не должен «откатывать» поле. */
+function searchText(params: URLSearchParams): string {
+  return (params.get("q") ?? "").slice(0, MAX_SEARCH_TEXT_LENGTH);
+}
+
 /** Читает фильтры и выбранную карточку из query string. */
 export function parseKanbanQuery(search: string): KanbanQueryState {
   const params = new URLSearchParams(search);
@@ -47,6 +57,7 @@ export function parseKanbanQuery(search: string): KanbanQueryState {
     ...DEFAULT_KANBAN_QUERY,
     projectId,
     tag: first(params, "tag"),
+    q: searchText(params),
     taskId: taskId.length === 0 ? null : taskId,
   };
 }
@@ -60,6 +71,10 @@ function toSearchParams(state: KanbanQueryState): URLSearchParams {
 
   if (state.tag.length > 0) {
     params.set("tag", state.tag);
+  }
+
+  if (state.q.length > 0) {
+    params.set("q", state.q);
   }
 
   if (state.taskId !== null) {
@@ -142,9 +157,9 @@ export function setKanbanSearch(search: string): void {
   emit();
 }
 
-/** Сбрасывает тег, сохраняя выбранный проект и выбранную карточку. */
+/** Сбрасывает тег и поиск, сохраняя проект и выбранную карточку. */
 export function resetKanbanFilters(): void {
-  updateKanbanQuery({ tag: "" });
+  updateKanbanQuery({ tag: "", q: "" });
 }
 
 /** Требует повторного запроса доски и деталей после команды. */

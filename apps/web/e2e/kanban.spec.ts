@@ -141,6 +141,7 @@ async function settingsColumnIds(page: Page): Promise<string[]> {
 }
 
 interface TaskEditSeed {
+  readonly description?: string;
   readonly priority?: string;
   readonly status?: keyof typeof STATUS_LABELS;
   readonly dueAt?: string;
@@ -150,6 +151,7 @@ interface TaskEditSeed {
 interface TaskSeed {
   readonly projectTitle: string;
   readonly title: string;
+  readonly description?: string;
   readonly priority?: string;
   readonly status?: keyof typeof STATUS_LABELS;
   readonly dueAt?: string;
@@ -159,6 +161,7 @@ interface TaskSeed {
 
 function hasTaskExtras(seed: TaskSeed): boolean {
   return (
+    seed.description !== undefined ||
     seed.priority !== undefined ||
     (seed.status !== undefined && seed.status !== "todo") ||
     seed.dueAt !== undefined ||
@@ -190,6 +193,10 @@ async function editTaskDetails(page: Page, seed: TaskEditSeed): Promise<void> {
     await form
       .getByRole("combobox", { name: "Приоритет", exact: true })
       .selectOption(seed.priority);
+  }
+
+  if (seed.description !== undefined) {
+    await form.getByLabel("Описание (Markdown)", { exact: true }).fill(seed.description);
   }
 
   if (seed.dueAt !== undefined) {
@@ -2801,6 +2808,79 @@ test.describe("канбан в production shell", () => {
       await expect(page).toHaveURL(/[?&]project=/u);
       await expect(page).not.toHaveURL(/[?&]tag=/u);
       await expect(page.getByTestId(`kanban-card-${backendId}`)).toBeVisible();
+    });
+
+    test("ищет по названию и описанию, сочетает с тегом и сбрасывает q", async ({ page }) => {
+      const projectTitle = uniqueTitle("Проект поиска канбана");
+      const alphaTitle = `Alpha ${projectTitle}`;
+      const betaTitle = `Beta ${projectTitle}`;
+      const marker = uniqueTitle("скрытый маркер");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const alphaId = await createTask(page, {
+        projectTitle,
+        title: alphaTitle,
+        description: `Детали: ${marker}`,
+        tags: "release",
+      });
+
+      await closeDetails(page);
+      const betaId = await createTask(page, {
+        projectTitle,
+        title: betaTitle,
+        tags: "backend",
+      });
+
+      await closeDetails(page);
+      await openKanban(page, projectTitle);
+
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toBeVisible();
+
+      const filters = page.getByTestId("kanban-filters");
+      const search = filters.getByRole("searchbox", { name: "Поиск задач" });
+
+      // Регистронезависимый поиск по title.
+      await search.fill(alphaTitle.toLowerCase());
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("q"))
+        .toBe(alphaTitle.toLowerCase());
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+
+      // Поиск по descriptionMarkdown.
+      await search.fill(marker.toLowerCase());
+      await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(marker.toLowerCase());
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+
+      // Поиск комбинируется с тегом по AND.
+      await filters.getByLabel("Тег", { exact: true }).fill("release");
+      await expect(page).toHaveURL(/[?&]tag=release/u);
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+
+      // q, несовместимый с тегом, даёт пустой результат, а не скрытую карточку.
+      await search.fill(betaTitle.toLowerCase());
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("q"))
+        .toBe(betaTitle.toLowerCase());
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toHaveCount(0);
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+      await expect(page.getByTestId("kanban-empty-filter")).toBeVisible();
+
+      // Reset очищает тег и поиск, проект остаётся.
+      await page
+        .getByTestId("kanban-active-filters")
+        .getByRole("button", { name: "Сбросить фильтры" })
+        .click();
+      await expect(page).not.toHaveURL(/[?&]q=/u);
+      await expect(page).not.toHaveURL(/[?&]tag=/u);
+      await expect(page).toHaveURL(/[?&]project=/u);
+      await expect(search).toHaveValue("");
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toBeVisible();
     });
 
     test("догружает колонку страницами больше page size без дублей", async ({ page }) => {
