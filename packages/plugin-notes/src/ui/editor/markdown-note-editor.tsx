@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactNode } from "react";
-import { filterSuggestionItems, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
+import { filterSuggestionItems } from "@blocknote/core";
 import type { SuggestionMenuOptions } from "@blocknote/core";
 import { ru } from "@blocknote/core/locales";
 import {
@@ -10,7 +10,6 @@ import {
   SuggestionMenuController,
   useCreateBlockNote,
 } from "@blocknote/react";
-import type { DefaultReactSuggestionItem } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/core/style.css";
 import "@blocknote/shadcn/style.css";
@@ -55,30 +54,6 @@ interface EditorBlockLike {
   readonly type: string;
   readonly props?: unknown;
   readonly children?: readonly EditorBlockLike[];
-}
-
-/**
- * Заменяет только пункт image в стандартном slash/side menu: вместо пустого
- * image-блока открывается существующий скрытый file input заметки. Остальные
- * пункты остаются штатными, чтобы не дублировать поведение BlockNote.
- */
-export function withImagePickerSuggestion<T extends { readonly onItemClick: () => void }>(
-  items: readonly T[],
-  onPickImage: () => void,
-): T[] {
-  return items.map((item) =>
-    (item as { readonly key?: string }).key === "image"
-      ? { ...item, onItemClick: onPickImage }
-      : item,
-  );
-}
-
-/** Пункты slash menu с image, открывающим picker заметки. */
-export function buildSlashMenuItems(
-  items: readonly DefaultReactSuggestionItem[],
-  onPickImage: () => void,
-): DefaultReactSuggestionItem[] {
-  return withImagePickerSuggestion(items, onPickImage);
 }
 
 /**
@@ -332,24 +307,14 @@ export function MarkdownNoteEditor({
 
   /**
    * Пункт «Картинка» в slash/side menu открывает существующий file input,
-   * который использует общий uploadFiles-флоу. Пустой image-блок не создаётся,
-   * поэтому отмена выбора не оставляет pending-запись.
+   * который использует общий uploadFiles-флоу. Документ не меняется:
+   * SuggestionMenuWrapper сам удаляет trigger/query, а при отмене picker
+   * не остаётся ни пустого image-блока, ни нового параграфа.
    */
   const pickImage = useCallback(() => {
     if (lockedRef.current) return;
-    const activeEditor = editorRef.current;
     const input = imageInputRef.current;
-    if (activeEditor === null || input === null || input.disabled) return;
-
-    try {
-      // SuggestionMenuWrapper уже удалил query. Оставшийся "/" (или пустой
-      // блок, открытый кнопкой "+") превращаем в пустой параграф.
-      insertOrUpdateBlockForSlashMenu(activeEditor, { type: "paragraph" });
-    } catch {
-      // Курсор мог оказаться в блоке без inline-контента: picker всё равно
-      // должен открыться, а документ менять не нужно.
-    }
-
+    if (input === null || input.disabled) return;
     input.click();
   }, []);
 
@@ -359,18 +324,21 @@ export function MarkdownNoteEditor({
   );
 
   const getSlashMenuItems = useCallback(
-    async (query: string) =>
-      filterSuggestionItems(
-        buildSlashMenuItems(
-          // BlockNote 0.54 не выводит generic кастомной схемы в собственных
-          // типах; приведение ограничено фабрикой пунктов меню.
-          getDefaultReactSlashMenuItems(
-            editor as unknown as Parameters<typeof getDefaultReactSlashMenuItems>[0],
-          ),
-          pickImage,
+    async (query: string) => {
+      const items = getDefaultReactSlashMenuItems(
+        // BlockNote 0.54 не выводит generic кастомной схемы в собственных
+        // типах; приведение ограничено фабрикой пунктов меню.
+        editor as unknown as Parameters<typeof getDefaultReactSlashMenuItems>[0],
+      );
+      return filterSuggestionItems(
+        items.map((item) =>
+          (item as { readonly key?: string }).key === "image"
+            ? { ...item, onItemClick: pickImage }
+            : item,
         ),
         query,
-      ),
+      );
+    },
     [editor, pickImage],
   );
 
