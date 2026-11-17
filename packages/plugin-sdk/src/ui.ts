@@ -24,6 +24,9 @@ export type UiSlotId = string;
 
 export const UI_SLOT_PATTERN = "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$";
 
+/** Идентификатор иконки содержит хотя бы один непробельный символ. */
+export const UI_ICON_PATTERN = "\\S";
+
 export const UI_CONTRIBUTION_KINDS = [
   "view",
   "route",
@@ -72,7 +75,7 @@ export const UiContributionSchema = Type.Object(
      * статическим allowlist компонентов. Неизвестное значение означает
      * безопасный fallback, а не ошибку контракта.
      */
-    icon: Type.Optional(Type.String({ minLength: 1 })),
+    icon: Type.Optional(Type.String({ minLength: 1, pattern: UI_ICON_PATTERN })),
     /**
      * Плагин-владелец открываемого ресурса.
      *

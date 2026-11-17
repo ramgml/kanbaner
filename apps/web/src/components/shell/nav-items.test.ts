@@ -27,6 +27,12 @@ describe("иконки навигации плагинов", () => {
     expect(resolvePluginNavIcon(undefined)).toBe(Flag);
     expect(resolvePluginNavIcon("unknown-icon")).toBe(Flag);
   });
+
+  it("не разрешает прототипные свойства объекта как иконки", () => {
+    for (const icon of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      expect(resolvePluginNavIcon(icon)).toBe(Flag);
+    }
+  });
 });
 
 describe("isActivePath", () => {

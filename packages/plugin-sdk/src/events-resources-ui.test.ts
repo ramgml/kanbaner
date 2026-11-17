@@ -330,17 +330,22 @@ describe("UI-вклады", () => {
     };
 
     expect(validateUiContribution(contribution).ok).toBe(true);
-    expect(
-      validateUiContribution({
-        id: "acme.calendar.navigation",
-        slot: "app.sidebar",
-        kind: "navigation",
-        priority: 10,
-        title: "Календарь",
-        route: "/view/calendar",
-        icon: "",
-      }).ok,
-    ).toBe(false);
+  });
+
+  it("отклоняет пустой или пробельный icon", () => {
+    for (const icon of ["", " ", "\t", " \n "]) {
+      expect(
+        validateUiContribution({
+          id: "acme.calendar.navigation",
+          slot: "app.sidebar",
+          kind: "navigation",
+          priority: 10,
+          title: "Календарь",
+          route: "/view/calendar",
+          icon,
+        }).ok,
+      ).toBe(false);
+    }
   });
 
   it("отклоняет неизвестный kind и неверный slot", () => {

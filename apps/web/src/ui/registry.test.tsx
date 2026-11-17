@@ -558,18 +558,21 @@ describe("синхронизация серверных metadata и привяз
     expect(registry.list("app.sidebar")[0]?.contribution.icon).toBe("folder-kanban");
   });
 
-  it("отклоняет пустой icon до изменения состояния", () => {
+  it("отклоняет пустой или пробельный icon до изменения состояния", () => {
     const registry = createUiContributionRegistry();
 
-    expectRegistryError(
-      () =>
-        registry.register(
-          "example.test-ui",
-          contribution({ kind: "navigation", route: "/view/test-ui", icon: "" }),
-          render,
-        ),
-      "INVALID_CONTRIBUTION",
-    );
+    for (const icon of ["", " ", "\t"]) {
+      expectRegistryError(
+        () =>
+          registry.register(
+            "example.test-ui",
+            contribution({ kind: "navigation", route: "/view/test-ui", icon }),
+            render,
+          ),
+        "INVALID_CONTRIBUTION",
+      );
+    }
+
     expect(registry.size()).toBe(0);
   });
 

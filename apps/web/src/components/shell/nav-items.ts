@@ -12,10 +12,10 @@ export interface ShellNavItem {
  * Metadata содержат только строковый идентификатор: shell не выполняет
  * динамический импорт и не разрешает произвольные имена компонентов.
  */
-const PLUGIN_NAV_ICONS: Readonly<Record<string, LucideIcon>> = {
-  "folder-kanban": FolderKanban,
-  "notebook-tabs": NotebookTabs,
-};
+const PLUGIN_NAV_ICONS: ReadonlyMap<string, LucideIcon> = new Map([
+  ["folder-kanban", FolderKanban],
+  ["notebook-tabs", NotebookTabs],
+]);
 
 /** Иконка плагина без `icon` или с неизвестным идентификатором. */
 export const FALLBACK_PLUGIN_NAV_ICON: LucideIcon = Flag;
@@ -25,7 +25,7 @@ export function resolvePluginNavIcon(icon: string | undefined): LucideIcon {
     return FALLBACK_PLUGIN_NAV_ICON;
   }
 
-  return PLUGIN_NAV_ICONS[icon] ?? FALLBACK_PLUGIN_NAV_ICON;
+  return PLUGIN_NAV_ICONS.get(icon) ?? FALLBACK_PLUGIN_NAV_ICON;
 }
 
 /**
