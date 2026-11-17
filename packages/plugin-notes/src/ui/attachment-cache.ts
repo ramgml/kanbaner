@@ -20,6 +20,20 @@ export class AttachmentUrlCache {
     return this.set(attachment.id, attachment.mimeType, attachment.contentBase64);
   }
 
+  /**
+   * Снимок соответствия канонических `attachment://` URL и data URL.
+   *
+   * Возвращается новым объектом: редактор применяет загруженные вложения
+   * императивно и должен реагировать на каждое новое поколение снимка.
+   */
+  toEditorUrls(): ReadonlyMap<string, string> {
+    const urls = new Map<string, string>();
+    for (const [id, dataUrl] of this.dataUrls) {
+      urls.set(attachmentUrl(id), dataUrl);
+    }
+    return urls;
+  }
+
   toEditor(markdown: string): string {
     return replaceMarkdownImageUrls(markdown, (url) => {
       if (!url.startsWith("attachment://")) {

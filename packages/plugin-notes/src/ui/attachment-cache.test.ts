@@ -24,4 +24,14 @@ describe("AttachmentUrlCache", () => {
     expect(cache.toCanonical(editor)).toBe(canonical);
     expect(attachmentUrl("image-1")).toBe("attachment://image-1");
   });
+
+  it("отдаёт снимок canonical → data URL для императивной подстановки", () => {
+    const cache = new AttachmentUrlCache();
+    cache.set("image-1", "image/png", "aGVsbG8=");
+
+    const urls = cache.toEditorUrls();
+
+    expect(urls.get("attachment://image-1")).toBe("data:image/png;base64,aGVsbG8=");
+    expect(urls.size).toBe(1);
+  });
 });

@@ -39,12 +39,20 @@ export interface MarkdownNoteEditorProps {
   readonly onChange: (markdown: string) => void;
   /** Загружает изображение и возвращает URL для image-узла. */
   readonly onUploadImage: (file: File) => Promise<string>;
+  /**
+   * Загруженные вложения: канонический `attachment://id` → data URL.
+   *
+   * Применяются императивно к блокам после загрузки, чтобы Markdown оставался
+   * коротким и не проходил через micromark с мегабайтными data URL.
+   */
+  readonly attachmentUrls?: ReadonlyMap<string, string>;
   readonly readOnly?: boolean;
   readonly disabled?: boolean;
   readonly ariaLabel?: string;
 }
 
 const DEFAULT_ARIA_LABEL = "Текст заметки";
+const EMPTY_URLS: ReadonlyMap<string, string> = new Map();
 const PREVIEW_PLACEHOLDER =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 const FILE_BLOCK_TYPES = new Set(["image", "file", "audio", "video"]);
@@ -85,6 +93,238 @@ interface EditorViewProps {
   readonly children?: ReactNode;
 }
 
+interface InlineNodeLike {
+  readonly type?: string;
+  readonly props?: { readonly url?: string; readonly [key: string]: unknown };
+  readonly content?: unknown;
+}
+
+interface BlockLike {
+  readonly id: string;
+  readonly type: string;
+  readonly props?: { readonly url?: string; readonly [key: string]: unknown };
+  readonly content?: unknown;
+  readonly children?: readonly BlockLike[];
+}
+
+interface InlineResolution {
+  readonly content: unknown;
+  readonly changed: boolean;
+}
+
+const INLINE_IMAGE_TYPES = new Set(["inlineImage", "linkedImage"]);
+
+/**
+ * Рекурсивно заменяет `attachment://` URL в inline-контенте одного блока,
+ * включая ячейки таблицы (`tableContent.rows[].cells[]`).
+ */
+function resolveInlineAttachmentUrls(
+  content: unknown,
+  urls: ReadonlyMap<string, string>,
+): InlineResolution {
+  if (Array.isArray(content)) {
+    let changed = false;
+    const nextContent = content.map((item) => {
+      if (typeof item !== "object" || item === null) return item;
+      const node = item as InlineNodeLike;
+      let nextNode = node;
+      let nodeChanged = false;
+
+      if (
+        node.type !== undefined &&
+        INLINE_IMAGE_TYPES.has(node.type) &&
+        typeof node.props?.url === "string"
+      ) {
+        const replacement = urls.get(node.props.url);
+        if (replacement !== undefined) {
+          nextNode = { ...nextNode, props: { ...node.props, url: replacement } };
+          nodeChanged = true;
+        }
+      }
+
+      const nested = resolveInlineAttachmentUrls(nextNode.content, urls);
+      if (nested.changed) {
+        nextNode = { ...nextNode, content: nested.content };
+        nodeChanged = true;
+      }
+
+      if (!nodeChanged) return item;
+      changed = true;
+      return nextNode;
+    });
+
+    return changed ? { content: nextContent, changed: true } : { content, changed: false };
+  }
+
+  if (typeof content === "object" && content !== null) {
+    const record = content as {
+      readonly rows?: unknown;
+      readonly content?: unknown;
+      readonly cells?: unknown;
+    };
+
+    if (Array.isArray(record.rows)) {
+      let changed = false;
+      const rows = record.rows.map((row) => {
+        if (typeof row !== "object" || row === null) return row;
+        const cells = (row as { readonly cells?: unknown }).cells;
+        if (!Array.isArray(cells)) return row;
+
+        let rowChanged = false;
+        const nextCells = cells.map((cell) => {
+          const resolved = resolveInlineAttachmentUrls(cell, urls);
+          if (resolved.changed) rowChanged = true;
+          return resolved.content;
+        });
+
+        if (!rowChanged) return row;
+        changed = true;
+        return { ...(row as Record<string, unknown>), cells: nextCells };
+      });
+
+      return changed
+        ? { content: { ...(content as object), rows }, changed: true }
+        : { content, changed: false };
+    }
+
+    // Ячейка таблицы — объект `tableCell` со своим inline-контентом.
+    if (Array.isArray(record.content)) {
+      const resolved = resolveInlineAttachmentUrls(record.content, urls);
+      return resolved.changed
+        ? { content: { ...(content as object), content: resolved.content }, changed: true }
+        : { content, changed: false };
+    }
+  }
+
+  return { content, changed: false };
+}
+
+/**
+ * Приводит сериализованный Markdown к каноническому виду для сравнения с
+ * baseline. Замена строковая: вызывать micromark на мегабайтных data URL
+ * ради проверки «изменился ли документ» нельзя.
+ */
+function canonicalizeAttachmentUrls(markdown: string, urls: ReadonlyMap<string, string>): string {
+  let result = markdown;
+  for (const [canonical, dataUrl] of urls) {
+    result = result.replaceAll(dataUrl, canonical);
+  }
+  return result;
+}
+
+/** Ищет канонические `attachment://` URL, которые ещё не заменены data URL. */
+function hasUnresolvedAttachmentUrls(
+  editor: ReturnType<typeof useCreateBlockNote>,
+  urls: ReadonlyMap<string, string>,
+): boolean {
+  const contentHasUnresolved = (content: unknown): boolean => {
+    if (Array.isArray(content)) {
+      return content.some((item) => {
+        if (typeof item !== "object" || item === null) return false;
+        const node = item as InlineNodeLike;
+        if (
+          node.type !== undefined &&
+          INLINE_IMAGE_TYPES.has(node.type) &&
+          typeof node.props?.url === "string" &&
+          urls.has(node.props.url)
+        ) {
+          return true;
+        }
+        return contentHasUnresolved(node.content);
+      });
+    }
+
+    if (typeof content === "object" && content !== null) {
+      const record = content as {
+        readonly rows?: unknown;
+        readonly content?: unknown;
+        readonly cells?: unknown;
+      };
+      if (Array.isArray(record.rows)) {
+        return record.rows.some((row) => {
+          if (typeof row !== "object" || row === null) return false;
+          const cells = (row as { readonly cells?: unknown }).cells;
+          return Array.isArray(cells) && cells.some(contentHasUnresolved);
+        });
+      }
+      return Array.isArray(record.content) && contentHasUnresolved(record.content);
+    }
+
+    return false;
+  };
+
+  const visit = (block: BlockLike): boolean => {
+    if (
+      block.type === "image" &&
+      typeof block.props?.url === "string" &&
+      urls.has(block.props.url)
+    ) {
+      return true;
+    }
+    if (contentHasUnresolved(block.content)) return true;
+    return (block.children ?? []).some(visit);
+  };
+
+  return (editor.document as unknown as readonly BlockLike[]).some(visit);
+}
+
+interface TransactionMetaLike {
+  setMeta: (key: string, value: unknown) => unknown;
+}
+
+/**
+ * Выполняет программное изменение документа вне undo-истории.
+ *
+ * Загрузка страницы, внешнее значение и подстановка вложений — не действия
+ * пользователя: Ctrl+Z после открытия не должен очищать или ломать документ.
+ */
+function withoutHistory(editor: ReturnType<typeof useCreateBlockNote>, action: () => void): void {
+  editor.transact((transaction: TransactionMetaLike) => {
+    transaction.setMeta("addToHistory", false);
+    action();
+  });
+}
+
+/**
+ * Подставляет загруженные data URL в image-блоки и inline image.
+ *
+ * Документ и внешнее значение остаются каноническими: замена выполняется
+ * поверх готового дерева блоков и не запускает autosave.
+ */
+function applyAttachmentUrls(
+  editor: ReturnType<typeof useCreateBlockNote>,
+  urls: ReadonlyMap<string, string>,
+): void {
+  if (urls.size === 0) return;
+
+  withoutHistory(editor, () => {
+    const visit = (block: BlockLike): void => {
+      let nextProps: BlockLike["props"] | undefined;
+      if (block.type === "image" && typeof block.props?.url === "string") {
+        const replacement = urls.get(block.props.url);
+        if (replacement !== undefined) {
+          nextProps = { ...block.props, url: replacement };
+        }
+      }
+
+      const inline = resolveInlineAttachmentUrls(block.content, urls);
+      if (nextProps !== undefined || inline.changed) {
+        const update = {
+          ...(nextProps === undefined ? {} : { props: nextProps }),
+          ...(inline.changed ? { content: inline.content } : {}),
+        };
+        editor.updateBlock(
+          block as unknown as Parameters<typeof editor.updateBlock>[0],
+          update as unknown as Parameters<typeof editor.updateBlock>[1],
+        );
+      }
+
+      for (const child of block.children ?? []) visit(child);
+    };
+
+    for (const block of editor.document as unknown as readonly BlockLike[]) visit(block);
+  });
+}
 // BlockNote 0.54 не проходит exactOptionalPropertyTypes в собственных generic-типах.
 // Приведение ограничено props представления; editor остаётся строго типизирован выше.
 const EditorView = BlockNoteView as unknown as ComponentType<EditorViewProps>;
@@ -100,6 +340,7 @@ export function MarkdownNoteEditor({
   value,
   onChange,
   onUploadImage,
+  attachmentUrls,
   readOnly = false,
   disabled = false,
   ariaLabel = DEFAULT_ARIA_LABEL,
@@ -110,6 +351,7 @@ export function MarkdownNoteEditor({
   const valueRef = useRef(value);
   const onChangeRef = useRef(onChange);
   const uploadRef = useRef(onUploadImage);
+  const attachmentUrlsRef = useRef<ReadonlyMap<string, string>>(attachmentUrls ?? EMPTY_URLS);
   const lastEmittedRef = useRef(value);
   const appliedValueRef = useRef(value);
   const initializedRef = useRef(false);
@@ -123,11 +365,14 @@ export function MarkdownNoteEditor({
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
   const locked = readOnly || disabled;
+  /** Документ ProseMirror последнего опубликованного/применённого состояния. */
+  const lastDocRef = useRef<unknown>(null);
 
   useEffect(() => {
     valueRef.current = value;
     onChangeRef.current = onChange;
     uploadRef.current = onUploadImage;
+    attachmentUrlsRef.current = attachmentUrls ?? EMPTY_URLS;
     lockedRef.current = locked;
   });
 
@@ -258,8 +503,15 @@ export function MarkdownNoteEditor({
     setUploading(false);
 
     try {
-      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, valueRef.current));
-      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      withoutHistory(editor, () => {
+        editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, valueRef.current));
+        applyAttachmentUrls(editor, attachmentUrlsRef.current);
+      });
+      lastEmittedRef.current = canonicalizeAttachmentUrls(
+        serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy()),
+        attachmentUrlsRef.current,
+      );
+      lastDocRef.current = editor.prosemirrorState.doc;
       initializedRef.current = true;
       if (!cancelled) setReady(true);
     } catch {
@@ -287,16 +539,24 @@ export function MarkdownNoteEditor({
         >[0],
       ),
     );
-    if (markdownDocumentsEqual(value, current)) {
-      lastEmittedRef.current = current;
+    const canonicalCurrent = canonicalizeAttachmentUrls(current, attachmentUrlsRef.current);
+    if (markdownDocumentsEqual(value, current) || markdownDocumentsEqual(value, canonicalCurrent)) {
+      lastEmittedRef.current = canonicalCurrent;
       appliedValueRef.current = value;
       return;
     }
 
     suppressChangeRef.current = true;
     try {
-      editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, value));
-      lastEmittedRef.current = serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy());
+      withoutHistory(editor, () => {
+        editor.replaceBlocks(editor.document, markdownToEditorBlocks(editor, value));
+        applyAttachmentUrls(editor, attachmentUrlsRef.current);
+      });
+      lastEmittedRef.current = canonicalizeAttachmentUrls(
+        serializeBlockNoteMarkdown(editor.blocksToMarkdownLossy()),
+        attachmentUrlsRef.current,
+      );
+      lastDocRef.current = editor.prosemirrorState.doc;
       appliedValueRef.current = value;
     } catch {
       queueMicrotask(() => setError("Не удалось обновить содержимое редактора."));
@@ -304,6 +564,18 @@ export function MarkdownNoteEditor({
       suppressChangeRef.current = false;
     }
   }, [editor, ready, value]);
+
+  /** Догруженные вложения подставляются поверх блоков без изменения Markdown. */
+  useEffect(() => {
+    if (!ready || attachmentUrls === undefined || attachmentUrls.size === 0) return;
+    suppressChangeRef.current = true;
+    try {
+      applyAttachmentUrls(editor, attachmentUrls);
+      lastDocRef.current = editor.prosemirrorState.doc;
+    } finally {
+      suppressChangeRef.current = false;
+    }
+  }, [attachmentUrls, editor, ready]);
 
   /**
    * Пункт «Картинка» в slash/side menu открывает существующий file input,
@@ -419,14 +691,38 @@ export function MarkdownNoteEditor({
           slashMenu={false}
           onChange={() => {
             if (!initializedRef.current || suppressChangeRef.current) return;
+            // setEditable и прочие технические события эмитят change без
+            // изменения документа: сериализовать мегабайтные data URL вложений
+            // ради них нельзя.
+            const doc = editor.prosemirrorState.doc;
+            if (lastDocRef.current === doc) return;
+            lastDocRef.current = doc;
+
+            // Undo/redo может вернуть снимок с каноническим attachment:// URL.
+            // Возвращаем data URL вне истории; повторный change подавлен.
+            const urls = attachmentUrlsRef.current;
+            if (urls.size > 0 && hasUnresolvedAttachmentUrls(editor, urls)) {
+              suppressChangeRef.current = true;
+              try {
+                applyAttachmentUrls(editor, urls);
+              } finally {
+                suppressChangeRef.current = false;
+              }
+              lastDocRef.current = editor.prosemirrorState.doc;
+            }
+
             const blocks = stripUploadArtifacts(editor.document, pendingUploadsRef.current);
             const markdown = serializeBlockNoteMarkdown(
               editor.blocksToMarkdownLossy(
                 blocks as unknown as Parameters<typeof editor.blocksToMarkdownLossy>[0],
               ),
             );
-            if (markdownDocumentsEqual(markdown, lastEmittedRef.current)) return;
-            lastEmittedRef.current = markdown;
+            const canonical = canonicalizeAttachmentUrls(markdown, urls);
+            if (markdownDocumentsEqual(canonical, lastEmittedRef.current)) {
+              lastEmittedRef.current = canonical;
+              return;
+            }
+            lastEmittedRef.current = canonical;
             onChangeRef.current(markdown);
           }}
         >
