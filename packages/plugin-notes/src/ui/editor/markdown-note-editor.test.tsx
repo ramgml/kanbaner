@@ -693,3 +693,73 @@ describe("MarkdownNoteEditor: lifecycle сериализации", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+describe("MarkdownNoteEditor: догрузка вложений", () => {
+  const DATA_URL = "data:image/png;base64,aGVsbG8=";
+  const URLS = new Map([["attachment://img-1", DATA_URL]]);
+
+  it("подставляет inline data URL без onChange", async () => {
+    const { container, rerender, onChange } = renderEditor({
+      value: "До ![Схема](attachment://img-1) после",
+    });
+    const content = await waitForReady(container);
+    expect(content.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
+
+    rerender({ attachmentUrls: URLS });
+
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+    expect(content).toHaveTextContent("До");
+    expect(content).toHaveTextContent("после");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("подставляет URL block image и сохраняет его при внешнем значении", async () => {
+    const { container, rerender, onChange } = renderEditor({
+      value: "![Схема](attachment://img-1)",
+    });
+    await waitForReady(container);
+
+    rerender({ attachmentUrls: URLS });
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+
+    // Внешнее значение с canonical URL заново строит блоки: подстановка
+    // вложений обязана примениться и к новому дереву, не помечая документ.
+    rerender({
+      value: "Обновлённый текст\n\n![Схема](attachment://img-1)",
+      attachmentUrls: URLS,
+    });
+    await waitFor(() => {
+      expect(container.querySelector(".bn-editor")).toHaveTextContent("Обновлённый текст");
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("не публикует onChange при смене editable с подставленными вложениями", async () => {
+    const { container, rerender, onChange } = renderEditor({
+      value: "![Схема](attachment://img-1)",
+    });
+    await waitForReady(container);
+    rerender({ attachmentUrls: URLS });
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+
+    // Блокировка на время загрузки другой страницы меняет editor.isEditable;
+    // ProseMirror эмитит change, но документ не изменился и autosave не нужен.
+    rerender({ attachmentUrls: URLS, readOnly: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    rerender({ attachmentUrls: URLS, readOnly: false });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});

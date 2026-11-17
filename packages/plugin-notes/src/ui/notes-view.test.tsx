@@ -44,36 +44,50 @@ vi.mock("./editor/markdown-note-editor.tsx", () => ({
     value,
     onChange,
     onUploadImage,
+    attachmentUrls,
     readOnly,
     ariaLabel,
   }: {
     value: string;
     onChange: (value: string) => void;
     onUploadImage?: (file: File) => Promise<string>;
+    attachmentUrls?: ReadonlyMap<string, string>;
     readOnly?: boolean;
     ariaLabel?: string;
-  }) => (
-    <div>
-      <textarea
-        aria-label={ariaLabel ?? "Содержимое заметки"}
-        value={value}
-        readOnly={readOnly}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      <button
-        type="button"
-        data-testid="editor-upload"
-        onClick={() => {
-          const file = new File([new Uint8Array(editorState.bytes)], "image.png", {
-            type: "image/png",
-          });
-          void onUploadImage?.(file).catch(() => undefined);
-        }}
-      >
-        upload
-      </button>
-    </div>
-  ),
+  }) => {
+    // jsdom-mock повторяет императивную подстановку data URL BlockNote:
+    // каноническое значение остаётся коротким, а текстовая область показывает
+    // то же, что увидит пользователь после догрузки вложений.
+    const display =
+      attachmentUrls === undefined
+        ? value
+        : [...attachmentUrls.entries()].reduce(
+            (markdown, [canonical, dataUrl]) => markdown.split(canonical).join(dataUrl),
+            value,
+          );
+    return (
+      <div>
+        <textarea
+          aria-label={ariaLabel ?? "Содержимое заметки"}
+          value={display}
+          readOnly={readOnly}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <button
+          type="button"
+          data-testid="editor-upload"
+          onClick={() => {
+            const file = new File([new Uint8Array(editorState.bytes)], "image.png", {
+              type: "image/png",
+            });
+            void onUploadImage?.(file).catch(() => undefined);
+          }}
+        >
+          upload
+        </button>
+      </div>
+    );
+  },
 }));
 
 const timestamp = "2026-11-13T00:00:00.000Z";
@@ -319,6 +333,151 @@ describe("NotesView autosave", () => {
     await screen.findByText("Конфликт версий", { exact: false });
     expect(title).toHaveValue("Локальный черновик");
     expect(await screen.findByTestId("note-conflict-reload")).toBeVisible();
+  });
+
+  it("показывает заметку до загрузки вложений и не помечает её изменённой", async () => {
+    const file = attachment("att-1", "note-1");
+    const details: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [file],
+    };
+    const attachmentRequest = deferred<UiOperationResult>();
+    let updates = 0;
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) return attachmentRequest.promise;
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updates += 1;
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+
+    // Заметка и канонический Markdown видны, пока attachment.get ещё висит.
+    await waitFor(() => {
+      expect(editor).toHaveValue("![img](attachment://att-1)");
+      expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
+    });
+
+    await act(async () => {
+      attachmentRequest.resolve(success({ attachment: { ...file, contentBase64: "aGVsbG8=" } }));
+    });
+
+    await waitFor(() => {
+      expect(editor).toHaveValue("![img](data:image/png;base64,aGVsbG8=)");
+    });
+    expect(updates).toBe(0);
+    expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
+  });
+
+  it("сохраняет черновик, набранный до загрузки вложений", async () => {
+    const file = attachment("att-1", "note-1");
+    const details: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [file],
+    };
+    const attachmentRequest = deferred<UiOperationResult>();
+    let updates = 0;
+    let savedMarkdown = "";
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) return success(details);
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) return attachmentRequest.promise;
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updates += 1;
+        savedMarkdown = String((input as { contentMarkdown: string }).contentMarkdown);
+        return success({
+          ...details,
+          view: {
+            ...details.view,
+            note: {
+              ...details.view.note,
+              version: 2,
+              contentMarkdown: savedMarkdown,
+            },
+          },
+        });
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+    await waitFor(() => expect(editor).toHaveValue("![img](attachment://att-1)"));
+
+    fireEvent.change(editor, {
+      target: { value: "![img](attachment://att-1)\n\nЧерновик до вложений" },
+    });
+    await waitFor(() => expect(updates).toBe(1), { timeout: 3000 });
+    expect(savedMarkdown).toContain("Черновик до вложений");
+    expect(savedMarkdown).toContain("attachment://att-1");
+
+    await act(async () => {
+      attachmentRequest.resolve(success({ attachment: { ...file, contentBase64: "aGVsbG8=" } }));
+    });
+
+    // Data URL применяется к уже сохранённому черновику и не стирает текст.
+    await waitFor(() => {
+      expect(editor).toHaveValue("![img](data:image/png;base64,aGVsbG8=)\n\nЧерновик до вложений");
+    });
+    expect(updates).toBe(1);
+    expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
+  });
+
+  it("не применяет вложения прошлой заметки после быстрого перехода", async () => {
+    const file = attachment("att-1", "note-1");
+    const first: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [file],
+    };
+    const second = makeDetails("note-2", "Без картинки", {
+      contentMarkdown: "Вторая страница",
+    });
+    const attachmentRequest = deferred<UiOperationResult>();
+    const invoke: UiOperationInvoker = async (operationId, input) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(first.view, second.view));
+      if (operationId === NOTES_QUERY_IDS.get) {
+        return success((input as { id: string }).id === "note-1" ? first : second);
+      }
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) return attachmentRequest.promise;
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: second.view });
+      return success({ items: [] });
+    };
+
+    const { container } = render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+    await waitFor(() => expect(editor).toHaveValue("![img](attachment://att-1)"));
+
+    const secondTreeItem = container.querySelector('[data-note-select="note-2"]');
+    expect(secondTreeItem).not.toBeNull();
+    fireEvent.click(secondTreeItem as HTMLElement);
+    await waitFor(() => expect(editor).toHaveValue("Вторая страница"));
+
+    await act(async () => {
+      attachmentRequest.resolve(success({ attachment: { ...file, contentBase64: "aGVsbG8=" } }));
+    });
+
+    // Старый ответ не подставляет data URL в открытую вторую страницу.
+    expect(editor).toHaveValue("Вторая страница");
+    expect(screen.getByTestId("note-title")).toHaveValue("Без картинки");
   });
 
   it("не удаляет вложение, если после сохранения черновик изменился (undo)", async () => {

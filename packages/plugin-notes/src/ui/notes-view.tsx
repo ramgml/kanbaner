@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Download,
   FileText,
@@ -70,6 +70,8 @@ const inputClass =
 const buttonClass =
   "inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 
+const EMPTY_ATTACHMENT_URLS: ReadonlyMap<string, string> = new Map();
+
 /** Предки заметки из плоского списка: от корня к родителю. */
 function ancestorsOf(note: Note, items: readonly NoteView[]): readonly Note[] {
   const byId = new Map(items.map((item) => [item.note.id, item.note] as const));
@@ -102,6 +104,9 @@ export function NotesView(props: NotesViewProps) {
   const [conflict, setConflict] = useState(false);
   const [title, setTitle] = useState("");
   const [editorValue, setEditorValue] = useState("");
+  const [canonicalContent, setCanonicalContent] = useState("");
+  const [attachmentUrls, setAttachmentUrls] =
+    useState<ReadonlyMap<string, string>>(EMPTY_ATTACHMENT_URLS);
   const [searchText, setSearchText] = useState("");
   const [searchResults, setSearchResults] = useState<NoteSearchPage | null>(null);
   const sidebarResizer = useNoteSidebarResizer();
@@ -309,6 +314,49 @@ export function NotesView(props: NotesViewProps) {
     }, 700);
   }, [saveNow]);
 
+  /**
+   * Догружает содержимое вложений после показа заметки.
+   *
+   * Заметка и Markdown отображаются сразу после `note.get`; data URL
+   * подставляются в готовое дерево блоков. Sequence и selectedId защищают
+   * быстрые переходы от применения вложений чужой страницы.
+   */
+  const loadAttachmentUrls = useCallback(
+    async (
+      id: string,
+      attachments: readonly NoteAttachmentDescriptor[],
+      sequence: number,
+    ): Promise<void> => {
+      if (attachments.length === 0) return;
+      try {
+        const loaded = await Promise.all(
+          attachments.map(async (attachment) => {
+            const result = await invokeNotes<{ attachment: NoteAttachment }>(
+              invoke,
+              NOTES_QUERY_IDS.attachmentGet,
+              { id: attachment.id },
+            );
+            return result.attachment;
+          }),
+        );
+        if (sequence !== loadSequenceRef.current || selectedIdRef.current !== id) return;
+
+        const cache = cacheRef.current;
+        for (const attachment of loaded) cache.add(attachment);
+        setAttachmentUrls(cache.toEditorUrls());
+      } catch (reason) {
+        if (sequence === loadSequenceRef.current && selectedIdRef.current === id) {
+          setError(
+            reason instanceof Error
+              ? `Не удалось загрузить вложения: ${reason.message}`
+              : "Не удалось загрузить вложения",
+          );
+        }
+      }
+    },
+    [invoke],
+  );
+
   const loadNote = useCallback(
     async (id: string, updateLocation = true) => {
       const sequence = ++loadSequenceRef.current;
@@ -319,26 +367,20 @@ export function NotesView(props: NotesViewProps) {
       setConflict(false);
       try {
         const next = await invokeNotes<NoteDetails>(invoke, NOTES_QUERY_IDS.get, { id });
-        const loadedAttachments = await Promise.all(
-          next.attachments.map(async (attachment) => {
-            const result = await invokeNotes<{ attachment: NoteAttachment }>(
-              invoke,
-              NOTES_QUERY_IDS.attachmentGet,
-              { id: attachment.id },
-            );
-            return result.attachment;
-          }),
-        );
         if (sequence !== loadSequenceRef.current) return;
 
-        // Ввод, начавшийся после старта get/attachmentGet, не затирается:
-        // для той же заметки сохраняем черновик, dirty и состояние сохранения.
+        // Ввод, начавшийся после старта get, не затирается: для той же заметки
+        // сохраняем черновик, dirty и состояние сохранения.
         const draftChanged = draftRevisionRef.current !== revisionAtStart;
         const keepDraft = sameNoteAtStart && draftChanged;
 
-        const cache = new AttachmentUrlCache();
-        for (const attachment of loadedAttachments) cache.add(attachment);
-        cacheRef.current = cache;
+        // Новая страница получает пустой cache: содержимое вложений приедет
+        // отдельно и не задержит первый рендер редактора. Для той же страницы
+        // cache сохраняется, иначе уже показанные data URL нельзя канонизировать.
+        if (!sameNoteAtStart) {
+          cacheRef.current = new AttachmentUrlCache();
+          setAttachmentUrls(EMPTY_ATTACHMENT_URLS);
+        }
         attachmentsRef.current = next.attachments;
         selectedIdRef.current = id;
         versionRef.current = next.view.note.version;
@@ -349,12 +391,17 @@ export function NotesView(props: NotesViewProps) {
           contentRef.current = next.view.note.contentMarkdown;
           dirtyRef.current = false;
           setTitle(next.view.note.title);
-          setEditorValue(cache.toEditor(next.view.note.contentMarkdown));
+          setCanonicalContent(next.view.note.contentMarkdown);
+          // Редактор парсит короткий canonical Markdown, а не мегабайтные
+          // data URL вложений; они подставляются после загрузки.
+          setEditorValue(next.view.note.contentMarkdown);
           setSaveState("idle");
         }
         setSearchResults(null);
         if (updateLocation) updateUrl(id);
         setSidebarOpen(false);
+        setLoading(false);
+        void loadAttachmentUrls(id, next.attachments, sequence);
         void invokeNotes(invoke, NOTES_COMMAND_IDS.recordVisit, { id })
           .then(() => refreshNotes())
           .catch(() => undefined);
@@ -367,7 +414,7 @@ export function NotesView(props: NotesViewProps) {
         if (sequence === loadSequenceRef.current) setLoading(false);
       }
     },
-    [invoke, refreshNotes, updateUrl],
+    [invoke, loadAttachmentUrls, refreshNotes, updateUrl],
   );
 
   useEffect(() => {
@@ -645,8 +692,10 @@ export function NotesView(props: NotesViewProps) {
   };
 
   const changeMarkdown = (value: string) => {
+    const canonical = cacheRef.current.toCanonical(value);
     setEditorValue(value);
-    contentRef.current = cacheRef.current.toCanonical(value);
+    contentRef.current = canonical;
+    setCanonicalContent(canonical);
     draftRevisionRef.current += 1;
     dirtyRef.current = true;
     setSaveState("dirty");
@@ -767,8 +816,13 @@ export function NotesView(props: NotesViewProps) {
     }
   };
 
-  const referencedAttachmentIds = new Set(
-    extractAttachmentIds(cacheRef.current.toCanonical(editorValue)),
+  /**
+   * Ссылки на вложения считаются по каноническому Markdown, а не по значению
+   * редактора с data URL. Иначе каждый рендер парсит мегабайтные вложения.
+   */
+  const referencedAttachmentIds = useMemo(
+    () => new Set(extractAttachmentIds(canonicalContent)),
+    [canonicalContent],
   );
 
   const visibleItems =
@@ -1134,6 +1188,7 @@ export function NotesView(props: NotesViewProps) {
                 value={editorValue}
                 onChange={changeMarkdown}
                 onUploadImage={uploadImage}
+                attachmentUrls={attachmentUrls}
                 readOnly={loading || busy}
                 ariaLabel="Содержимое заметки"
               />

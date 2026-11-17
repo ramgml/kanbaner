@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { deflateSync } from "node:zlib";
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -24,6 +25,66 @@ async function openNotes(page: Page): Promise<void> {
 
 const INLINE_IMAGE_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = (value & 1) === 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])));
+  return Buffer.concat([length, typeBuffer, data, checksum]);
+}
+
+/**
+ * Детерминированный PNG без внешних зависимостей.
+ *
+ * Шум почти не сжимается, поэтому 512×512 даёт вложение около 1 МБ в base64 —
+ * того же порядка, что реальные изображения, на которых проявлялась задержка
+ * переключения страниц.
+ */
+function largePng(width = 512, height = 512): Buffer {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const stride = width * 3 + 1;
+  const pixels = Buffer.alloc(stride * height);
+  let seed = 0x12345678;
+  for (let y = 0; y < height; y += 1) {
+    const row = y * stride;
+    pixels[row] = 0;
+    for (let x = 0; x < width * 3; x += 1) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      pixels[row + 1 + x] = seed & 0xff;
+    }
+  }
+  return Buffer.concat([
+    signature,
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+const LARGE_PNG = largePng();
 
 /**
  * Собирает console error/warning и pageerror. Проверка нужна для lifecycle
@@ -118,6 +179,24 @@ async function createInlineImageNote(
   await expect(editor).toContainText(suffix);
   await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
     timeout: 15_000,
+  });
+  return id;
+}
+
+/** Создаёт заметку с большим блоком-изображением и текстом, дожидаясь сохранения. */
+async function createLargeImageNote(page: Page, name: string, body: string): Promise<string> {
+  const id = await createNote(page, name, body);
+  await page.getByTestId("note-image-input").setInputFiles({
+    name: "large.png",
+    mimeType: "image/png",
+    buffer: LARGE_PNG,
+  });
+
+  const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+  await expect(editor.locator(".bn-visual-media")).toBeVisible({ timeout: 20_000 });
+  await expect(editor).toContainText(body);
+  await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+    timeout: 20_000,
   });
   return id;
 }
@@ -460,6 +539,136 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(finalEditor).not.toContainText("Промежуточная заметка");
 
     expectNoLifecycleSerializationMessages(consoleMessages);
+  });
+
+  test("показывает страницу с большим вложением до загрузки data URL и не помечает её изменённой", async ({
+    page,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const name = title("Большое вложение");
+    const body = "Текст до картинки и после неё";
+    const targetId = await createLargeImageNote(page, name, body);
+
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+    );
+    const blocksBefore = await editor.locator(".bn-block").count();
+    expect(blocksBefore).toBeGreaterThan(0);
+
+    const plainId = await createNote(page, title("Промежуточная без вложения"), "Другая страница");
+    await expect(page.getByTestId("note-title")).toHaveValue(/Промежуточная без вложения/u);
+
+    let releaseAttachments = (): void => undefined;
+    const attachmentGate = new Promise<void>((resolve) => {
+      releaseAttachments = resolve;
+    });
+    let heldAttachments = 0;
+    let updates = 0;
+    await page.route("**/view/notes**", async (route) => {
+      const body = route.request().postData() ?? "";
+      if (body.includes("kanbaner.notes.note.update")) updates += 1;
+      if (body.includes("kanbaner.notes.note.attachment.get")) {
+        heldAttachments += 1;
+        await attachmentGate;
+      }
+      await route.continue();
+    });
+
+    await page.locator(`[data-note-select='${targetId}']`).click();
+
+    // Заметка и текст видны, пока запросы вложений ещё удерживаются.
+    await expect(page.getByTestId("note-title")).toHaveValue(name, { timeout: 10_000 });
+    await expect(editor).toContainText(body);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
+    await expect.poll(() => heldAttachments).toBeGreaterThan(0);
+    expect(updates).toBe(0);
+
+    releaseAttachments();
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+      { timeout: 20_000 },
+    );
+
+    // Подстановка URL не меняет Markdown и не запускает autosave.
+    await expect(editor.locator(".bn-block")).toHaveCount(blocksBefore);
+    expect(updates).toBe(0);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
+
+    // Автоматическая подстановка не должна попадать в undo-историю.
+    await editor.click();
+    await page.keyboard.press("Control+z");
+    await expect(editor).toContainText(body);
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+    );
+    await page.unroute("**/view/notes**");
+    await expect(page).toHaveURL(new RegExp(`[?&]note=${targetId}(?:&|$)`));
+
+    // Повторное открытие после reload сохраняет все блоки и изображение.
+    await page.reload();
+    await expect(page.getByTestId("note-title")).toHaveValue(name);
+    await expect(editor).toContainText(body);
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+      { timeout: 20_000 },
+    );
+    await expect(editor.locator(".bn-block")).toHaveCount(blocksBefore);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
+
+    // Убеждаемся, что промежуточная страница не пострадала.
+    await page.locator(`[data-note-select='${plainId}']`).click();
+    await expect(page.getByTestId("note-title")).toHaveValue(/Промежуточная без вложения/u);
+  });
+
+  test("быстро переключает страницы с вложениями: побеждает последняя", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const name = title("Быстрое вложение");
+    const body = "Финальный текст с картинкой";
+    const targetId = await createLargeImageNote(page, name, body);
+    const plainId = await createNote(
+      page,
+      title("Промежуточная для перехода"),
+      "Промежуточный текст",
+    );
+    const initialId = await createNote(page, title("Стартовая без вложения"), "Стартовый текст");
+
+    await page.locator(`[data-note-select='${targetId}']`).click();
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+      { timeout: 20_000 },
+    );
+    await page.locator(`[data-note-select='${initialId}']`).click();
+    await expect(page.getByTestId("note-title")).toHaveValue(/Стартовая без вложения/u);
+
+    // Два перехода в одном task: старый ответ вложений не должен перетереть
+    // последнюю страницу или помешать её data URL появиться.
+    await page.evaluate(
+      ({ plain, target }) => {
+        document.querySelector<HTMLElement>(`[data-note-select='${plain}']`)?.click();
+        document.querySelector<HTMLElement>(`[data-note-select='${target}']`)?.click();
+      },
+      { plain: plainId, target: targetId },
+    );
+
+    await expect(page).toHaveURL(new RegExp(`[?&]note=${targetId}(?:&|$)`));
+    await expect(page.getByTestId("note-title")).toHaveValue(name);
+    await expect(editor).toContainText(body);
+    await expect(editor).not.toContainText("Промежуточный текст");
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+      { timeout: 20_000 },
+    );
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
   });
 
   test("создаёт вложенные страницы и перемещает их без drag-and-drop", async ({ page }) => {
