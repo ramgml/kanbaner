@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MarkdownNoteEditor, type MarkdownNoteEditorProps } from "./markdown-note-editor.tsx";
@@ -45,6 +45,10 @@ async function waitForReady(container: HTMLElement): Promise<HTMLElement> {
   const content = container.querySelector<HTMLElement>(".bn-editor");
   expect(content).not.toBeNull();
   return content as HTMLElement;
+}
+
+function consoleMessages(spy: { readonly mock: { readonly calls: readonly unknown[][] } }): string {
+  return spy.mock.calls.map((call) => call.map((part) => String(part)).join(" ")).join("\n");
 }
 
 interface TestBlockEditor {
@@ -594,5 +598,98 @@ describe("MarkdownNoteEditor: raw HTML", () => {
     await waitFor(() => {
       expect(lastMarkdown(onChange)).toContain("<script>window.__noteXss = true</script>");
     });
+  });
+});
+
+describe("MarkdownNoteEditor: lifecycle сериализации", () => {
+  const INLINE_IMAGE = "До ![Схема](attachment://img-1) после";
+
+  it("не вызывает flushSync из lifecycle при инициализации с inline image", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { container, onChange } = renderEditor({ value: INLINE_IMAGE });
+
+    const content = await waitForReady(container);
+
+    expect(content.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
+    expect(consoleMessages(consoleError)).not.toContain("flushSync");
+    expect(consoleMessages(consoleWarn)).not.toContain("renderHTML() failed");
+    expect(onChange).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("не сериализует inline image при lifecycle-смене editable", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { container, rerender, onChange } = renderEditor({ value: INLINE_IMAGE });
+    await waitForReady(container);
+
+    // BlockNoteView меняет editor.isEditable внутри своего эффекта, а setEditable
+    // эмитит change. Сериализация этого события не должна попадать в lifecycle.
+    rerender({ readOnly: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(consoleMessages(consoleError)).not.toContain("flushSync");
+    expect(consoleMessages(consoleWarn)).not.toContain("renderHTML() failed");
+    expect(onChange).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("не применяет старую инициализацию при быстрой смене noteId", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { container, rerender, onChange } = renderEditor({ value: "Первый документ" });
+    await waitForReady(container);
+
+    // Два разных noteId до ожидания готовности: применяется только последний,
+    // промежуточный и исходный документы не должны протечь в редактор.
+    rerender({ noteId: "note-2", value: "Второй документ" });
+    rerender({ noteId: "note-3", value: INLINE_IMAGE });
+
+    await waitFor(() => {
+      expect(container.querySelector(".bn-editor")).toHaveTextContent("До");
+      expect(container.querySelector(".bn-editor")).not.toHaveTextContent("Первый документ");
+      expect(container.querySelector(".bn-editor")).not.toHaveTextContent("Второй документ");
+    });
+    expect(container.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
+    expect(consoleMessages(consoleError)).not.toContain("flushSync");
+    expect(consoleMessages(consoleWarn)).not.toContain("renderHTML() failed");
+    expect(onChange).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("применяет последнее внешнее значение и не публикует устаревший документ", async () => {
+    const { container, rerender, onChange } = renderEditor({ value: "Исходный" });
+    await waitForReady(container);
+
+    rerender({ value: INLINE_IMAGE });
+    rerender({ value: "Финальный" });
+
+    await waitFor(() => {
+      const content = container.querySelector(".bn-editor");
+      expect(content).toHaveTextContent("Финальный");
+      expect(content).not.toHaveTextContent("Исходный");
+      expect(content).not.toHaveTextContent("Схема");
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("не публикует onChange при инициализации inline image", async () => {
+    const { container, onChange } = renderEditor({ value: INLINE_IMAGE });
+    await waitForReady(container);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
