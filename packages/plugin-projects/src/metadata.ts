@@ -126,6 +126,7 @@ export const projectsUiContributions: readonly UiContribution[] = Object.freeze(
     title: "Проекты",
     description: "Вход в рабочее пространство проектов",
     route: `${PROJECTS_OVERVIEW_ROUTE}?entry=1`,
+    icon: "folder-kanban",
   },
   {
     // Открытие ресурса чужого домена: shell добавляет к маршруту

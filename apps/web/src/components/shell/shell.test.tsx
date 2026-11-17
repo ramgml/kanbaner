@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppShell } from "../../components/shell/app-shell";
@@ -241,6 +241,94 @@ describe("адаптивный app shell", () => {
     expect(screen.getAllByRole("link", { name: "Тест UI" })).toHaveLength(2);
     expect(screen.getByTestId("test-ui-overlay")).toBeInTheDocument();
     expect(screen.getByText("Детали теста")).toBeInTheDocument();
+  });
+
+  it("показывает разные иконки плагинов на desktop и mobile с fallback Flag", () => {
+    renderShell(undefined, (registry) => {
+      registerUiPlugin(registry, {
+        id: "example.icons",
+        contributions: [
+          {
+            metadata: {
+              id: "example.icons.notes",
+              slot: "app.sidebar",
+              kind: "navigation",
+              priority: 40,
+              title: "Заметки",
+              route: "/view/notes-icons",
+              icon: "notebook-tabs",
+            },
+            render: () => null,
+          },
+          {
+            metadata: {
+              id: "example.icons.projects",
+              slot: "app.sidebar",
+              kind: "navigation",
+              priority: 30,
+              title: "Проекты",
+              route: "/view/projects-icons",
+              icon: "folder-kanban",
+            },
+            render: () => null,
+          },
+          {
+            metadata: {
+              id: "example.icons.no-icon",
+              slot: "app.sidebar",
+              kind: "navigation",
+              priority: 20,
+              title: "Без иконки",
+              route: "/view/no-icon",
+            },
+            render: () => null,
+          },
+          {
+            metadata: {
+              id: "example.icons.unknown",
+              slot: "app.sidebar",
+              kind: "navigation",
+              priority: 10,
+              title: "Неизвестная иконка",
+              route: "/view/unknown-icon",
+              icon: "not-a-lucide-icon",
+            },
+            render: () => null,
+          },
+        ],
+      });
+    });
+
+    const desktop = screen.getByTestId("desktop-sidebar");
+    const mobile = screen.getByTestId("mobile-navigation");
+
+    for (const container of [desktop, mobile]) {
+      expect(within(container).getByRole("link", { name: "Заметки" })).toBeInTheDocument();
+      expect(
+        within(container)
+          .getByRole("link", { name: "Заметки" })
+          .querySelector("svg")
+          ?.getAttribute("class"),
+      ).toContain("lucide-notebook-tabs");
+      expect(
+        within(container)
+          .getByRole("link", { name: "Проекты" })
+          .querySelector("svg")
+          ?.getAttribute("class"),
+      ).toContain("lucide-folder-kanban");
+      expect(
+        within(container)
+          .getByRole("link", { name: "Без иконки" })
+          .querySelector("svg")
+          ?.getAttribute("class"),
+      ).toContain("lucide-flag");
+      expect(
+        within(container)
+          .getByRole("link", { name: "Неизвестная иконка" })
+          .querySelector("svg")
+          ?.getAttribute("class"),
+      ).toContain("lucide-flag");
+    }
   });
 });
 

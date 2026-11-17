@@ -30,6 +30,7 @@ export const notesUiContributions: readonly UiContribution[] = Object.freeze([
     title: "Заметки",
     description: "Вход в рабочее пространство заметок",
     route: NOTES_ROUTE,
+    icon: "notebook-tabs",
   },
   {
     id: "kanbaner.notes.open",

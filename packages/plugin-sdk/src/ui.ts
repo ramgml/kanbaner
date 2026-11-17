@@ -66,6 +66,14 @@ export const UiContributionSchema = Type.Object(
     commandId: Type.Optional(OperationIdSchema),
     resourceType: Type.Optional(Type.String({ minLength: 1 })),
     /**
+     * Сериализуемый идентификатор иконки навигации.
+     *
+     * SDK не импортирует React или Lucide: shell сопоставляет строку со
+     * статическим allowlist компонентов. Неизвестное значение означает
+     * безопасный fallback, а не ошибку контракта.
+     */
+    icon: Type.Optional(Type.String({ minLength: 1 })),
+    /**
      * Плагин-владелец открываемого ресурса.
      *
      * Для `resource-opener` по умолчанию совпадает с владельцем вклада.

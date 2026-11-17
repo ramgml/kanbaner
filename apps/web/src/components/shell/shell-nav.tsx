@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-import { Blocks, Flag, Settings, ShieldAlert } from "lucide-react";
+import { Blocks, Settings, ShieldAlert } from "lucide-react";
 
 import { Badge } from "../ui/badge";
 import { Separator } from "../ui/separator";
@@ -12,6 +12,7 @@ import {
   SETTINGS_HREF,
   SETTINGS_PLUGINS_HREF,
   isActivePath,
+  resolvePluginNavIcon,
   type ShellNavItem,
 } from "./nav-items";
 import { UiSlot } from "./ui-slot";
@@ -34,7 +35,7 @@ function pluginNavItems(
     .map((contribution) => ({
       href: contribution.contribution.route as string,
       label: contribution.contribution.title ?? contribution.contribution.id,
-      icon: Flag,
+      icon: resolvePluginNavIcon(contribution.contribution.icon),
     }));
 }
 

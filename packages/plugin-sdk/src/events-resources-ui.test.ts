@@ -318,6 +318,31 @@ describe("UI-вклады", () => {
     ).toBe(true);
   });
 
+  it("принимает необязательный строковый icon навигации", () => {
+    const contribution: UiContribution = {
+      id: "acme.calendar.navigation",
+      slot: "app.sidebar",
+      kind: "navigation",
+      priority: 10,
+      title: "Календарь",
+      route: "/view/calendar",
+      icon: "notebook-tabs",
+    };
+
+    expect(validateUiContribution(contribution).ok).toBe(true);
+    expect(
+      validateUiContribution({
+        id: "acme.calendar.navigation",
+        slot: "app.sidebar",
+        kind: "navigation",
+        priority: 10,
+        title: "Календарь",
+        route: "/view/calendar",
+        icon: "",
+      }).ok,
+    ).toBe(false);
+  });
+
   it("отклоняет неизвестный kind и неверный slot", () => {
     expect(
       validateUiContribution({
