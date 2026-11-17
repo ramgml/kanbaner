@@ -1,7 +1,7 @@
 ---
 id: KAN-049
 title: Иконки навигации плагинов
-status: in_progress
+status: done
 stage: 1
 priority: medium
 owner: opencode-worker
@@ -27,10 +27,10 @@ Navigation-вклад может декларировать иконку чер�
 
 ## Объём работ
 
-- [ ] Добавить совместимое необязательное поле иконки в Plugin SDK и учесть его в registry.
-- [ ] Настроить отдельные Lucide-иконки для notes и projects.
-- [ ] Добавить unit-тесты metadata, registry и shell.
-- [ ] Обновить описание UI-контракта.
+- [x] Добавить совместимое необязательное поле иконки в Plugin SDK и учесть его в registry.
+- [x] Настроить отдельные Lucide-иконки для notes и projects.
+- [x] Добавить unit-тесты metadata, registry и shell.
+- [x] Обновить описание UI-контракта.
 
 ## Владение файлами
 
@@ -55,10 +55,10 @@ Navigation-вклад может декларировать иконку чер�
 
 ## Критерии приёмки
 
-- [ ] Заметки и проекты имеют разные иконки в desktop и mobile navigation.
-- [ ] Плагин без `icon` получает прежний fallback.
-- [ ] Изменение `icon` учитывается при синхронизации metadata.
-- [ ] Типы, линтер и тесты зелёные.
+- [x] Заметки и проекты имеют разные иконки в desktop и mobile navigation.
+- [x] Плагин без `icon` получает прежний fallback.
+- [x] Изменение `icon` учитывается при синхронизации metadata.
+- [x] Типы, линтер и тесты зелёные.
 
 ## Проверки
 
@@ -69,8 +69,9 @@ Navigation-вклад может декларировать иконку чер�
 ## Журнал
 
 - 2026-11-17 — Задача создана по запросу пользователя.
+- 2026-11-17 — Notes получил `notebook-tabs`, Projects — `folder-kanban`; SDK принимает необязательный `icon`, shell использует статический Map и fallback. Ревью выявило prototype lookup и рассинхрон whitespace-валидации; обе проблемы исправлены. Ветка влита в `dev`.
 
 ## Итог
 
-- Коммит:
-- Проверки:
+- Коммит: worker `5789cbd`, fix `c1da614`, merge `9b1b66f031055b9e55b5c0add4e6007bc4115e86`.
+- Проверки: `pnpm check` 1695 тестов и production build; shell E2E 4/4; browser smoke desktop/mobile. Push не выполнялся.
