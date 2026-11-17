@@ -111,6 +111,37 @@ describe("TaskSearch", () => {
     expect(input).toHaveValue("ab");
   });
 
+  it("принимает внешний q из popstate в фокусе и blur не возвращает старый draft", () => {
+    const onChange = vi.fn();
+    const view = render(<TaskSearch value="" onChange={onChange} />);
+    const input = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      input.focus();
+    });
+    fireEvent.change(input, { target: { value: "old-typed" } });
+
+    window.history.replaceState(null, "", "/view/tasks?project=p1&q=external");
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(input).toHaveValue("external");
+
+    view.rerender(<TaskSearch value="external" onChange={onChange} />);
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue("external");
+
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS * 2);
+    });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue("external");
+  });
+
   it("синхронизирует внешнее value, когда поле не в фокусе", () => {
     const onChange = vi.fn();
     const view = render(<TaskSearch value="release" onChange={onChange} />);

@@ -41,6 +41,7 @@ export function TaskSearch({
   const draftRef = useRef(value);
   const committedRef = useRef(value);
   const focusedRef = useRef(false);
+  const skipFlushOnBlurRef = useRef(false);
 
   const cancelTimer = useCallback((): void => {
     if (timerRef.current !== null) {
@@ -65,6 +66,38 @@ export function TaskSearch({
     cancelTimer();
     commit(draftRef.current);
   }, [cancelTimer, commit]);
+
+  /**
+   * Back/forward меняет только URL и не даёт inline-события blur. Пока поле в
+   * фокусе, обычный effect синхронизации намеренно молчит, поэтому внешний
+   * `q` читается из location напрямую. Следующий blur не должен вернуть
+   * прежний draft.
+   */
+  useEffect(() => {
+    const onPopState = (): void => {
+      cancelTimer();
+
+      const next = (new URLSearchParams(window.location.search).get("q") ?? "").slice(
+        0,
+        MAX_SEARCH_TEXT_LENGTH,
+      );
+
+      draftRef.current = next;
+      committedRef.current = next;
+
+      if (focusedRef.current) {
+        skipFlushOnBlurRef.current = true;
+      }
+
+      setDraft(next);
+    };
+
+    window.addEventListener("popstate", onPopState);
+
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+    };
+  }, [cancelTimer]);
 
   useEffect(() => {
     if (focusedRef.current) {
@@ -91,6 +124,7 @@ export function TaskSearch({
 
   const updateDraft = (next: string): void => {
     draftRef.current = next;
+    skipFlushOnBlurRef.current = false;
     setDraft(next);
     cancelTimer();
     timerRef.current = setTimeout(() => {
@@ -103,6 +137,7 @@ export function TaskSearch({
     cancelTimer();
     draftRef.current = "";
     committedRef.current = "";
+    skipFlushOnBlurRef.current = false;
     setDraft("");
     onChange("");
     inputRef.current?.focus();
@@ -130,9 +165,17 @@ export function TaskSearch({
           data-testid="task-search-input"
           onFocus={() => {
             focusedRef.current = true;
+            skipFlushOnBlurRef.current = false;
           }}
           onBlur={() => {
             focusedRef.current = false;
+
+            if (skipFlushOnBlurRef.current) {
+              skipFlushOnBlurRef.current = false;
+
+              return;
+            }
+
             flush();
           }}
           onChange={(event) => {
