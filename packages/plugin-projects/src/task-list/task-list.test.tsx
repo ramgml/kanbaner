@@ -203,6 +203,255 @@ describe("TaskListView", () => {
     expect(window.location.search).not.toContain("tag=");
   });
 
+  it("ищет по названию и описанию, комбинирует фильтры и сбрасывает страницу", async () => {
+    const docsTask: Task = {
+      ...task,
+      id: "task-2",
+      title: "Написать документацию",
+      descriptionMarkdown: "Инструкция по документации",
+      priority: "low",
+      tags: ["docs"],
+    };
+    const handlers = baseHandlers();
+
+    handlers["kanbaner.tasks.task.list"] = (input) => {
+      const values = (typeof input === "object" && input !== null ? input : {}) as Record<
+        string,
+        unknown
+      >;
+      const text = typeof values.text === "string" ? values.text.toLowerCase() : "";
+      const priority = typeof values.priority === "string" ? values.priority : "";
+      const items = [task, docsTask].filter(
+        (candidate) =>
+          (text.length === 0 ||
+            candidate.title.toLowerCase().includes(text) ||
+            candidate.descriptionMarkdown.toLowerCase().includes(text)) &&
+          (priority.length === 0 || candidate.priority === priority),
+      );
+
+      return ok({ items, total: items.length, nextOffset: null });
+    };
+
+    const operations = createOperations(handlers);
+
+    window.history.replaceState(null, "", "/view/tasks?project=project-1&page=2");
+    resetTaskListQueryForTests("?project=project-1&page=2");
+    render(<TaskListView invoke={operations.invoke} />);
+
+    await screen.findByTestId("task-row-task-1");
+    await screen.findByTestId("task-row-task-2");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: "РЕЛИЗ" } });
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("q=%D0%A0%D0%95%D0%9B%D0%98%D0%97");
+    });
+    await waitFor(() => {
+      const last = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(last?.input).toMatchObject({ text: "РЕЛИЗ", offset: 0 });
+    });
+
+    expect(screen.getByTestId("task-row-task-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("task-row-task-2")).toBeNull();
+    expect(window.location.search).not.toContain("page=");
+
+    // Поиск по descriptionMarkdown второй задачи.
+    fireEvent.change(search, { target: { value: "документац" } });
+
+    await waitFor(() => {
+      const last = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(last?.input).toMatchObject({ text: "документац" });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-row-task-1")).toBeNull();
+      expect(screen.getByTestId("task-row-task-2")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Приоритет" }), {
+      target: { value: "high" },
+    });
+
+    await waitFor(() => {
+      const last = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(last?.input).toMatchObject({ text: "документац", priority: "high" });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-row-task-1")).toBeNull();
+      expect(screen.queryByTestId("task-row-task-2")).toBeNull();
+    });
+    expect(screen.getByText("Задач пока нет")).toBeInTheDocument();
+
+    fireEvent.blur(search);
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
+
+    await waitFor(() => {
+      expect(window.location.search).not.toContain("q=");
+    });
+    expect(window.location.search).not.toContain("priority=");
+    expect(screen.getByRole("searchbox", { name: "Поиск задач" })).toHaveValue("");
+
+    await waitFor(() => {
+      const last = operations.calls
+        .filter((call) => call.operationId === "kanbaner.tasks.task.list")
+        .at(-1);
+
+      expect(last?.input).not.toHaveProperty("text");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("task-row-task-1")).toBeInTheDocument();
+      expect(screen.getByTestId("task-row-task-2")).toBeInTheDocument();
+    });
+  });
+
+  it("pending поиск фиксируется на blur до reset и очищается", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <TaskListView
+        invoke={operations.invoke}
+        search="?project=project-1"
+        replaceSearch={replaceSearch}
+      />,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+
+    // Browser: reset click сначала снимает фокус, затем выполняет onClick.
+    fireEvent.blur(search);
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&q=release");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1");
+    });
+    expect(search).toHaveValue("");
+  });
+
+  it("pending поиск фиксируется на blur до открытия задачи", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <TaskListView
+        invoke={operations.invoke}
+        search="?project=project-1"
+        replaceSearch={replaceSearch}
+      />,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+    fireEvent.blur(search);
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть задачу Подготовить релиз" }));
+
+    await waitFor(() => {
+      expect(getTaskListQuerySnapshot().taskId).toBe("task-1");
+    });
+    expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&q=release&task=task-1");
+  });
+
+  it("pending поиск попадает в ссылку переключения представлений после blur", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <>
+        <TaskListView
+          invoke={operations.invoke}
+          search="?project=project-1"
+          replaceSearch={replaceSearch}
+        />
+        <ProjectSidebar invoke={operations.invoke} />
+      </>,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+    fireEvent.blur(search);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+        "href",
+        "/view/kanban?project=project-1&q=release",
+      );
+    });
+  });
+
+  it("сохраняет q в ссылке переключателя Список/Канбан", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <>
+        <TaskListView
+          invoke={operations.invoke}
+          search="?project=project-1&q=release"
+          replaceSearch={replaceSearch}
+        />
+        <ProjectSidebar invoke={operations.invoke} />
+      </>,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+        "href",
+        "/view/kanban?project=project-1&q=release",
+      );
+    });
+
+    fireEvent.focus(screen.getByRole("searchbox", { name: "Поиск задач" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Поиск задач" }), {
+      target: { value: "backend" },
+    });
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&q=backend");
+    });
+    expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+      "href",
+      "/view/kanban?project=project-1&q=backend",
+    );
+  });
+
   it("делегирует создание проекта общему command и не держит форму в списке", async () => {
     const operations = createOperations(baseHandlers());
 

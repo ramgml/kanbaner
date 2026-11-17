@@ -124,6 +124,7 @@ const STATUS_LABELS = {
 interface TaskSeed {
   readonly projectTitle: string;
   readonly title: string;
+  readonly description?: string;
   readonly priority?: string;
   readonly status?: keyof typeof STATUS_LABELS;
   readonly dueAt?: string;
@@ -133,6 +134,7 @@ interface TaskSeed {
 
 function hasTaskExtras(seed: TaskSeed): boolean {
   return (
+    seed.description !== undefined ||
     seed.priority !== undefined ||
     (seed.status !== undefined && seed.status !== "todo") ||
     seed.dueAt !== undefined ||
@@ -164,6 +166,10 @@ async function editTaskDetails(page: Page, seed: TaskSeed): Promise<void> {
     await form
       .getByRole("combobox", { name: "Приоритет", exact: true })
       .selectOption(seed.priority);
+  }
+
+  if (seed.description !== undefined) {
+    await form.getByLabel("Описание (Markdown)", { exact: true }).fill(seed.description);
   }
 
   if (seed.dueAt !== undefined) {
@@ -1011,6 +1017,97 @@ test.describe("список задач в production shell", () => {
 
       await expect(page).toHaveURL(/\/view\/tasks\?[^#]*tag=release/u);
       await expect(filters.getByLabel("Тег", { exact: true })).toHaveValue("release");
+    });
+
+    test("ищет по названию и описанию, сохраняет q при переключении вида и сбрасывает фильтры", async ({
+      page,
+    }) => {
+      const projectTitle = uniqueTitle("Проект поиска списка");
+      const alphaTitle = `Alpha ${projectTitle}`;
+      const betaTitle = `Beta ${projectTitle}`;
+      const marker = uniqueTitle("секретный маркер");
+
+      await openTaskList(page);
+      await createProject(page, projectTitle);
+      const alphaId = await createTask(page, {
+        projectTitle,
+        title: alphaTitle,
+        priority: "high",
+        description: `Подробности: ${marker}`,
+      });
+
+      await closeDetails(page, "desktop");
+      const betaId = await createTask(page, {
+        projectTitle,
+        title: betaTitle,
+        priority: "low",
+      });
+
+      await closeDetails(page, "desktop");
+      await filterTaskListByProject(page, projectTitle);
+
+      const filters = page.getByTestId("task-filters");
+      const search = page.getByRole("searchbox", { name: "Поиск задач" });
+
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+      await expect(desktopRow(page, betaId)).toBeVisible();
+
+      // Регистронезависимый поиск по title.
+      await search.fill(alphaTitle.toLowerCase());
+      await expect(page).toHaveURL(/[?&]q=/u);
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+      await expect(desktopRow(page, betaId)).toHaveCount(0);
+      await expect(desktopRow(page, alphaId)).toContainText(alphaTitle);
+
+      // Поиск по descriptionMarkdown без учёта регистра.
+      await search.fill(marker.toLowerCase());
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+      await expect(desktopRow(page, betaId)).toHaveCount(0);
+
+      // Поиск комбинируется с приоритетом по AND.
+      await filters.getByRole("combobox", { name: "Приоритет", exact: true }).selectOption("low");
+      await expect(page).toHaveURL(/[?&]priority=low/u);
+      await expect(desktopRow(page, alphaId)).toHaveCount(0);
+      await expect(desktopRow(page, betaId)).toHaveCount(0);
+      await expect(page.getByText("Задач пока нет")).toBeVisible();
+
+      // Reset очищает и поиск, и остальные фильтры, но сохраняет проект.
+      await page.getByRole("button", { name: "Сбросить фильтры" }).click();
+      await expect(page).not.toHaveURL(/[?&]q=/u);
+      await expect(page).not.toHaveURL(/[?&]priority=/u);
+      await expect(page).toHaveURL(/[?&]project=/u);
+      await expect(search).toHaveValue("");
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+      await expect(desktopRow(page, betaId)).toBeVisible();
+
+      // q переживает переключение Список → Канбан: клик по ссылке сначала
+      // снимает фокус с поля, blur фиксирует pending draft, затем переход.
+      await search.fill(marker.toLowerCase());
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+
+      const projectId = new URL(page.url()).searchParams.get("project");
+
+      expect(projectId).not.toBeNull();
+
+      await page.getByTestId("project-view-kanban").click();
+      await expect(page).toHaveURL(/\/view\/kanban\?/u);
+      await expect(page).toHaveURL(new RegExp(`[?&]project=${projectId}`, "u"));
+      await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(marker.toLowerCase());
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+
+      // q переживает reload и возвращается в список без потери значения.
+      await page.reload();
+      await expect(page.getByTestId(`kanban-card-${alphaId}`)).toBeVisible();
+      await expect(page.getByTestId(`kanban-card-${betaId}`)).toHaveCount(0);
+
+      await page.getByTestId("project-view-list").click();
+      await expect(page).toHaveURL(/\/view\/tasks\?[^#]*q=/u);
+      await expect(page.getByRole("searchbox", { name: "Поиск задач" })).toHaveValue(
+        marker.toLowerCase(),
+      );
+      await expect(desktopRow(page, alphaId)).toBeVisible();
+      await expect(desktopRow(page, betaId)).toHaveCount(0);
     });
 
     test("синхронизирует native dialog с breakpoint mobile→desktop→mobile", async ({ page }) => {

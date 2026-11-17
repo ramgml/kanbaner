@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { MAX_SEARCH_TEXT_LENGTH } from "@kanbaner/plugin-tasks/contract";
 import type { SortDirection, TaskSortField } from "@kanbaner/plugin-tasks/contract";
 
 import { parseWorkspaceResource } from "../ui/resource-query.ts";
@@ -21,6 +22,8 @@ export interface TaskListQueryState {
   readonly legacyStatus: string;
   readonly priority: string;
   readonly tag: string;
+  /** Поиск по названию и описанию; хранится в URL как `q`. */
+  readonly q: string;
   readonly dueAfter: string;
   readonly dueBefore: string;
   readonly sortField: TaskListSortField;
@@ -40,6 +43,7 @@ export const DEFAULT_TASK_LIST_QUERY: TaskListQueryState = Object.freeze({
   legacyStatus: "",
   priority: "",
   tag: "",
+  q: "",
   dueAfter: "",
   dueBefore: "",
   sortField: "position",
@@ -78,6 +82,11 @@ function first(params: URLSearchParams, key: string): string {
   return params.get(key)?.trim() ?? "";
 }
 
+/** Поиск не trim-ится: пробел посреди ввода не должен «откатывать» поле. */
+function searchText(params: URLSearchParams): string {
+  return (params.get("q") ?? "").slice(0, MAX_SEARCH_TEXT_LENGTH);
+}
+
 /** Читает состояние списка из query string. */
 export function parseTaskListQuery(search: string): TaskListQueryState {
   const params = new URLSearchParams(search);
@@ -93,6 +102,7 @@ export function parseTaskListQuery(search: string): TaskListQueryState {
     legacyStatus: first(params, "status"),
     priority: first(params, "priority"),
     tag: first(params, "tag"),
+    q: searchText(params),
     dueAfter: first(params, "dueAfter"),
     dueBefore: first(params, "dueBefore"),
     sortField: isSortField(sort) ? sort : "position",
@@ -123,6 +133,10 @@ function toSearchParams(state: TaskListQueryState): URLSearchParams {
 
   if (state.tag.length > 0) {
     params.set("tag", state.tag);
+  }
+
+  if (state.q.length > 0) {
+    params.set("q", state.q);
   }
 
   if (state.dueAfter.length > 0) {
@@ -219,7 +233,13 @@ export function updateTaskListQuery(
   patch: Partial<Omit<TaskListQueryState, "revision">>,
   options: { readonly mode?: "replace" | "push" } = {},
 ): void {
-  const next: TaskListQueryState = { ...current, ...patch, revision: current.revision };
+  // Любое изменение поиска возвращает на первую страницу: offset старой
+  // страницы мог бы оказаться за пределами нового результата.
+  const withPage =
+    patch.q !== undefined && patch.q !== current.q && patch.page === undefined
+      ? { ...patch, page: 1 }
+      : patch;
+  const next: TaskListQueryState = { ...current, ...withPage, revision: current.revision };
 
   current = next;
   writeUrl(next, options.mode ?? "replace");
@@ -242,6 +262,7 @@ export function resetTaskListFilters(): void {
     legacyStatus: "",
     priority: "",
     tag: "",
+    q: "",
     dueAfter: "",
     dueBefore: "",
     page: 1,

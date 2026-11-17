@@ -28,6 +28,7 @@ import { defaultCreateColumnId } from "../ui/board-state.ts";
 import { fetchProjectColumns } from "../ui/load-columns.ts";
 import { invokeJson, errorMessage } from "../ui/operations.ts";
 import { ProjectHeader } from "../ui/project-header.tsx";
+import { TaskSearch } from "../ui/task-search.tsx";
 import { TitleComposer, type TitleCreateResult } from "../ui/title-composer.tsx";
 import { useProjectSummary } from "../ui/use-project-summary.ts";
 import { useProjectsData } from "../ui/use-projects.ts";
@@ -60,6 +61,7 @@ const secondaryButton =
 function buildTaskListInput(query: ReturnType<typeof useTaskListQuery>): TaskListInput {
   const dueAfter = dateInputToDueAt(query.dueAfter, "start");
   const dueBefore = dateInputToDueAt(query.dueBefore, "end");
+  const text = query.q.trim();
 
   return {
     ...(query.projectId.length === 0 ? {} : { projectId: query.projectId }),
@@ -67,6 +69,7 @@ function buildTaskListInput(query: ReturnType<typeof useTaskListQuery>): TaskLis
     ...(query.legacyStatus.length === 0 ? {} : { status: query.legacyStatus as Task["status"] }),
     ...(query.priority.length === 0 ? {} : { priority: query.priority as Task["priority"] }),
     ...(query.tag.length === 0 ? {} : { tag: query.tag }),
+    ...(text.length === 0 ? {} : { text }),
     ...(dueAfter === null ? {} : { dueAfter }),
     ...(dueBefore === null ? {} : { dueBefore }),
     sort: { field: query.sortField, direction: query.sortDirection },
@@ -166,6 +169,7 @@ export function TaskListView({
     query.legacyStatus,
     query.priority,
     query.tag,
+    query.q,
     query.dueAfter,
     query.dueBefore,
     query.sortField,
@@ -408,6 +412,20 @@ export function TaskListView({
           />
         </section>
       ) : null}
+
+      <section
+        aria-label="Поиск задач"
+        data-testid="task-search"
+        className="rounded-lg border bg-card p-3"
+      >
+        <TaskSearch
+          value={query.q}
+          onChange={(q) => {
+            updateTaskListQuery({ q, page: 1 });
+          }}
+          className="max-w-md"
+        />
+      </section>
 
       <TaskFilters
         projects={projects}
