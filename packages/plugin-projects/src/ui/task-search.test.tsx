@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskSearch } from "./task-search.tsx";
@@ -21,7 +21,6 @@ import {
 } from "../task-list/query-state.ts";
 
 beforeEach(() => {
-  vi.useFakeTimers();
   window.history.replaceState(null, "", "/view/tasks");
   resetTaskListQueryForTests("");
   resetKanbanQueryForTests("");
@@ -29,7 +28,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  vi.useRealTimers();
 });
 
 describe("TaskSearch", () => {
@@ -44,115 +42,55 @@ describe("TaskSearch", () => {
     expect(container.querySelector("svg")).not.toBeNull();
   });
 
-  it("дебаунсит быстрый ввод и отправляет последнее значение", () => {
-    const onChange = vi.fn();
-
-    render(<TaskSearch value="" onChange={onChange} />);
-
-    const input = screen.getByRole("searchbox", { name: "Поиск задач" });
-
-    fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: "a" } });
-    fireEvent.change(input, { target: { value: "ab" } });
-    fireEvent.change(input, { target: { value: "abc" } });
-
-    expect(input).toHaveValue("abc");
-    expect(onChange).not.toHaveBeenCalled();
-
-    act(() => {
-      vi.advanceTimersByTime(274);
-    });
-    expect(onChange).not.toHaveBeenCalled();
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenLastCalledWith("abc");
-  });
-
-  it("не откатывает ввод устаревшей query string", () => {
+  it("немедленно вызывает onChange на каждый ввод без локального черновика", () => {
     const onChange = vi.fn();
     const view = render(<TaskSearch value="" onChange={onChange} />);
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
 
-    act(() => {
-      input.focus();
-    });
+    fireEvent.change(input, { target: { value: "a" } });
+    fireEvent.change(input, { target: { value: "ab" } });
     fireEvent.change(input, { target: { value: "abc" } });
 
-    // Router ещё не догнал ввод: старое значение не должно заменить черновик.
-    view.rerender(<TaskSearch value="ab" onChange={onChange} />);
-    expect(input).toHaveValue("abc");
+    expect(onChange).toHaveBeenNthCalledWith(1, "a");
+    expect(onChange).toHaveBeenNthCalledWith(2, "ab");
+    expect(onChange).toHaveBeenNthCalledWith(3, "abc");
+    expect(onChange).toHaveBeenCalledTimes(3);
 
-    act(() => {
-      vi.advanceTimersByTime(275);
-    });
-    expect(onChange).toHaveBeenLastCalledWith("abc");
+    // Controlled: до обновления value поле показывает прежнее значение.
+    expect(input).toHaveValue("");
 
     view.rerender(<TaskSearch value="abc" onChange={onChange} />);
     expect(input).toHaveValue("abc");
-
-    // Запоздалое эхо-значение — префикс свежего ввода — тоже игнорируется.
-    view.rerender(<TaskSearch value="a" onChange={onChange} />);
-    expect(input).toHaveValue("abc");
   });
 
-  it("принимает внешний сброс и отменяет незавершённый debounce", () => {
+  it("следует за внешним reset и навигацией без отката ввода", () => {
     const onChange = vi.fn();
     const view = render(<TaskSearch value="release" onChange={onChange} />);
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
 
-    fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: "release notes" } });
-
     view.rerender(<TaskSearch value="" onChange={onChange} />);
-
     expect(input).toHaveValue("");
 
-    act(() => {
-      vi.advanceTimersByTime(500);
-    });
+    view.rerender(<TaskSearch value="release notes" onChange={onChange} />);
+    expect(input).toHaveValue("release notes");
+
+    view.rerender(<TaskSearch value="backend" onChange={onChange} />);
+    expect(input).toHaveValue("backend");
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("очищает поиск кнопкой и отменяет ожидающий таймер", () => {
+  it("очищает поиск кнопкой и возвращает фокус в поле", () => {
     const onChange = vi.fn();
 
     render(<TaskSearch value="release" onChange={onChange} />);
 
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
 
-    fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: "release notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Очистить поиск задач" }));
 
-    expect(input).toHaveValue("");
+    expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenLastCalledWith("");
-    expect(onChange).toHaveBeenCalledTimes(1);
-
-    act(() => {
-      vi.advanceTimersByTime(500);
-    });
-    expect(onChange).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
-  });
-
-  it("снимает таймер при unmount", () => {
-    const onChange = vi.fn();
-    const view = render(<TaskSearch value="" onChange={onChange} />);
-
-    fireEvent.focus(screen.getByRole("searchbox", { name: "Поиск задач" }));
-    fireEvent.change(screen.getByRole("searchbox", { name: "Поиск задач" }), {
-      target: { value: "abc" },
-    });
-
-    view.unmount();
-
-    act(() => {
-      vi.advanceTimersByTime(500);
-    });
-    expect(onChange).not.toHaveBeenCalled();
   });
 });
 

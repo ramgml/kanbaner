@@ -1359,6 +1359,124 @@ describe("KanbanView", () => {
     expect(cardTitles("backlog")).toEqual(["T00", "T01"]);
   });
 
+  it("блокирует loadMore до первой страницы filterKey и не применяет stale cursor", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: Array.from({ length: 30 }, (_, index) => {
+        const group = index < 15 ? "Match" : "Other";
+        const number = String(index % 15).padStart(2, "0");
+
+        return makeTask(`${group.toLowerCase()}-${number}`, {
+          title: `${group} ${number}`,
+          status: "backlog",
+          position: index,
+        });
+      }),
+    };
+    const matchFirstPage = deferred<UiOperationResult>();
+    const staleMatchPage = deferred<UiOperationResult>();
+    const operations = createOperations(board, {
+      "kanbaner.tasks.task.list": (input) => {
+        const values = inputOf(input);
+
+        if (values.parentTaskId !== undefined) {
+          return listTasks(board, input);
+        }
+
+        if (values.text === "Match" && values.offset === 0) {
+          return matchFirstPage.promise;
+        }
+
+        if (values.text === "Match" && values.offset === 10) {
+          return staleMatchPage.promise;
+        }
+
+        return listTasks(board, input);
+      },
+    });
+    const matchTasks = board.tasks.filter((task) => task.title.startsWith("Match"));
+    const otherTasks = board.tasks.filter((task) => task.title.startsWith("Other"));
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-match-00");
+    expect(screen.getByTestId("kanban-load-more-backlog")).toBeVisible();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Поиск задач" }), {
+      target: { value: "Match" },
+    });
+
+    // Первая страница нового filterKey ещё не применена: старый nextOffset
+    // не должен открывать loadMore.
+    await waitFor(() => {
+      expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+    });
+
+    await act(async () => {
+      matchFirstPage.resolve(
+        ok({
+          items: matchTasks.slice(0, 10),
+          total: matchTasks.length,
+          nextOffset: 10,
+        }),
+      );
+      await matchFirstPage.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("15");
+    });
+    expect(screen.getByTestId("kanban-load-more-backlog")).toBeVisible();
+
+    // Стартует loadMore со свежим курсором первой страницы и сразу устаревает:
+    // фильтр меняется до ответа. Ответ не должен ни дописаться, ни сдвинуть
+    // nextOffset новой страницы.
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(
+        operations.calls.some((call) => {
+          const values = inputOf(call.input);
+
+          return values.text === "Match" && values.offset === 10;
+        }),
+      ).toBe(true);
+    });
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Поиск задач" }), {
+      target: { value: "Other" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-count-backlog")).toHaveTextContent("15");
+      expect(screen.getByTestId("kanban-card-other-00")).toBeVisible();
+    });
+    expect(cardTitles("backlog")).toEqual(otherTasks.slice(0, 10).map((task) => task.title));
+
+    await act(async () => {
+      staleMatchPage.resolve(
+        ok({
+          items: matchTasks.slice(10, 15),
+          total: matchTasks.length,
+          nextOffset: null,
+        }),
+      );
+      await staleMatchPage.promise;
+    });
+
+    expect(cardTitles("backlog")).toEqual(otherTasks.slice(0, 10).map((task) => task.title));
+    expect(screen.getByTestId("kanban-load-more-backlog")).toBeVisible();
+
+    // Следующая страница нового фильтра начинается с его курсора: без
+    // пропусков и без повторного использования stale offset.
+    fireEvent.click(screen.getByTestId("kanban-load-more-backlog"));
+
+    await waitFor(() => {
+      expect(cardTitles("backlog")).toEqual(otherTasks.map((task) => task.title));
+    });
+    expect(screen.queryByTestId("kanban-load-more-backlog")).toBeNull();
+  });
+
   it("после смены фильтра во время move перечитывает колонку актуальным фильтром", async () => {
     const board: FakeBoard = {
       projects: [project],

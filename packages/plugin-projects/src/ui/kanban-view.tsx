@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { Plus, RotateCcw, Trash2, X } from "lucide-react";
@@ -297,6 +297,21 @@ export function KanbanView({
     loading: summaryLoading,
     error: summaryError,
   } = useProjectSummary(invoke, effectiveProjectId, query.revision);
+
+  /** Ключ фильтра текущего рендера: loadMore не должен ждать passive effect. */
+  const renderFilterKey = filterKeyFor(effectiveProjectId, query.tag, query.q);
+  const committedFilterKeyRef = useRef(renderFilterKey);
+  const [firstPageState, setFirstPageState] = useState<{
+    readonly filterKey: string;
+    readonly columns: ReadonlySet<string>;
+  }>(() => ({ filterKey: "", columns: new Set() }));
+
+  // Layout effect закрывает промежуток между сменой query и passive reload:
+  // ответ устаревшего loadMore, пришедший в этом промежутке, уже видит новый
+  // filterKey и не применяется.
+  useLayoutEffect(() => {
+    committedFilterKeyRef.current = renderFilterKey;
+  }, [renderFilterKey]);
 
   // Последний/единственный проект выбирается без отдельного экрана; несколько
   // проектов без сохранённого выбора требуют явного выбора в sidebar.
@@ -716,6 +731,7 @@ export function KanbanView({
       const filters = filtersRef.current;
 
       if (filters.projectId.length === 0) {
+        setFirstPageState({ filterKey: "", columns: new Set() });
         setColumns(createEmptyColumns());
         setLoadedProjectId("");
 
@@ -729,6 +745,9 @@ export function KanbanView({
       );
 
       reloadSequenceRef.current = sequence;
+      // До применения первой страницы текущего filterKey loadMore запрещён:
+      // старый nextOffset относится к прежним фильтрам и данным.
+      setFirstPageState({ filterKey, columns: new Set() });
 
       let projectColumns: readonly TaskColumn[];
 
@@ -927,6 +946,12 @@ export function KanbanView({
           }
         }
       }
+
+      const appliedFirstPage = new Set(
+        results.filter((result) => result.page !== null).map((result) => result.columnId),
+      );
+
+      setFirstPageState({ filterKey, columns: appliedFirstPage });
 
       setColumns((current) => {
         if (reloadSequenceRef.current !== sequence || filterKeyRef.current !== filterKey) {
@@ -1913,6 +1938,12 @@ export function KanbanView({
       return;
     }
 
+    // Первая страница текущего filterKey ещё не применена: nextOffset в
+    // колонке относится к прежним фильтрам или прежней ревизии данных.
+    if (firstPageState.filterKey !== renderFilterKey || !firstPageState.columns.has(columnId)) {
+      return;
+    }
+
     const current = getColumn(boardColumns, columnId);
 
     if (current === null) {
@@ -1926,8 +1957,8 @@ export function KanbanView({
     }
 
     const generation = reloadSequenceRef.current;
-    const filterKey = filterKeyRef.current;
-    const filters = filtersRef.current;
+    const filterKey = renderFilterKey;
+    const filters = { projectId: effectiveProjectId, tag: query.tag, q: query.q };
     const request = (loadMoreSequenceRef.current[columnId] ?? 0) + 1;
 
     loadMoreSequenceRef.current = {
@@ -1969,7 +2000,8 @@ export function KanbanView({
         const isCurrent = (): boolean =>
           reloadSequenceRef.current === generation &&
           (loadMoreSequenceRef.current[columnId] ?? 0) === request &&
-          filterKeyRef.current === filterKey;
+          filterKeyRef.current === filterKey &&
+          committedFilterKeyRef.current === filterKey;
 
         if (!isCurrent()) {
           return;
@@ -2020,7 +2052,8 @@ export function KanbanView({
         if (
           reloadSequenceRef.current !== generation ||
           (loadMoreSequenceRef.current[columnId] ?? 0) !== request ||
-          filterKeyRef.current !== filterKey
+          filterKeyRef.current !== filterKey ||
+          committedFilterKeyRef.current !== filterKey
         ) {
           return;
         }
@@ -3425,7 +3458,11 @@ export function KanbanView({
                     total={columnData.total}
                     loading={columnData.loading}
                     error={columnData.error}
-                    hasMore={columnData.nextOffset !== null}
+                    hasMore={
+                      columnData.nextOffset !== null &&
+                      firstPageState.filterKey === renderFilterKey &&
+                      firstPageState.columns.has(column.id)
+                    }
                     dragOver={
                       dropActive ||
                       (columnDragOver?.columnId === column.id && columnDraggingId !== null)
