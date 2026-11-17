@@ -3,7 +3,11 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MarkdownNoteEditor, type MarkdownNoteEditorProps } from "./markdown-note-editor.tsx";
+import {
+  buildSlashMenuItems,
+  MarkdownNoteEditor,
+  type MarkdownNoteEditorProps,
+} from "./markdown-note-editor.tsx";
 
 const DEFAULT_NOTE_ID = "note-1";
 const DEFAULT_VALUE = "Привет";
@@ -219,6 +223,30 @@ describe("MarkdownNoteEditor: readOnly и disabled", () => {
     );
     expect(content).toHaveAttribute("aria-disabled", "true");
     expect(content).toHaveAttribute("contenteditable", "false");
+  });
+});
+
+describe("MarkdownNoteEditor: slash-меню изображения", () => {
+  it("заменяет только пункт image на открытие picker", () => {
+    const onPickImage = vi.fn();
+    const paragraphClick = vi.fn();
+    const imageClick = vi.fn();
+    const videoClick = vi.fn();
+    const items = [
+      { key: "paragraph", title: "Параграф", onItemClick: paragraphClick },
+      { key: "image", title: "Картинка", onItemClick: imageClick },
+      { key: "video", title: "Видео", onItemClick: videoClick },
+    ];
+
+    const result = buildSlashMenuItems(items, onPickImage);
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toBe(items[0]);
+    expect(result[2]).toBe(items[2]);
+    expect(result[1]?.onItemClick).toBe(onPickImage);
+    result[1]?.onItemClick();
+    expect(onPickImage).toHaveBeenCalledTimes(1);
+    expect(imageClick).not.toHaveBeenCalled();
   });
 });
 

@@ -364,6 +364,74 @@ test.describe("kanbaner.notes в production shell", () => {
     expect(markdown).not.toContain("attachment://");
   });
 
+  test("сохраняет изображение, выбранное из slash-меню", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Заметка с picker"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.click();
+    await page.keyboard.type("/");
+    const imageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(imageOption).toBeVisible();
+
+    // Пункт меню должен открыть настоящий файловый picker, а не создать
+    // пустой image-блок с отдельной панелью загрузки.
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await imageOption.click();
+    const fileChooser = await fileChooserPromise;
+    expect(fileChooser.isMultiple()).toBe(false);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    await fileChooser.setFiles({
+      name: "pixel.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+
+    await expect(editor.locator("img:not(.ProseMirror-separator)")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("note-save-state")).toContainText(/Есть изменения|Сохраняем/);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+
+    await page.reload();
+    await expect(
+      page
+        .getByRole("textbox", { name: "Содержимое заметки" })
+        .locator("img:not(.ProseMirror-separator)"),
+    ).toHaveAttribute("src", /^data:image\/png;base64,/);
+  });
+
+  test("не создаёт пустой image при отмене picker из меню «+»", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Отмена picker"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.locator(".bn-block-outer").first().hover();
+    await page.getByRole("button", { name: "Добавить блок" }).click();
+    const imageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(imageOption).toBeVisible();
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await imageOption.click();
+    const fileChooser = await fileChooserPromise;
+    // Пустой выбор соответствует закрытию системного picker без файла.
+    await fileChooser.setFiles([]);
+
+    await expect(editor.locator("[data-content-type='image']")).toHaveCount(0);
+    await expect(editor.locator("img:not(.ProseMirror-separator)")).toHaveCount(0);
+    await expect(editor.locator("[data-content-type='paragraph']")).toHaveCount(1);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+  });
+
   test("показывает slash-меню, side menu и formatting toolbar", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     await openNotes(page);
