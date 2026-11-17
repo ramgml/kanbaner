@@ -22,6 +22,66 @@ async function openNotes(page: Page): Promise<void> {
   await expect(page.getByTestId("notes-view")).toBeVisible();
 }
 
+const INLINE_IMAGE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+/**
+ * Собирает console error/warning и pageerror. Проверка нужна для lifecycle
+ * BlockNote: сериализация React inline content внутри useEffect раньше давала
+ * flushSync error и warning «ReactInlineContentSpec: renderHTML() failed».
+ */
+function trackPageConsole(page: Page): string[] {
+  const messages: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error" || message.type() === "warning") {
+      messages.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => messages.push(`pageerror: ${error.message}`));
+  return messages;
+}
+
+function expectNoLifecycleSerializationMessages(messages: readonly string[]): void {
+  const serializationMessages = messages.filter((message) =>
+    /flushSync|ReactInlineContentSpec/iu.test(message),
+  );
+  expect(serializationMessages).toEqual([]);
+}
+
+/**
+ * Вставляет inline image (image внутри strong) настоящим HTML-paste.
+ *
+ * Используется BlockNote-обёртка `data-inline-content-type`: сырой `<img>` в
+ * external HTML BlockNote не парсит в inline content. `imageUrl` — data URL
+ * уже загруженного через UI вложения, который notes-view конвертирует обратно
+ * в канонический `attachment://` при сохранении.
+ */
+async function pasteInlineImage(
+  page: Page,
+  imageUrl: string,
+  prefix: string,
+  suffix: string,
+): Promise<void> {
+  await page.evaluate(
+    ({ url, before, after }) => {
+      const target = document.querySelector<HTMLElement>(
+        "[role='textbox'][aria-label='Содержимое заметки']",
+      );
+      if (target === null) throw new Error("Редактор заметки не найден");
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData(
+        "text/html",
+        `<p>${before} <strong><span data-inline-content-type="inlineImage" data-url="${url}" data-name="схема"></span></strong> ${after}</p>`,
+      );
+      dataTransfer.setData("text/plain", `${before} ${after}`);
+      const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: dataTransfer });
+      target.dispatchEvent(event);
+    },
+    { url: imageUrl, before: prefix, after: suffix },
+  );
+}
+
 async function createNote(page: Page, name: string, body = "Содержимое заметки"): Promise<string> {
   const empty = page.getByTestId("note-create-empty");
   if (await empty.isVisible()) await empty.click();
@@ -296,6 +356,82 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect.poll(opacity).toBe("0");
     await page.locator(`[data-note-delete='${id}']`).focus();
     await expect.poll(opacity).toBe("1");
+  });
+
+  test("не сериализует BlockNote в lifecycle и быстро переключает заметки с inline image", async ({
+    page,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    const consoleMessages = trackPageConsole(page);
+    await openNotes(page);
+
+    const inlineId = await createNote(page, title("Inline image"), "");
+
+    // Сначала загружаем настоящее вложение через UI: сервер принимает только
+    // attachment:// и HTTP(S) URL, data: URL в Markdown отклоняется.
+    await page.getByTestId("note-image-input").setInputFiles({
+      name: "pixel.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(INLINE_IMAGE_BASE64, "base64"),
+    });
+
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    const blockImage = editor.locator("img:not(.ProseMirror-separator)").first();
+    await expect(blockImage).toBeVisible({ timeout: 15_000 });
+    const uploadedImageUrl = await blockImage.getAttribute("src");
+    expect(uploadedImageUrl).toMatch(/^data:image\/png;base64,/u);
+    if (uploadedImageUrl === null) throw new Error("У загруженного изображения нет src");
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+    expectNoLifecycleSerializationMessages(consoleMessages);
+
+    // Вставляем inline image, ссылающийся на то же вложение через data URL из
+    // cache: при сохранении notes-view вернёт канонический attachment://.
+    await pasteInlineImage(page, uploadedImageUrl, "До", "после");
+
+    const inlineImage = editor.locator("[data-inline-content-type='inlineImage'] img");
+    await expect(inlineImage).toBeVisible();
+    await expect(editor).toContainText("До");
+    await expect(editor).toContainText("после");
+    expectNoLifecycleSerializationMessages(consoleMessages);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+    expectNoLifecycleSerializationMessages(consoleMessages);
+
+    // Повторное открытие запускает initial useEffect с inline image: именно
+    // этот путь раньше сериализовал документ внутри React lifecycle.
+    await page.reload();
+    const reloadedEditor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    await expect(
+      reloadedEditor.locator("[data-inline-content-type='inlineImage'] img"),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(reloadedEditor).toContainText("До");
+    await expect(reloadedEditor).toContainText("после");
+    expectNoLifecycleSerializationMessages(consoleMessages);
+
+    const plainId = await createNote(page, title("Без inline image"), "Вторая заметка");
+
+    // Оба перехода запускаются в одном task: старая инициализация должна быть
+    // отменена, а не примениться поверх выбранной заметки.
+    await page.evaluate(
+      ({ first, second }) => {
+        document.querySelector<HTMLElement>(`[data-note-select='${second}']`)?.click();
+        document.querySelector<HTMLElement>(`[data-note-select='${first}']`)?.click();
+      },
+      { first: inlineId, second: plainId },
+    );
+
+    await expect(page).toHaveURL(new RegExp(`[?&]note=${inlineId}(?:&|$)`));
+    const finalEditor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    await expect(page.locator(".kanbaner-note-editor")).toHaveAttribute("data-note-id", inlineId);
+    await expect(page.locator(".kanbaner-note-editor")).toHaveAttribute("data-ready", "true");
+    await expect(finalEditor.locator("[data-inline-content-type='inlineImage'] img")).toBeVisible();
+    await expect(finalEditor).toContainText("До");
+    await expect(finalEditor).not.toContainText("Вторая заметка");
+
+    expectNoLifecycleSerializationMessages(consoleMessages);
   });
 
   test("создаёт вложенные страницы и перемещает их без drag-and-drop", async ({ page }) => {
