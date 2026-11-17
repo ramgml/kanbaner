@@ -47,6 +47,86 @@ async function waitForReady(container: HTMLElement): Promise<HTMLElement> {
   return content as HTMLElement;
 }
 
+interface TestBlockEditor {
+  readonly document: ReadonlyArray<{ readonly id: string }>;
+  readonly updateBlock: (
+    block: { readonly id: string },
+    update: { readonly type: string; readonly props?: Record<string, unknown> },
+  ) => { readonly id: string };
+  readonly setTextCursorPosition: (
+    block: { readonly id: string },
+    placement: "start" | "end",
+  ) => void;
+  readonly getExtension: (key: string) =>
+    | {
+        readonly openSuggestionMenu: (
+          trigger: string,
+          options?: { readonly deleteTriggerCharacter?: boolean },
+        ) => void;
+      }
+    | undefined;
+}
+
+/**
+ * BlockNote не отдаёт экземпляр редактора наружу, а в unit-тесте нужен
+ * публичный API suggestion menu. Достаём editor из props BlockNoteView через
+ * React fiber контейнера.
+ */
+function blockEditorFor(content: HTMLElement): TestBlockEditor {
+  const fiberKey = Object.keys(content).find((key) => key.startsWith("__reactFiber"));
+  let fiber = (
+    fiberKey === undefined ? null : (content as unknown as Record<string, unknown>)[fiberKey]
+  ) as { return?: unknown; memoizedProps?: Record<string, unknown> } | null;
+
+  while (fiber !== null) {
+    const editor = fiber.memoizedProps?.editor;
+    if (typeof editor === "object" && editor !== null && "getExtension" in editor) {
+      return editor as unknown as TestBlockEditor;
+    }
+    fiber = (fiber.return ?? null) as typeof fiber;
+  }
+
+  throw new Error("BlockNote editor не найден в React fiber");
+}
+
+/**
+ * Открывает slash-меню, выбирает «Картинка» и имитирует отмену системного
+ * picker: hidden input получает click, но change с файлом не приходит.
+ */
+async function cancelImagePickerFromSlashMenu(content: HTMLElement): Promise<void> {
+  const editor = blockEditorFor(content);
+  const firstBlock = editor.document.at(0);
+  if (firstBlock === undefined) throw new Error("В документе нет блоков");
+  editor.setTextCursorPosition(firstBlock, "end");
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 10,
+    bottom: 10,
+    width: 10,
+    height: 10,
+    toJSON: () => ({}),
+  } as DOMRect);
+
+  editor.getExtension("suggestionMenu")?.openSuggestionMenu("/", {
+    deleteTriggerCharacter: true,
+  });
+  const imageOption = await screen.findByRole("option", { name: /Картинка/u });
+  const input = screen.getByTestId("note-image-input");
+  const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+
+  fireEvent.click(imageOption);
+  await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+}
+
+function contentTypes(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("[data-content-type]")).map(
+    (element) => element.getAttribute("data-content-type") ?? "",
+  );
+}
+
 function lastMarkdown(onChange: RenderedEditor["onChange"]): string {
   const calls = onChange.mock.calls;
   expect(calls.length).toBeGreaterThan(0);
@@ -219,6 +299,41 @@ describe("MarkdownNoteEditor: readOnly и disabled", () => {
     );
     expect(content).toHaveAttribute("aria-disabled", "true");
     expect(content).toHaveAttribute("contenteditable", "false");
+  });
+});
+
+describe("MarkdownNoteEditor: отмена picker из slash-меню", () => {
+  it("не меняет непустой абзац", async () => {
+    const { container, onChange } = renderEditor({ value: "Текст" });
+    const content = await waitForReady(container);
+
+    await cancelImagePickerFromSlashMenu(content);
+
+    expect(content.textContent).toBe("Текст");
+    expect(contentTypes(container)).toEqual(["paragraph"]);
+    expect(container.querySelector("[data-content-type='image']")).toBeNull();
+    await waitFor(() => {
+      expect(onChange.mock.calls.at(-1)?.[0] ?? "").toBe("Текст");
+    });
+  });
+
+  it.each([
+    { label: "пустой heading", type: "heading", props: { level: 1 } },
+    { label: "пустой список", type: "bulletListItem", props: undefined },
+  ])("не меняет $label и его тип", async ({ type, props }) => {
+    const { container } = renderEditor({ value: "" });
+    const content = await waitForReady(container);
+    const editor = blockEditorFor(content);
+    const firstBlock = editor.document.at(0);
+    if (firstBlock === undefined) throw new Error("В документе нет блоков");
+    const block = editor.updateBlock(firstBlock, props === undefined ? { type } : { type, props });
+    editor.setTextCursorPosition(block, "end");
+
+    await cancelImagePickerFromSlashMenu(content);
+
+    expect(contentTypes(container)).toEqual([type]);
+    expect(content.textContent).toBe("");
+    expect(container.querySelector("[data-content-type='image']")).toBeNull();
   });
 });
 

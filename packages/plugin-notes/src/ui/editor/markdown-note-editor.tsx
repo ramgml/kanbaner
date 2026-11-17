@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { ChangeEvent, ComponentType } from "react";
+import type { ChangeEvent, ComponentType, ReactNode } from "react";
+import { filterSuggestionItems } from "@blocknote/core";
+import type { SuggestionMenuOptions } from "@blocknote/core";
 import { ru } from "@blocknote/core/locales";
-import { useCreateBlockNote } from "@blocknote/react";
+import {
+  getDefaultReactSlashMenuItems,
+  SuggestionMenuController,
+  useCreateBlockNote,
+} from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/core/style.css";
 import "@blocknote/shadcn/style.css";
@@ -74,7 +80,9 @@ interface EditorViewProps {
   readonly theme: "light" | "dark";
   readonly editable: boolean;
   readonly className: string;
+  readonly slashMenu: boolean;
   readonly onChange: () => void;
+  readonly children?: ReactNode;
 }
 
 // BlockNote 0.54 не проходит exactOptionalPropertyTypes в собственных generic-типах.
@@ -297,6 +305,43 @@ export function MarkdownNoteEditor({
     }
   }, [editor, ready, value]);
 
+  /**
+   * Пункт «Картинка» в slash/side menu открывает существующий file input,
+   * который использует общий uploadFiles-флоу. Документ не меняется:
+   * SuggestionMenuWrapper сам удаляет trigger/query, а при отмене picker
+   * не остаётся ни пустого image-блока, ни нового параграфа.
+   */
+  const pickImage = useCallback(() => {
+    if (lockedRef.current) return;
+    const input = imageInputRef.current;
+    if (input === null || input.disabled) return;
+    input.click();
+  }, []);
+
+  const shouldOpenSlashMenu = useCallback<NonNullable<SuggestionMenuOptions["shouldOpen"]>>(
+    (state) => !state.selection.$from.parent.type.isInGroup("tableContent"),
+    [],
+  );
+
+  const getSlashMenuItems = useCallback(
+    async (query: string) => {
+      const items = getDefaultReactSlashMenuItems(
+        // BlockNote 0.54 не выводит generic кастомной схемы в собственных
+        // типах; приведение ограничено фабрикой пунктов меню.
+        editor as unknown as Parameters<typeof getDefaultReactSlashMenuItems>[0],
+      );
+      return filterSuggestionItems(
+        items.map((item) =>
+          (item as { readonly key?: string }).key === "image"
+            ? { ...item, onItemClick: pickImage }
+            : item,
+        ),
+        query,
+      );
+    },
+    [editor, pickImage],
+  );
+
   const uploadFiles = useCallback(
     async (files: readonly File[]) => {
       const images = files.filter(isImageFile);
@@ -371,6 +416,7 @@ export function MarkdownNoteEditor({
           theme={theme}
           editable={!locked}
           className="kne-blocknote"
+          slashMenu={false}
           onChange={() => {
             if (!initializedRef.current || suppressChangeRef.current) return;
             const blocks = stripUploadArtifacts(editor.document, pendingUploadsRef.current);
@@ -383,7 +429,15 @@ export function MarkdownNoteEditor({
             lastEmittedRef.current = markdown;
             onChangeRef.current(markdown);
           }}
-        />
+        >
+          {locked ? null : (
+            <SuggestionMenuController
+              triggerCharacter="/"
+              getItems={getSlashMenuItems}
+              shouldOpen={shouldOpenSlashMenu}
+            />
+          )}
+        </EditorView>
         {!ready && error === null ? (
           <p className="kne-loading" role="status">
             Загрузка редактора…

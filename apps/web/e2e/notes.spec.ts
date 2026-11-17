@@ -364,6 +364,145 @@ test.describe("kanbaner.notes в production shell", () => {
     expect(markdown).not.toContain("attachment://");
   });
 
+  test("сохраняет изображение, выбранное из slash-меню", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Заметка с picker"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.click();
+    await page.keyboard.type("/");
+    const imageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(imageOption).toBeVisible();
+
+    // Пункт меню должен открыть настоящий файловый picker, а не создать
+    // пустой image-блок с отдельной панелью загрузки.
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await imageOption.click();
+    const fileChooser = await fileChooserPromise;
+    expect(fileChooser.isMultiple()).toBe(false);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    await fileChooser.setFiles({
+      name: "pixel.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+
+    await expect(editor.locator("img:not(.ProseMirror-separator)")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("note-save-state")).toContainText(/Есть изменения|Сохраняем/);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+
+    await page.reload();
+    await expect(
+      page
+        .getByRole("textbox", { name: "Содержимое заметки" })
+        .locator("img:not(.ProseMirror-separator)"),
+    ).toHaveAttribute("src", /^data:image\/png;base64,/);
+  });
+
+  test("не создаёт пустой image при отмене picker из меню «+»", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Отмена picker"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.locator(".bn-block-outer").first().hover();
+    await page.getByRole("button", { name: "Добавить блок" }).click();
+    const imageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(imageOption).toBeVisible();
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await imageOption.click();
+    const fileChooser = await fileChooserPromise;
+    // Пустой выбор соответствует закрытию системного picker без файла.
+    await fileChooser.setFiles([]);
+
+    await expect(editor.locator("[data-content-type='image']")).toHaveCount(0);
+    await expect(editor.locator("img:not(.ProseMirror-separator)")).toHaveCount(0);
+    await expect(editor.locator("[data-content-type='paragraph']")).toHaveCount(1);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+  });
+
+  test("не меняет непустой текст при отмене picker из slash-меню", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Отмена picker в тексте"), "Текст");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+    const paragraph = editor.locator("[data-content-type='paragraph']").first();
+
+    await paragraph.click();
+    await page.keyboard.press("End");
+    await page.keyboard.type("/");
+    const imageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(imageOption).toBeVisible();
+
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await imageOption.click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles([]);
+
+    await expect(paragraph).toHaveText("Текст");
+    await expect(editor.locator("[data-content-type='paragraph']")).toHaveCount(1);
+    await expect(editor.locator("[data-content-type='image']")).toHaveCount(0);
+    await expect(editor.locator("img:not(.ProseMirror-separator)")).toHaveCount(0);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+  });
+
+  test("не меняет пустые heading и список при отмене picker из slash-меню", async ({ page }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    await createNote(page, title("Отмена picker в блоках"), "");
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await editor.click();
+    await page.keyboard.type("/");
+    await page.getByRole("option", { name: /^Заголовок 1 уровня/u }).click();
+    const heading = editor.locator("[data-content-type='heading']");
+    await expect(heading).toHaveCount(1);
+
+    await page.keyboard.type("/");
+    const headingImageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(headingImageOption).toBeVisible();
+    const headingChooserPromise = page.waitForEvent("filechooser");
+    await headingImageOption.click();
+    await (await headingChooserPromise).setFiles([]);
+
+    await expect(heading).toHaveCount(1);
+    await expect(heading).toHaveText("");
+    await expect(editor.locator("[data-content-type='image']")).toHaveCount(0);
+
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/");
+    await page.getByRole("option", { name: "Маркированный список" }).click();
+    const listItem = editor.locator("[data-content-type='bulletListItem']");
+    await expect(listItem).toHaveCount(1);
+
+    await page.keyboard.type("/");
+    const listImageOption = page.getByRole("option", { name: /Картинка/u });
+    await expect(listImageOption).toBeVisible();
+    const listChooserPromise = page.waitForEvent("filechooser");
+    await listImageOption.click();
+    await (await listChooserPromise).setFiles([]);
+
+    await expect(listItem).toHaveCount(1);
+    await expect(listItem).toHaveText("");
+    await expect(editor.locator("[data-content-type='image']")).toHaveCount(0);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+      timeout: 15_000,
+    });
+  });
+
   test("показывает slash-меню, side menu и formatting toolbar", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     await openNotes(page);
