@@ -69,6 +69,11 @@ interface TestBlockEditor {
         ) => void;
       }
     | undefined;
+  readonly _tiptapEditor: {
+    readonly commands: {
+      readonly insertContent: (content: string) => boolean;
+    };
+  };
 }
 
 /**
@@ -761,5 +766,104 @@ describe("MarkdownNoteEditor: догрузка вложений", () => {
     });
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("подставляет URL в изображение внутри ячейки таблицы", async () => {
+    const table = ["| Колонка |", "| --- |", "| ![Схема](attachment://img-1) |"].join("\n");
+    const { container, rerender, onChange } = renderEditor({ value: table });
+    await waitForReady(container);
+
+    expect(container.querySelector("table")).not.toBeNull();
+    expect(container.querySelector('table img[src="attachment://img-1"]')).not.toBeNull();
+
+    rerender({ attachmentUrls: URLS });
+
+    await waitFor(() => {
+      expect(container.querySelector(`table img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("не публикует onChange, пока загружается второе изображение поверх вложений", async () => {
+    let resolveUpload: (url: string) => void = () => undefined;
+    const upload = new Promise<string>((resolve) => {
+      resolveUpload = resolve;
+    });
+    const { container, onChange, rerender } = renderEditor({
+      value: "![Загружено](attachment://img-1)",
+      onUploadImage: () => upload,
+    });
+    const content = await waitForReady(container);
+
+    // Вложения приходят отдельным шагом после первого рендера — как в notes-view.
+    rerender({ attachmentUrls: URLS });
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+
+    // Встроенный upload BlockNote сразу вставляет pending-блок. Его удаление
+    // при сериализации не должно давать ложную разницу с canonical baseline.
+    pasteFile(content, imageFile("второе.png"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByText("Загрузка изображения…")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveUpload("data:image/png;base64,bmV3");
+      await upload;
+    });
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+    expect(lastMarkdown(onChange)).toContain("data:image/png;base64,bmV3");
+    expect(lastMarkdown(onChange)).toContain(DATA_URL);
+  });
+
+  it("повторно подставляет URL после undo/redo без записи в историю", async () => {
+    const { container, onChange } = renderEditor({
+      value: "![Схема](attachment://img-1)\n\nТекст",
+      attachmentUrls: URLS,
+    });
+    const content = await waitForReady(container);
+    const editor = blockEditorFor(content);
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+
+    const image = editor.document[0] as unknown as {
+      readonly id: string;
+      readonly type: string;
+      readonly props: Record<string, unknown>;
+    };
+    expect(image.type).toBe("image");
+
+    // Создаём историю так, как её увидит пользователь: снимок с data URL,
+    // затем шаг с каноническим URL и снова data URL.
+    await act(async () => {
+      editor.updateBlock(image, {
+        type: "image",
+        props: { ...image.props, url: "attachment://img-1" },
+      });
+    });
+    await act(async () => {
+      editor.updateBlock(image, {
+        type: "image",
+        props: { ...image.props, url: DATA_URL },
+      });
+    });
+
+    const callsBeforeUndo = onChange.mock.calls.length;
+    await act(async () => {
+      fireEvent.keyDown(content, { key: "z", code: "KeyZ", ctrlKey: true });
+    });
+
+    // Undo возвращает canonical attachment://; он должен снова стать data URL.
+    await waitFor(() => {
+      expect(container.querySelector(`img[src="${DATA_URL}"]`)).not.toBeNull();
+    });
+    expect(container.querySelector('img[src="attachment://img-1"]')).toBeNull();
+    expect(onChange.mock.calls.length).toBeGreaterThanOrEqual(callsBeforeUndo);
   });
 });

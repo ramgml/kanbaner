@@ -98,6 +98,8 @@ export function NotesView(props: NotesViewProps) {
   const [loading, setLoading] = useState(true);
   const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentRetryPending, setAttachmentRetryPending] = useState(false);
   const [moveError, setMoveError] = useState<MoveFailure | null>(null);
   const [movePending, setMovePending] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -121,6 +123,8 @@ export function NotesView(props: NotesViewProps) {
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const attachmentsRef = useRef<readonly NoteAttachmentDescriptor[]>([]);
   const loadSequenceRef = useRef(0);
+  /** Номер актуальной попытки загрузки вложений: старый retry не перетирает новый. */
+  const attachmentAttemptRef = useRef(0);
   /** Растёт при каждом изменении черновика; защищает ввод от загрузки. */
   const draftRevisionRef = useRef(0);
   /** Ключ создания живёт до успеха, чтобы retry не создавал дубль. */
@@ -326,8 +330,15 @@ export function NotesView(props: NotesViewProps) {
       id: string,
       attachments: readonly NoteAttachmentDescriptor[],
       sequence: number,
+      manualRetry = false,
     ): Promise<void> => {
-      if (attachments.length === 0) return;
+      const attempt = ++attachmentAttemptRef.current;
+      if (attachments.length === 0) {
+        setAttachmentError(null);
+        return;
+      }
+      if (manualRetry) setAttachmentRetryPending(true);
+      setAttachmentError(null);
       try {
         const loaded = await Promise.all(
           attachments.map(async (attachment) => {
@@ -339,29 +350,53 @@ export function NotesView(props: NotesViewProps) {
             return result.attachment;
           }),
         );
-        if (sequence !== loadSequenceRef.current || selectedIdRef.current !== id) return;
+        if (
+          attempt !== attachmentAttemptRef.current ||
+          sequence !== loadSequenceRef.current ||
+          selectedIdRef.current !== id
+        ) {
+          return;
+        }
 
         const cache = cacheRef.current;
         for (const attachment of loaded) cache.add(attachment);
         setAttachmentUrls(cache.toEditorUrls());
+        setAttachmentError(null);
       } catch (reason) {
-        if (sequence === loadSequenceRef.current && selectedIdRef.current === id) {
-          setError(
+        if (
+          attempt === attachmentAttemptRef.current &&
+          sequence === loadSequenceRef.current &&
+          selectedIdRef.current === id
+        ) {
+          setAttachmentError(
             reason instanceof Error
               ? `Не удалось загрузить вложения: ${reason.message}`
               : "Не удалось загрузить вложения",
           );
         }
+      } finally {
+        if (attempt === attachmentAttemptRef.current) setAttachmentRetryPending(false);
       }
     },
     [invoke],
   );
+
+  /** Повторяет именно загрузку вложений открытой страницы, не перечитывая заметку. */
+  const retryAttachments = useCallback((): void => {
+    const id = selectedIdRef.current;
+    if (id === null || attachmentRetryPending) return;
+    void loadAttachmentUrls(id, attachmentsRef.current, loadSequenceRef.current, true);
+  }, [attachmentRetryPending, loadAttachmentUrls]);
 
   const loadNote = useCallback(
     async (id: string, updateLocation = true) => {
       const sequence = ++loadSequenceRef.current;
       const revisionAtStart = draftRevisionRef.current;
       const sameNoteAtStart = selectedIdRef.current === id;
+      // Старая попытка вложений больше не актуальна и не должна включать retry.
+      attachmentAttemptRef.current += 1;
+      setAttachmentRetryPending(false);
+      setAttachmentError(null);
       setLoading(true);
       setError(null);
       setConflict(false);
@@ -1177,6 +1212,27 @@ export function NotesView(props: NotesViewProps) {
                       Повторить перемещение
                     </button>
                   )}
+                </div>
+              </div>
+            ) : null}
+
+            {attachmentError !== null ? (
+              <div
+                role="alert"
+                data-testid="note-attachments-error"
+                className="mx-4 mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive sm:mx-6"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>{attachmentError}</span>
+                  <button
+                    type="button"
+                    data-testid="note-attachments-retry"
+                    disabled={attachmentRetryPending}
+                    onClick={retryAttachments}
+                    className="underline disabled:opacity-50"
+                  >
+                    {attachmentRetryPending ? "Повторяем…" : "Повторить"}
+                  </button>
                 </div>
               </div>
             ) : null}

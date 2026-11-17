@@ -626,6 +626,51 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(page.getByTestId("note-title")).toHaveValue(/Промежуточная без вложения/u);
   });
 
+  test("повторяет загрузку вложений после сетевой ошибки, не перечитывая страницу", async ({
+    page,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    await openNotes(page);
+    const name = title("Ошибка вложения");
+    const body = "Текст виден несмотря на ошибку";
+    const targetId = await createLargeImageNote(page, name, body);
+    await createNote(page, title("Промежуточная после ошибки"), "Промежуточный текст");
+
+    let failed = 0;
+    await page.route("**/view/notes**", async (route) => {
+      const requestBody = route.request().postData() ?? "";
+      if (requestBody.includes("kanbaner.notes.note.attachment.get") && failed === 0) {
+        failed += 1;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.locator(`[data-note-select='${targetId}']`).click();
+    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+    await expect(page.getByTestId("note-title")).toHaveValue(name);
+    await expect(editor).toContainText(body);
+    const alert = page.getByTestId("note-attachments-error");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText("Не удалось загрузить вложения");
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
+
+    // Retry остаётся в контексте открытой страницы и реально повторяет запрос.
+    await page.getByTestId("note-attachments-retry").click();
+    await expect(editor.locator(".bn-visual-media")).toHaveAttribute(
+      "src",
+      /^data:image\/png;base64,/u,
+      { timeout: 20_000 },
+    );
+    await expect(alert).toHaveCount(0);
+    await expect(editor).toContainText(body);
+    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено");
+    expect(failed).toBe(1);
+    await page.unroute("**/view/notes**");
+  });
+
   test("быстро переключает страницы с вложениями: побеждает последняя", async ({ page }) => {
     await page.setViewportSize(DESKTOP);
     await openNotes(page);

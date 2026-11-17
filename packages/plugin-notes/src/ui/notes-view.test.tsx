@@ -438,6 +438,62 @@ describe("NotesView autosave", () => {
     expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
   });
 
+  it("повторяет загрузку вложений после ошибки без перечитывания заметки", async () => {
+    const file = attachment("att-1", "note-1");
+    const details: NoteDetails = {
+      view: noteView("note-1", "С картинкой", {
+        contentMarkdown: "![img](attachment://att-1)",
+      }),
+      ancestors: [],
+      attachments: [file],
+    };
+    let attachmentAttempts = 0;
+    let getCalls = 0;
+    let updates = 0;
+    const invoke: UiOperationInvoker = async (operationId) => {
+      if (operationId === NOTES_QUERY_IDS.list) return success(listOf(details.view));
+      if (operationId === NOTES_QUERY_IDS.get) {
+        getCalls += 1;
+        return success(details);
+      }
+      if (operationId === NOTES_QUERY_IDS.attachmentGet) {
+        attachmentAttempts += 1;
+        return attachmentAttempts === 1
+          ? failure("INTERNAL", "Сбой загрузки")
+          : success({ attachment: { ...file, contentBase64: "aGVsbG8=" } });
+      }
+      if (operationId === NOTES_QUERY_IDS.links) return success({ items: [] });
+      if (operationId === NOTES_COMMAND_IDS.recordVisit) return success({ view: details.view });
+      if (operationId === NOTES_COMMAND_IDS.update) {
+        updates += 1;
+        return success(details);
+      }
+      return success({ items: [] });
+    };
+
+    render(<NotesView invoke={invoke} search="?note=note-1" />);
+    const editor = await screen.findByRole("textbox", { name: "Содержимое заметки" });
+
+    // Ошибка вложений не блокирует страницу: виден канонический Markdown.
+    const alert = await screen.findByTestId("note-attachments-error");
+    await waitFor(() => expect(alert).toHaveTextContent("Сбой загрузки"));
+    expect(editor).toHaveValue("![img](attachment://att-1)");
+    expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
+    expect(updates).toBe(0);
+
+    fireEvent.click(screen.getByTestId("note-attachments-retry"));
+
+    await waitFor(() => {
+      expect(editor).toHaveValue("![img](data:image/png;base64,aGVsbG8=)");
+    });
+    expect(screen.queryByTestId("note-attachments-error")).toBeNull();
+    expect(attachmentAttempts).toBe(2);
+    // Retry относится только к вложениям: заметку заново не читаем.
+    expect(getCalls).toBe(1);
+    expect(updates).toBe(0);
+    expect(screen.getByTestId("note-save-state")).toHaveTextContent("Сохранено");
+  });
+
   it("не применяет вложения прошлой заметки после быстрого перехода", async () => {
     const file = attachment("att-1", "note-1");
     const first: NoteDetails = {
