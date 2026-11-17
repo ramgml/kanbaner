@@ -1,7 +1,7 @@
 ---
 id: KAN-051
 title: Открыть выбор файла из slash-меню изображения
-status: in_progress
+status: done
 stage: 1
 priority: high
 owner: opencode-worker
@@ -26,10 +26,10 @@ specs:
 
 ## Объём работ
 
-- [ ] Воспроизвести сценарий в реальном BlockNote UI.
-- [ ] Подключить picker к существующему hidden input/upload flow без дублирования загрузки.
-- [ ] Добавить unit/E2E regression на успешный выбор и отсутствие пустого image после cancel.
-- [ ] Проверить paste/drop и старую кнопку загрузки.
+- [x] Воспроизвести сценарий в реальном BlockNote UI.
+- [x] Подключить picker к существующему hidden input/upload flow без дублирования загрузки.
+- [x] Добавить unit/E2E regression на успешный выбор и отсутствие пустого image после cancel.
+- [x] Проверить paste/drop и старую кнопку загрузки.
 
 ## Владение файлами
 
@@ -45,16 +45,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] `+ → Картинка` открывает picker и создаёт сохранённое изображение.
-- [ ] Нет пустого блока или pending-записи при cancel.
-- [ ] Readonly/disabled не открывают picker.
-- [ ] Полные проверки и notes E2E зелёные.
+- [x] `+ → Картинка` открывает picker и создаёт сохранённое изображение.
+- [x] Нет пустого блока или pending-записи при cancel.
+- [x] Readonly/disabled не открывают picker.
+- [x] Полные проверки и notes E2E зелёные.
 
 ## Журнал
 
 - 2026-11-17 — Задача создана по сообщению пользователя о неработающем пункте «Картинка».
+- 2026-11-17 — Image item открывает существующий file picker через SuggestionMenuController. Ревью устранило изменение блока при cancel. Ветка влита в `dev`.
 
 ## Итог
 
-- Коммит:
-- Проверки:
+- Коммит: `9bf10bb`, cancel fix `0acea20`, merge `56db679b3c2fe3bee12983cd944b81a070d5410f`.
+- Проверки: `pnpm check` 1721 тест, notes E2E 20/20, filechooser/cancel/reload сценарии. Push не выполнялся.
