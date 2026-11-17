@@ -234,6 +234,10 @@ function assertContribution(value: UiContribution): UiContribution {
     assertNonEmptyString(value.resourceType, "resourceType");
   }
 
+  if (value.icon !== undefined) {
+    assertNonEmptyString(value.icon, "icon");
+  }
+
   if (value.resourcePluginId !== undefined) {
     assertNonEmptyString(value.resourcePluginId, "resourcePluginId");
   }
@@ -310,6 +314,7 @@ function contributionEquals(left: UiContribution, right: UiContribution): boolea
     left.route === right.route &&
     left.commandId === right.commandId &&
     left.resourceType === right.resourceType &&
+    left.icon === right.icon &&
     left.resourcePluginId === right.resourcePluginId
   );
 }

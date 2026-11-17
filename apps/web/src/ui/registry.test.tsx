@@ -529,6 +529,53 @@ describe("синхронизация серверных metadata и привяз
     expect(registry.list("app.main")[0]).toBe(entry);
   });
 
+  it("обновляет вклад и версию при изменении icon", () => {
+    const registry = createUiContributionRegistry();
+    const metadata: UiContribution = {
+      id: "kanbaner.notes.navigation",
+      slot: "app.sidebar",
+      kind: "navigation",
+      priority: 50,
+      title: "Заметки",
+      route: "/view/notes",
+      icon: "notebook-tabs",
+    };
+
+    registry.syncPlugin("kanbaner.notes", [{ metadata, render: genericRender }], genericRender);
+
+    const listener = vi.fn();
+    const version = registry.getVersion();
+
+    registry.subscribe(listener);
+    registry.syncPlugin(
+      "kanbaner.notes",
+      [{ metadata: { ...metadata, icon: "folder-kanban" }, render: genericRender }],
+      genericRender,
+    );
+
+    expect(registry.getVersion()).toBe(version + 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(registry.list("app.sidebar")[0]?.contribution.icon).toBe("folder-kanban");
+  });
+
+  it("отклоняет пустой или пробельный icon до изменения состояния", () => {
+    const registry = createUiContributionRegistry();
+
+    for (const icon of ["", " ", "\t"]) {
+      expectRegistryError(
+        () =>
+          registry.register(
+            "example.test-ui",
+            contribution({ kind: "navigation", route: "/view/test-ui", icon }),
+            render,
+          ),
+        "INVALID_CONTRIBUTION",
+      );
+    }
+
+    expect(registry.size()).toBe(0);
+  });
+
   it("отклоняет чужой pre-bind до metadata без изменения состояния", () => {
     const registry = createUiContributionRegistry();
 

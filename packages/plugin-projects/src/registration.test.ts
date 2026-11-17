@@ -100,6 +100,7 @@ describe("регистрация kanbaner.projects", () => {
       slot: "app.sidebar",
       title: "Проекты",
       route: "/view/projects?entry=1",
+      icon: "folder-kanban",
     });
   });
 });
