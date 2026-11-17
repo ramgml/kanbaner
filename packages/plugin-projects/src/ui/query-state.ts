@@ -35,6 +35,51 @@ const listeners = new Set<() => void>();
 const searchWriters = new Set<(search: string) => void>();
 let current: KanbanQueryState = DEFAULT_KANBAN_QUERY;
 
+/**
+ * Последние query string, записанные этим модулем.
+ *
+ * App Router может доставить `search` из router с задержкой и в порядке,
+ * отличном от локальных записей. Без этой истории запоздалое эхо `?q=a`
+ * перезаписывало бы уже актуальное `?q=ab`. Значение, совпадающее с более
+ * поздней локальной записью, принимается; внешняя навигация приходит
+ * значением, которого нет в истории, и применяется как обычно.
+ */
+const localSearches = new Set<string>();
+const localSearchOrder: string[] = [];
+const MAX_LOCAL_SEARCHES = 20;
+let lastLocalSearch: string | null = null;
+
+function rememberLocalSearch(search: string): void {
+  lastLocalSearch = search;
+
+  const index = localSearchOrder.indexOf(search);
+
+  if (index !== -1) {
+    localSearchOrder.splice(index, 1);
+  }
+
+  localSearchOrder.push(search);
+  localSearches.add(search);
+
+  while (localSearchOrder.length > MAX_LOCAL_SEARCHES) {
+    const removed = localSearchOrder.shift();
+
+    if (removed !== undefined && removed !== lastLocalSearch) {
+      localSearches.delete(removed);
+    }
+  }
+}
+
+function isStaleLocalEcho(search: string): boolean {
+  return search !== lastLocalSearch && localSearches.has(search);
+}
+
+function clearLocalSearchHistory(): void {
+  localSearches.clear();
+  localSearchOrder.length = 0;
+  lastLocalSearch = null;
+}
+
 function first(params: URLSearchParams, key: string): string {
   return params.get(key)?.trim() ?? "";
 }
@@ -110,6 +155,8 @@ function writeUrl(state: KanbanQueryState): void {
   const nextSearch = search.length === 0 ? "" : `?${search}`;
   const writer = searchWriters.values().next().value;
 
+  rememberLocalSearch(nextSearch);
+
   if (writer !== undefined) {
     writer(nextSearch);
 
@@ -170,6 +217,7 @@ export function bumpKanbanRevision(): void {
 
 /** Только для тестов: синхронизирует модульное состояние с переданным URL. */
 export function resetKanbanQueryForTests(search = ""): void {
+  clearLocalSearchHistory();
   current = { ...parseKanbanQuery(search), revision: current.revision + 1 };
   emit();
 }
@@ -227,7 +275,16 @@ export function useKanbanQuery(search?: string): KanbanQueryState {
     }
 
     lastSearchRef.current = search;
+
+    // Запоздалое эхо собственной записи не должно откатывать более новый
+    // локальный query state. Актуальная локальная запись и внешняя навигация
+    // по-прежнему применяются.
+    if (isStaleLocalEcho(search)) {
+      return;
+    }
+
     current = { ...parseKanbanQuery(search), revision: current.revision };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- синхронизация с внешней query string
     setState(current);
   }, [search]);
 

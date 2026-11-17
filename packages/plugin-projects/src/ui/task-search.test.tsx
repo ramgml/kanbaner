@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskSearch } from "./task-search.tsx";
@@ -18,7 +18,9 @@ import {
   resetTaskListQueryForTests,
   serializeTaskListQuery,
   updateTaskListQuery,
+  useTaskListQuery,
 } from "../task-list/query-state.ts";
+import { useKanbanQuery } from "./query-state.ts";
 
 beforeEach(() => {
   window.history.replaceState(null, "", "/view/tasks");
@@ -29,6 +31,18 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
 });
+
+function ListQueryProbe({ search }: { readonly search: string }) {
+  const query = useTaskListQuery(search);
+
+  return <output data-testid="list-query">{`${query.q}|${query.projectId}`}</output>;
+}
+
+function KanbanQueryProbe({ search }: { readonly search: string }) {
+  const query = useKanbanQuery(search);
+
+  return <output data-testid="kanban-query">{`${query.q}|${query.tag}`}</output>;
+}
 
 describe("TaskSearch", () => {
   it("рисует searchbox с label, placeholder и доступной очисткой", () => {
@@ -130,5 +144,51 @@ describe("query-state поиска", () => {
     resetKanbanFilters();
     expect(getKanbanQuerySnapshot()).toMatchObject({ tag: "", q: "" });
     expect(serializeKanbanQuery(getKanbanQuerySnapshot())).not.toContain("q=");
+  });
+
+  it("не откатывает список запоздалым router echo, но принимает актуальный search и внешнюю ссылку", () => {
+    const view = render(<ListQueryProbe search="" />);
+
+    expect(screen.getByTestId("list-query")).toHaveTextContent("|");
+
+    act(() => {
+      updateTaskListQuery({ q: "a" });
+    });
+    act(() => {
+      updateTaskListQuery({ q: "ab" });
+    });
+
+    // Запоздалое эхо первой записи приходит после второй.
+    view.rerender(<ListQueryProbe search="?q=a" />);
+    expect(screen.getByTestId("list-query")).toHaveTextContent("ab|");
+
+    view.rerender(<ListQueryProbe search="?q=ab" />);
+    expect(screen.getByTestId("list-query")).toHaveTextContent("ab|");
+
+    // Внешняя навигация не входит в локальную историю и применяется целиком.
+    view.rerender(<ListQueryProbe search="?project=p2&q=external" />);
+    expect(screen.getByTestId("list-query")).toHaveTextContent("external|p2");
+  });
+
+  it("не откатывает канбан запоздалым router echo, но принимает актуальный search и внешнюю ссылку", () => {
+    const view = render(<KanbanQueryProbe search="" />);
+
+    expect(screen.getByTestId("kanban-query")).toHaveTextContent("|");
+
+    act(() => {
+      updateKanbanQuery({ q: "a" });
+    });
+    act(() => {
+      updateKanbanQuery({ q: "ab" });
+    });
+
+    view.rerender(<KanbanQueryProbe search="?q=a" />);
+    expect(screen.getByTestId("kanban-query")).toHaveTextContent("ab|");
+
+    view.rerender(<KanbanQueryProbe search="?q=ab" />);
+    expect(screen.getByTestId("kanban-query")).toHaveTextContent("ab|");
+
+    view.rerender(<KanbanQueryProbe search="?tag=release&q=external" />);
+    expect(screen.getByTestId("kanban-query")).toHaveTextContent("external|release");
   });
 });
