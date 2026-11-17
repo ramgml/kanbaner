@@ -642,6 +642,7 @@ describe("KanbanView", () => {
     expect(screen.queryByTestId("kanban-card-release")).toBeNull();
     expect(screen.queryByTestId("kanban-card-docs")).toBeNull();
 
+    fireEvent.blur(search);
     fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
 
     await waitFor(() => {
@@ -722,6 +723,44 @@ describe("KanbanView", () => {
       expect(screen.getByTestId("kanban-card-release-b")).toBeVisible();
       expect(screen.getByTestId("kanban-card-other")).toBeVisible();
     });
+  });
+
+  it("фиксирует pending поиск на blur и сбрасывает его кнопкой reset", async () => {
+    const board: FakeBoard = {
+      projects: [project],
+      tasks: [makeTask("a", { title: "Релиз A", status: "todo" })],
+    };
+    const operations = createOperations(board);
+
+    render(<KanbanView invoke={operations.invoke} />);
+
+    await screen.findByTestId("kanban-card-a");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "релиз" } });
+    fireEvent.blur(search);
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("q")).toBe("релиз");
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("kanban-active-filters")).toBeVisible();
+    });
+
+    fireEvent.click(
+      within(screen.getByTestId("kanban-active-filters")).getByRole("button", {
+        name: "Сбросить фильтры",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get("q")).toBeNull();
+    });
+    expect(screen.getByRole("searchbox", { name: "Поиск задач" })).toHaveValue("");
   });
 
   it("переставляет filtered-карточку по полному scope, не теряя скрытого поиском соседа", async () => {

@@ -1,14 +1,18 @@
 "use client";
 
-import { useId, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
 
 import { MAX_SEARCH_TEXT_LENGTH } from "@kanbaner/plugin-tasks/contract";
+
+/** Задержка между последним нажатием и запросом списка. */
+export const TASK_SEARCH_DEBOUNCE_MS = 275;
 
 export interface TaskSearchProps {
   readonly value: string;
   readonly onChange: (value: string) => void;
   readonly disabled?: boolean;
+  readonly debounceMs?: number;
   readonly className?: string;
 }
 
@@ -16,15 +20,93 @@ const inputClass =
   "h-9 w-full rounded-md border bg-background pr-9 pl-8 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50";
 
 /**
- * Доступное controlled-поле поиска задач.
+ * Доступное поле поиска задач с локальным draft и debounce.
  *
- * Каждое изменение немедленно уходит в query-state: локальный backend делает
- * это приемлемым, а отсутствие локального черновика и debounce исключает
- * гонки с reset, открытием задачи и навигацией по представлениям.
+ * Видимый ввод принадлежит полю, поэтому запоздалое эхо router не может
+ * откатить набранный текст. Пока поле в фокусе, внешнее `value` не применяется;
+ * blur синхронно фиксирует draft до click-действия (reset, открытие задачи,
+ * переключение представления). Unmount только отменяет таймер.
  */
-export function TaskSearch({ value, onChange, disabled = false, className = "" }: TaskSearchProps) {
+export function TaskSearch({
+  value,
+  onChange,
+  disabled = false,
+  debounceMs = TASK_SEARCH_DEBOUNCE_MS,
+  className = "",
+}: TaskSearchProps) {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+  const committedRef = useRef(value);
+  const focusedRef = useRef(false);
+
+  const cancelTimer = useCallback((): void => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const commit = useCallback(
+    (next: string): void => {
+      if (next === committedRef.current) {
+        return;
+      }
+
+      committedRef.current = next;
+      onChange(next);
+    },
+    [onChange],
+  );
+
+  const flush = useCallback((): void => {
+    cancelTimer();
+    commit(draftRef.current);
+  }, [cancelTimer, commit]);
+
+  useEffect(() => {
+    if (focusedRef.current) {
+      return;
+    }
+
+    if (value === draftRef.current) {
+      committedRef.current = value;
+
+      return;
+    }
+
+    draftRef.current = value;
+    committedRef.current = value;
+    setDraft(value);
+  }, [value]);
+
+  useEffect(
+    () => () => {
+      cancelTimer();
+    },
+    [cancelTimer],
+  );
+
+  const updateDraft = (next: string): void => {
+    draftRef.current = next;
+    setDraft(next);
+    cancelTimer();
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      commit(draftRef.current);
+    }, debounceMs);
+  };
+
+  const clear = (): void => {
+    cancelTimer();
+    draftRef.current = "";
+    committedRef.current = "";
+    setDraft("");
+    onChange("");
+    inputRef.current?.focus();
+  };
 
   return (
     <div className={`flex min-w-0 flex-col gap-1 ${className}`}>
@@ -41,26 +123,30 @@ export function TaskSearch({ value, onChange, disabled = false, className = "" }
           id={inputId}
           name="q"
           type="search"
-          value={value}
+          value={draft}
           disabled={disabled}
           maxLength={MAX_SEARCH_TEXT_LENGTH}
           placeholder="Название или описание"
           data-testid="task-search-input"
+          onFocus={() => {
+            focusedRef.current = true;
+          }}
+          onBlur={() => {
+            focusedRef.current = false;
+            flush();
+          }}
           onChange={(event) => {
-            onChange(event.target.value);
+            updateDraft(event.target.value);
           }}
           className={inputClass}
         />
-        {value.length === 0 ? null : (
+        {draft.length === 0 ? null : (
           <button
             type="button"
             aria-label="Очистить поиск задач"
             data-testid="task-search-clear"
             disabled={disabled}
-            onClick={() => {
-              onChange("");
-              inputRef.current?.focus();
-            }}
+            onClick={clear}
             className="absolute top-1/2 right-1.5 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
           >
             <X aria-hidden="true" className="size-4" />

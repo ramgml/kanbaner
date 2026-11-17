@@ -293,6 +293,7 @@ describe("TaskListView", () => {
     });
     expect(screen.getByText("Задач пока нет")).toBeInTheDocument();
 
+    fireEvent.blur(search);
     fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
 
     await waitFor(() => {
@@ -311,6 +312,105 @@ describe("TaskListView", () => {
     await waitFor(() => {
       expect(screen.getByTestId("task-row-task-1")).toBeInTheDocument();
       expect(screen.getByTestId("task-row-task-2")).toBeInTheDocument();
+    });
+  });
+
+  it("pending поиск фиксируется на blur до reset и очищается", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <TaskListView
+        invoke={operations.invoke}
+        search="?project=project-1"
+        replaceSearch={replaceSearch}
+      />,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+
+    // Browser: reset click сначала снимает фокус, затем выполняет onClick.
+    fireEvent.blur(search);
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&q=release");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить фильтры" }));
+
+    await waitFor(() => {
+      expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1");
+    });
+    expect(search).toHaveValue("");
+  });
+
+  it("pending поиск фиксируется на blur до открытия задачи", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <TaskListView
+        invoke={operations.invoke}
+        search="?project=project-1"
+        replaceSearch={replaceSearch}
+      />,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+    fireEvent.blur(search);
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть задачу Подготовить релиз" }));
+
+    await waitFor(() => {
+      expect(getTaskListQuerySnapshot().taskId).toBe("task-1");
+    });
+    expect(replaceSearch).toHaveBeenLastCalledWith("?project=project-1&q=release&task=task-1");
+  });
+
+  it("pending поиск попадает в ссылку переключения представлений после blur", async () => {
+    const operations = createOperations(baseHandlers());
+    const replaceSearch = vi.fn();
+
+    render(
+      <>
+        <TaskListView
+          invoke={operations.invoke}
+          search="?project=project-1"
+          replaceSearch={replaceSearch}
+        />
+        <ProjectSidebar invoke={operations.invoke} />
+      </>,
+    );
+
+    await screen.findByTestId("task-row-task-1");
+
+    const search = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      search.focus();
+    });
+    fireEvent.change(search, { target: { value: "release" } });
+    fireEvent.blur(search);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-view-kanban")).toHaveAttribute(
+        "href",
+        "/view/kanban?project=project-1&q=release",
+      );
     });
   });
 

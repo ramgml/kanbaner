@@ -3,13 +3,14 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TaskSearch } from "./task-search.tsx";
+import { TaskSearch, TASK_SEARCH_DEBOUNCE_MS } from "./task-search.tsx";
 import {
   getKanbanQuerySnapshot,
   resetKanbanFilters,
   resetKanbanQueryForTests,
   serializeKanbanQuery,
   updateKanbanQuery,
+  useKanbanQuery,
 } from "./query-state.ts";
 import {
   getTaskListQuerySnapshot,
@@ -20,9 +21,9 @@ import {
   updateTaskListQuery,
   useTaskListQuery,
 } from "../task-list/query-state.ts";
-import { useKanbanQuery } from "./query-state.ts";
 
 beforeEach(() => {
+  vi.useFakeTimers();
   window.history.replaceState(null, "", "/view/tasks");
   resetTaskListQueryForTests("");
   resetKanbanQueryForTests("");
@@ -30,18 +31,21 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 function ListQueryProbe({ search }: { readonly search: string }) {
   const query = useTaskListQuery(search);
 
-  return <output data-testid="list-query">{`${query.q}|${query.projectId}`}</output>;
+  return <output data-testid="list-query">{`${query.q}|${query.projectId}|${query.tag}`}</output>;
 }
 
 function KanbanQueryProbe({ search }: { readonly search: string }) {
   const query = useKanbanQuery(search);
 
-  return <output data-testid="kanban-query">{`${query.q}|${query.tag}`}</output>;
+  return (
+    <output data-testid="kanban-query">{`${query.q}|${query.tag}|${query.taskId ?? ""}`}</output>
+  );
 }
 
 describe("TaskSearch", () => {
@@ -56,28 +60,58 @@ describe("TaskSearch", () => {
     expect(container.querySelector("svg")).not.toBeNull();
   });
 
-  it("немедленно вызывает onChange на каждый ввод без локального черновика", () => {
+  it("немедленно меняет draft и отправляет только последнее значение после debounce", () => {
+    const onChange = vi.fn();
+
+    render(<TaskSearch value="" onChange={onChange} debounceMs={TASK_SEARCH_DEBOUNCE_MS} />);
+
+    const input = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      input.focus();
+    });
+    fireEvent.change(input, { target: { value: "a" } });
+    fireEvent.change(input, { target: { value: "ab" } });
+
+    expect(input).toHaveValue("ab");
+    expect(onChange).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS - 1);
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith("ab");
+  });
+
+  it("не откатывает draft запоздалым router echo, пока поле в фокусе", () => {
     const onChange = vi.fn();
     const view = render(<TaskSearch value="" onChange={onChange} />);
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
 
+    act(() => {
+      input.focus();
+    });
     fireEvent.change(input, { target: { value: "a" } });
     fireEvent.change(input, { target: { value: "ab" } });
-    fireEvent.change(input, { target: { value: "abc" } });
 
-    expect(onChange).toHaveBeenNthCalledWith(1, "a");
-    expect(onChange).toHaveBeenNthCalledWith(2, "ab");
-    expect(onChange).toHaveBeenNthCalledWith(3, "abc");
-    expect(onChange).toHaveBeenCalledTimes(3);
+    view.rerender(<TaskSearch value="a" onChange={onChange} />);
+    expect(input).toHaveValue("ab");
 
-    // Controlled: до обновления value поле показывает прежнее значение.
-    expect(input).toHaveValue("");
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS);
+    });
+    expect(onChange).toHaveBeenLastCalledWith("ab");
 
-    view.rerender(<TaskSearch value="abc" onChange={onChange} />);
-    expect(input).toHaveValue("abc");
+    view.rerender(<TaskSearch value="ab" onChange={onChange} />);
+    expect(input).toHaveValue("ab");
   });
 
-  it("следует за внешним reset и навигацией без отката ввода", () => {
+  it("синхронизирует внешнее value, когда поле не в фокусе", () => {
     const onChange = vi.fn();
     const view = render(<TaskSearch value="release" onChange={onChange} />);
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
@@ -85,26 +119,74 @@ describe("TaskSearch", () => {
     view.rerender(<TaskSearch value="" onChange={onChange} />);
     expect(input).toHaveValue("");
 
-    view.rerender(<TaskSearch value="release notes" onChange={onChange} />);
-    expect(input).toHaveValue("release notes");
-
     view.rerender(<TaskSearch value="backend" onChange={onChange} />);
     expect(input).toHaveValue("backend");
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("очищает поиск кнопкой и возвращает фокус в поле", () => {
+  it("синхронно фиксирует pending draft на blur до следующего click-действия", () => {
     const onChange = vi.fn();
 
-    render(<TaskSearch value="release" onChange={onChange} />);
+    render(<TaskSearch value="" onChange={onChange} />);
 
     const input = screen.getByRole("searchbox", { name: "Поиск задач" });
 
+    act(() => {
+      input.focus();
+    });
+    fireEvent.change(input, { target: { value: "release" } });
+
+    fireEvent.blur(input);
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith("release");
+
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS * 2);
+    });
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("очищает поиск кнопкой, отменяет timer и возвращает фокус", () => {
+    const onChange = vi.fn();
+
+    render(<TaskSearch value="" onChange={onChange} />);
+
+    const input = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      input.focus();
+    });
+    fireEvent.change(input, { target: { value: "release" } });
     fireEvent.click(screen.getByRole("button", { name: "Очистить поиск задач" }));
 
+    expect(input).toHaveValue("");
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenLastCalledWith("");
     expect(input).toHaveFocus();
+
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS * 2);
+    });
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("снимает timer при unmount без отложенного setState", () => {
+    const onChange = vi.fn();
+    const view = render(<TaskSearch value="" onChange={onChange} />);
+    const input = screen.getByRole("searchbox", { name: "Поиск задач" });
+
+    act(() => {
+      input.focus();
+    });
+    fireEvent.change(input, { target: { value: "abc" } });
+
+    view.unmount();
+
+    act(() => {
+      vi.advanceTimersByTime(TASK_SEARCH_DEBOUNCE_MS * 2);
+    });
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
 
@@ -146,49 +228,19 @@ describe("query-state поиска", () => {
     expect(serializeKanbanQuery(getKanbanQuerySnapshot())).not.toContain("q=");
   });
 
-  it("не откатывает список запоздалым router echo, но принимает актуальный search и внешнюю ссылку", () => {
+  it("применяет production search без '?' и сохраняет остальные фильтры списка", () => {
     const view = render(<ListQueryProbe search="" />);
 
-    expect(screen.getByTestId("list-query")).toHaveTextContent("|");
+    view.rerender(<ListQueryProbe search="project=p1&tag=release&q=ab" />);
 
-    act(() => {
-      updateTaskListQuery({ q: "a" });
-    });
-    act(() => {
-      updateTaskListQuery({ q: "ab" });
-    });
-
-    // Запоздалое эхо первой записи приходит после второй.
-    view.rerender(<ListQueryProbe search="?q=a" />);
-    expect(screen.getByTestId("list-query")).toHaveTextContent("ab|");
-
-    view.rerender(<ListQueryProbe search="?q=ab" />);
-    expect(screen.getByTestId("list-query")).toHaveTextContent("ab|");
-
-    // Внешняя навигация не входит в локальную историю и применяется целиком.
-    view.rerender(<ListQueryProbe search="?project=p2&q=external" />);
-    expect(screen.getByTestId("list-query")).toHaveTextContent("external|p2");
+    expect(screen.getByTestId("list-query")).toHaveTextContent("ab|p1|release");
   });
 
-  it("не откатывает канбан запоздалым router echo, но принимает актуальный search и внешнюю ссылку", () => {
+  it("применяет production search без '?' и сохраняет выбранную задачу канбана", () => {
     const view = render(<KanbanQueryProbe search="" />);
 
-    expect(screen.getByTestId("kanban-query")).toHaveTextContent("|");
+    view.rerender(<KanbanQueryProbe search="project=p1&tag=release&q=ab&task=t1" />);
 
-    act(() => {
-      updateKanbanQuery({ q: "a" });
-    });
-    act(() => {
-      updateKanbanQuery({ q: "ab" });
-    });
-
-    view.rerender(<KanbanQueryProbe search="?q=a" />);
-    expect(screen.getByTestId("kanban-query")).toHaveTextContent("ab|");
-
-    view.rerender(<KanbanQueryProbe search="?q=ab" />);
-    expect(screen.getByTestId("kanban-query")).toHaveTextContent("ab|");
-
-    view.rerender(<KanbanQueryProbe search="?tag=release&q=external" />);
-    expect(screen.getByTestId("kanban-query")).toHaveTextContent("external|release");
+    expect(screen.getByTestId("kanban-query")).toHaveTextContent("ab|release|t1");
   });
 });

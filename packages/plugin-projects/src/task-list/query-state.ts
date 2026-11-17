@@ -64,51 +64,6 @@ const listeners = new Set<() => void>();
 const searchWriters = new Set<(search: string) => void>();
 let current: TaskListQueryState = DEFAULT_TASK_LIST_QUERY;
 
-/**
- * Последние query string, записанные этим модулем.
- *
- * App Router может доставить `search` из router с задержкой и в порядке,
- * отличном от локальных записей. Без этой истории запоздалое эхо `?q=a`
- * перезаписывало бы уже актуальное `?q=ab`. Значение, совпадающее с более
- * поздней локальной записью, принимается; внешняя навигация приходит
- * значением, которого нет в истории, и применяется как обычно.
- */
-const localSearches = new Set<string>();
-const localSearchOrder: string[] = [];
-const MAX_LOCAL_SEARCHES = 20;
-let lastLocalSearch: string | null = null;
-
-function rememberLocalSearch(search: string): void {
-  lastLocalSearch = search;
-
-  const index = localSearchOrder.indexOf(search);
-
-  if (index !== -1) {
-    localSearchOrder.splice(index, 1);
-  }
-
-  localSearchOrder.push(search);
-  localSearches.add(search);
-
-  while (localSearchOrder.length > MAX_LOCAL_SEARCHES) {
-    const removed = localSearchOrder.shift();
-
-    if (removed !== undefined && removed !== lastLocalSearch) {
-      localSearches.delete(removed);
-    }
-  }
-}
-
-function isStaleLocalEcho(search: string): boolean {
-  return search !== lastLocalSearch && localSearches.has(search);
-}
-
-function clearLocalSearchHistory(): void {
-  localSearches.clear();
-  localSearchOrder.length = 0;
-  lastLocalSearch = null;
-}
-
 function isSortField(value: string | null): value is TaskListSortField {
   return value !== null && (SORT_FIELDS as readonly string[]).includes(value);
 }
@@ -245,8 +200,6 @@ function writeUrl(state: TaskListQueryState, mode: "replace" | "push"): void {
   const nextSearch = search.length === 0 ? "" : `?${search}`;
   const writer = searchWriters.values().next().value;
 
-  rememberLocalSearch(nextSearch);
-
   if (writer !== undefined) {
     writer(nextSearch);
 
@@ -324,7 +277,6 @@ export function bumpTaskListRevision(): void {
 
 /** Только для тестов: синхронизирует модульное состояние с переданным URL. */
 export function resetTaskListQueryForTests(search = ""): void {
-  clearLocalSearchHistory();
   current = { ...parseTaskListQuery(search), revision: current.revision + 1 };
   emit();
 }
@@ -381,16 +333,7 @@ export function useTaskListQuery(search?: string): TaskListQueryState {
     }
 
     lastSearchRef.current = search;
-
-    // Запоздалое эхо собственной записи не должно откатывать более новый
-    // локальный query state. Актуальная локальная запись и внешняя навигация
-    // по-прежнему применяются.
-    if (isStaleLocalEcho(search)) {
-      return;
-    }
-
     current = { ...parseTaskListQuery(search), revision: current.revision };
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- синхронизация с внешней query string
     setState(current);
   }, [search]);
 

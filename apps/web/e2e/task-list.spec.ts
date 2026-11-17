@@ -1080,9 +1080,9 @@ test.describe("список задач в production shell", () => {
       await expect(desktopRow(page, alphaId)).toBeVisible();
       await expect(desktopRow(page, betaId)).toBeVisible();
 
-      // q переживает переключение Список → Канбан.
+      // q переживает переключение Список → Канбан: клик по ссылке сначала
+      // снимает фокус с поля, blur фиксирует pending draft, затем переход.
       await search.fill(marker.toLowerCase());
-      await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe(marker.toLowerCase());
       await expect(desktopRow(page, alphaId)).toBeVisible();
 
       const projectId = new URL(page.url()).searchParams.get("project");
