@@ -647,11 +647,15 @@ describe("MarkdownNoteEditor: lifecycle сериализации", () => {
     const { container, rerender, onChange } = renderEditor({ value: "Первый документ" });
     await waitForReady(container);
 
-    rerender({ noteId: "note-2", value: INLINE_IMAGE });
+    // Два разных noteId до ожидания готовности: применяется только последний,
+    // промежуточный и исходный документы не должны протечь в редактор.
+    rerender({ noteId: "note-2", value: "Второй документ" });
+    rerender({ noteId: "note-3", value: INLINE_IMAGE });
 
     await waitFor(() => {
       expect(container.querySelector(".bn-editor")).toHaveTextContent("До");
       expect(container.querySelector(".bn-editor")).not.toHaveTextContent("Первый документ");
+      expect(container.querySelector(".bn-editor")).not.toHaveTextContent("Второй документ");
     });
     expect(container.querySelector('img[src="attachment://img-1"]')).not.toBeNull();
     expect(consoleMessages(consoleError)).not.toContain("flushSync");

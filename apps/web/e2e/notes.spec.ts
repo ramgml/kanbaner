@@ -82,6 +82,46 @@ async function pasteInlineImage(
   );
 }
 
+/**
+ * Создаёт заметку с настоящим attachment и inline image, дожидаясь сохранения.
+ *
+ * Сервер принимает только attachment:// и HTTP(S) URL, поэтому сначала файл
+ * загружается через UI, а inline image ссылается на его data URL из cache:
+ * notes-view канонизирует его обратно в attachment://.
+ */
+async function createInlineImageNote(
+  page: Page,
+  name: string,
+  prefix = "До",
+  suffix = "после",
+): Promise<string> {
+  const id = await createNote(page, name, "");
+  await page.getByTestId("note-image-input").setInputFiles({
+    name: "pixel.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(INLINE_IMAGE_BASE64, "base64"),
+  });
+
+  const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+  const blockImage = editor.locator("img:not(.ProseMirror-separator)").first();
+  await expect(blockImage).toBeVisible({ timeout: 15_000 });
+  const uploadedImageUrl = await blockImage.getAttribute("src");
+  expect(uploadedImageUrl).toMatch(/^data:image\/png;base64,/u);
+  if (uploadedImageUrl === null) throw new Error("У загруженного изображения нет src");
+  await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+    timeout: 15_000,
+  });
+
+  await pasteInlineImage(page, uploadedImageUrl, prefix, suffix);
+  await expect(editor.locator("[data-inline-content-type='inlineImage'] img")).toBeVisible();
+  await expect(editor).toContainText(prefix);
+  await expect(editor).toContainText(suffix);
+  await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+    timeout: 15_000,
+  });
+  return id;
+}
+
 async function createNote(page: Page, name: string, body = "Содержимое заметки"): Promise<string> {
   const empty = page.getByTestId("note-create-empty");
   if (await empty.isVisible()) await empty.click();
@@ -365,39 +405,7 @@ test.describe("kanbaner.notes в production shell", () => {
     const consoleMessages = trackPageConsole(page);
     await openNotes(page);
 
-    const inlineId = await createNote(page, title("Inline image"), "");
-
-    // Сначала загружаем настоящее вложение через UI: сервер принимает только
-    // attachment:// и HTTP(S) URL, data: URL в Markdown отклоняется.
-    await page.getByTestId("note-image-input").setInputFiles({
-      name: "pixel.png",
-      mimeType: "image/png",
-      buffer: Buffer.from(INLINE_IMAGE_BASE64, "base64"),
-    });
-
-    const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
-    const blockImage = editor.locator("img:not(.ProseMirror-separator)").first();
-    await expect(blockImage).toBeVisible({ timeout: 15_000 });
-    const uploadedImageUrl = await blockImage.getAttribute("src");
-    expect(uploadedImageUrl).toMatch(/^data:image\/png;base64,/u);
-    if (uploadedImageUrl === null) throw new Error("У загруженного изображения нет src");
-    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
-      timeout: 15_000,
-    });
-    expectNoLifecycleSerializationMessages(consoleMessages);
-
-    // Вставляем inline image, ссылающийся на то же вложение через data URL из
-    // cache: при сохранении notes-view вернёт канонический attachment://.
-    await pasteInlineImage(page, uploadedImageUrl, "До", "после");
-
-    const inlineImage = editor.locator("[data-inline-content-type='inlineImage'] img");
-    await expect(inlineImage).toBeVisible();
-    await expect(editor).toContainText("До");
-    await expect(editor).toContainText("после");
-    expectNoLifecycleSerializationMessages(consoleMessages);
-    await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
-      timeout: 15_000,
-    });
+    const firstId = await createInlineImageNote(page, title("Inline image"));
     expectNoLifecycleSerializationMessages(consoleMessages);
 
     // Повторное открытие запускает initial useEffect с inline image: именно
@@ -411,25 +419,45 @@ test.describe("kanbaner.notes в production shell", () => {
     await expect(reloadedEditor).toContainText("после");
     expectNoLifecycleSerializationMessages(consoleMessages);
 
-    const plainId = await createNote(page, title("Без inline image"), "Вторая заметка");
-
-    // Оба перехода запускаются в одном task: старая инициализация должна быть
-    // отменена, а не примениться поверх выбранной заметки.
-    await page.evaluate(
-      ({ first, second }) => {
-        document.querySelector<HTMLElement>(`[data-note-select='${second}']`)?.click();
-        document.querySelector<HTMLElement>(`[data-note-select='${first}']`)?.click();
-      },
-      { first: inlineId, second: plainId },
+    const plainId = await createNote(page, title("Без inline image"), "Промежуточная заметка");
+    const finalId = await createInlineImageNote(
+      page,
+      title("Финальная inline image"),
+      "Финальная",
+      "заметка",
     );
 
-    await expect(page).toHaveURL(new RegExp(`[?&]note=${inlineId}(?:&|$)`));
+    // Возвращаемся на первую inline-заметку и дожидаемся готовности, чтобы
+    // быстрая последовательность начиналась именно с inline.
+    await page.locator(`[data-note-select='${firstId}']`).click();
+    const editorRoot = page.locator(".kanbaner-note-editor");
+    await expect(editorRoot).toHaveAttribute("data-note-id", firstId);
+    await expect(editorRoot).toHaveAttribute("data-ready", "true");
+    await expect(
+      page
+        .getByRole("textbox", { name: "Содержимое заметки" })
+        .locator("[data-inline-content-type='inlineImage'] img"),
+    ).toBeVisible();
+
+    // Два разных перехода запускаются в одном task без ожидания между ними:
+    // inline → plain → inline. Побеждает последняя заметка, а загрузка
+    // промежуточной не должна применить её документ или редактор.
+    await page.evaluate(
+      ({ plain, final }) => {
+        document.querySelector<HTMLElement>(`[data-note-select='${plain}']`)?.click();
+        document.querySelector<HTMLElement>(`[data-note-select='${final}']`)?.click();
+      },
+      { plain: plainId, final: finalId },
+    );
+
+    await expect(page).toHaveURL(new RegExp(`[?&]note=${finalId}(?:&|$)`));
     const finalEditor = page.getByRole("textbox", { name: "Содержимое заметки" });
-    await expect(page.locator(".kanbaner-note-editor")).toHaveAttribute("data-note-id", inlineId);
-    await expect(page.locator(".kanbaner-note-editor")).toHaveAttribute("data-ready", "true");
+    await expect(editorRoot).toHaveAttribute("data-note-id", finalId);
+    await expect(editorRoot).toHaveAttribute("data-ready", "true");
     await expect(finalEditor.locator("[data-inline-content-type='inlineImage'] img")).toBeVisible();
-    await expect(finalEditor).toContainText("До");
-    await expect(finalEditor).not.toContainText("Вторая заметка");
+    await expect(finalEditor).toContainText("Финальная");
+    await expect(finalEditor).toContainText("заметка");
+    await expect(finalEditor).not.toContainText("Промежуточная заметка");
 
     expectNoLifecycleSerializationMessages(consoleMessages);
   });
