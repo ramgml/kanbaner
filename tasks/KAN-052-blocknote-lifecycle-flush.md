@@ -1,7 +1,7 @@
 ---
 id: KAN-052
 title: Устранить flushSync в lifecycle BlockNote
-status: in_progress
+status: done
 stage: 1
 priority: high
 owner: opencode-worker
@@ -26,10 +26,10 @@ specs:
 
 ## Объём работ
 
-- [ ] Воспроизвести console error на странице с inline image.
-- [ ] Перенести вызовы replace/serialization из синхронного lifecycle в отменяемую задачу или устранить React external renderer по актуальному API.
-- [ ] Проверить initial load, external value update и быструю смену noteId.
-- [ ] Добавить regression-тест console/error и содержимого.
+- [x] Воспроизвести console error на странице с inline image.
+- [x] Перенести вызовы replace/serialization из синхронного lifecycle в отменяемую задачу или устранить React external renderer по актуальному API.
+- [x] Проверить initial load, external value update и быструю смену noteId.
+- [x] Добавить regression-тест console/error и содержимого.
 
 ## Владение файлами
 
@@ -45,16 +45,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Нет flushSync lifecycle warning при открытии галереи блоков.
-- [ ] Markdown и inline images сохраняются без изменений и потерь.
-- [ ] Быстрое переключение заметок не применяет старую инициализацию.
-- [ ] Полные проверки и notes E2E зелёные.
+- [x] Нет flushSync lifecycle warning при открытии галереи блоков.
+- [x] Markdown и inline images сохраняются без изменений и потерь.
+- [x] Быстрое переключение заметок не применяет старую инициализацию.
+- [x] Полные проверки и notes E2E зелёные.
 
 ## Журнал
 
 - 2026-11-17 — Задача создана по Console Error пользователя.
+- 2026-11-17 — React external renderer inline image заменён DOM `toExternalHTML`; устранён flushSync при всех Markdown-сериализациях. Ревью подтвердило безопасность, regression переключений усилен. Ветка влита в `dev`.
 
 ## Итог
 
-- Коммит:
-- Проверки:
+- Коммит: `f5f3d10`, test `34556e7`, merge `3c909ff1ffb4dafca582f4b36a30387e4b86a555`.
+- Проверки: `pnpm check` 1726 тестов, notes E2E 21/21, console/pageerror чистые. Push не выполнялся. Отдельно найдено ограничение быстрого возврата к текущей pending-заметке, не влияющее на этот fix.
