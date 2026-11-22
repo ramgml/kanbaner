@@ -49,7 +49,7 @@ export function createKanbanerMcpServer(
     ...config,
     instanceId: config.instanceId ?? randomUUID(),
   };
-  const server = new McpServer({ name: "kanbaner", version: "0.1.0-dev.0" });
+  const server = new McpServer({ name: "kanbaner", version: "0.1.0-rc.0" });
 
   function query(
     name: string,

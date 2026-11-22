@@ -1,7 +1,7 @@
 {
   "id": "kanbaner.notes",
   "name": "Kanbaner Notes",
-  "version": "1.0.0",
+  "version": "0.1.0-rc.0",
   "hostApi": "^1.0.0",
   "entrypoints": {
     "server": "./dist/index.js"

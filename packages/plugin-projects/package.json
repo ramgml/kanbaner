@@ -1,6 +1,6 @@
 {
   "name": "@kanbaner/plugin-projects",
-  "version": "0.1.0-dev.0",
+  "version": "0.1.0-rc.0",
   "private": true,
   "type": "module",
   "description": "UI-плагин рабочего пространства проектов Kanbaner: sidebar, доска, список и переключатель представлений. Работает только через публичные команды и запросы kanbaner.tasks.",
