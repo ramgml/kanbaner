@@ -225,7 +225,7 @@ pnpm test:sqlite
 Резервное копирование работающего приложения выполняется только online через Storage Provider. Восстановление выполняется при остановленном приложении в новый каталог данных:
 
 ```bash
-pnpm storage:restore -- --backup <backup-file> --data-dir <new-data-directory>
+pnpm storage:restore --backup <backup-file> --data-dir <new-data-directory>
 ```
 
 Не копируйте файлы базы, WAL и SHM работающего приложения вручную.
