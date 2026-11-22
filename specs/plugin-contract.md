@@ -621,6 +621,7 @@ UI-контракт v1 является внутрипроцессным.
 app.sidebar
 app.main
 app.details
+app.assistant
 app.settings
 app.overlays
 ```
@@ -734,6 +735,7 @@ app.overlays
 - `http = true` означает доступность через общий command/query transport.
 - Плагин не регистрирует собственные HTTP-маршруты в MVP.
 - Аутентификация и лимиты выполняются ядром.
+- Отдельный `/api/opencode/*` принадлежит composition root и является внутренним UI transport внешней интеграции, а не маршрутом плагина или command/query API. Он не экспортирует доменные операции, использует same-origin/client guard и не передаёт Bearer token в браузер.
 - Схемы валидируются до вызова обработчика.
 
 ### MCP
@@ -745,6 +747,10 @@ app.overlays
 - `risk = destructive` должен быть явно разрешён и помечен в описании.
 - MCP не обходит ошибки, версии и идемпотентность контракта.
 - `mcp = true` не даёт доступа к неэкспортированным командам и чужим данным.
+
+Эти правила описывают универсальный discovery-driven `@kanbaner/mcp`. Ограниченный `kanbaner-mcp` из `@kanbaner/opencode` является отдельным ручным адаптером: его allowlist задаётся кодом интеграции, не строится из `exposure.mcp` и не меняется при добавлении новых доменных операций. Такая операция всё равно обязана иметь `exposure.http = true`; вызов идёт через общий `/api/v1` с теми же валидацией, версиями и идемпотентностью. Ручной allowlist не переиспользуется универсальным адаптером.
+
+Метаданные ручного OpenCode allowlist содержат `name`, `operationId`, `risk` (`read` или `write`) и `requiresExpectedVersion`. Catalog `/api/opencode/catalog` отдаёт тот же список из 14 MCP tools вместе со стандартными built-in tools OpenCode, помеченными `source` (`builtin` или `mcp`); `operationId` и `requiresExpectedVersion` необязательны для built-ins. Панель показывает built-ins и Kanbaner MCP отдельными группами, поэтому UI не может разойтись с фактическим MCP tool list. Delete MCP tools в allowlist отсутствуют. По явному решению пользователя от 2026-11-20 built-in tools (`question`, `websearch`, `webfetch`, `read`, `glob`, `grep`, `edit`, `shell`, `subagent`, `skill`, `external_directory`) разрешены агенту `kanbaner` в `opencode.jsonc`; это не песочница и не расширяет ручной MCP allowlist. Сторонние MCP servers, Code Mode `execute` и wildcard allow для чужих tools не включаются.
 
 ### Запрещено
 

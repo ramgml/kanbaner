@@ -12,7 +12,7 @@ Kanbaner — локальная однопользовательская сис�
 - встроенные и дополнительные плагины используют один публичный SDK;
 - ядро предоставляет инфраструктуру, но не содержит доменной логики;
 - внешние агенты работают через HTTP API и необязательный MCP-адаптер;
-- встроенного ИИ нет.
+- ядро не содержит ИИ; необязательный `@kanbaner/opencode` подключается к внешнему OpenCode Service.
 
 ## 2. Язык и стиль работы
 
@@ -69,7 +69,7 @@ Kanbaner — локальная однопользовательская сис�
 - Все встроенные функции загружаются через plugin-механизм.
 - Плагины считаются доверенным локальным кодом.
 - Жёсткая песочница, marketplace и удалённая загрузка кода не входят в MVP.
-- Встроенный ИИ, embeddings и семантический поиск не входят в MVP.
+- ИИ-логика, собственные модели, embeddings и семантический поиск не входят в ядро; внешний OpenCode подключается только отдельным необязательным плагином.
 - MCP является внешним адаптером и не подключается к базе данных.
 - Микросервисы и межплагинные транзакции не используются.
 
@@ -183,8 +183,18 @@ Kanbaner — локальная однопользовательская сис�
 - HTTP API использует те же команды и запросы, что интерфейс.
 - Токен хранится только на сервере в `KANBANER_API_TOKEN`.
 - Токен не попадает в клиентский JavaScript, журналы и ответы.
-- Все операции, кроме health, требуют Bearer token.
-- Неэкспортированная операция недоступна через API и MCP.
+- Все операции `/api/v1`, кроме health, требуют Bearer token.
+- `/api/opencode/*` является отдельным внутренним UI transport: same-origin проверки и `x-kanbaner-client: ui` обязательны, токен в браузер не передаётся.
+- OpenCode использует только внешний Service через `Service.ensure()`; сессии ограничены агентом `kanbaner` и `metadata.source=kanbaner`.
+- Вложения OpenCode передаются только inline `data:` URL в prompt выбранной модели; не читаются `file:` URL, произвольные server paths и файлы с диска.
+- Вложения: до 5 файлов и 8 MiB суммарно, UTF-8 текст до 1 MiB, image/PDF до 5 MiB каждый; сервер проверяет канонический Base64, UTF-8 и сигнатуры, а browser history получает только `name` и `mime` без base64. Image preview загружается отдельным same-origin binary endpoint по точным session/message/attachment index с той же session ownership и UI guard.
+- MCP OpenCode не регистрирует delete tools; update требует `expectedVersion`, mutations — `Idempotency-Key`.
+- По явному решению пользователя от 2026-11-20 chat-агенту `kanbaner` разрешены стандартные built-in tools OpenCode: `question`, `websearch`, `webfetch`, `read`, `glob`, `grep`, `edit`, `shell`, `subagent`, `skill`, `external_directory`. `edit` покрывает `edit`/`write`/`patch`. Прежний запрет shell/filesystem для chat-агента заменён.
+- Полный доступ OpenCode не является sandbox: агент может читать и изменять локальные файлы и секреты, выполнять shell с правами пользователя и обращаться к сети. Не добавляй `ask`-approval без реализации UI approvals и не ослабляй ordered deny `*` до wildcard allow.
+- Сторонние MCP servers, Code Mode `execute` и wildcard allow для чужих tools не включаются. Ручной Kanbaner MCP allowlist остаётся ограниченным.
+- Catalog OpenCode отдаёт built-in tools и 14 MCP tools с `source` и `risk` read/write; для MCP также `requiresExpectedVersion`. UI показывает две группы и предупреждение о полном доступе.
+- Неэкспортированная HTTP-операция недоступна через `/api/v1`; универсальный MCP использует `exposure.mcp`.
+- Ручной OpenCode allowlist не строится из `exposure.mcp`, не расширяется автоматически и вызывает только явно перечисленные HTTP-операции.
 - MCP-адаптер не имеет доступа к базе данных.
 - MCP-адаптер не содержит доменной логики.
 - Разрушительные MCP-инструменты должны быть явными и помеченными.

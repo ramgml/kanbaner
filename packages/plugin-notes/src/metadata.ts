@@ -23,6 +23,14 @@ export const notesUiContributions: readonly UiContribution[] = Object.freeze([
     route: NOTES_ROUTE,
   },
   {
+    id: "kanbaner.notes.sidebar",
+    slot: "app.sidebar",
+    kind: "panel",
+    priority: 20,
+    title: "Заметки",
+    description: "Дерево, поиск и создание страниц в глобальной боковой панели",
+  },
+  {
     id: "kanbaner.notes.navigation",
     slot: "app.sidebar",
     kind: "navigation",

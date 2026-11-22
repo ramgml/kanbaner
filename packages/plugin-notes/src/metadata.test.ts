@@ -20,4 +20,15 @@ describe("metadata UI-вкладов заметок", () => {
       notesUiContributions.filter((contribution) => contribution.icon !== undefined),
     ).toHaveLength(1);
   });
+
+  it("публикует дерево как отдельный panel-вклад глобального sidebar", () => {
+    expect(
+      notesUiContributions.find((contribution) => contribution.id === "kanbaner.notes.sidebar"),
+    ).toMatchObject({
+      slot: "app.sidebar",
+      kind: "panel",
+      priority: 20,
+      title: "Заметки",
+    });
+  });
 });

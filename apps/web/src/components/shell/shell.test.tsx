@@ -60,7 +60,8 @@ describe("адаптивный app shell", () => {
     expect(mobile).toHaveClass("md:hidden");
     expect(desktop).toHaveAttribute("aria-label", "Боковая панель");
     expect(mobile).toHaveAttribute("aria-label", "Мобильная навигация");
-    expect(screen.getAllByRole("link", { name: "Обзор" })).toHaveLength(2);
+    expect(within(desktop).queryByRole("link", { name: "Обзор" })).not.toBeInTheDocument();
+    expect(within(mobile).queryByRole("link", { name: "Обзор" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Плагины" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Настройки" })).toHaveLength(2);
     expect(screen.getAllByRole("link", { name: "Настройки" })[0]).toHaveAttribute(
@@ -71,7 +72,8 @@ describe("адаптивный app shell", () => {
       "href",
       "/settings",
     );
-    expect(screen.getAllByRole("link", { name: "Тест UI" })).toHaveLength(2);
+    expect(within(desktop).getByRole("link", { name: "Тест UI" })).toBeVisible();
+    expect(within(mobile).getByRole("link", { name: "Тест UI" })).toBeVisible();
   });
 
   it("делает основные действия доступными на ширине 360 px", () => {
@@ -79,7 +81,7 @@ describe("адаптивный app shell", () => {
     renderShell();
 
     expect(screen.getByTestId("mobile-navigation")).toBeVisible();
-    expect(screen.getAllByRole("link", { name: "Обзор" })[1]).toHaveAttribute("href", "/");
+    expect(screen.queryByRole("link", { name: "Обзор" })).not.toBeInTheDocument();
     expect(screen.getByTestId("settings-link-mobile")).toHaveAttribute("href", "/settings");
     expect(screen.getByTestId("settings-link-mobile")).toHaveAccessibleName("Настройки");
     expect(screen.queryAllByRole("link", { name: "Плагины" })).toHaveLength(0);
@@ -107,7 +109,20 @@ describe("адаптивный app shell", () => {
       "aria-current",
       "page",
     );
-    expect(screen.getAllByRole("link", { name: "Обзор" })[0]).not.toHaveAttribute("aria-current");
+    expect(screen.queryByRole("link", { name: "Обзор" })).not.toBeInTheDocument();
+  });
+
+  it("не помечает обзор активным на корневом маршруте", () => {
+    navigation.pathname = "/";
+    renderShell();
+
+    const mobile = screen.getByTestId("mobile-navigation");
+
+    expect(within(mobile).queryByRole("link", { name: "Обзор" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("settings-link-mobile")).not.toHaveAttribute("aria-current");
+    expect(within(mobile).getByRole("link", { name: "Тест UI" })).not.toHaveAttribute(
+      "aria-current",
+    );
   });
 
   it("ведёт safe mode ссылки в настройки плагинов", () => {

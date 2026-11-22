@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   createPluginRuntime,
   type PluginDiagnostic,
+  type OperationDescriptor,
   type PluginDiagnosticCode,
   type PluginLifecycleHooks,
   type PluginRuntime,
@@ -14,11 +15,14 @@ import type {
   OperationResult,
   PluginHostServices,
   PluginLogger,
+  ResourceDescriptor,
+  ResourceRef,
 } from "@kanbaner/plugin-sdk";
 
 import {
   createApplicationPluginComposition,
   type ApplicationPluginComposition,
+  type HttpOperationInvokeOptions,
   type PluginUiContributionRecord,
 } from "./application-composition";
 
@@ -304,6 +308,14 @@ export interface PluginServiceOptions {
     input: JsonValue,
     options?: UiOperationInvokeOptions,
   ) => Promise<OperationResult<unknown>>;
+  /** HTTP discovery видит только операции с явным `exposure.http`. */
+  readonly listHttpOperations?: () => readonly OperationDescriptor[];
+  readonly executeHttpOperation?: (
+    operationId: string,
+    input: JsonValue,
+    options: HttpOperationInvokeOptions,
+  ) => Promise<OperationResult<unknown>>;
+  readonly resolveHttpResource?: (ref: ResourceRef) => Promise<OperationResult<ResourceDescriptor>>;
 }
 
 interface StopResult {
@@ -431,6 +443,16 @@ class PluginService {
         options?: UiOperationInvokeOptions,
       ) => Promise<OperationResult<unknown>>)
     | undefined;
+  private readonly httpOperationsProvider: (() => readonly OperationDescriptor[]) | undefined;
+  private readonly httpOperationExecutor:
+    | ((
+        operationId: string,
+        input: JsonValue,
+        options: HttpOperationInvokeOptions,
+      ) => Promise<OperationResult<unknown>>)
+    | undefined;
+  private readonly httpResourceResolver:
+    ((ref: ResourceRef) => Promise<OperationResult<ResourceDescriptor>>) | undefined;
   private runtime: PluginRuntime | null = null;
   private snapshot: PluginRuntimeSnapshot | null = null;
   private bootstrapDone = false;
@@ -447,6 +469,9 @@ class PluginService {
     this.onSnapshot = options.onSnapshot;
     this.uiContributionsProvider = options.getUiContributions;
     this.operationExecutor = options.executeOperation;
+    this.httpOperationsProvider = options.listHttpOperations;
+    this.httpOperationExecutor = options.executeHttpOperation;
+    this.httpResourceResolver = options.resolveHttpResource;
 
     const providedHooks = options.hooks ?? {};
 
@@ -553,6 +578,59 @@ class PluginService {
       }
 
       return this.operationExecutor(operationId, input, sanitizeUiOperationOptions(options));
+    });
+  }
+
+  /** Список HTTP-операций и их JSON Schema для discovery. */
+  listHttpOperations(): Promise<readonly OperationDescriptor[]> {
+    return this.enqueue(async () => {
+      await this.ensureStarted();
+
+      return this.httpOperationsProvider?.() ?? [];
+    });
+  }
+
+  /** Выполняет HTTP-вызов через тот же Operation Bus, что и UI. */
+  executeHttpOperation(
+    operationId: string,
+    input: JsonValue,
+    options: HttpOperationInvokeOptions,
+  ): Promise<OperationResult<unknown>> {
+    return this.enqueue(async () => {
+      await this.ensureStarted();
+
+      if (this.httpOperationExecutor === undefined) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "HTTP OperationBus не подключён к composition root",
+            retryable: true,
+          },
+        };
+      }
+
+      return this.httpOperationExecutor(operationId, input, options);
+    });
+  }
+
+  /** Разрешает ResourceRef через адаптер плагина-владельца. */
+  resolveHttpResource(ref: ResourceRef): Promise<OperationResult<ResourceDescriptor>> {
+    return this.enqueue(async () => {
+      await this.ensureStarted();
+
+      if (this.httpResourceResolver === undefined) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "Resource Registry не подключён к composition root",
+            retryable: true,
+          },
+        };
+      }
+
+      return this.httpResourceResolver(ref);
     });
   }
 
@@ -787,6 +865,35 @@ function createDefaultPluginService(): PluginService {
       }
 
       return composition.executeUiOperation(operationId, input, options);
+    },
+    listHttpOperations: () => composition?.listHttpOperations() ?? [],
+    executeHttpOperation: async (operationId, input, options) => {
+      if (composition === null) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "Composition root не инициализирован",
+            retryable: true,
+          },
+        };
+      }
+
+      return composition.executeHttpOperation(operationId, input, options);
+    },
+    resolveHttpResource: async (ref) => {
+      if (composition === null) {
+        return {
+          ok: false,
+          error: {
+            code: "PLUGIN_UNAVAILABLE",
+            message: "Composition root не инициализирован",
+            retryable: true,
+          },
+        };
+      }
+
+      return composition.resolveHttpResource(ref);
     },
     hooks: {
       migrate: async (context) => {

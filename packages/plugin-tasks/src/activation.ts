@@ -1450,12 +1450,12 @@ const taskList: QueryFn = async (input, dependencies) => {
 /* Активация                                                                  */
 /* ------------------------------------------------------------------------- */
 
-function withUiExposure<Metadata extends CommandMetadata | QueryMetadata>(
+function withTaskExposure<Metadata extends CommandMetadata | QueryMetadata>(
   metadata: Metadata,
 ): Metadata {
   return {
     ...metadata,
-    exposure: { ui: true, http: false, mcp: false },
+    exposure: { ui: true, http: true, mcp: false },
   };
 }
 
@@ -1561,7 +1561,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     }
 
     context.commands.register({
-      metadata: withUiExposure(metadata),
+      metadata: withTaskExposure(metadata),
       handler: async (input, executionContext) => {
         // В очереди остаются только доменная транзакция и поисковые эффекты.
         // События публикуются после освобождения очереди, чтобы подписчик мог
@@ -1585,7 +1585,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     }
 
     context.queries.register({
-      metadata: withUiExposure(metadata),
+      metadata: withTaskExposure(metadata),
       handler: (input) => runMapped(() => handler(input, dependencies)),
     });
   }

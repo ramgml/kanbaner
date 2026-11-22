@@ -305,6 +305,7 @@ describe("активация kanbaner.notes", () => {
     expect(contributions.map((record) => record.contribution.id).sort()).toEqual([
       "kanbaner.notes.navigation",
       "kanbaner.notes.open",
+      "kanbaner.notes.sidebar",
       "kanbaner.notes.task-related",
       "kanbaner.notes.view",
     ]);

@@ -10,6 +10,7 @@
 @source "../../../../packages/plugin-projects/src";
 @source "../../../../packages/plugin-notes/src";
 @source "../../../../packages/plugin-notes/node_modules/@blocknote/shadcn";
+@source "../../../../packages/opencode/src";
 
 @custom-variant dark (&:is(.dark *));
 

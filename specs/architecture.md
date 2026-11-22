@@ -29,7 +29,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 | A-05 | Встроенные плагины используют тот же SDK | Проверка расширяемости на реальном продукте |
 | A-06 | Домен задач отделён от канбана и списка | Новые представления не должны менять домен |
 | A-07 | Плагины считаются доверенным кодом | Соответствует локальной модели и Obsidian-подходу |
-| A-08 | Нет встроенного ИИ | ИИ не является зависимостью продукта |
+| A-08 | Ядро не содержит ИИ | Модели и агентный runtime не являются зависимостью ядра; OpenCode — необязательная внешняя интеграция |
 | A-09 | Внешние агенты работают через HTTP API и MCP | Агенты не получают доступ к базе |
 | A-10 | Каждый плагин владеет своим namespace данных | Изоляция изменений и миграций |
 | A-11 | Связи ресурсов являются инфраструктурной возможностью ядра | Плагины не должны знать чужие таблицы |
@@ -41,6 +41,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 | A-17 | Поддержка Linux и Windows | Локальные данные и кроссплатформенные пути без Docker |
 | A-18 | Online backup через SQLite `.backup()` | Консистентная копия без копирования live-файлов |
 | A-19 | Универсальный `PluginDocumentStore` для сторонних плагинов | Backend-neutral API без утечки SQL |
+| A-20 | OpenCode как отдельный адаптер внешнего Service | Панель и MCP не добавляют модели, provider credentials или доменную логику в ядро |
 
 ## 3. Компоненты
 
@@ -129,6 +130,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 | `kanbaner.notes` | Заметки и Markdown-редактор | Нет | `kanbaner.notes.commands.v1`, `kanbaner.notes.queries.v1`, `kanbaner.notes.events.v1` |
 | `kanbaner.search` | Полнотекстовый поиск и агрегация провайдеров | Нет | `kanbaner.search.queries.v1`, UI-вклад |
 | `kanbaner.mcp` | Необязательный stdio-адаптер MCP | HTTP API | Не загружается в ядро |
+| `kanbaner.opencode` | Глобальная панель чата, catalog/session gateway, полный built-in toolset внешнего агента и ограниченный MCP | Внешний OpenCode Service и HTTP API | `kanbaner.opencode.ui.v1`; не владеет доменными данными |
 
 `kanbaner.notes` не зависит от `kanbaner.tasks`. Связь заметки с задачей выражается через `ResourceRef`.
 
@@ -148,6 +150,8 @@ Kanbaner строится как **модульный монолит с plugin-�
 @kanbaner/plugin-notes
 @kanbaner/plugin-search
 @kanbaner/mcp
+@kanbaner/opencode
+@kanbaner/cli
 ```
 
 Правила импорта:
@@ -157,6 +161,8 @@ Kanbaner строится как **модульный монолит с plugin-�
 - связь между плагинами идёт через публичные контракты;
 - `task-ui` — общая клиентская библиотека компонентов, а не плагин: она может зависеть от `plugin-sdk` и `@kanbaner/plugin-tasks/contract`, но не от корневого `@kanbaner/plugin-tasks`, `kernel`, storage, серверных модулей или `apps/web`;
 - UI-entrypoint плагина импортируется только composition-модулем `apps/web/src/ui/builtin-ui-plugins.ts`; shell и слоты работают с metadata из реестра;
+- `cli` является внешним HTTP-клиентом: он может использовать `@kanbaner/plugin-sdk` и client-safe `/contract` entrypoint-ы, но не ядро, Storage Provider или server-активацию плагинов;
+- `opencode` зависит только от Plugin SDK и публичного OpenCode client, не импортирует kernel, Storage Provider или доменные плагины; доменные вызовы выполняет отдельный MCP-процесс через `/api/v1`;
 - нарушение правил импорта проверяется автоматическим тестом.
 
 ## 7. Жизненный цикл плагина
@@ -626,6 +632,43 @@ GET  /api/v1/resources/{encodedResourceRef}
 
 Интерфейс и API работают в одном origin. Отдельная система пользовательских сессий не вводится.
 
+### CLI
+
+`@kanbaner/cli` — внешний процесс для агентов и скриптов поверх этого HTTP transport. Он предоставляет универсальные command/query/resource/discovery-вызовы и доменные сокращения, которые только формируют payload существующих операций. CLI не подключается к базе и не содержит доменной логики.
+
+Все результаты сериализуются как единый `OperationResult` JSON. URL задаётся через `KANBANER_API_URL` или `--url`, Bearer token — через `KANBANER_API_TOKEN`; токен не выводится и не принимается аргументом командной строки. Разрушительные доменные команды неинтерактивны и требуют явного `--confirm` либо `confirm: true` в универсальном input.
+
+### OpenCode UI transport
+
+`@kanbaner/opencode` не регистрирует маршруты плагина. Composition root предоставляет отдельный внутренний transport для browser panel:
+
+```text
+GET  /api/opencode/status
+GET  /api/opencode/catalog
+POST /api/opencode/session
+GET  /api/opencode/session/{sessionID}
+GET  /api/opencode/session/{sessionID}/messages/{messageID}/attachments/{attachmentIndex}
+POST /api/opencode/session/{sessionID}/model
+POST /api/opencode/session/{sessionID}/prompt
+```
+
+Это не машинный command/query API и не замена `/api/v1`. Bearer token не передаётся в браузер; запросы принимаются только с `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin проверками. Все ответы имеют `Cache-Control: no-store`; prompt использует NDJSON. Публичные ошибки не содержат сырые upstream messages, response body, headers и provider settings.
+
+Gateway вызывает `Service.ensure()` только при обращении к открытой панели. Catalog, session create и остальные операции используют один project location. Доступны только сессии с `metadata.source=kanbaner` и агентом `kanbaner`. Event subscription должна подтвердить `server.connected` до prompt; terminal execution закрывает поток, abort вызывает `session.interrupt` и закрывает subscriber-local iterator.
+
+Catalog также возвращает единый список инструментов с публичными `name`, `source` (`builtin` или `mcp`), `risk` (`read` или `write`) и `requiresExpectedVersion` для MCP. Панель показывает built-in tools OpenCode и ручной Kanbaner MCP отдельными группами и предупреждает о полном доступе к интернету, файлам и shell. Источник MCP-части — код интеграции, а не `exposure.mcp`, поэтому список не расширяется автоматически при появлении новых доменных операций.
+
+По явному решению пользователя от 2026-11-20 агенту `kanbaner` разрешены стандартные built-in tools: `question`, `websearch`, `webfetch`, `read`, `glob`, `grep`, `edit`, `shell`, `subagent`, `skill` и `external_directory`. Это не песочница: `read`/`edit`/`shell` имеют доступ к локальным файлам и секретам, а `websearch`/`webfetch`/`shell` — к сети. Сторонние MCP servers, Code Mode `execute` и wildcard allow для чужих tools остаются запрещены.
+
+### Вложения OpenCode prompt
+
+- Browser file picker принимает UTF-8 text/code, PNG/JPEG/GIF/WebP и PDF. Лимиты: до 5 файлов, 8 MiB суммарно, 1 MiB на текст и 5 MiB на каждый image/PDF.
+- Клиент валидирует выбор до чтения, санитизирует имя до basename не длиннее 200 символов и читает файл через `FileReader` в base64. В `POST /api/opencode/session/{sessionID}/prompt` уходит `files: [{ name, mime, base64 }]`; отдельного upload endpoint нет.
+- Сервер ограничивает тело запроса 12 MB, проверяет канонический Base64, фактический размер, UTF-8 через fatal `TextDecoder`, сигнатуры PNG/JPEG/GIF/WebP и `%PDF-`, затем передаёт файл в `session.prompt` как inline `data:<mime>;base64,...` с `source: { type: "inline" }`. `file:` URL и чтение произвольных server paths не поддерживаются.
+- Вложения относятся к текущему prompt и выбранной модели. Если модель не объявляет поддержку image/PDF-входа, панель только предупреждает и не блокирует отправку prompt; OpenCode/provider может заменить несовместимое вложение служебной заметкой или отклонить его. UI не фильтрует вложение по возможностям модели.
+- Публичное представление истории содержит только `name` и `mime`; base64 не возвращается в browser history, не логируется и не попадает в публичные ошибки. Валидация использует существующие `Buffer`, `TextDecoder` и browser `FileReader`, без новых runtime-зависимостей.
+- Image previews отображаются в composer и user messages. Для canonical сообщения `GET /api/opencode/session/{sessionID}/messages/{messageID}/attachments/{attachmentIndex}` проверяет session ownership и exact message/index, читает только canonical inline `file.data`/`file.mime` с `source.type === "inline"`, повторно проверяет Base64, лимит и сигнатуру и возвращает binary image с `no-store`/`nosniff`. Browser запрашивает endpoint с общим UI guard и создаёт blob URL; text/PDF и `media:`/`file:`/HTTP sources не выдаются. При отсутствии валидного inline-источника UI показывает обычную карточку вложения.
+
 ## 12. MCP
 
 `kanbaner-mcp` — необязательный внешний процесс.
@@ -649,6 +692,8 @@ Kanbaner API
 - при недоступном API MCP возвращает структурированную ошибку;
 - MCP не влияет на запуск и работу веб-интерфейса.
 
+Текущий executable `kanbaner-mcp` входит в `@kanbaner/opencode` и предоставляет явно перечисленный ограниченный набор: `project_list/get/create/update`, `task_list/get/create/update/complete/move`, `note_list/get/create/update`. Он не является ещё универсальным discovery-driven адаптером `@kanbaner/mcp` из этапа 7. Delete MCP tools отсутствуют. Все операции идут через Bearer-защищённый `/api/v1`; update содержит `expectedVersion`, mutation — ключ идемпотентности из `operationId`, input, идентичности MCP request/session и UUID экземпляра MCP server. Ограниченность этого MCP не ограничивает отдельно разрешённые built-in tools OpenCode: `shell` и `edit` могут изменять локальные файлы, но не получают доступа к базе Kanbaner иначе как через HTTP API.
+
 ## 13. Модель доверия и безопасность
 
 Текущая модель — **доверенные локальные плагины**.
@@ -659,6 +704,7 @@ Kanbaner API
 - Установка разрешена только из локального каталога.
 - Автоматическая загрузка кода из сети отсутствует.
 - API-токен и переменные окружения должны быть доступны только доверенному коду.
+- Полный доступ chat-агента OpenCode (`read`, `edit`, `shell`, `external_directory`, сеть) является осознанным решением пользователя и не образует sandbox: агент действует с правами пользователя и может читать секреты и изменять локальные файлы.
 
 Если в будущем понадобятся недоверенные плагины, потребуется отдельный этап:
 

@@ -135,7 +135,7 @@ function ProjectSidebarContent({
       aria-labelledby="projects-sidebar-title"
       data-testid="projects-sidebar"
       data-active-project={view.projectId}
-      className="flex min-h-0 flex-col gap-2"
+      className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
     >
       <div className="flex items-center justify-between gap-2">
         <h2

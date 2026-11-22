@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { Blocks, Info, Palette, Settings } from "lucide-react";
+import { Blocks, Info, LayoutDashboard, Palette, Settings } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
 import {
@@ -26,6 +26,21 @@ export default function SettingsPage() {
           <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">app.settings</code>.
         </p>
       </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <LayoutDashboard aria-hidden="true" className="size-4" />
+            Обзор
+          </CardTitle>
+          <CardDescription>Сводка shell-а и доступные разделы.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button asChild variant="outline" className="w-full sm:w-auto">
+            <Link href="/">Открыть обзор</Link>
+          </Button>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

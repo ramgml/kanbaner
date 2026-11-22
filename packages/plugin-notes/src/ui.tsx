@@ -4,12 +4,14 @@ import type { ResourceRef, UiContribution } from "@kanbaner/plugin-sdk";
 
 import { NOTES_PLUGIN_ID, NOTES_UI_CONTRACT } from "./constants.ts";
 import { notesUiContributions } from "./metadata.ts";
+import { NotesSidebar } from "./ui/notes-sidebar.tsx";
 import { NotesView } from "./ui/notes-view.tsx";
 import { RelatedNotesPanel } from "./ui/related-notes-panel.tsx";
 import type { NotesUiRendererProps } from "./ui/runtime.ts";
 
 export { NOTES_PLUGIN_ID, NOTES_ROUTE, NOTES_UI_CONTRACT } from "./constants.ts";
 export { notesUiContributions } from "./metadata.ts";
+export { NotesSidebar } from "./ui/notes-sidebar.tsx";
 export { NotesView } from "./ui/notes-view.tsx";
 export { RelatedNotesPanel } from "./ui/related-notes-panel.tsx";
 export type { NotesUiRendererProps } from "./ui/runtime.ts";
@@ -29,6 +31,10 @@ export const notesUiPlugin = {
     {
       metadata: contribution("kanbaner.notes.view"),
       render: (props: NotesUiRendererProps) => <NotesView {...props} />,
+    },
+    {
+      metadata: contribution("kanbaner.notes.sidebar"),
+      render: () => <NotesSidebar />,
     },
     {
       metadata: contribution("kanbaner.notes.navigation"),

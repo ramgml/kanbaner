@@ -10,7 +10,10 @@ import {
   ResourceRegistry,
   ResourceServiceError,
   subscribeResourceDeletedCleanup,
+  type ExecutionOptions,
   type OperationBusOptions,
+  type OperationDescriptor,
+  type OperationKind,
 } from "@kanbaner/kernel";
 import {
   createPluginError,
@@ -24,13 +27,18 @@ import {
   type PluginHostServices,
   type PluginId,
   type PluginLogger,
+  type ResourceDescriptor,
+  type ResourceRef,
   type SearchRegistrar,
   type StorageProvider,
   type UiContribution,
   type UiContributionRegistrar,
 } from "@kanbaner/plugin-sdk";
 
-import { sanitizeUiOperationOptions, type UiOperationInvokeOptions } from "../ui/operation-types";
+import {
+  sanitizeUiOperationOptions,
+  type UiOperationInvokeOptions,
+} from "../ui/operation-types.ts";
 
 const NOOP_LOGGER: PluginLogger = Object.freeze({
   debug(): void {
@@ -122,6 +130,14 @@ export interface ApplicationPluginCompositionOptions {
   readonly operationBus?: Omit<OperationBusOptions, "resources" | "events" | "search" | "storage">;
 }
 
+/** Параметры внешнего HTTP-вызова общей шины операций. */
+export interface HttpOperationInvokeOptions {
+  readonly expectedKind: OperationKind;
+  readonly requestId: string;
+  readonly idempotencyKey?: string;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * Общий composition плагинной инфраструктуры приложения.
  *
@@ -147,6 +163,13 @@ export interface ApplicationPluginComposition {
     input: JsonValue,
     options?: UiOperationInvokeOptions,
   ): Promise<OperationResult<unknown>>;
+  listHttpOperations(): readonly OperationDescriptor[];
+  executeHttpOperation(
+    operationId: string,
+    input: JsonValue,
+    options: HttpOperationInvokeOptions,
+  ): Promise<OperationResult<unknown>>;
+  resolveHttpResource(ref: ResourceRef): Promise<OperationResult<ResourceDescriptor>>;
   dispose(): void;
 }
 
@@ -284,6 +307,45 @@ export function createApplicationPluginComposition(
       return descriptor.kind === "mutation"
         ? operations.executeCommand(operationId, input, executionOptions)
         : operations.executeQuery(operationId, input, executionOptions);
+    },
+
+    listHttpOperations(): readonly OperationDescriptor[] {
+      return operations.registry
+        .list()
+        .filter((descriptor) => descriptor.exposure.http)
+        .sort((left, right) => left.id.localeCompare(right.id));
+    },
+
+    async executeHttpOperation(
+      operationId: string,
+      input: JsonValue,
+      options: HttpOperationInvokeOptions,
+    ): Promise<OperationResult<unknown>> {
+      const descriptor =
+        options.expectedKind === "mutation"
+          ? operations.registry.getCommand(operationId)
+          : operations.registry.getQuery(operationId);
+
+      if (descriptor === undefined || !descriptor.exposure.http) {
+        return toErrorResult(createPluginError("NOT_FOUND", "Операция недоступна для HTTP"));
+      }
+
+      const idempotencyKey =
+        options.expectedKind === "mutation" ? options.idempotencyKey : undefined;
+      const executionOptions: ExecutionOptions = {
+        source: { type: "http", id: "api" },
+        requestId: options.requestId,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      };
+
+      return options.expectedKind === "mutation"
+        ? operations.executeCommand(operationId, input, executionOptions)
+        : operations.executeQuery(operationId, input, executionOptions);
+    },
+
+    resolveHttpResource(ref: ResourceRef): Promise<OperationResult<ResourceDescriptor>> {
+      return resources.resolve(ref);
     },
 
     dispose(): void {

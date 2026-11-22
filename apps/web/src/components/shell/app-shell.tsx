@@ -2,15 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { ShieldAlert } from "lucide-react";
+import { ShieldAlert, Sparkles, X } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { useUiContributions, UiResourceOpenerRuntime } from "../../ui/provider";
 import { SETTINGS_PLUGINS_HREF } from "./nav-items";
 import { DesktopSidebar, MobileNavigation } from "./shell-nav";
 import { UiSlot } from "./ui-slot";
+import { useDesktopAssistantResizer } from "./use-desktop-assistant-resizer";
 
 function SafeModeNotice({ problemCount }: { readonly problemCount: number }) {
   return (
@@ -59,6 +60,105 @@ function DetailsSlot({
         replaceSearch={replaceSearch}
       />
     </aside>
+  );
+}
+
+function AssistantSlot({
+  pathname,
+  search,
+  replaceSearch,
+}: {
+  readonly pathname: string;
+  readonly search: string;
+  readonly replaceSearch: (search: string) => void;
+}) {
+  const contributions = useUiContributions("app.assistant");
+  const [open, setOpen] = useState(false);
+  const [restored, setRestored] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const resizer = useDesktopAssistantResizer();
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setOpen(window.localStorage.getItem("kanbaner.opencode.panelOpen") === "true");
+      setRestored(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    if (restored) window.localStorage.setItem("kanbaner.opencode.panelOpen", String(open));
+  }, [open, restored]);
+
+  useEffect(() => {
+    if (open) closeButtonRef.current?.focus();
+  }, [open]);
+
+  if (contributions.length === 0) return null;
+
+  return (
+    <>
+      {open ? null : (
+        <button
+          type="button"
+          aria-label="Открыть OpenCode"
+          data-testid="opencode-open"
+          onClick={() => setOpen(true)}
+          className="fixed right-3 bottom-20 z-30 inline-flex size-10 items-center justify-center rounded-full border bg-primary text-primary-foreground shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:bottom-4"
+        >
+          <Sparkles aria-hidden="true" className="size-5" />
+        </button>
+      )}
+      {open ? (
+        <aside
+          id="opencode-assistant"
+          aria-label="OpenCode assistant"
+          data-testid="opencode-sidebar"
+          style={resizer.asideStyle}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex max-h-dvh w-full shrink-0 flex-col border-l bg-background md:relative md:z-40"
+        >
+          <div
+            {...resizer.separatorProps}
+            aria-label="Ширина панели OpenCode"
+            aria-controls="opencode-assistant"
+            title="Потяните за границу, используйте стрелки, Home/End; двойной клик сбрасывает ширину"
+            className="group absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize touch-none select-none focus-visible:bg-accent/60 focus-visible:outline-none md:block"
+          >
+            <span
+              aria-hidden="true"
+              data-app-assistant-resizer-line
+              className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+                resizer.dragging
+                  ? "bg-primary"
+                  : "bg-border group-hover:bg-primary/60 group-focus-visible:bg-primary"
+              }`}
+            />
+          </div>
+          <div className="flex items-center justify-end border-b px-2 py-1">
+            <button
+              ref={closeButtonRef}
+              type="button"
+              aria-label="Закрыть OpenCode"
+              data-testid="opencode-close"
+              onClick={() => setOpen(false)}
+              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </div>
+          <UiSlot
+            slot="app.assistant"
+            className="flex min-h-0 flex-1 flex-col"
+            pathname={pathname}
+            search={search}
+            replaceSearch={replaceSearch}
+          />
+        </aside>
+      ) : null}
+    </>
   );
 }
 
@@ -158,6 +258,7 @@ export function AppShell({ children, safeMode = false, problemCount = 0 }: AppSh
             </main>
 
             <DetailsSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
+            <AssistantSlot pathname={pathname} search={search} replaceSearch={replaceSearch} />
           </div>
         </div>
 

@@ -1,0 +1,14 @@
+{
+  "id": "kanbaner.opencode",
+  "name": "OpenCode Chat",
+  "version": "0.1.0-dev.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./dist/index.js",
+    "client": "./dist/ui.js"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": ["kanbaner.opencode.ui.v1"],
+  "permissions": ["ui", "commands"]
+}

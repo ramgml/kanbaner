@@ -10,6 +10,11 @@ import {
 } from "./nav-items";
 
 describe("core navigation", () => {
+  it("не содержит собственных пунктов и корневого маршрута", () => {
+    expect(CORE_NAV_ITEMS).toHaveLength(0);
+    expect(CORE_NAV_ITEMS.map((item) => item.href)).not.toContain("/");
+  });
+
   it("не содержит администрирование в рабочей навигации", () => {
     expect(CORE_NAV_ITEMS.map((item) => item.href)).not.toContain("/plugins");
     expect(CORE_NAV_ITEMS.map((item) => item.href)).not.toContain("/settings");

@@ -328,7 +328,7 @@ async function waitFor<Value>(
 }
 
 describe("активация kanbaner.tasks", heavyPluginSuite, () => {
-  it("регистрирует все команды и запросы с UI exposure и выключенными HTTP/MCP", async () => {
+  it("регистрирует все команды и запросы с UI/HTTP exposure и выключенным MCP", async () => {
     const harness = await startHarness();
 
     const commands = harness.composition.operations.registry.commands
@@ -344,7 +344,7 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     expect(queryIds).toEqual(Object.values(TASKS_QUERY_IDS).sort());
 
     for (const descriptor of [...commands, ...queries]) {
-      expect(descriptor.exposure).toEqual({ ui: true, http: false, mcp: false });
+      expect(descriptor.exposure).toEqual({ ui: true, http: true, mcp: false });
     }
 
     expect(

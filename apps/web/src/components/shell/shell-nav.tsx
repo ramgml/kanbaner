@@ -16,6 +16,7 @@ import {
   type ShellNavItem,
 } from "./nav-items";
 import { UiSlot } from "./ui-slot";
+import { useDesktopSidebarResizer } from "./use-desktop-sidebar-resizer";
 
 interface ShellNavProps {
   readonly pathname: string;
@@ -85,12 +86,15 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
   const sidebarContributions = useUiContributions("app.sidebar");
   const items = mergeNavItems(pluginNavItems(sidebarContributions));
   const settingsActive = isActivePath(pathname, SETTINGS_HREF);
+  const resizer = useDesktopSidebarResizer();
 
   return (
     <aside
       aria-label="Боковая панель"
+      id="app-sidebar"
       data-testid="desktop-sidebar"
-      className="hidden w-64 shrink-0 flex-col border-r bg-muted/20 md:flex"
+      style={resizer.asideStyle}
+      className="relative hidden max-h-dvh shrink-0 flex-col border-r bg-muted/20 md:flex"
     >
       <div className="flex h-14 items-center border-b px-4">
         <Link
@@ -102,7 +106,7 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
         </Link>
       </div>
 
-      <nav aria-label="Основная навигация" className="flex flex-1 flex-col gap-4 p-3">
+      <nav aria-label="Основная навигация" className="flex min-h-0 flex-1 flex-col gap-4 p-3">
         <ul className="flex flex-col gap-1">
           {items.map((item) => {
             const Icon = item.icon;
@@ -123,7 +127,11 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
           })}
         </ul>
 
-        <UiSlot slot="app.sidebar" excludeKinds={["navigation"]} className="flex flex-col gap-2" />
+        <UiSlot
+          slot="app.sidebar"
+          excludeKinds={["navigation"]}
+          className="flex min-h-0 flex-1 flex-col gap-2"
+        />
 
         <div className="mt-auto flex flex-col gap-3">
           <Separator />
@@ -158,6 +166,23 @@ export function DesktopSidebar({ pathname, safeMode = false, problemCount = 0 }:
           </div>
         </div>
       </nav>
+      <div
+        {...resizer.separatorProps}
+        aria-label="Ширина боковой панели"
+        aria-controls="app-sidebar"
+        title="Потяните за границу, используйте стрелки, Home/End; двойной клик сбрасывает ширину"
+        className="group absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none select-none focus-visible:bg-accent/60 focus-visible:outline-none md:block"
+      >
+        <span
+          aria-hidden="true"
+          data-app-sidebar-resizer-line
+          className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+            resizer.dragging
+              ? "bg-primary"
+              : "bg-border group-hover:bg-primary/60 group-focus-visible:bg-primary"
+          }`}
+        />
+      </div>
     </aside>
   );
 }

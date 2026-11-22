@@ -1,4 +1,4 @@
-import { Flag, FolderKanban, LayoutDashboard, NotebookTabs, type LucideIcon } from "lucide-react";
+import { Flag, FolderKanban, NotebookTabs, type LucideIcon } from "lucide-react";
 
 export interface ShellNavItem {
   readonly href: string;
@@ -29,13 +29,15 @@ export function resolvePluginNavIcon(icon: string | undefined): LucideIcon {
 }
 
 /**
- * Пункты рабочей навигации shell-а. Администрирование (плагины и настройки)
+ * Пункты рабочей навигации shell-а.
+ *
+ * Ядро не добавляет собственных пунктов: рабочая навигация строится только
+ * из вкладов доменных плагинов. Администрирование (плагины и настройки)
  * сюда не входит: plugin manager живёт в `/settings/plugins`, а вход в
- * настройки — отдельная компактная иконка внизу навигации.
+ * настройки — отдельная компактная иконка внизу навигации. Обзор доступен
+ * с корневого маршрута `/` и из карточки в `/settings`.
  */
-export const CORE_NAV_ITEMS: readonly ShellNavItem[] = [
-  { href: "/", label: "Обзор", icon: LayoutDashboard },
-];
+export const CORE_NAV_ITEMS: readonly ShellNavItem[] = [];
 
 /** Единый адрес раздела настроек для shell-навигации. */
 export const SETTINGS_HREF = "/settings";

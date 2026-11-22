@@ -1,17 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import {
-  Download,
-  FileText,
-  Menu,
-  PanelLeftClose,
-  Plus,
-  Save,
-  Search,
-  Star,
-  Trash2,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, FileText, Menu, Plus, Save, Star, Trash2 } from "lucide-react";
 import type { ResourceRef } from "@kanbaner/plugin-sdk";
 
 import { NOTES_COMMAND_IDS, NOTES_QUERY_IDS } from "../constants.ts";
@@ -34,8 +24,14 @@ import { AttachmentUrlCache } from "./attachment-cache.ts";
 import { downloadMarkdownExport } from "./download.ts";
 import { MarkdownNoteEditor } from "./editor/markdown-note-editor.tsx";
 import { NoteLinks } from "./note-links.tsx";
+import {
+  NotesSidebarPanel,
+  useNotesMobileViewport,
+  usePublishNotesSidebar,
+  type NotesFilter,
+  type NotesSidebarContext,
+} from "./notes-sidebar.tsx";
 import { NoteTitleField } from "./note-title-field.tsx";
-import { NoteTree } from "./note-tree.tsx";
 import { useNoteSidebarResizer } from "./use-note-sidebar-resizer.ts";
 import {
   fileToBase64,
@@ -48,7 +44,6 @@ import {
   type NotesUiRendererProps,
 } from "./runtime.ts";
 
-type Filter = "tree" | "favorite" | "recent";
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
 interface MoveRequest {
@@ -93,7 +88,8 @@ export function NotesView(props: NotesViewProps) {
   const [items, setItems] = useState<readonly NoteView[]>([]);
   const [details, setDetails] = useState<NoteDetails | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(() => noteIdFromSearch(search));
-  const [filter, setFilter] = useState<Filter>("tree");
+  const [filter, setFilter] = useState<NotesFilter>("tree");
+  const isMobileViewport = useNotesMobileViewport();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [pendingCount, setPendingCount] = useState(0);
@@ -832,8 +828,7 @@ export function NotesView(props: NotesViewProps) {
     await loadNote(selectedIdRef.current, false);
   };
 
-  const runSearch = async (event: FormEvent) => {
-    event.preventDefault();
+  const runSearch = async () => {
     if (searchText.trim().length === 0) {
       setSearchResults(null);
       return;
@@ -895,13 +890,36 @@ export function NotesView(props: NotesViewProps) {
     if (openResource) openResource(ref);
   };
 
+  const sidebarContext: NotesSidebarContext = {
+    items,
+    visibleItems,
+    selectedId,
+    filter,
+    searchText,
+    searchResults,
+    busy,
+    movePending,
+    onFilterChange: (nextFilter) => {
+      setFilter(nextFilter);
+      setSearchResults(null);
+    },
+    onSearchTextChange: setSearchText,
+    onSearch: () => void runSearch(),
+    onClearSearch: () => setSearchResults(null),
+    onSelect: (id) => void selectNote(id),
+    onCreate: (parentId) => void createNote(parentId),
+    onMove: (id, parentId, position) => void moveNote(id, parentId, position),
+    onDelete: (view) => void deleteNote(view),
+  };
+  usePublishNotesSidebar(sidebarContext);
+
   return (
     <div
       ref={sidebarResizer.containerRef}
       data-testid="notes-view"
       className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row"
     >
-      <header className="flex items-center justify-between border-b border-border px-3 py-2 lg:hidden">
+      <header className="flex items-center justify-between border-b border-border px-3 py-2 md:hidden">
         <button
           type="button"
           aria-label="Открыть дерево заметок"
@@ -922,129 +940,33 @@ export function NotesView(props: NotesViewProps) {
         </button>
       </header>
 
-      <aside
-        aria-label="Навигация по заметкам"
-        id="notes-sidebar"
-        style={sidebarResizer.asideStyle}
-        className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:relative lg:flex lg:[width:var(--note-sidebar-width)]`}
-      >
-        <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-3">
-          <h1 className="text-base font-semibold">Заметки</h1>
-          <button
-            type="button"
-            aria-label="Закрыть дерево заметок"
-            onClick={() => setSidebarOpen(false)}
-            className={`${buttonClass} lg:hidden`}
-          >
-            <PanelLeftClose aria-hidden="true" className="size-4" />
-          </button>
-          <button
-            type="button"
-            data-note-create-top
-            disabled={busy}
-            onClick={() => void createNote(null)}
-            className={`${buttonClass} hidden lg:inline-flex`}
-          >
-            <Plus aria-hidden="true" className="size-4" /> Создать
-          </button>
-        </div>
-        <form
-          onSubmit={(event) => void runSearch(event)}
-          className="flex gap-1 border-b border-border p-2"
+      {isMobileViewport ? (
+        <aside
+          aria-label="Навигация по заметкам"
+          id="notes-sidebar"
+          style={sidebarResizer.asideStyle}
+          className={`${sidebarOpen ? "fixed inset-0 z-40 flex bg-background" : "hidden"} min-h-0 shrink-0 flex-col border-r border-border lg:relative lg:flex lg:[width:var(--note-sidebar-width)]`}
         >
-          <input
-            aria-label="Поиск заметок"
-            data-testid="note-search-input"
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Поиск…"
-            className={`${inputClass} min-w-0 flex-1`}
-          />
-          <button type="submit" aria-label="Найти" className={buttonClass}>
-            <Search aria-hidden="true" className="size-4" />
-          </button>
-        </form>
-        <div
-          className="flex gap-1 border-b border-border p-2"
-          role="group"
-          aria-label="Фильтр страниц"
-        >
-          {(["tree", "favorite", "recent"] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={filter === value}
-              data-note-filter={value}
-              onClick={() => {
-                setFilter(value);
-                setSearchResults(null);
-              }}
-              className={`flex-1 rounded-md px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${filter === value ? "bg-accent" : "hover:bg-accent/50"}`}
-            >
-              {value === "tree" ? "Дерево" : value === "favorite" ? "Избранное" : "Недавние"}
-            </button>
-          ))}
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          {searchResults !== null ? (
-            <section aria-label="Результаты поиска">
-              <div className="mb-2 flex items-center justify-between px-1 text-xs text-muted-foreground">
-                <span>Найдено: {searchResults.items.length}</span>
-                <button type="button" onClick={() => setSearchResults(null)} className="underline">
-                  Сбросить
-                </button>
-              </div>
-              <ul className="m-0 list-none p-0">
-                {searchResults.items.map((hit) => (
-                  <li key={hit.noteId}>
-                    <button
-                      type="button"
-                      data-note-search-result={hit.noteId}
-                      onClick={() => void selectNote(hit.noteId)}
-                      className="w-full rounded-md px-2 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <span className="block truncate text-sm font-medium">{hit.title}</span>
-                      <span className="mt-1 line-clamp-2 block text-xs text-muted-foreground">
-                        {hit.excerpt}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : (
-            <NoteTree
-              items={visibleItems}
-              positionItems={items}
-              flat={filter === "recent"}
-              movePending={movePending}
-              actionsDisabled={busy}
-              selectedId={selectedId}
-              onSelect={(id) => void selectNote(id)}
-              onCreate={(parentId) => void createNote(parentId)}
-              onMove={(id, parentId, position) => void moveNote(id, parentId, position)}
-              onDelete={(view) => void deleteNote(view)}
+          <NotesSidebarPanel value={sidebarContext} mobile onClose={() => setSidebarOpen(false)} />
+          <div
+            {...sidebarResizer.separatorProps}
+            aria-label="Ширина дерева заметок"
+            aria-controls="notes-sidebar"
+            title="Потяните за границу, используйте стрелки, Home/End; двойной клик сбрасывает ширину"
+            className="group absolute inset-y-0 -right-1 z-10 hidden w-2 cursor-col-resize touch-none select-none focus-visible:bg-accent/60 focus-visible:outline-none lg:block"
+          >
+            <span
+              aria-hidden="true"
+              data-note-sidebar-resizer-line
+              className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+                sidebarResizer.dragging
+                  ? "bg-primary"
+                  : "bg-border group-hover:bg-primary/60 group-focus-visible:bg-primary"
+              }`}
             />
-          )}
-        </div>
-        <div
-          {...sidebarResizer.separatorProps}
-          aria-label="Ширина дерева заметок"
-          aria-controls="notes-sidebar"
-          title="Потяните за границу, используйте стрелки, Home/End; двойной клик сбрасывает ширину"
-          className="group absolute inset-y-0 -right-1 z-10 hidden w-2 cursor-col-resize touch-none select-none focus-visible:bg-accent/60 focus-visible:outline-none lg:block"
-        >
-          <span
-            aria-hidden="true"
-            data-note-sidebar-resizer-line
-            className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
-              sidebarResizer.dragging
-                ? "bg-primary"
-                : "bg-border group-hover:bg-primary/60 group-focus-visible:bg-primary"
-            }`}
-          />
-        </div>
-      </aside>
+          </div>
+        </aside>
+      ) : null}
 
       <section
         aria-label="Редактор заметки"

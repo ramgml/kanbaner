@@ -78,6 +78,13 @@ const NOTES_SERVER_ENTRYPOINT = "index.ts";
 const NOTES_CONTRACT_ENTRYPOINT = "contract.ts";
 const NOTES_UI_ENTRYPOINT_FILE = "ui.tsx";
 const NOTES_UI_PACKAGE_PREFIXES = ["@blocknote/core", "@blocknote/react", "@blocknote/shadcn"];
+const ALLOWED_CLI_DEPENDENCIES = new Set([
+  "node:fs/promises",
+  "node:util",
+  "@kanbaner/plugin-sdk",
+  "@kanbaner/plugin-tasks/contract",
+  "@kanbaner/plugin-notes/contract",
+]);
 
 function isNotesUiSpecifier(specifier) {
   return NOTES_UI_PACKAGE_PREFIXES.some(
@@ -677,6 +684,44 @@ function analyzeMarkdownUiSources(root, violations) {
   }
 }
 
+function analyzeCliSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "cli");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(sourceRoot) || !statSync(sourceRoot).isDirectory()) {
+    return;
+  }
+
+  for (const file of sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file))) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `относительный импорт выходит за пределы cli (${kind}): ${specifier}`,
+          });
+        }
+
+        continue;
+      }
+
+      if (!ALLOWED_CLI_DEPENDENCIES.has(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `cli должен использовать только HTTP client и public contract (${kind}): ${specifier}`,
+        });
+      }
+    }
+  }
+}
+
 function analyzeNotesSources(root, violations) {
   const packageRoot = path.join(root, "packages", "plugin-notes");
   const sourceRoot = path.join(packageRoot, "src");
@@ -1165,6 +1210,8 @@ export function analyzeImportBoundaries(root = ROOT) {
 
   analyzeNotesSources(root, violations);
 
+  analyzeCliSources(root, violations);
+
   analyzeManifests(root, violations);
 
   return violations;
@@ -1203,6 +1250,7 @@ function runSelfTest() {
   const tasksRoot = path.join(root, "packages", "plugin-tasks");
   const taskUiRoot = path.join(root, "packages", "task-ui");
   const projectsRoot = path.join(root, "packages", "plugin-projects");
+  const cliRoot = path.join(root, "packages", "cli");
 
   try {
     writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: {} }));
@@ -1403,6 +1451,16 @@ function runSelfTest() {
       'import { projectsUiPlugin } from "@kanbaner/plugin-projects/ui";\nexport const builtin = [projectsUiPlugin];\n',
     );
 
+    // 11. CLI использует только public contracts и не импортирует server graph.
+    writeFile(
+      path.join(cliRoot, "src", "bad.ts"),
+      'import { OperationBus } from "@kanbaner/kernel";\nexport const bus = OperationBus;\n',
+    );
+    writeFile(
+      path.join(cliRoot, "src", "good.ts"),
+      'import { parseArgs } from "node:util";\nimport { TASKS_QUERY_IDS } from "@kanbaner/plugin-tasks/contract";\nexport const value = [parseArgs, TASKS_QUERY_IDS];\n',
+    );
+
     const violations = analyzeImportBoundaries(root);
 
     assertViolation(
@@ -1497,6 +1555,8 @@ function runSelfTest() {
     assertNoViolation(violations, "packages/plugin-tasks/src/good-dep.ts");
     assertNoViolation(violations, "packages/plugin-tasks/src/activation.ts");
     assertNoViolation(violations, "packages/plugin-tasks/src/contract.ts");
+    assertViolation(violations, "packages/cli/src/bad.ts", "cli должен использовать только HTTP");
+    assertNoViolation(violations, "packages/cli/src/good.ts");
 
     console.log(
       `Import boundary self-test: ${String(violations.length)} violation(s) в ${String(
@@ -1528,5 +1588,6 @@ if (process.argv.includes("--self-test")) {
     console.log(
       "Import boundaries: task-ui и plugin-projects не смешивают server и React; UI-entrypoint импортируется только composition-модулем.",
     );
+    console.log("Import boundaries: cli использует только HTTP client и public contracts.");
   }
 }

@@ -1,0 +1,33 @@
+{
+  "name": "@kanbaner/cli",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "description": "Машинно-ориентированный CLI для HTTP API Kanbaner.",
+  "bin": {
+    "kanbaner": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@kanbaner/plugin-notes": "workspace:*",
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/plugin-tasks": "workspace:*"
+  }
+}
