@@ -1,7 +1,7 @@
 ---
 id: KAN-055
 title: Файлы и список инструментов в OpenCode-панели
-status: in_progress
+status: done
 stage: 7
 priority: high
 owner: opencode-orchestrator
@@ -9,7 +9,7 @@ blocked_by: []
 branch: dev
 worktree: .
 created: 2026-11-19
-updated: 2026-11-21
+updated: 2026-11-22
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -76,4 +76,4 @@ specs:
 
 ## Итог
 
-Реализация и проверки завершены; существующие изменения сохраняются без коммита. Статус остаётся `in_progress` до интеграционного коммита/merge в `dev`.
+Интегрировано в `dev` коммитом `c5d7f62`; полные проверки и live smoke зелёные. Статус: `done`.

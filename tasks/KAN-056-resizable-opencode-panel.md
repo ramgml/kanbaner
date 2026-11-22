@@ -1,7 +1,7 @@
 ---
 id: KAN-056
 title: Resizable OpenCode-панель
-status: in_progress
+status: done
 stage: 7
 priority: medium
 owner: worker
@@ -9,7 +9,7 @@ blocked_by: []
 branch: dev
 worktree: .
 created: 2026-11-20
-updated: 2026-11-20
+updated: 2026-11-22
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -44,7 +44,7 @@ specs:
 - [x] Подключить resizer к `AssistantSlot`, не меняя open/close/Escape/focus.
 - [x] Добавить unit-тесты hook и E2E в `shell.spec.ts`.
 - [x] Прогнать форматирование, lint, typecheck, focused unit, build и E2E.
-- [ ] Коммит и merge в `dev` — выполняет оркестратор.
+- [x] Коммит и интеграция в `dev` — выполнены оркестратором (`c5d7f62`).
 
 ## Владение файлами
 
@@ -79,4 +79,4 @@ specs:
 
 ## Итог
 
-Ожидает review и интеграции оркестратором; статус `done` не устанавливался.
+Интегрировано в `dev` коммитом `c5d7f62`; focused unit, shell E2E и полный `pnpm check` зелёные. Статус: `done`.

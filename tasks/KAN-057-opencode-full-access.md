@@ -1,7 +1,7 @@
 ---
 id: KAN-057
 title: Полный доступ OpenCode для агента kanbaner
-status: in_progress
+status: done
 stage: 7
 priority: high
 owner: worker
@@ -9,7 +9,7 @@ blocked_by: []
 branch: dev
 worktree: .
 created: 2026-11-20
-updated: 2026-11-20
+updated: 2026-11-22
 specs:
   - specs/context.md
   - specs/product-mvp.md
@@ -56,7 +56,7 @@ specs:
 - [x] Добавить metadata-тест против `opencode.jsonc` и обновить UI/E2E тесты.
 - [x] Обновить спецификации, README, AGENTS.md и README пакета.
 - [x] Прогнать проверки и зафиксировать фактические результаты.
-- [ ] Интеграционный commit/merge выполняет оркестратор.
+- [x] Интеграционный коммит в `dev` выполнен оркестратором (`c5d7f62`).
 
 ## Владение файлами
 
@@ -105,5 +105,4 @@ specs:
 
 ## Итог
 
-Реализация, независимый review и проверки завершены. Изменения сохраняются без
-коммита; статус остаётся `in_progress` до интеграционного commit/merge в `dev`.
+Интегрировано в `dev` коммитом `c5d7f62`. Независимый review, полный `pnpm check` и безопасный live smoke зелёные. Статус: `done`.

@@ -1,7 +1,7 @@
 ---
 id: KAN-058
 title: Перенос входа в Обзор в настройки
-status: in_progress
+status: done
 stage: 7
 priority: low
 owner: worker
@@ -40,5 +40,10 @@ navigation, сохранив доступ к странице через нас�
 
 ## Ограничения
 
-Работа ведётся в текущем checkout без worktree, commit, merge и push. Статус
-остаётся `in_progress` до отдельной интеграции в `dev`.
+Реализация выполнялась в текущем checkout без worktree. Интеграционный коммит
+выполнен оркестратором по запросу пользователя перед публикацией.
+
+## Итог
+
+Интегрировано в `dev` коммитом `c5d7f62`; unit, keyboard/pointer E2E и полный
+`pnpm check` зелёные. Статус: `done`.

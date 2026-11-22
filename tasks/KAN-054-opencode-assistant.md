@@ -1,7 +1,7 @@
 ---
 id: KAN-054
 title: Глобальная панель OpenCode и ограниченный MCP
-status: in_progress
+status: done
 stage: 7
 priority: high
 owner: opencode-orchestrator
@@ -9,7 +9,7 @@ blocked_by: []
 branch: dev
 worktree: .
 created: 2026-11-19
-updated: 2026-11-19
+updated: 2026-11-22
 specs:
   - specs/context.md
   - specs/product-mvp.md
@@ -78,4 +78,4 @@ specs:
 
 ## Итог
 
-Реализация и проверки завершены; изменения не коммитятся без явной просьбы пользователя. Статус остаётся `in_progress` до интеграционного коммита/merge в `dev`.
+Интегрировано в `dev` коммитом `c5d7f62` после зелёных проверок и live smoke. Статус: `done`.
