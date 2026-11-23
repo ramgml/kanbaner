@@ -33,6 +33,14 @@ async function mockOpenCode(
   historyMessages?: readonly unknown[],
   options?: {
     readonly sessionDelayMs?: number;
+    readonly promptDelayMs?: number;
+    readonly previewDelayMs?: number;
+    /** Явный gate: preview-запрос ждёт сигнала теста, чтобы проверить load при чтении выше. */
+    readonly previewGate?: Promise<void>;
+    /** Сообщения, которые вернёт POST при создании первой сессии. */
+    readonly initialMessages?: readonly unknown[];
+    /** История для конкретного GET; нужна, чтобы отличить initial load и canonical refresh. */
+    readonly sessionHistory?: (call: number) => readonly unknown[] | undefined;
     readonly statusOutcome?:
       | "done"
       | "error"
@@ -49,6 +57,7 @@ async function mockOpenCode(
     previewPaths: [] as string[],
     previewHeaders: [] as Array<Record<string, string>>,
     sessionBodies: [] as unknown[],
+    sessionGetCalls: 0,
     statusQueries: [] as string[],
     promptBodies: [] as Array<{
       text?: string;
@@ -81,7 +90,7 @@ async function mockOpenCode(
         title: "Kanbaner chat",
         agent: "kanbaner",
         model: catalog.defaultModel,
-        messages: [],
+        messages: state.createdSessions === 1 ? (options?.initialMessages ?? []) : [],
       });
       return;
     }
@@ -98,6 +107,10 @@ async function mockOpenCode(
           files?: Array<{ name: string; mime: string; base64: string }>;
         },
       );
+      // Задержка ответа даёт тесту уйти читать выше до прихода streaming-событий.
+      if (options?.promptDelayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.promptDelayMs));
+      }
       const events = promptEvents?.(state.promptBodies.length) ?? [
         {
           kind: "tool",
@@ -134,6 +147,12 @@ async function mockOpenCode(
     ) {
       state.previewPaths.push(path);
       state.previewHeaders.push(request.headers());
+      // Отложенная загрузка image проверяет capture load при чтении выше.
+      if (options?.previewGate !== undefined) {
+        await options.previewGate;
+      } else if (options?.previewDelayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, options.previewDelayMs));
+      }
       await route.fulfill({
         status: 200,
         contentType: "image/png",
@@ -143,17 +162,14 @@ async function mockOpenCode(
       return;
     }
     if (/^\/api\/opencode\/session\/ses-\d+$/u.test(path) && method === "GET") {
+      state.sessionGetCalls += 1;
       // Задержка только для canonical refresh после prompt: даёт проверить
       // optimistic-состояние до замены сообщений ответом сервера.
       if (state.promptBodies.length > 0 && options?.sessionDelayMs !== undefined) {
         await new Promise((resolve) => setTimeout(resolve, options.sessionDelayMs));
       }
-      const body = {
-        id: path.split("/").at(-1),
-        title: "Kanbaner chat",
-        agent: "kanbaner",
-        model: catalog.defaultModel,
-        messages: historyMessages ?? [
+      const sessionMessages = options?.sessionHistory?.(state.sessionGetCalls) ??
+        historyMessages ?? [
           { id: "user:message-0", role: "user", text: "Проверка" },
           {
             id: "tool:message-1:call-1",
@@ -167,7 +183,13 @@ async function mockOpenCode(
             endedAt: 3600,
           },
           { id: "assistant:message-1:0", role: "assistant", text: "Ответ OpenCode" },
-        ],
+        ];
+      const body = {
+        id: path.split("/").at(-1),
+        title: "Kanbaner chat",
+        agent: "kanbaner",
+        model: catalog.defaultModel,
+        messages: sessionMessages,
       };
       state.sessionBodies.push(body);
       const turnID = url.searchParams.get("turnID");
@@ -193,6 +215,203 @@ async function mockOpenCode(
 
   return state;
 }
+
+interface ChatScrollMetrics {
+  readonly top: number;
+  readonly max: number;
+  readonly bottomGap: number;
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+}
+
+async function chatScrollMetrics(page: Page): Promise<ChatScrollMetrics> {
+  return page.getByTestId("opencode-messages").evaluate((element) => ({
+    top: element.scrollTop,
+    max: Math.max(0, element.scrollHeight - element.clientHeight),
+    bottomGap: Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight),
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+}
+
+/** Детерминированно уводит чтение выше без wheel-событий и авто-scroll Playwright. */
+async function readChatAbove(page: Page): Promise<void> {
+  await page.getByTestId("opencode-messages").evaluate((element) => {
+    element.scrollTop = 0;
+  });
+}
+
+/** Середина истории: пользователь читает не начало и не конец. */
+async function readChatMiddle(page: Page): Promise<void> {
+  await page.getByTestId("opencode-messages").evaluate((element) => {
+    const max = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = Math.round(max / 2);
+  });
+}
+
+interface ChatAnchor {
+  readonly index: number;
+  readonly top: number;
+  readonly text: string;
+}
+
+/** Первое сообщение, пересекающее верхнюю границу viewport контейнера. */
+async function chatAnchor(page: Page): Promise<ChatAnchor> {
+  return page.getByTestId("opencode-messages").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const articles = Array.from(element.querySelectorAll("article"));
+    const index = articles.findIndex(
+      (article) => article.getBoundingClientRect().bottom > box.top + 8,
+    );
+    const anchor = articles[index];
+    if (anchor === undefined) throw new Error("visible anchor is missing");
+    return {
+      index,
+      top: anchor.getBoundingClientRect().top,
+      text: (anchor.textContent ?? "").slice(0, 40),
+    };
+  });
+}
+
+async function chatAnchorTop(page: Page, anchor: ChatAnchor): Promise<number> {
+  return page.getByTestId("opencode-messages").evaluate((element, index) => {
+    const target = Array.from(element.querySelectorAll("article"))[index];
+    if (target === undefined) throw new Error("anchor disappeared");
+    return target.getBoundingClientRect().top;
+  }, anchor.index);
+}
+
+test("desktop: чтение в середине истории сохраняет видимый anchor при росте раннего сообщения", async ({
+  page,
+}) => {
+  const history = Array.from({ length: 30 }, (_value, index) => ({
+    id: `assistant:history-${index}`,
+    role: "assistant" as const,
+    text: `Середина ${index}. ${"Подробный текст шага. ".repeat(6)}`,
+  }));
+  // Canonical refresh увеличивает высоту сообщения ВЫШЕ видимого фрагмента:
+  // native scroll anchoring должен удержать чтение, а не числовой scrollTop.
+  const canonical = [
+    ...history.map((message, index) =>
+      index === 2
+        ? {
+            ...message,
+            text: `${message.text} ${"Дополнительный ранний текст. ".repeat(40)}`,
+          }
+        : message,
+    ),
+    { id: "assistant:mid-answer", role: "assistant" as const, text: "Ответ в середине" },
+  ];
+  const mock = await mockOpenCode(
+    page,
+    () => [
+      { kind: "delta", id: "message-1:0", text: "Потоковый " },
+      { kind: "text", id: "message-1:0", text: "Потоковый ответ середины" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ],
+    history,
+    {
+      // Даём тесту уйти в середину до streaming и canonical refresh.
+      promptDelayMs: 900,
+      sessionDelayMs: 1400,
+      initialMessages: history,
+      sessionHistory: () => canonical,
+    },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Середина 29.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+
+  await message.fill("Вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect.poll(() => mock.promptBodies.length).toBe(1);
+
+  await readChatMiddle(page);
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  await expect(jump).toBeVisible();
+  const middle = await chatScrollMetrics(page);
+  expect(middle.top).toBeGreaterThan(0);
+  expect(middle.bottomGap).toBeGreaterThan(100);
+  const anchor = await chatAnchor(page);
+  expect(anchor.text).not.toContain("Середина 29.");
+
+  // Delta ниже viewport не перестраивает контент выше: числовой scrollTop цел.
+  await expect(scroll.getByText("Потоковый ответ середины", { exact: true })).toBeVisible();
+  expect((await chatScrollMetrics(page)).top).toBe(middle.top);
+
+  // Canonical replacement выросшего раннего сообщения: видимый anchor на месте.
+  await expect(scroll).toContainText("Дополнительный ранний текст.");
+  await expect(scroll.getByText("Ответ в середине", { exact: true })).toBeVisible();
+  const anchored = await chatAnchor(page);
+  expect(anchored.text).toBe(anchor.text);
+  expect(Math.abs((await chatAnchorTop(page, anchor)) - anchor.top)).toBeLessThanOrEqual(1);
+  // ScrollTop изменил браузер для компенсации reflow выше, а не hook.
+  expect((await chatScrollMetrics(page)).top).toBeGreaterThan(middle.top);
+  await expect(jump).toBeVisible();
+});
+
+test("desktop: streaming → canonical replacement даёт ровно один unread", async ({ page }) => {
+  const history = Array.from({ length: 20 }, (_value, index) => ({
+    id: `assistant:history-${index}`,
+    role: "assistant" as const,
+    text: `Ответ истории ${index}. ${"Текст ответа. ".repeat(8)}`,
+  }));
+  const canonical = [
+    ...history,
+    { id: "assistant:canonical", role: "assistant" as const, text: "Канонический ответ" },
+  ];
+  await mockOpenCode(
+    page,
+    () => [
+      { kind: "delta", id: "message-1:0", text: "Потоковый " },
+      { kind: "text", id: "message-1:0", text: "Потоковый ответ" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ],
+    history,
+    {
+      promptDelayMs: 900,
+      sessionDelayMs: 1400,
+      initialMessages: history,
+      sessionHistory: () => canonical,
+    },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Ответ истории 19.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+
+  await message.fill("Вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await readChatAbove(page);
+
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  const unread = page.getByTestId("opencode-unread-count");
+  await expect(jump).toBeVisible();
+
+  // Streaming ID — один unread, а не счётчик на каждый delta.
+  await expect(scroll.getByText("Потоковый ответ", { exact: true })).toBeVisible();
+  await expect(unread).toHaveText("1");
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+
+  // Canonical replacement удаляет transient ID и оставляет тот же один ответ.
+  await expect(scroll.getByText("Канонический ответ", { exact: true })).toBeVisible();
+  await expect(unread).toHaveText("1");
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+});
 
 test("mobile панель открывается явно, занимает экран и сохраняет закрытое состояние", async ({
   page,
@@ -1092,4 +1311,263 @@ test("ручная проверка статуса: canonical error сохран
   await expect(turnStatus).toContainText("OpenCode сообщил об ошибке");
   await expect(page.getByText("Черновик", { exact: true })).toBeVisible();
   expect(mock.promptBodies).toHaveLength(1);
+});
+
+test("desktop: чтение выше переживает streaming, canonical и раскрытие tool call", async ({
+  page,
+}) => {
+  const history = Array.from({ length: 24 }, (_value, index) => ({
+    id: `assistant:history-${index}`,
+    role: "assistant" as const,
+    text: `Длинная история ${index}. ${"Подробный текст шага. ".repeat(6)}`,
+  }));
+  const canonical = [
+    ...history,
+    { id: "assistant:canonical", role: "assistant" as const, text: "Канонический ответ" },
+  ];
+  const mock = await mockOpenCode(
+    page,
+    (call) =>
+      call === 1
+        ? [
+            {
+              kind: "tool",
+              id: "message-1:call-1",
+              name: "read",
+              status: "running",
+              text: "",
+              startedAt: 1000,
+            },
+            {
+              kind: "tool",
+              id: "message-1:call-1",
+              name: "read",
+              status: "completed",
+              text: "",
+              output: "ok",
+              endedAt: 2000,
+            },
+            { kind: "delta", id: "message-1:0", text: "Потоковый " },
+            { kind: "text", id: "message-1:0", text: "Потоковый ответ" },
+            { kind: "finalizing" },
+            { kind: "done" },
+          ]
+        : [{ kind: "text", id: "message-2:0", text: "Второй ответ" }, { kind: "done" }],
+    history,
+    {
+      // Ответ приходит после того, как тест успевает уйти читать выше.
+      promptDelayMs: 900,
+      sessionDelayMs: 1200,
+      initialMessages: history,
+      // GET после prompt — canonical refresh; вторая проверка ждёт свой ответ.
+      sessionHistory: (call) =>
+        call === 1
+          ? canonical
+          : [...canonical, { id: "assistant:second", role: "assistant", text: "Второй ответ" }],
+    },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Длинная история 23.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+  const initial = await chatScrollMetrics(page);
+  expect(initial.scrollHeight).toBeGreaterThan(initial.clientHeight + 400);
+
+  await message.fill("Вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect.poll(() => mock.promptBodies.length).toBe(1);
+
+  // Уходим выше до прихода streaming-событий: follow выключается.
+  await readChatAbove(page);
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  await expect(jump).toBeVisible();
+  await expect(scroll.locator('[data-testid="opencode-jump-to-latest"]')).toHaveCount(0);
+
+  await expect(scroll.getByText("Потоковый ответ", { exact: true })).toBeVisible();
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+  await expect(page.getByTestId("opencode-unread-count")).toBeVisible();
+
+  // Раскрытие tool call увеличивает контент, но не двигает чтение.
+  await page.evaluate(() => {
+    const details = document.querySelector<HTMLDetailsElement>(
+      '[data-testid="opencode-tool-call"]',
+    );
+    if (details === null) throw new Error("tool call is missing");
+    details.open = true;
+  });
+  await expect(page.getByTestId("opencode-tool-call")).toHaveJSProperty("open", true);
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+
+  // Canonical refresh той же сессии заменяет сообщения, но не scrollTop.
+  await expect(scroll.getByText("Канонический ответ", { exact: true })).toBeVisible();
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+  // Transient streaming ID удалён: один логический ответ — один unread.
+  await expect(page.getByTestId("opencode-unread-count")).toHaveText("1");
+
+  expect(await jump.evaluate((element) => element.tagName)).toBe("BUTTON");
+  await jump.focus();
+  await expect(jump).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(jump).toHaveCount(0);
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(
+    "opencode-messages",
+  );
+
+  // Явный возврат снова включает follow для следующего prompt.
+  await expect(message).toBeEnabled();
+  await message.fill("Ещё");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(scroll.getByText("Второй ответ", { exact: true })).toBeVisible();
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+  await expect(jump).toHaveCount(0);
+});
+
+test("mobile 360: кнопка вне scroll, resize и загрузка картинки не двигают чтение", async ({
+  page,
+}) => {
+  let releasePreview: () => void = () => {};
+  const previewGate = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  const history = [
+    {
+      id: "user:message-0",
+      role: "user" as const,
+      text: "История с картинкой",
+      attachments: [{ name: "pixel.png", mime: "image/png" }],
+    },
+    {
+      id: "tool:message-1:call-1",
+      role: "tool" as const,
+      name: "read",
+      status: "completed" as const,
+      text: "",
+      input: '{"path":"README.md"}',
+      output: "ok",
+      startedAt: 1000,
+      endedAt: 2000,
+    },
+    ...Array.from({ length: 18 }, (_value, index) => ({
+      id: `assistant:history-${index}`,
+      role: "assistant" as const,
+      text: `Мобильная история ${index}. ${"Текст для прокрутки. ".repeat(5)}`,
+    })),
+  ];
+  const mock = await mockOpenCode(
+    page,
+    () => [{ kind: "text", id: "message-1:0", text: "Мобильный ответ" }, { kind: "done" }],
+    history,
+    {
+      previewGate,
+      initialMessages: history,
+      sessionHistory: () => [
+        ...history,
+        { id: "assistant:mobile", role: "assistant", text: "Мобильный ответ" },
+      ],
+    },
+  );
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Мобильная история 17.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+
+  await readChatAbove(page);
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  await expect(jump).toBeVisible();
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+
+  // Загрузка image preview ниже точки чтения не создаёт scroll jump.
+  releasePreview();
+  const image = page.getByTestId("message-image-preview");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() =>
+      image.evaluate((element) => (element instanceof HTMLImageElement ? element.naturalWidth : 0)),
+    )
+    .toBeGreaterThan(0);
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+
+  // Раскрытие tool call меняет высоту контента, но не позицию чтения.
+  await page.evaluate(() => {
+    const details = document.querySelector<HTMLDetailsElement>(
+      '[data-testid="opencode-tool-call"]',
+    );
+    if (details === null) throw new Error("tool call is missing");
+    details.open = true;
+  });
+  await expect(page.getByTestId("opencode-tool-call")).toHaveJSProperty("open", true);
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+
+  // Mobile viewport resize не прокручивает читающего выше.
+  await page.setViewportSize({ width: 360, height: 600 });
+  await expect.poll(() => page.evaluate(() => window.innerHeight)).toBe(600);
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const panel = document.querySelector<HTMLElement>('[data-testid="opencode-panel"]');
+    const scroller = document.querySelector<HTMLElement>('[data-testid="opencode-messages"]');
+    const button = document.querySelector<HTMLElement>('[data-testid="opencode-jump-to-latest"]');
+    if (panel === null || scroller === null || button === null) {
+      throw new Error("scroll ui is missing");
+    }
+    const buttonRect = button.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    return {
+      insideScroll: scroller.contains(button),
+      buttonWidth: buttonRect.width,
+      buttonRight: buttonRect.right,
+      panelRight: panelRect.right,
+      panelWidth: panelRect.width,
+      documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      panelOverflow: panel.scrollWidth - panel.clientWidth,
+    };
+  });
+  expect(layout.insideScroll).toBe(false);
+  expect(layout.buttonWidth).toBeLessThanOrEqual(layout.panelWidth - 16);
+  expect(layout.buttonRight).toBeLessThanOrEqual(layout.panelRight + 1);
+  expect(layout.documentOverflow).toBeLessThanOrEqual(0);
+  expect(layout.panelOverflow).toBeLessThanOrEqual(1);
+
+  await jump.focus();
+  await expect(jump).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(jump).toHaveCount(0);
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe(
+    "opencode-messages",
+  );
+
+  // После возврата prompt снова следует за концом.
+  await expect(message).toBeEnabled();
+  await message.fill("Мобильный вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(scroll.getByText("Мобильный ответ", { exact: true })).toBeVisible();
+  expect(mock.promptBodies).toEqual([expect.objectContaining({ text: "Мобильный вопрос" })]);
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+  await expect(jump).toHaveCount(0);
+
+  // Смена сессии при чтении выше открывает конец и убирает кнопку/unread.
+  await readChatAbove(page);
+  await expect(jump).toBeVisible();
+  await page.getByRole("button", { name: "Новая сессия OpenCode" }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-2");
+  await expect(jump).toHaveCount(0);
+  expect((await chatScrollMetrics(page)).top).toBe(0);
 });

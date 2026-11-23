@@ -129,6 +129,43 @@ Bearer token в браузер не передаётся. Ответы имею�
   runtime-зависимостей нет: используются browser `FileReader`, `Buffer` и
   `TextDecoder`.
 
+## Прокрутка чата
+
+Лента использует реальный scroll container и внутренний content wrapper; логика
+вынесена в `packages/opencode/src/chat-scroll.ts` и не использует виртуализацию,
+IntersectionObserver или `scrollIntoView`.
+
+- Follow включается только у нижней границы: расстояние
+  `scrollHeight - scrollTop - clientHeight` не больше 48 px. Порог проверяется по
+  фактическому контейнеру, а не по последнему сообщению.
+- При чтении выше `scrollTop` не меняется от streaming deltas, upsert tool call,
+  canonical refresh той же сессии и tool status. Unread считается по identity:
+  новые ID и сообщения с изменённым текстом; чистое удаление истории счётчик не
+  увеличивает. Если после изменения сообщений или resize геометрия сама привела
+  к нижней границе, follow и badge восстанавливаются без scroll event.
+- Перед любой автоматической записью `scrollTop` текущий offset сверяется с
+  сохранённой предыдущей нижней границей. Если пользователь уже ушёл выше, но
+  scroll event ещё не доставлен, запись пропускается: follow выключается, кнопка
+  и unread появляются сразу. Явные `followNow`, возврат кнопкой и отправка
+  prompt остаются override.
+- Кнопка находится вне scroll content и является native `<button>`: работает
+  pointer/touch, Enter/Space и `focus-visible`. После возврата фокус переносится
+  на контейнер с `preventScroll`, чтобы исчезновение кнопки не прокручивало ленту.
+- Отправка prompt и retry явно включают follow. Смена `session.id` сбрасывает
+  unread и открывает конец новой истории; canonical refresh той же сессии follow
+  не сбрасывает.
+- Native scroll anchoring не отключается. Контракт — стабильность видимого
+  фрагмента при reflow выше viewport, а не неизменный числовой `scrollTop`:
+  браузер сам компенсирует рост раннего сообщения, hook не делает собственный
+  jump. Для deltas без reflow выше viewport `scrollTop` остаётся прежним.
+- `ResizeObserver` наблюдает container и content, window resize и capture
+  `load`/`error` (image preview) удерживают низ только в режиме follow. Без
+  `ResizeObserver` дополнительно работают capture `toggle` для tool `<details>`
+  и window `pointerup`/`keyup` после resize мышью или клавиатурой; polling и
+  новые зависимости не используются.
+- `overscroll-contain` не отдаёт прокрутку чата внешней странице. Позиция между
+  перезагрузками не сохраняется; generation/abort в scroll-логику не входят.
+
 ## MCP и built-in tools
 
 `opencode.jsonc` в корне репозитория регистрирует локальный stdio server с
@@ -207,6 +244,10 @@ server. Поэтому повтор того же request внутри одно�
   merge/finish helpers, keyboard, stale generation, unconfirmed/error/cancelled
   tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
   завершения и ручной status check в том же scope.
+- `packages/opencode/src/chat-scroll.test.tsx` — геометрия near-bottom,
+  threshold 48 px, follow/чтение выше, unread, возврат, canonical refresh,
+  сброс при смене сессии, `ResizeObserver`/window resize/`load`/`error`,
+  StrictMode cleanup, passive listener и native keyboard/focus.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,
@@ -214,4 +255,6 @@ server. Поэтому повтор того же request внутри одно�
   авто-GET, ручные done/error/pending без нового prompt, compact tool call с
   duration, keyboard disclosure, длинным output без overflow и canonical
   timings после reload, streaming с mock OpenCode transport в production
-  Chromium.
+  Chromium. Scroll-сценарии проверяют чтение выше во время streaming и
+  canonical, tool disclosure, отложенную загрузку картинки, resize viewport,
+  Enter/Space-возврат, повторный follow и смену сессии на desktop и mobile 360.
