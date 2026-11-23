@@ -1,7 +1,7 @@
 ---
 id: KAN-061
 title: Компактное представление tool calls
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-061
@@ -95,6 +95,10 @@ specs:
   aborted streaming normalization, representative v1 fixture и `aria-live=off`
   для ticking duration. Задача возвращена в `in_progress`; новый
   `tool-call.tsx` явно добавлен во владение.
+- 2026-11-23 — Worker исправил замечания коммитами `1ec5d9a` и `306764a`.
+  Финальное ревью не нашло blocker/high/medium/low. Focused tests 111/111,
+  OpenCode E2E 13/13, полный `pnpm check` — 139 files / 1936 tests. Статус
+  `review`.
 
 ## Итог
 
