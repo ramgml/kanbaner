@@ -1,7 +1,7 @@
 ---
 id: KAN-060
 title: Статусы и ошибки конкретного prompt
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-060
@@ -111,6 +111,10 @@ pnpm check
 - 2026-11-23 — Независимое ревью нашло blocker/high: retry при ambiguous fetch
   failure, ordinal вместо stable turn ID и преждевременный done по assistant
   text. Merge остановлен; задача возвращена worker в `in_progress`.
+- 2026-11-23 — Worker исправил замечания коммитами `0d7f1a4` и `f73bdcd`.
+  Повторное ревью подтвердило отсутствие blocker/high/medium/low. Focused
+  tests 109/109, OpenCode E2E 12/12, полный `pnpm check` — 139 files /
+  1909 tests. Статус `review`.
 
 ## Итог
 
