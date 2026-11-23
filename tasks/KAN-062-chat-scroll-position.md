@@ -1,0 +1,86 @@
+---
+id: KAN-062
+title: Прокрутка чата без потери позиции чтения
+status: backlog
+stage: 8
+priority: high
+owner: unassigned
+blocked_by: [KAN-061]
+branch: null
+worktree: null
+created: 2026-11-23
+updated: 2026-11-23
+specs:
+  - specs/product-mvp.md
+  - specs/architecture.md
+  - specs/roadmap.md
+---
+
+# KAN-062 — Прокрутка чата без потери позиции чтения
+
+## Цель
+
+Реализовать пункт 3 roadmap: streaming не должен выталкивать пользователя из
+читаемого фрагмента, а возврат к новым сообщениям должен быть явным.
+
+## Результат
+
+- Автоследование работает только когда пользователь находится у нижней границы.
+- При чтении выше позиция сохраняется и появляется кнопка «К новому сообщению».
+- Переключение сессий, resize и восстановление истории не дают ложных скачков.
+
+## Объём работ
+
+- [ ] Добавить near-bottom detection и управление scroll anchoring.
+- [ ] Реализовать доступную кнопку возврата и индикацию новых сообщений.
+- [ ] Учесть streaming deltas, tool calls, картинки, resize и mobile viewport.
+- [ ] Добавить unit/E2E regression-тесты и документацию.
+
+## Владение файлами
+
+Разрешено:
+
+- `packages/opencode/src/ui.tsx`, `ui.test.tsx`;
+- при необходимости отдельные модули `packages/opencode/src/*scroll*`;
+- `packages/opencode/README.md`;
+- `apps/web/e2e/opencode.spec.ts`;
+- `specs/product-mvp.md`, `specs/architecture.md`;
+- `tasks/reports/KAN-062.md`.
+
+Запрещено:
+
+- изменения shell/sticky-sidebar, не связанные с прокруткой чата;
+- ядро, доменные плагины, SQLite, новые зависимости и lock-файл;
+- ослабление generation/abort semantics и canonical refresh.
+
+## Контракты и зависимости
+
+- Начинается только после KAN-061 и использует его compact tool calls.
+- Новые browser APIs проверяются по актуальной документации и имеют fallback.
+
+## Критерии приёмки
+
+- [ ] У нижней границы streaming остаётся следуемым.
+- [ ] При прокрутке вверх позиция не скачет от deltas/tool updates.
+- [ ] Кнопка возврата доступна клавиатурой и прокручивает к актуальному концу.
+- [ ] После явного возврата автоследование включается снова.
+- [ ] Mobile/desktop и загрузка вложений не создают неуправляемый scroll jump.
+- [ ] Unit/E2E и полный `pnpm check` зелёные.
+
+## Проверки
+
+- Focused UI unit и Playwright `e2e/opencode.spec.ts` на desktop/mobile.
+- `pnpm --filter @kanbaner/opencode typecheck` и `pnpm check`.
+
+## Риски
+
+- ResizeObserver/изображения могут менять высоту после пользовательского scroll.
+- Порог near-bottom не должен мешать ручному чтению.
+
+## Журнал
+
+- 2026-11-23 — Задача создана по пункту 3 roadmap; ожидает KAN-061.
+
+## Итог
+
+Заполняется оркестратором после интеграции.
