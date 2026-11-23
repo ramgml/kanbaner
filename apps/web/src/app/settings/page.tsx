@@ -10,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "../../components/ui/card";
+import { FontSizeSetting } from "../../components/shell/font-size-setting";
 import { UiSlot } from "../../components/shell/ui-slot";
 import { SETTINGS_PLUGINS_HREF } from "../../components/shell/nav-items";
 
@@ -70,6 +71,9 @@ export default function SettingsPage() {
             не создаётся.
           </CardDescription>
         </CardHeader>
+        <CardContent>
+          <FontSizeSetting />
+        </CardContent>
       </Card>
 
       <Card>

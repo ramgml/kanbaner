@@ -345,6 +345,73 @@ test.describe("адаптивный shell в реальном Chromium", () => {
     await expect(sidebar).toHaveCount(0);
   });
 
+  test("глобальный размер шрифта применяется, сохраняется и сбрасывается", async ({ page }) => {
+    await page.setViewportSize(DESKTOP_VIEWPORT);
+    await page.goto("/settings");
+
+    const select = page.getByRole("combobox", { name: "Размер шрифта" });
+    const headingFontSize = (): Promise<number> =>
+      page.evaluate(() => {
+        const heading = document.querySelector("h1");
+        return heading === null ? 0 : Number.parseFloat(getComputedStyle(heading).fontSize);
+      });
+
+    await expect(select).toHaveValue("100");
+    const defaultHeadingSize = await headingFontSize();
+
+    await select.selectOption("90");
+
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("90%");
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.ui.fontScale")))
+      .toBe("90");
+    expect(await headingFontSize()).toBeLessThan(defaultHeadingSize);
+    await expectNoHorizontalOverflow(page);
+
+    await page.reload();
+
+    await expect(page.getByRole("combobox", { name: "Размер шрифта" })).toHaveValue("90");
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("90%");
+
+    await page.getByRole("link", { name: "Открыть обзор" }).click();
+    await expect(page).toHaveURL(/\/$/u);
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("90%");
+
+    await page.goto("/settings");
+    const resetSelect = page.getByRole("combobox", { name: "Размер шрифта" });
+    await expect(resetSelect).toHaveValue("90");
+    await resetSelect.selectOption("100");
+
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("100%");
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.ui.fontScale")))
+      .toBe("100");
+
+    await page.setViewportSize(MOBILE_VIEWPORT);
+    await page.goto("/settings");
+    const mobileSelect = page.getByRole("combobox", { name: "Размер шрифта" });
+    await mobileSelect.selectOption("125");
+
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("125%");
+    await expectNoHorizontalOverflow(page);
+
+    await mobileSelect.selectOption("100");
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.style.fontSize))
+      .toBe("100%");
+    await expectNoHorizontalOverflow(page);
+  });
+
   test("прокручивает содержимое project sidebar при малой высоте без наложения на footer", async ({
     page,
   }) => {
