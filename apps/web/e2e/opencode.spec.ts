@@ -31,7 +31,16 @@ async function mockOpenCode(
   page: Page,
   promptEvents?: (call: number) => readonly unknown[],
   historyMessages?: readonly unknown[],
-  options?: { readonly sessionDelayMs?: number },
+  options?: {
+    readonly sessionDelayMs?: number;
+    readonly statusOutcome?:
+      | "done"
+      | "error"
+      | "cancelled"
+      | "pending"
+      | "missing"
+      | ((turnID: string) => "done" | "error" | "cancelled" | "pending" | "missing");
+  },
 ) {
   const state = {
     catalogCalls: 0,
@@ -40,8 +49,10 @@ async function mockOpenCode(
     previewPaths: [] as string[],
     previewHeaders: [] as Array<Record<string, string>>,
     sessionBodies: [] as unknown[],
+    statusQueries: [] as string[],
     promptBodies: [] as Array<{
       text?: string;
+      turnID?: string;
       files?: Array<{ name: string; mime: string; base64: string }>;
     }>,
   };
@@ -83,6 +94,7 @@ async function mockOpenCode(
       state.promptBodies.push(
         request.postDataJSON() as {
           text?: string;
+          turnID?: string;
           files?: Array<{ name: string; mime: string; base64: string }>;
         },
       );
@@ -91,6 +103,7 @@ async function mockOpenCode(
         { kind: "tool", id: "message-1:call-1", status: "completed", text: "Обновлено" },
         { kind: "delta", id: "message-1:0", text: "Ответ " },
         { kind: "text", id: "message-1:0", text: "Ответ OpenCode" },
+        { kind: "finalizing" },
         { kind: "done" },
       ];
       await route.fulfill({
@@ -138,6 +151,14 @@ async function mockOpenCode(
         ],
       };
       state.sessionBodies.push(body);
+      const turnID = url.searchParams.get("turnID");
+      if (turnID !== null) {
+        state.statusQueries.push(turnID);
+        const configured = options?.statusOutcome ?? "pending";
+        const outcome = typeof configured === "function" ? configured(turnID) : configured;
+        await json({ session: body, outcome });
+        return;
+      }
       await json(body);
       return;
     }
@@ -236,7 +257,7 @@ test("desktop model switch, streaming tool upsert и новая сессия", a
   await expect(page.getByText("task_update", { exact: true })).toHaveCount(1);
   await expect(page.getByText("Обновлено", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled();
-  expect(mock.promptBodies).toEqual([{ text: "Проверка" }]);
+  expect(mock.promptBodies).toEqual([expect.objectContaining({ text: "Проверка" })]);
 
   await page.getByRole("button", { name: "Новая сессия OpenCode" }).click();
   await expect(
@@ -571,10 +592,10 @@ test("прикрепляет текстовый файл и передаёт е�
   await expect(page.getByText("Ответ OpenCode", { exact: true })).toBeVisible();
 
   expect(mock.promptBodies).toEqual([
-    {
+    expect.objectContaining({
       text: "Посмотри файл",
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
-    },
+    }),
   ]);
   await expect(page.getByText("5 B")).toHaveCount(0);
 
@@ -774,7 +795,9 @@ test("image attachment: preview в composer, optimistic/canonical и после 
 
 test("ошибка upstream в NDJSON сохраняет вложение для повтора до done", async ({ page }) => {
   const mock = await mockOpenCode(page, (call) =>
-    call === 1 ? [{ kind: "error", text: "Модель отклонила вложение" }] : [{ kind: "done" }],
+    call === 1
+      ? [{ kind: "finalizing" }, { kind: "error", text: "Модель отклонила вложение" }]
+      : [{ kind: "finalizing" }, { kind: "done" }],
   );
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
@@ -792,22 +815,141 @@ test("ошибка upstream в NDJSON сохраняет вложение для
 
   await message.fill("Посмотри файл");
   await page.getByRole("button", { name: "Отправить", exact: true }).click();
-  await expect(page.getByTestId("opencode-panel").getByRole("alert")).toContainText(
-    "Модель отклонила вложение",
-  );
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Модель отклонила вложение");
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
   await expect(selected.getByText("notes.txt")).toBeVisible();
 
   await message.fill("Посмотри файл");
   await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(turnStatus).toContainText("Готово");
   await expect(selected).toHaveCount(0);
   expect(mock.promptBodies).toEqual([
-    {
+    expect.objectContaining({
       text: "Посмотри файл",
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
-    },
-    {
+    }),
+    expect.objectContaining({
       text: "Посмотри файл",
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
-    },
+    }),
   ]);
+});
+
+test("prompt success: Enter, один POST и сохранённый статус Готово", async ({ page }) => {
+  const mock = await mockOpenCode(page);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка клавиатуры");
+  await message.press("Enter");
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Готово");
+  await expect(turnStatus).toHaveAttribute("role", "status");
+  await expect(page.getByText("Ответ OpenCode", { exact: true })).toBeVisible();
+  await expect(message).toBeEnabled();
+  expect(mock.promptBodies).toEqual([expect.objectContaining({ text: "Проверка клавиатуры" })]);
+  await expect.poll(() => mock.sessionBodies.length).toBe(1);
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
+  await expect(turnStatus.getByRole("button", { name: "Проверить статус" })).toHaveCount(0);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("unconfirmed: нет авто-GET, Проверить статус делает один GET без нового prompt", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, () => [{ kind: "finalizing" }], [
+    { id: "user:message-0", role: "user", text: "Проверка" },
+  ]);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Результат не подтверждён");
+  await expect(turnStatus).toContainText("Не удалось подтвердить результат OpenCode");
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
+  await expect(page.getByText("Проверка", { exact: true })).toBeVisible();
+  expect(mock.promptBodies).toHaveLength(1);
+  expect(mock.sessionBodies).toHaveLength(0);
+
+  await turnStatus.getByRole("button", { name: "Проверить статус" }).click();
+  await expect(turnStatus).toContainText("Результат пока не подтверждён");
+  expect(mock.sessionBodies).toHaveLength(1);
+  expect(mock.promptBodies).toHaveLength(1);
+  await expect(page.getByText("Проверка", { exact: true })).toBeVisible();
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("ручная проверка статуса: canonical done заменяет streamed-сообщения", async ({ page }) => {
+  const mock = await mockOpenCode(
+    page,
+    () => [{ kind: "finalizing" }],
+    [
+      { id: "user:message-0", role: "user", text: "Проверка" },
+      { id: "assistant:message-1:0", role: "assistant", text: "Канонический ответ" },
+    ],
+    { statusOutcome: "done" },
+  );
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Результат не подтверждён");
+  expect(mock.promptBodies).toHaveLength(1);
+
+  await turnStatus.getByRole("button", { name: "Проверить статус" }).click();
+  await expect(turnStatus).toContainText("Готово");
+  await expect(page.getByText("Канонический ответ", { exact: true })).toBeVisible();
+  expect(mock.promptBodies).toHaveLength(1);
+  expect(mock.statusQueries).toHaveLength(1);
+  expect(mock.statusQueries[0]).toBe(mock.promptBodies[0]?.turnID);
+});
+
+test("ручная проверка статуса: canonical error сохраняет streamed-текст", async ({ page }) => {
+  const mock = await mockOpenCode(
+    page,
+    () => [{ kind: "delta", id: "message-1:0", text: "Черновик" }, { kind: "finalizing" }],
+    [{ id: "user:message-0", role: "user", text: "Проверка" }],
+    { statusOutcome: "error" },
+  );
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Результат не подтверждён");
+  await expect(page.getByText("Черновик", { exact: true })).toBeVisible();
+
+  await turnStatus.getByRole("button", { name: "Проверить статус" }).click();
+  await expect(turnStatus).toContainText("OpenCode сообщил об ошибке");
+  await expect(page.getByText("Черновик", { exact: true })).toBeVisible();
+  expect(mock.promptBodies).toHaveLength(1);
 });
