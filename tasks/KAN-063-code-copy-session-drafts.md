@@ -1,13 +1,13 @@
 ---
 id: KAN-063
 title: Копирование кода и черновики по OpenCode-сессиям
-status: backlog
+status: in_progress
 stage: 8
 priority: high
-owner: unassigned
-blocked_by: [KAN-062]
-branch: null
-worktree: null
+owner: worker-kan-063
+blocked_by: []
+branch: feat/kan-063-code-copy-session-drafts
+worktree: .worktrees/kan-063-code-copy-session-drafts
 created: 2026-11-23
 updated: 2026-11-23
 specs:
@@ -43,6 +43,8 @@ specs:
 Разрешено:
 
 - `packages/opencode/src/ui.tsx`, `ui.test.tsx` и отдельные модули Markdown/drafts;
+- `packages/markdown-ui/src/markdown-content.tsx` и его тесты;
+- `packages/markdown-ui/README.md`;
 - `packages/opencode/README.md`;
 - `apps/web/e2e/opencode.spec.ts`;
 - `specs/product-mvp.md`, `specs/architecture.md`;
@@ -59,6 +61,13 @@ specs:
 - Начинается после KAN-062 и не ломает его scroll semantics.
 - До KAN-064 переключение проверяется через существующее восстановление последней сессии;
   полноценный список сессий появится следующей задачей.
+- `MarkdownContent` получает только additive optional `codeBlockAction`; без prop
+  поведение остальных плагинов не меняется, `skipHtml` сохраняется.
+- Draft ограничен 16 384 символами на запись, 20 записями и 65 536 символами
+  суммарно с LRU. Сверхлимитный текст остаётся в памяти composer, но не
+  сохраняется; `maxLength` в textarea не добавляется.
+- Существующий last session ID получает safe storage fallback, чтобы ошибки
+  localStorage не блокировали панель и composer.
 
 ## Критерии приёмки
 
@@ -81,7 +90,11 @@ specs:
 
 ## Журнал
 
-- 2026-11-23 — Задача создана по пункту 4 roadmap; ожидает KAN-062.
+- 2026-11-23 — Задача создана по пункту 4 roadmap; ожидала KAN-062.
+- 2026-11-23 — KAN-062 завершена. Назначен `worker-kan-063`, создана ветка и
+  worktree; статус `in_progress`. Оркестратор согласовал additive
+  `codeBlockAction` в `markdown-ui`, bounded draft limits и safe fallback для
+  существующего last session ID.
 
 ## Итог
 
