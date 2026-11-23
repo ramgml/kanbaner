@@ -8,6 +8,7 @@ import { ATTACHMENT_LIMITS } from "./attachments.ts";
 import { OPENCODE_AGENT_ID } from "./metadata.ts";
 import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
 import {
+  isOpenCodeAdmittedTurnID,
   isRecord,
   isOpenCodeTurnID,
   OpenCodeGatewayError,
@@ -696,7 +697,7 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
 
     getTurnStatus: (sessionID, turnID) =>
       translated(async () => {
-        if (!isOpenCodeTurnID(turnID)) {
+        if (!isOpenCodeAdmittedTurnID(turnID)) {
           throw new OpenCodeGatewayError("VALIDATION_ERROR", "Некорректный идентификатор хода");
         }
         const info = await ownedSession(client, sessionID);
@@ -742,7 +743,7 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         markAborted = resolve;
       });
       let promptStarted = false;
-      let promptAdmitted = false;
+      let promptAttempted = false;
       let finalizingEmitted = false;
       let inboxID = requestedTurnID ?? `msg_${randomUUID()}`;
       const clientTurnID = inboxID;
@@ -842,6 +843,7 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
 
         if (signal.aborted) return;
         promptStarted = true;
+        promptAttempted = true;
         const admitted = await client.session.prompt({
           sessionID,
           id: clientTurnID,
@@ -859,7 +861,6 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
           metadata: { source: "kanbaner" },
         });
         inboxID = stringField(admitted.id) ?? clientTurnID;
-        promptAdmitted = true;
         rememberTurnAlias(sessionID, clientTurnID, inboxID);
         if (signal.aborted) return;
         if (requestedTurnID !== undefined && inboxID !== requestedTurnID) {
@@ -933,9 +934,11 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (promptAdmitted) {
-          // Сбой SSE/iterator не означает отмену prompt: сначала пытаемся
-          // подтвердить terminal по canonical history и не прерываем execution.
+        if (promptAttempted) {
+          // Вызов уже начался: rejected Promise не доказывает, что Service не
+          // принял prompt (соединение могло оборваться после admission).
+          // Безопасно проверяем canonical history по stable client turn ID и
+          // повтор не предлагаем. SSE/iterator не прерываем.
           if (!finalizingEmitted) {
             finalizingEmitted = true;
             yield finalizingEvent(sessionID);

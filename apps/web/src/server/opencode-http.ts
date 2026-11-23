@@ -7,6 +7,7 @@ import {
 import {
   ATTACHMENT_LIMITS,
   ensureOpenCodeGateway,
+  isOpenCodeAdmittedTurnID,
   isOpenCodeTurnID,
   isRecord,
   OpenCodeGatewayError,
@@ -213,7 +214,7 @@ export async function handleOpenCodeSessionGet(
     const turnID = new URL(request.url).searchParams.get("turnID");
     const gateway = await getOpenCodeGateway();
     if (turnID !== null) {
-      if (!isOpenCodeTurnID(turnID)) {
+      if (!isOpenCodeAdmittedTurnID(turnID)) {
         return failure("VALIDATION_ERROR", "Некорректный идентификатор хода");
       }
       return success(await gateway.getTurnStatus(sessionID, turnID));
@@ -329,7 +330,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   let closed = false;
   let terminal = false;
   let finalizing = false;
-  let admitted = false;
+  let emittedAny = false;
   const close = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
     if (closed) return;
     closed = true;
@@ -361,9 +362,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
           if (closed) return;
           const mapped = streamEvent(event);
           if (mapped === null) continue;
-          if (mapped.kind === "admitted") {
-            admitted = true;
-          }
+          emittedAny = true;
           if (mapped.kind === "finalizing") {
             // Этап перед canonical lookup: не terminal и не подтверждает результат.
             finalizing = true;
@@ -383,10 +382,11 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
         close(controller);
       } catch (error) {
         if (!closed && !signal.aborted && !terminal) {
-          if (!finalizing && !admitted && error instanceof OpenCodeGatewayError) {
-            // Gateway гарантирует: OpenCodeGatewayError наружу означает сбой
-            // строго до admission. Это единственный явный server-confirmed
-            // non-admission, кроме HTTP-ответа до NDJSON.
+          if (!finalizing && !emittedAny && error instanceof OpenCodeGatewayError) {
+            // Gateway гарантирует: его OpenCodeGatewayError наружу означает
+            // сбой строго до вызова prompt (owned session/subscription), т.е.
+            // server-confirmed non-admission. После начала вызова gateway сам
+            // делает canonical lookup и не выбрасывает pre-admission ошибку.
             emit(controller, {
               kind: "error",
               text: error.message,

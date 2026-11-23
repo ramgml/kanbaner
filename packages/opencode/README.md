@@ -51,11 +51,21 @@ catalog активных chat-моделей, streaming, полный built-in t
   запрещён.
 - После возможного admission NDJSON никогда не помечает ошибку retryable:
   rejected `fetch`, null body, EOF без `finalizing` и неизвестный сбой дают
-  `reason: "unconfirmed"` и только ручную проверку. Retryable и
-  `nonAdmission: true` выставляются только для явного pre-admission отказа
+  `reason: "unconfirmed"` и только ручную проверку. Это же правило действует
+  для rejected `client.session.prompt()`: сам вызов мог дойти до Service,
+  поэтому `promptAttempted` фиксируется до вызова, затем выполняется bounded
+  canonical lookup по stable turn ID; terminal выдаётся только при exact
+  canonical outcome, иначе unconfirmed, без retry/interrupt. Retryable и
+  `nonAdmission: true` выставляются только для сбоя до вызова prompt
   (`OpenCodeGatewayError` до первого streamed-события, 408/429/5xx); повтор
   отправляет тот же текст и файлы. Terminal error после `finalizing` не
   дублируется.
+- Status query принимает как client-generated `msg_...` ID (через alias-map),
+  так и фактический admitted `SessionMessageID` Service. Для admitted ID
+  используется отдельный bounded validator (длина и безопасный charset без
+  требования `msg_`), поэтому прямой ID работает и после eviction alias-map
+  или restart. В prompt body по-прежнему допускается только strict
+  client-generated ID.
 - System error в history показывается только для последнего assistant последнего
   user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
 - Tool calls объединяются по `assistantMessageID + tool call ID`; history

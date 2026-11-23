@@ -895,6 +895,54 @@ describe("OpenCode gateway", () => {
     expect(status.outcome).toBe("done");
   });
 
+  it("getTurnStatus принимает admitted ID вне client pattern напрямую и через alias", async () => {
+    const turnID = "msg_client0004";
+    const admittedID = "inbox-admitted";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: admittedID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({
+      id: admittedID,
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const list = vi.fn(async () => canonicalTurn(admittedID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    expect(received.map((item) => streamEvent(item))).toContainEqual({
+      kind: "admitted",
+      id: admittedID,
+    });
+
+    expect((await gateway.getTurnStatus("ses-1", turnID)).outcome).toBe("done");
+    expect((await gateway.getTurnStatus("ses-1", admittedID)).outcome).toBe("done");
+
+    // Прямой admitted ID не зависит от alias-map: новый gateway после
+    // restart/eviction тоже находит точный turn.
+    const restarted = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+    expect((await restarted.getTurnStatus("ses-1", admittedID)).outcome).toBe("done");
+    await expect(gateway.getTurnStatus("ses-1", "bad id")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+  });
+
   it("getTurnStatus вычисляет outcome ровно по переданному turn ID", async () => {
     const doneID = "msg_done000001";
     const errorID = "msg_error00001";
@@ -918,10 +966,79 @@ describe("OpenCode gateway", () => {
     expect((await gateway.getTurnStatus("ses-1", doneID)).outcome).toBe("done");
     expect((await gateway.getTurnStatus("ses-1", errorID)).outcome).toBe("error");
     expect((await gateway.getTurnStatus("ses-1", "msg_missing0001")).outcome).toBe("missing");
-    await expect(gateway.getTurnStatus("ses-1", "not-a-turn")).rejects.toMatchObject({
+    await expect(gateway.getTurnStatus("ses-1", "bad id")).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
     });
     expect(list).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejected session.prompt после начала вызова даёт unconfirmed без non-admission", async () => {
+    const turnID = "msg_client0003";
+    const stream = subscription([event("server.connected")]);
+    const prompt = vi.fn(async () => {
+      throw new OpenCodeGatewayError(
+        "DEPENDENCY_UNAVAILABLE",
+        "secret prompt failure after possible admission",
+      );
+    });
+    const list = vi.fn(async () => canonicalTurn(turnID));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const cancel = vi.fn(async () => undefined);
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { prompt, interrupt, inbox: { cancel } }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    const events = received.map((item) => streamEvent(item));
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ id: turnID }));
+    expect(events).toContainEqual({ kind: "finalizing" });
+    expect(last(received)).toEqual(
+      expect.objectContaining({
+        type: "session.execution.failed",
+        data: expect.objectContaining({ kanbanerUnconfirmed: true }),
+      }),
+    );
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(JSON.stringify(received)).not.toContain("secret");
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("rejected session.prompt подтверждает только exact canonical outcome", async () => {
+    const cases = [
+      ["done", completedAssistant(), { kind: "done" }],
+      [
+        "error",
+        failedAssistant("assistant-failed"),
+        { kind: "error", text: "Запрос OpenCode завершился с ошибкой" },
+      ],
+    ] as const;
+
+    for (const [name, assistant, expected] of cases) {
+      const turnID = `msg_client${name}0001`;
+      const stream = subscription([event("server.connected")]);
+      const prompt = vi.fn(async () => {
+        throw new Error("connection reset after possible admission");
+      });
+      const list = vi.fn(async () => canonicalTurn(turnID, assistant));
+      const gateway = createOpenCodeGateway(promptClient(stream, list, { prompt }));
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+      );
+
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(streamEvent(last(received))).toEqual(expected);
+      expect(JSON.stringify(received)).not.toContain("connection reset");
+    }
   });
 
   it("находит второй prompt по stable ID, если первый отсутствует в canonical history", async () => {

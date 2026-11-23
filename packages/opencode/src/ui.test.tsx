@@ -1604,6 +1604,50 @@ describe("OpenCodePanel", () => {
     expect(statusQueries.at(-1)).toBe(promptBodies[1]?.turnID);
   });
 
+  it("ручная проверка использует admitted ID вне client pattern", async () => {
+    const promptBodies: Array<{ turnID: string }> = [];
+    const statusQueries: string[] = [];
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        const turnID = decodeURIComponent(url.split("turnID=")[1] ?? "");
+        statusQueries.push(turnID);
+        return success({
+          session: {
+            ...session(),
+            messages: [
+              { id: turnID, role: "user", text: "Вопрос" },
+              { id: "assistant:admitted", role: "assistant", text: "Ответ admitted" },
+            ],
+          },
+          outcome: "done",
+        });
+      }
+      if (url.endsWith("/prompt")) {
+        promptBodies.push(JSON.parse(String(init?.body)) as { turnID: string });
+        return stream([{ kind: "admitted", id: "inbox-admitted" }, { kind: "finalizing" }]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Результат не подтверждён"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+    expect(screen.getByText("Ответ admitted")).toBeVisible();
+    expect(statusQueries).toEqual(["inbox-admitted"]);
+    expect(promptBodies).toHaveLength(1);
+  });
+
   it("показывает thumbnail только для image в composer и освобождает URL", async () => {
     fetchMock.mockImplementation(async (input, init) => {
       const url = String(input);

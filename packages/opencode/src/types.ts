@@ -179,6 +179,18 @@ export function isOpenCodeTurnID(value: unknown): value is string {
   return typeof value === "string" && TURN_ID_PATTERN.test(value);
 }
 
+/**
+ * Bounded SessionMessageID, который Service вернул как admitted ID. SDK
+ * описывает его как string без гарантированного префикса, поэтому для
+ * status query допускается безопасный charset без требования `msg_`.
+ * Значение не логируется и не раскрывается клиенту сверх самого ID.
+ */
+const ADMITTED_TURN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+
+export function isOpenCodeAdmittedTurnID(value: unknown): value is string {
+  return typeof value === "string" && ADMITTED_TURN_ID_PATTERN.test(value);
+}
+
 export type OpenCodeGatewayErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "DEPENDENCY_UNAVAILABLE";
 
 /** Публичная ошибка адаптера без upstream response, headers и provider settings. */
