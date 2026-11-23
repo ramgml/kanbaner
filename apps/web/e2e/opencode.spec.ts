@@ -357,6 +357,62 @@ test("desktop: чтение в середине истории сохраняе�
   await expect(jump).toBeVisible();
 });
 
+test("desktop: streaming → canonical replacement даёт ровно один unread", async ({ page }) => {
+  const history = Array.from({ length: 20 }, (_value, index) => ({
+    id: `assistant:history-${index}`,
+    role: "assistant" as const,
+    text: `Ответ истории ${index}. ${"Текст ответа. ".repeat(8)}`,
+  }));
+  const canonical = [
+    ...history,
+    { id: "assistant:canonical", role: "assistant" as const, text: "Канонический ответ" },
+  ];
+  await mockOpenCode(
+    page,
+    () => [
+      { kind: "delta", id: "message-1:0", text: "Потоковый " },
+      { kind: "text", id: "message-1:0", text: "Потоковый ответ" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ],
+    history,
+    {
+      promptDelayMs: 900,
+      sessionDelayMs: 1400,
+      initialMessages: history,
+      sessionHistory: () => canonical,
+    },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Ответ истории 19.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+
+  await message.fill("Вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await readChatAbove(page);
+
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  const unread = page.getByTestId("opencode-unread-count");
+  await expect(jump).toBeVisible();
+
+  // Streaming ID — один unread, а не счётчик на каждый delta.
+  await expect(scroll.getByText("Потоковый ответ", { exact: true })).toBeVisible();
+  await expect(unread).toHaveText("1");
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+
+  // Canonical replacement удаляет transient ID и оставляет тот же один ответ.
+  await expect(scroll.getByText("Канонический ответ", { exact: true })).toBeVisible();
+  await expect(unread).toHaveText("1");
+  expect((await chatScrollMetrics(page)).top).toBe(0);
+  await expect(jump).toBeVisible();
+});
+
 test("mobile панель открывается явно, занимает экран и сохраняет закрытое состояние", async ({
   page,
 }) => {
@@ -1352,6 +1408,8 @@ test("desktop: чтение выше переживает streaming, canonical �
   await expect(scroll.getByText("Канонический ответ", { exact: true })).toBeVisible();
   expect((await chatScrollMetrics(page)).top).toBe(0);
   await expect(jump).toBeVisible();
+  // Transient streaming ID удалён: один логический ответ — один unread.
+  await expect(page.getByTestId("opencode-unread-count")).toHaveText("1");
 
   expect(await jump.evaluate((element) => element.tagName)).toBe("BUTTON");
   await jump.focus();

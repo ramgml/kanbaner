@@ -164,15 +164,20 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     applyUnread(0);
   }, [applyUnread]);
 
-  const registerUnread = useCallback(
-    (ids: readonly string[]): void => {
-      let changed = false;
-      for (const id of ids) {
-        if (unreadIDsRef.current.has(id)) continue;
-        unreadIDsRef.current.add(id);
-        changed = true;
+  /**
+   * Unread синхронизируется с текущей историей: transient IDs (streaming →
+   * assistant → canonical) удаляются, changedIDs добавляются заново. Поэтому
+   * один логический ответ остаётся одним unread, а удаление последнего unread
+   * обнуляет badge даже без добавлений.
+   */
+  const reconcileUnread = useCallback(
+    (current: readonly ChatScrollMessage[], changedIDs: readonly string[]): void => {
+      const present = new Set(current.map((message) => message.id));
+      for (const id of unreadIDsRef.current) {
+        if (!present.has(id)) unreadIDsRef.current.delete(id);
       }
-      if (changed) applyUnread(unreadIDsRef.current.size);
+      for (const id of changedIDs) unreadIDsRef.current.add(id);
+      applyUnread(unreadIDsRef.current.size);
     },
     [applyUnread],
   );
@@ -215,12 +220,12 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     }
 
     if (element === null) {
-      if (!followingRef.current) registerUnread(changedIDs);
+      if (!followingRef.current) reconcileUnread(messages, changedIDs);
       return;
     }
 
     if (!followingRef.current) {
-      registerUnread(changedIDs);
+      reconcileUnread(messages, changedIDs);
       // Shrink или выросший clientHeight могли сами привести к нижней границе.
       if (isChatNearBottom(element)) {
         applyFollowing(true);
@@ -234,7 +239,7 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     if (movedAbovePreviousBottom(element)) {
       // Silent scroll без события: не пишем scrollTop, показываем возврат.
       applyFollowing(false);
-      registerUnread(changedIDs);
+      reconcileUnread(messages, changedIDs);
       recordGeometry(element);
       return;
     }
@@ -249,8 +254,8 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     container,
     messages,
     movedAbovePreviousBottom,
+    reconcileUnread,
     recordGeometry,
-    registerUnread,
     sessionID,
   ]);
 

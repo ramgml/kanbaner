@@ -409,6 +409,92 @@ describe("useChatScroll", () => {
     expect(screen.queryByRole("button", { name: /К новому сообщению/u })).toBeNull();
   });
 
+  it("streaming → assistant → canonical оставляет ровно один unread", () => {
+    const base = chatMessages(4);
+    const { rerender } = render(<Harness sessionID="ses-1" messages={base} />);
+    const element = scrollElement();
+    controlledGeometry(element, { scrollHeight: 1000, clientHeight: 400 });
+    readAbove(element);
+    expect(isFollowing()).toBe(false);
+
+    rerender(
+      <Harness sessionID="ses-1" messages={[...base, { id: "streaming:m", text: "Поток" }]} />,
+    );
+    expect(unread()).toBe(1);
+
+    rerender(
+      <Harness sessionID="ses-1" messages={[...base, { id: "assistant:m", text: "Поток" }]} />,
+    );
+    expect(unread()).toBe(1);
+
+    rerender(
+      <Harness
+        sessionID="ses-1"
+        messages={[...base, { id: "assistant:canonical", text: "Ответ" }]}
+      />,
+    );
+    expect(unread()).toBe(1);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+    expect(screen.getByRole("button", { name: /К новому сообщению/u })).toBeVisible();
+  });
+
+  it("reconcile смешанной canonical замены удаляет исчезнувшие ID и добавляет новые", () => {
+    const base = chatMessages(3);
+    const { rerender } = render(<Harness sessionID="ses-1" messages={base} />);
+    const element = scrollElement();
+    controlledGeometry(element, { scrollHeight: 1200, clientHeight: 400 });
+    readAbove(element);
+
+    rerender(
+      <Harness
+        sessionID="ses-1"
+        messages={[...base, { id: "x", text: "old" }, { id: "y", text: "gone" }]}
+      />,
+    );
+    expect(unread()).toBe(2);
+
+    // y удалён, x изменён, z новый: в badge 2, а не 3 и не 4.
+    rerender(
+      <Harness
+        sessionID="ses-1"
+        messages={[...base, { id: "x", text: "new" }, { id: "z", text: "new" }]}
+      />,
+    );
+    expect(unread()).toBe(2);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+  });
+
+  it("shrink последнего unread при чтении выше обнуляет badge без follow", () => {
+    const base = chatMessages(3);
+    const { rerender } = render(<Harness sessionID="ses-1" messages={base} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 1200, clientHeight: 400 });
+    readAbove(element);
+
+    rerender(
+      <Harness sessionID="ses-1" messages={[...base, { id: "streaming:m", text: "partial" }]} />,
+    );
+    expect(unread()).toBe(1);
+    expect(screen.getByRole("button", { name: /К новому сообщению/u })).toBeVisible();
+
+    // Pure shrink: transient unread исчез, пользователь всё ещё выше.
+    geometry.setScrollHeight(800);
+    rerender(<Harness sessionID="ses-1" messages={base} />);
+    expect(unread()).toBe(0);
+    expect(isFollowing()).toBe(false);
+    expect(element.scrollTop).toBe(0);
+    // Пользователь всё ещё выше: кнопка возврата остаётся, badge уже без числа.
+    expect(screen.getByRole("button", { name: /К новому сообщению/u })).toBeVisible();
+
+    // Near-bottom recovery не сломан: выросший clientHeight вернул низ.
+    geometry.setClientHeight(800);
+    rerender(<Harness sessionID="ses-1" messages={[...base]} />);
+    expect(isFollowing()).toBe(true);
+    expect(unread()).toBe(0);
+  });
+
   it("смена session сбрасывает unread и открывает конец новой истории", () => {
     const { rerender } = render(<Harness sessionID="ses-1" messages={chatMessages(5)} />);
     const element = scrollElement();
