@@ -1,7 +1,7 @@
 ---
 id: KAN-063
 title: Копирование кода и черновики по OpenCode-сессиям
-status: review
+status: in_progress
 stage: 8
 priority: high
 owner: worker-kan-063
@@ -97,7 +97,10 @@ specs:
   существующего last session ID.
 - 2026-11-23 — Worker реализовал copy action и per-session drafts. Коммит
   `0ab7b14`; focused unit 36/36 + UI 76/76, E2E 21/21, полный `pnpm check` —
-  143 files / 2003 tests. Статус `review`.
+  143 files / 2003 tests.
+- 2026-11-23 — Ревью не нашло blocker/high, но выявило удаление нормативного
+  абзаца разрешений из `architecture.md`, trim-признак изменённого composer и
+  отсутствие 404 regression. Задача возвращена в `in_progress`.
 
 ## Итог
 
