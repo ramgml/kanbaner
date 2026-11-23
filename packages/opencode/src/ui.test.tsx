@@ -1,9 +1,16 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  finishToolMessages,
+  formatToolDuration,
+  mergeToolMessage,
+  ToolCallMessage,
+  type OpenCodeToolMessage,
+} from "./tool-call.tsx";
 import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
 import type { OpenCodeCatalog, OpenCodeSessionView, OpenCodeStreamEvent } from "./types.ts";
 import { OpenCodePanel } from "./ui.tsx";
@@ -169,8 +176,27 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+function toolMessage(patch: Partial<OpenCodeToolMessage> = {}): OpenCodeToolMessage {
+  return {
+    id: "tool:1",
+    role: "tool",
+    name: "task_get",
+    status: "completed",
+    text: "",
+    ...patch,
+  };
+}
+
+function toolDetails(): HTMLDetailsElement {
+  const details = screen.getByTestId("opencode-tool-call");
+  if (!(details instanceof HTMLDetailsElement)) throw new Error("tool details is missing");
+  return details;
+}
 
 describe("OpenCodePanel", () => {
   it("обновляет один tool call по ID, заменяет delta финальным text и очищает attachment", async () => {
@@ -186,9 +212,39 @@ describe("OpenCodePanel", () => {
             name: "task_update",
             status: "running",
             text: "",
+            startedAt: 1000,
           },
-          { kind: "tool", id: "message-1:call-1", status: "running", text: '{"id":"task-1"}' },
-          { kind: "tool", id: "message-1:call-1", status: "completed", text: "Обновлено" },
+          {
+            kind: "tool",
+            id: "message-1:call-1",
+            status: "running",
+            text: '{"id":"task-1"}',
+            input: '{"id":"task-1"}',
+            startedAt: 1200,
+          },
+          {
+            kind: "tool",
+            id: "message-1:call-1",
+            status: "running",
+            text: '{"id":"task-1"}',
+            input: '{"id":"task-1"}',
+            startedAt: 1400,
+          },
+          {
+            kind: "tool",
+            id: "message-1:call-1",
+            status: "completed",
+            text: "Обновлено",
+            output: "Обновлено",
+            endedAt: 3600,
+          },
+          {
+            kind: "tool",
+            id: "message-1:call-1",
+            status: "running",
+            text: "",
+            startedAt: 4000,
+          },
           { kind: "delta", id: "message-1:0", text: "Черновой" },
           { kind: "delta", id: "message-1:0", text: " ответ" },
           { kind: "text", id: "message-1:0", text: "Ответ целиком" },
@@ -213,8 +269,17 @@ describe("OpenCodePanel", () => {
       expect(screen.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled(),
     );
     expect(screen.getAllByText("task_update")).toHaveLength(1);
+    expect(screen.getByTestId("opencode-tool-call")).toBeInTheDocument();
     expect(screen.getByText("готово")).toBeVisible();
-    expect(screen.getByText("Обновлено")).toBeVisible();
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("2 с");
+    // Компактный summary по умолчанию: детали скрыты до явного раскрытия.
+    expect(screen.queryByTestId("opencode-tool-call-output")).not.toBeVisible();
+    expect(screen.queryByTestId("opencode-tool-call-input")).not.toBeVisible();
+    fireEvent.click(screen.getByTestId("opencode-tool-call-summary"));
+    expect(screen.getByTestId("opencode-tool-call-input")).toHaveTextContent('{"id":"task-1"}');
+    expect(screen.getByTestId("opencode-tool-call-output")).toHaveTextContent("Обновлено");
+    // Позднее running-событие не понизило completed.
+    expect(screen.getByText("готово")).toBeVisible();
     expect(screen.queryByText("Черновой ответ")).toBeNull();
 
     const promptCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/prompt"));
@@ -682,6 +747,7 @@ describe("OpenCodePanel", () => {
     expect(link).toHaveAttribute("rel", "noreferrer nofollow");
 
     expect(screen.getByText("**не жирный**")).toBeVisible();
+    fireEvent.click(screen.getByTestId("opencode-tool-call-summary"));
     expect(screen.getByText("**tool text**")).toBeVisible();
     expect(document.body.innerHTML).not.toContain("window.__markdownXss");
     expect(document.body.querySelector("script")).toBeNull();
@@ -1832,5 +1898,484 @@ describe("OpenCodePanel", () => {
     await waitFor(() => expect(screen.queryByRole("img")).toBeNull());
     expect(screen.getByText("pixel.png")).toBeVisible();
     expect(revokeObjectUrlMock).toHaveBeenCalledWith("blob:mock-2");
+  });
+});
+
+describe("formatToolDuration", () => {
+  it("форматирует миллисекунды, секунды и минуты детерминированно", () => {
+    expect(formatToolDuration(0)).toBe("0 мс");
+    expect(formatToolDuration(999)).toBe("999 мс");
+    expect(formatToolDuration(1000)).toBe("1 с");
+    expect(formatToolDuration(59_999)).toBe("59 с");
+    expect(formatToolDuration(60_000)).toBe("1 мин 0 с");
+    expect(formatToolDuration(125_000)).toBe("2 мин 5 с");
+  });
+
+  it("не показывает длительность для отрицательных и невалидных значений", () => {
+    expect(formatToolDuration(-1)).toBeNull();
+    expect(formatToolDuration(Number.NaN)).toBeNull();
+    expect(formatToolDuration(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("mergeToolMessage", () => {
+  it("создаёт tool call из stream event и использует fallback ID", () => {
+    const merged = mergeToolMessage(
+      undefined,
+      {
+        kind: "tool",
+        id: "call-1",
+        name: "task_update",
+        status: "running",
+        startedAt: 1000,
+        input: '{"id":"task-1"}',
+      },
+      "fallback",
+    );
+    expect(merged).toMatchObject({
+      id: "call-1",
+      role: "tool",
+      name: "task_update",
+      status: "running",
+      text: "",
+      startedAt: 1000,
+      input: '{"id":"task-1"}',
+    });
+    expect(merged.endedAt).toBeUndefined();
+    expect(merged.output).toBeUndefined();
+
+    const fallback = mergeToolMessage(undefined, { kind: "tool" }, "fallback");
+    expect(fallback).toMatchObject({
+      id: "fallback",
+      name: "tool",
+      status: "running",
+      text: "",
+    });
+  });
+
+  it("сохраняет ранний startedAt, первый endedAt и непустые поля", () => {
+    const existing = toolMessage({
+      status: "running",
+      startedAt: 2000,
+      input: "in",
+      text: "early",
+    });
+    const merged = mergeToolMessage(
+      existing,
+      {
+        kind: "tool",
+        id: "tool:1",
+        status: "running",
+        startedAt: 1500,
+        input: "in-2",
+        output: "",
+      },
+      "fallback",
+    );
+    expect(merged.startedAt).toBe(1500);
+    expect(merged.input).toBe("in-2");
+    expect(merged.output).toBeUndefined();
+    expect(merged.text).toBe("early");
+
+    const finished = mergeToolMessage(
+      toolMessage({ status: "completed", startedAt: 1000, endedAt: 3000, output: "ok" }),
+      { kind: "tool", status: "error", endedAt: 5000, output: "" },
+      "fallback",
+    );
+    expect(finished.status).toBe("error");
+    expect(finished.endedAt).toBe(3000);
+    expect(finished.output).toBe("ok");
+  });
+
+  it("не понижает terminal status поздним running и не затирает пустыми значениями", () => {
+    const merged = mergeToolMessage(
+      toolMessage({
+        status: "cancelled",
+        startedAt: 1000,
+        endedAt: 2000,
+        input: "in",
+        output: "out",
+        text: "text",
+      }),
+      {
+        kind: "tool",
+        id: "tool:1",
+        status: "running",
+        name: "",
+        text: "",
+        input: "",
+        output: "",
+        startedAt: 500,
+      },
+      "fallback",
+    );
+    expect(merged).toMatchObject({
+      status: "cancelled",
+      name: "task_get",
+      startedAt: 500,
+      endedAt: 2000,
+      input: "in",
+      output: "out",
+      text: "text",
+    });
+  });
+});
+
+describe("finishToolMessages", () => {
+  it("завершает только running tools и сохраняет уже известный endedAt", () => {
+    const running = toolMessage({ id: "tool:running", status: "running", startedAt: 1000 });
+    const frozen = toolMessage({ id: "tool:frozen", status: "running", endedAt: 2500 });
+    const done = toolMessage({ id: "tool:done", status: "completed", endedAt: 2000 });
+    const assistant = { id: "assistant:1", role: "assistant", text: "Ответ" } as const;
+
+    const next = finishToolMessages([running, frozen, done, assistant], "done", 4000);
+    expect(next).toEqual([
+      { ...running, status: "completed", endedAt: 4000 },
+      { ...frozen, status: "completed", endedAt: 2500 },
+      done,
+      assistant,
+    ]);
+  });
+
+  it("маппит terminal kind в cancelled/error и возвращает тот же массив без running", () => {
+    const running = toolMessage({ id: "tool:running", status: "running" });
+    expect(finishToolMessages([running], "cancelled", 1000)).toEqual([
+      { ...running, status: "cancelled", endedAt: 1000 },
+    ]);
+    expect(finishToolMessages([running], "error", 1000)).toEqual([
+      { ...running, status: "error", endedAt: 1000 },
+    ]);
+
+    const done = toolMessage({ id: "tool:done", status: "completed" });
+    const messages = [done];
+    expect(finishToolMessages(messages, "done", 1000)).toBe(messages);
+  });
+});
+
+describe("ToolCallMessage", () => {
+  it("по умолчанию свёрнут и раскрывает input/output по клику", () => {
+    render(
+      <ToolCallMessage
+        message={toolMessage({
+          status: "completed",
+          input: '{"id":"task-1"}',
+          output: "Обновлено",
+        })}
+      />,
+    );
+
+    expect(toolDetails().open).toBe(false);
+    expect(screen.getByTestId("opencode-tool-call-summary")).toHaveTextContent("task_get");
+    expect(screen.getByText("готово")).toBeVisible();
+    expect(screen.queryByTestId("opencode-tool-call-input")).not.toBeVisible();
+    expect(screen.queryByTestId("opencode-tool-call-output")).not.toBeVisible();
+
+    fireEvent.click(screen.getByTestId("opencode-tool-call-summary"));
+    expect(toolDetails().open).toBe(true);
+    expect(screen.getByTestId("opencode-tool-call-input")).toHaveTextContent('{"id":"task-1"}');
+    expect(screen.getByTestId("opencode-tool-call-output")).toHaveTextContent("Обновлено");
+  });
+
+  it("переключается с клавиатуры Enter и Space", () => {
+    render(<ToolCallMessage message={toolMessage({ output: "ok" })} />);
+    const summary = screen.getByTestId("opencode-tool-call-summary");
+
+    fireEvent.keyDown(summary, { key: "Enter" });
+    expect(toolDetails().open).toBe(true);
+    fireEvent.keyDown(summary, { key: "Enter" });
+    expect(toolDetails().open).toBe(false);
+    fireEvent.keyDown(summary, { key: " " });
+    expect(toolDetails().open).toBe(true);
+    fireEvent.keyDown(summary, { key: "Escape" });
+    expect(toolDetails().open).toBe(true);
+  });
+
+  it("тикает длительность running и фиксирует её после terminal статуса", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const { rerender } = render(
+      <ToolCallMessage
+        message={toolMessage({ status: "running", startedAt: 9000, output: "pending" })}
+      />,
+    );
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("1 с");
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("3 с");
+
+    rerender(
+      <ToolCallMessage
+        message={toolMessage({
+          status: "completed",
+          startedAt: 9000,
+          endedAt: 11_000,
+          output: "done",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("2 с");
+
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("2 с");
+  });
+
+  it("очищает interval при unmount в StrictMode", () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+    const { unmount } = render(
+      <StrictMode>
+        <ToolCallMessage message={toolMessage({ status: "running", startedAt: Date.now() })} />
+      </StrictMode>,
+    );
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(2);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+  });
+
+  it("показывает legacy text как output без фиктивной длительности", () => {
+    const { rerender } = render(
+      <ToolCallMessage message={toolMessage({ status: "completed", text: "legacy output" })} />,
+    );
+    expect(screen.queryByTestId("opencode-tool-call-duration")).toBeNull();
+    fireEvent.click(screen.getByTestId("opencode-tool-call-summary"));
+    expect(screen.getByTestId("opencode-tool-call-output")).toHaveTextContent("legacy output");
+    expect(screen.queryByTestId("opencode-tool-call-input")).toBeNull();
+
+    rerender(
+      <ToolCallMessage
+        message={toolMessage({ startedAt: 10_000, endedAt: 9000, text: "legacy" })}
+      />,
+    );
+    expect(screen.queryByTestId("opencode-tool-call-duration")).toBeNull();
+
+    rerender(<ToolCallMessage message={toolMessage({ endedAt: 9000, text: "legacy" })} />);
+    expect(screen.queryByTestId("opencode-tool-call-duration")).toBeNull();
+  });
+
+  it("показывает статусы running, error и cancelled", () => {
+    const { rerender } = render(
+      <ToolCallMessage message={toolMessage({ status: "running", startedAt: Date.now() })} />,
+    );
+    expect(screen.getByText("выполняется")).toBeVisible();
+    rerender(<ToolCallMessage message={toolMessage({ status: "error" })} />);
+    expect(screen.getByText("ошибка")).toBeVisible();
+    rerender(<ToolCallMessage message={toolMessage({ status: "cancelled" })} />);
+    expect(screen.getByText("отменено")).toBeVisible();
+    rerender(<ToolCallMessage message={toolMessage({ status: "completed" })} />);
+    expect(screen.getByText("готово")).toBeVisible();
+  });
+});
+
+describe("OpenCode tool calls в панели", () => {
+  function mountStreamingTool(): {
+    readonly writer: () => ReadableStreamDefaultController<Uint8Array>;
+  } {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(next) {
+        controller = next;
+      },
+    });
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1") return success(session());
+      if (url.endsWith("/prompt")) {
+        // Mock fetch не связан с AbortSignal сам по себе: пробрасываем abort в
+        // stream, чтобы Stop завершил pending reader так же, как реальный fetch.
+        init?.signal?.addEventListener("abort", () => controller?.error(abortError()), {
+          once: true,
+        });
+        return new Response(body);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    return {
+      writer: () => {
+        if (controller === undefined) throw new Error("stream controller is missing");
+        return controller;
+      },
+    };
+  }
+
+  async function sendPrompt(text = "Вопрос"): Promise<void> {
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+  }
+
+  function encode(event: unknown): Uint8Array {
+    return new TextEncoder().encode(`${JSON.stringify(event)}\n`);
+  }
+
+  it("помечает tool отменённым при Stop и сворачивает детали", async () => {
+    const source = mountStreamingTool();
+    render(<OpenCodePanel />);
+    await sendPrompt();
+
+    source.writer().enqueue(
+      encode({
+        kind: "tool",
+        id: "message-1:call-1",
+        name: "task_update",
+        status: "running",
+        startedAt: Date.now() - 3000,
+        input: '{"id":"task-1"}',
+      }),
+    );
+    expect(await screen.findByText("выполняется")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Остановить OpenCode" }));
+    expect(await screen.findByText("отменено")).toBeVisible();
+    expect(toolDetails().open).toBe(false);
+    expect(screen.getByTestId("opencode-tool-call-summary")).toHaveTextContent("task_update");
+    expect(screen.queryByTestId("opencode-tool-call-duration")).not.toBeNull();
+    expect(screen.getByTestId("opencode-tool-call-input")).not.toBeVisible();
+  });
+
+  it("помечает running tool ошибкой при error stream", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.endsWith("/prompt")) {
+        return stream([
+          {
+            kind: "tool",
+            id: "message-1:call-1",
+            name: "task_update",
+            status: "running",
+            startedAt: Date.now() - 2000,
+          },
+          { kind: "error", text: "Сбой инструмента" },
+        ]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt();
+
+    expect(await screen.findByText("ошибка")).toBeVisible();
+    expect(screen.getByTestId("opencode-tool-call-summary")).toHaveTextContent("task_update");
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent(/^\d+ (мс|с|мин)/u);
+  });
+
+  it("не завершает running tool при unconfirmed результате", async () => {
+    const malformed = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encode({
+            kind: "tool",
+            id: "message-1:call-1",
+            name: "task_update",
+            status: "running",
+            startedAt: Date.now() - 1000,
+          }),
+        );
+        controller.enqueue(new TextEncoder().encode("{broken\n"));
+        controller.close();
+      },
+    });
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.endsWith("/prompt")) return new Response(malformed);
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt();
+
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    expect(screen.getByText("выполняется")).toBeVisible();
+    expect(screen.queryByText("отменено")).toBeNull();
+    expect(screen.queryByText("ошибка")).toBeNull();
+  });
+
+  it("не применяет stale terminal статус к tools новой сессии", async () => {
+    let resolveStatus!: (response: Response) => void;
+    let statusSignal: AbortSignal | null | undefined;
+    let sessionPosts = 0;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && init?.method === "POST") {
+        sessionPosts += 1;
+        if (sessionPosts === 1) return Promise.resolve(success(session("ses-1")));
+        return Promise.resolve(
+          success({
+            ...session("ses-2"),
+            messages: [
+              {
+                id: "tool:new",
+                role: "tool",
+                name: "task_get",
+                status: "running",
+                text: "",
+                startedAt: Date.now() - 1000,
+              },
+            ],
+          }),
+        );
+      }
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        statusSignal = init?.signal;
+        return new Promise<Response>((resolve) => {
+          resolveStatus = resolve;
+        });
+      }
+      if (url.endsWith("/prompt")) {
+        return Promise.resolve(
+          stream([
+            {
+              kind: "tool",
+              id: "message-1:call-1",
+              name: "task_update",
+              status: "running",
+              startedAt: Date.now() - 2000,
+            },
+            { kind: "finalizing" },
+          ]),
+        );
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt("Старый вопрос");
+
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    expect(screen.getByText("выполняется")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(statusSignal).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
+    await waitFor(() => expect(sessionPosts).toBe(2));
+    expect(await screen.findByText("task_get")).toBeVisible();
+    expect(screen.getByText("выполняется")).toBeVisible();
+    expect(screen.queryByText("task_update")).toBeNull();
+
+    resolveStatus(success({ session: session("ses-1"), outcome: "cancelled" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("task_get")).toBeVisible();
+    expect(screen.getByText("выполняется")).toBeVisible();
+    expect(screen.queryByText("отменено")).toBeNull();
+    expect(screen.queryByText("task_update")).toBeNull();
   });
 });

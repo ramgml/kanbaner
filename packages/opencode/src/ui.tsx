@@ -45,6 +45,12 @@ import {
   type OpenCodeTurnStatus,
 } from "./types.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
+import {
+  finishToolMessages,
+  mergeToolMessage,
+  ToolCallMessage,
+  type OpenCodeToolMessage,
+} from "./tool-call.tsx";
 
 export { OPENCODE_PLUGIN_ID, OPENCODE_UI_CONTRACT, opencodeUiContributions } from "./metadata.ts";
 
@@ -940,6 +946,11 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     };
 
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    const finishTools = (kind: "done" | "cancelled" | "error", endedAt = Date.now()): void => {
+      setMessages((current) =>
+        currentGeneration() ? finishToolMessages(current, kind, endedAt) : current,
+      );
+    };
     const appendTool = (event: OpenCodeStreamEvent) => {
       setMessages((current) => {
         if (!currentGeneration()) return current;
@@ -947,13 +958,11 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         const index =
           eventID === undefined ? -1 : current.findIndex((message) => message.id === eventID);
         const existing = index >= 0 ? current[index] : undefined;
-        const next: OpenCodeChatMessage = {
-          id: existing?.id ?? eventID ?? `tool:optimistic:${Date.now()}`,
-          role: "tool",
-          name: event.name ?? (existing?.role === "tool" ? existing.name : "tool"),
-          status: event.status ?? "running",
-          text: event.text ?? existing?.text ?? "",
-        };
+        const previous =
+          existing !== undefined && existing.role === "tool"
+            ? (existing as OpenCodeToolMessage)
+            : undefined;
+        const next = mergeToolMessage(previous, event, `tool:optimistic:${Date.now()}`);
         if (index < 0) return [...current, next];
         return [...current.slice(0, index), next, ...current.slice(index + 1)];
       });
@@ -1104,6 +1113,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "error") {
           terminal = "error";
           terminalUnconfirmed = event.reason === "unconfirmed";
+          if (!terminalUnconfirmed) finishTools("error");
           settle("error", {
             reason: terminalUnconfirmed ? "unconfirmed" : null,
             errorText: event.text ?? "Запрос OpenCode завершился с ошибкой",
@@ -1115,6 +1125,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "done" || event.kind === "cancelled") {
           terminal = event.kind;
           terminalUnconfirmed = false;
+          finishTools(event.kind);
           settle(event.kind, {
             reason: null,
             errorText: null,
@@ -1160,6 +1171,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (!stoppedByUser) controller.abort();
       if (currentGeneration()) {
         if (stoppedByUser) {
+          finishTools("cancelled");
           settle("cancelled", {
             reason: null,
             errorText: null,
@@ -1273,6 +1285,18 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (status.outcome === "done") {
         // Полный terminal ответ: только здесь допустима canonical замена.
         applySession(status.session, generation);
+      } else {
+        // Canonical cancelled/error подтверждён сервером: завершаем running
+        // tools, чтобы таймер не продолжал расти после terminal.
+        setMessages((current) =>
+          generation === generationRef.current
+            ? finishToolMessages(
+                current,
+                status.outcome === "cancelled" ? "cancelled" : "error",
+                Date.now(),
+              )
+            : current,
+        );
       }
       setTurn((current) =>
         current !== null && current.generation === generation
@@ -1485,23 +1509,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         <div className="flex flex-col gap-3">
           {messages.map((message, index) => {
             const canonicalID = canonicalUserMessageID(message);
+            const toolMessage = message.role === "tool" ? message : null;
             return (
               <article
                 key={messageKey(message, index)}
-                className={`rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : message.role === "tool" ? "border bg-muted/40 text-xs" : "mr-4 bg-muted/60"}`}
+                className={
+                  toolMessage !== null
+                    ? "min-w-0"
+                    : `rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : "mr-4 bg-muted/60"}`
+                }
               >
-                {message.role === "tool" ? (
-                  <div className="mb-1 flex items-center justify-between gap-2 font-medium">
-                    <span className="truncate">{message.name}</span>
-                    <span className="text-muted-foreground">
-                      {message.status === "running"
-                        ? "выполняется"
-                        : message.status === "completed"
-                          ? "готово"
-                          : "ошибка"}
-                    </span>
-                  </div>
-                ) : null}
+                {toolMessage !== null ? <ToolCallMessage message={toolMessage} /> : null}
                 {message.role === "user" &&
                 message.attachments !== undefined &&
                 message.attachments.length > 0 ? (
@@ -1536,9 +1554,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 ) : null}
                 {message.role === "assistant" || message.role === "system" ? (
                   <MarkdownMessage source={message.text} />
-                ) : (
+                ) : message.role === "user" ? (
                   <div className="whitespace-pre-wrap break-words">{message.text}</div>
-                )}
+                ) : null}
               </article>
             );
           })}

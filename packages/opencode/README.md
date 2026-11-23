@@ -70,6 +70,17 @@ catalog активных chat-моделей, streaming, полный built-in t
   user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
 - Tool calls объединяются по `assistantMessageID + tool call ID`; history
   загружается через paginated `message.list` и сохраняет running/error states.
+- Tool call показывается компактным disclosure: status, имя, длительность и
+  свёрнутые input/output. Детали раскрываются pointer/touch, Enter или Space;
+  running duration тикает раз в секунду и фиксируется terminal/Stop/error.
+  Невалидные, отсутствующие и обратные timestamps не дают фиктивную
+  длительность. Для stream timings берутся из top-level `event.created` как
+  приблизительные; canonical `time.ran`/`time.completed` приходят со следующим
+  history reload. В публичный payload попадают только `input`, `output` и
+  timings: `state.metadata`, `part.native` и upstream `error.message` не
+  передаются. `cancelled` — UI-only terminal для Stop, подтверждённой отмены и
+  canonical `error.type=aborted`; unconfirmed результат оставляет tool в
+  running.
 
 Внутренние маршруты `/api/opencode/*` предназначены только для browser panel.
 Они требуют `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin
@@ -160,8 +171,8 @@ server. Поэтому повтор того же request внутри одно�
 
 - `packages/opencode/src/gateway.test.ts` — catalog whitelist/tools, ownership,
   pagination, stream readiness/finalizing/terminal/abort, canonical outcome,
-  stable turnID/admitted alias, transient lookup retry, tool event mapping и
-  inline files.
+  stable turnID/admitted alias, transient lookup retry, tool event mapping,
+  timings/input/output и inline files.
 - `packages/opencode/src/gateway-service-version.test.ts` — Service version
   predicate: accept 2.x (2.2/2.3), reject 1.x/3.x и malformed.
 - `packages/opencode/src/tool-metadata.test.ts` — ordered deny/allow против
@@ -175,10 +186,14 @@ server. Поэтому повтор того же request внутри одно�
   races, attachments, turn-статусы, rejected stream без retry, stable ID
   второго prompt, delta→error без потери текста, cancelled/empty/tool-only,
   все четыре фазы, retry/status check, две группы tool catalog с
-  предупреждением и stop.
+  предупреждением, stop, compact tool disclosure, детерминированная duration,
+  merge/finish helpers, keyboard, stale generation и unconfirmed/error/cancelled
+  tools.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,
   группы built-in/MCP tools, success с `finalizing`, unconfirmed без
-  авто-GET, ручные done/error/pending без нового prompt и streaming с mock
-  OpenCode transport в production Chromium.
+  авто-GET, ручные done/error/pending без нового prompt, compact tool call с
+  duration, keyboard disclosure, длинным output без overflow и canonical
+  timings после reload, streaming с mock OpenCode transport в production
+  Chromium.
