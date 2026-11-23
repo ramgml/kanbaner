@@ -1,13 +1,13 @@
 ---
 id: KAN-060
 title: Статусы и ошибки конкретного prompt
-status: ready
+status: in_progress
 stage: 8
 priority: high
-owner: unassigned
+owner: worker-kan-060
 blocked_by: []
-branch: null
-worktree: null
+branch: feat/kan-060-prompt-status
+worktree: .worktrees/kan-060-prompt-status
 created: 2026-11-23
 updated: 2026-11-23
 specs:
@@ -103,6 +103,8 @@ pnpm check
 ## Журнал
 
 - 2026-11-23 — Задача создана по пункту 1 roadmap.
+- 2026-11-23 — Назначен `worker-kan-060`, создана ветка и worktree; статус
+  `in_progress`.
 
 ## Итог
 
