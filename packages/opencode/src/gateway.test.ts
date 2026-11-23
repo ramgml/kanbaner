@@ -385,6 +385,7 @@ describe("OpenCode gateway", () => {
               time: { created: 5000, ran: 5100 },
             },
             {
+              id: "part-v1-completed",
               callID: "call-v1",
               type: "tool",
               tool: "task_list",
@@ -396,6 +397,7 @@ describe("OpenCode gateway", () => {
               },
             },
             {
+              id: "part-v1-error",
               callID: "call-v1-error",
               type: "tool",
               tool: "task_delete",

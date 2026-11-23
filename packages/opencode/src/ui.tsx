@@ -964,23 +964,41 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         currentGeneration() ? finishToolMessages(current, turnTools, kind, endedAt) : current,
       );
     };
+    /**
+     * Correlation для stream tools без `event.id`. SDK path с ID не меняется.
+     * Без ID события одного вызова неразличимы, поэтому последовательность до
+     * terminal относится к одному anonymous вызову; terminal закрывает его, а
+     * следующий no-ID event получает новый монотонный ID. Date.now() не
+     * используется: он давал collision для событий в одну миллисекунду.
+     */
+    let anonymousToolSeq = 0;
+    let pendingAnonymousToolID: string | null = null;
+    const nextAnonymousToolID = (): string => {
+      anonymousToolSeq += 1;
+      return `tool:anonymous:${turnID}:${generation}:${anonymousToolSeq}`;
+    };
+    const resolveToolID = (event: OpenCodeStreamEvent): string => {
+      if (event.id !== undefined) return event.id;
+      const terminal =
+        event.status === "completed" || event.status === "error" || event.status === "cancelled";
+      const id = pendingAnonymousToolID ?? nextAnonymousToolID();
+      pendingAnonymousToolID = terminal ? null : id;
+      return id;
+    };
     const appendTool = (event: OpenCodeStreamEvent) => {
       if (!currentGeneration()) return;
-      const fallbackID = `tool:optimistic:${Date.now()}`;
-      // mergeToolMessage сохраняет identity по event.id, поэтому набор получает
-      // ровно тот ID, под которым tool попадёт в messages.
-      turnTools.add(event.id ?? fallbackID);
+      const toolID = resolveToolID(event);
+      // Набор получает ровно тот ID, под которым tool попадёт в messages.
+      turnTools.add(toolID);
       setMessages((current) => {
         if (!currentGeneration()) return current;
-        const eventID = event.id;
-        const index =
-          eventID === undefined ? -1 : current.findIndex((message) => message.id === eventID);
+        const index = current.findIndex((message) => message.id === toolID);
         const existing = index >= 0 ? current[index] : undefined;
         const previous =
           existing !== undefined && existing.role === "tool"
             ? (existing as OpenCodeToolMessage)
             : undefined;
-        const next = mergeToolMessage(previous, event, fallbackID);
+        const next = mergeToolMessage(previous, event, toolID);
         if (index < 0) return [...current, next];
         return [...current.slice(0, index), next, ...current.slice(index + 1)];
       });

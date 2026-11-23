@@ -228,9 +228,11 @@ function messageViews(
         const input = toolInput(state);
         const output = toolOutput(state);
         const timing = toolTiming(part);
-        // v2 identity: part.id/name. v1 fallback: callID/tool; приоритет v2
-        // сохраняется, чтобы canonical ID и stream ID совпадали.
-        const partID = stringField(part.id) ?? stringField(part.callID) ?? String(index);
+        // v1 ToolPart содержит и PartID `id`, и tool call identity `callID`;
+        // публичный ID строится из callID. v2 callID не отдаёт, поэтому его
+        // поведение остаётся прежним (`id`, затем index). Text part выше
+        // по-прежнему использует PartID.
+        const partID = stringField(part.callID) ?? stringField(part.id) ?? String(index);
         return [
           {
             id: `tool:${message.id}:${partID}`,

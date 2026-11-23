@@ -68,10 +68,12 @@ catalog активных chat-моделей, streaming, полный built-in t
   client-generated ID.
 - System error в history показывается только для последнего assistant последнего
   user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
-- Tool calls объединяются по `assistantMessageID + tool call ID`; history
+- Tool calls объединяются по `assistantMessageID + tool call ID`. History
   загружается через paginated `message.list` и сохраняет running/error states.
-  Поддерживаются v2 identity (`id`/`name`) и v1 `ToolPart` (`callID`/`tool`,
-  строковый `state.error`, `state.output`/`state.time`) без изменения v2 ID.
+  v2 identity использует `id`/`name`; для v1 `ToolPart` tool call ID берётся из
+  `callID` (приоритетнее PartID `id`), имя — из `tool`; text parts по-прежнему
+  используют PartID. v1 строковый `state.error`, `state.output`/`state.time`
+  нормализуются без изменения v2 identity.
 - Tool call показывается компактным disclosure: status, имя, длительность и
   свёрнутые input/output. Детали раскрываются pointer/touch, Enter или Space;
   running duration тикает раз в секунду и фиксируется terminal/Stop/error.
@@ -90,6 +92,11 @@ catalog активных chat-моделей, streaming, полный built-in t
   tool предыдущего unconfirmed turn не меняется, а explicit `nonAdmission`
   вообще не запускает завершение. Ручная проверка статуса применяет тот же
   turn-scoped набор, поэтому canonical outcome не затрагивает чужой ход.
+- Stream event без `event.id` не использует `Date.now()`: per-turn монотонный
+  anonymous ID исключает collision. События без ID до terminal коррелируются в
+  один вызов, terminal закрывает его. Без ID нельзя отличить параллельные
+  вызовы, поэтому такой поток трактуется последовательно; идентифицированный
+  SDK path `event.id` не меняется и никогда не смешивается с anonymous ID.
 
 Внутренние маршруты `/api/opencode/*` предназначены только для browser panel.
 Они требуют `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin

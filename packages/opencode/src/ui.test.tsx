@@ -2572,4 +2572,71 @@ describe("OpenCode tool calls в панели", () => {
     await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("отменено"));
     expect(toolRow("task_a")).toHaveTextContent("выполняется");
   });
+
+  it("коррелирует no-ID события одного вызова и не сталкивает разные вызовы", async () => {
+    // Старый Date.now()-fallback давал одинаковый ID событиям в одну мс.
+    vi.spyOn(Date, "now").mockReturnValue(50_000);
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+        return success(session());
+      }
+      if (url.endsWith("/prompt")) {
+        return stream([
+          { kind: "tool", name: "task_a", status: "running", startedAt: 1000 },
+          { kind: "tool", status: "completed", output: "a", endedAt: 2000 },
+          { kind: "tool", name: "task_b", status: "running", startedAt: 3000 },
+          { kind: "tool", status: "completed", output: "b", endedAt: 4000 },
+          { kind: "error", text: "Сбой инструмента" },
+        ]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt();
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("готово"));
+    expect(toolRow("task_a")).toHaveTextContent("готово");
+    expect(screen.getAllByTestId("opencode-tool-call")).toHaveLength(2);
+  });
+
+  it("не присваивает no-ID tool события чужому ходу", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(60_000);
+    let promptCalls = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+        return success(session());
+      }
+      if (url.endsWith("/prompt")) {
+        promptCalls += 1;
+        return stream(
+          promptCalls === 1
+            ? [
+                { kind: "tool", name: "task_a", status: "running", startedAt: 1000 },
+                { kind: "finalizing" },
+              ]
+            : [
+                { kind: "tool", name: "task_b", status: "running", startedAt: 2000 },
+                { kind: "error", text: "Сбой инструмента" },
+              ],
+        );
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt("Первый вопрос");
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    await sendPrompt("Второй вопрос");
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("ошибка"));
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+    expect(screen.getAllByTestId("opencode-tool-call")).toHaveLength(2);
+  });
 });
