@@ -1,12 +1,12 @@
 ---
 id: KAN-059
 title: Глобальный размер шрифта в настройках
-status: review
+status: done
 stage: 8
 priority: medium
 owner: worker
 blocked_by: []
-branch: feat/kan-059-font-size-settings
+branch: dev
 worktree: .
 created: 2026-11-23
 updated: 2026-11-23
@@ -41,5 +41,15 @@ specs:
 
 ## Ограничения
 
-Работа в текущем checkout, без commit/push. Опубликованный `v0.1.0-rc.0` и его
-tag не изменяются; существующие незакоммиченные изменения сохраняются.
+Реализация выполнялась в текущем checkout без worktree. По запросу пользователя
+от 2026-11-23 результат закоммичен и смержен в `dev`; push не выполнялся.
+Опубликованный `v0.1.0-rc.0` и его tag не изменялись; посторонние
+незакоммиченные изменения сохранены и в коммиты не включались.
+
+## Итог
+
+Результат закоммичен в `bf029fb` и интегрирован в `dev` merge-коммитом
+`3f2a7dd`. На чистой feature-ветке `pnpm check` прошёл: 138 test files /
+1858 tests; shell E2E — 9/9. После merge на `dev` `pnpm check` прошёл:
+139 test files / 1881 tests; shell E2E — 9/9. Feature-ветка и проверочный
+worktree удалены. Статус: `done`.
