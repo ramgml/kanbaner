@@ -1,7 +1,7 @@
 ---
 id: KAN-062
 title: Прокрутка чата без потери позиции чтения
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-062
@@ -83,6 +83,9 @@ specs:
 - 2026-11-23 — KAN-061 завершена. Назначен `worker-kan-062`, создана ветка и
   worktree; статус `in_progress`. Виртуализация и сохранение scroll position
   между reload в срез не входят.
+- 2026-11-23 — Worker реализовал near-bottom follow, кнопку возврата и dynamic
+  height handling. Коммит `2da15f5`; focused unit 79/79, E2E 15/15, полный
+  `pnpm check` — 140 files / 1950 tests. Статус `review`.
 
 ## Итог
 
