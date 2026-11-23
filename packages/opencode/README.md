@@ -139,17 +139,30 @@ IntersectionObserver или `scrollIntoView`.
   `scrollHeight - scrollTop - clientHeight` не больше 48 px. Порог проверяется по
   фактическому контейнеру, а не по последнему сообщению.
 - При чтении выше `scrollTop` не меняется от streaming deltas, upsert tool call,
-  canonical refresh той же сессии и tool status. Число новых сообщений
-  показывается badge на кнопке «К новому сообщению».
+  canonical refresh той же сессии и tool status. Unread считается по identity:
+  новые ID и сообщения с изменённым текстом; чистое удаление истории счётчик не
+  увеличивает. Если после изменения сообщений или resize геометрия сама привела
+  к нижней границе, follow и badge восстанавливаются без scroll event.
+- Перед любой автоматической записью `scrollTop` текущий offset сверяется с
+  сохранённой предыдущей нижней границей. Если пользователь уже ушёл выше, но
+  scroll event ещё не доставлен, запись пропускается: follow выключается, кнопка
+  и unread появляются сразу. Явные `followNow`, возврат кнопкой и отправка
+  prompt остаются override.
 - Кнопка находится вне scroll content и является native `<button>`: работает
   pointer/touch, Enter/Space и `focus-visible`. После возврата фокус переносится
   на контейнер с `preventScroll`, чтобы исчезновение кнопки не прокручивало ленту.
 - Отправка prompt и retry явно включают follow. Смена `session.id` сбрасывает
   unread и открывает конец новой истории; canonical refresh той же сессии follow
   не сбрасывает.
+- Native scroll anchoring не отключается. Контракт — стабильность видимого
+  фрагмента при reflow выше viewport, а не неизменный числовой `scrollTop`:
+  браузер сам компенсирует рост раннего сообщения, hook не делает собственный
+  jump. Для deltas без reflow выше viewport `scrollTop` остаётся прежним.
 - `ResizeObserver` наблюдает container и content, window resize и capture
-  `load`/`error` (image preview) удерживают низ только в режиме follow. Это
-  покрывает раскрытие tool `<details>`, resize панели/textarea и mobile viewport.
+  `load`/`error` (image preview) удерживают низ только в режиме follow. Без
+  `ResizeObserver` дополнительно работают capture `toggle` для tool `<details>`
+  и window `pointerup`/`keyup` после resize мышью или клавиатурой; polling и
+  новые зависимости не используются.
 - `overscroll-contain` не отдаёт прокрутку чата внешней странице. Позиция между
   перезагрузками не сохраняется; generation/abort в scroll-логику не входят.
 

@@ -1,14 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CHAT_NEAR_BOTTOM_THRESHOLD_PX,
-  chatContentSignature,
   chatMaxScrollTop,
   chatScrollDistanceFromBottom,
+  chatUnreadIDs,
   formatChatUnread,
   isChatNearBottom,
   scrollChatToBottom,
@@ -43,7 +43,12 @@ class FakeResizeObserver {
   }
 
   trigger(): void {
-    if (!this.disconnected) this.callback([], this as unknown as ResizeObserver);
+    if (this.disconnected) return;
+    // ResizeObserver в браузере приходит вне React-события, но state hook'а
+    // должен быть виден в тесте сразу после callback.
+    act(() => {
+      this.callback([], this as unknown as ResizeObserver);
+    });
   }
 
   static triggerAll(): void {
@@ -53,6 +58,7 @@ class FakeResizeObserver {
 
 interface ControlledGeometry {
   grow(delta: number): void;
+  setScrollHeight(value: number): void;
   setClientHeight(value: number): void;
   readonly scrollHeight: number;
   readonly clientHeight: number;
@@ -81,6 +87,9 @@ function controlledGeometry(
   return {
     grow(delta) {
       scrollHeight += delta;
+    },
+    setScrollHeight(value) {
+      scrollHeight = value;
     },
     setClientHeight(value) {
       clientHeight = value;
@@ -135,6 +144,10 @@ function Harness({
           {messages.map((message) => (
             <p key={message.id}>{message.text}</p>
           ))}
+          <details data-testid="tool">
+            <summary>tool</summary>
+            <p>payload</p>
+          </details>
         </div>
       </div>
       <p data-testid="following">{String(following)}</p>
@@ -151,6 +164,11 @@ function Harness({
 function readAbove(element: HTMLElement): void {
   element.scrollTop = 0;
   fireEvent.scroll(element);
+}
+
+/** Меняет offset без synthetic scroll event: проверяет stale followingRef. */
+function readAboveSilently(element: HTMLElement): void {
+  element.scrollTop = 0;
 }
 
 beforeEach(() => {
@@ -186,11 +204,30 @@ describe("chat scroll geometry", () => {
     expect(chatMaxScrollTop({ scrollTop: 0, scrollHeight: 100, clientHeight: 400 })).toBe(0);
   });
 
-  it("строит подпись по identity и длине текста и ограничивает badge", () => {
-    expect(chatContentSignature([{ id: "a", text: "123" }])).toBe("a:3;");
-    expect(chatContentSignature([{ id: "a", text: "123" }])).toBe(
-      chatContentSignature([{ id: "a", text: "123" }]),
-    );
+  it("считает unread по identity и изменению текста, а не по net length", () => {
+    expect(chatUnreadIDs([{ id: "a", text: "123" }], [{ id: "a", text: "123" }])).toEqual([]);
+    expect(
+      chatUnreadIDs(
+        [
+          { id: "a", text: "123" },
+          { id: "b", text: "old" },
+        ],
+        [
+          { id: "a", text: "1234" },
+          { id: "c", text: "new" },
+        ],
+      ),
+    ).toEqual(["a", "c"]);
+    // Чистое удаление не является новым сообщением.
+    expect(
+      chatUnreadIDs(
+        [
+          { id: "a", text: "123" },
+          { id: "b", text: "x" },
+        ],
+        [{ id: "a", text: "123" }],
+      ),
+    ).toEqual([]);
     expect(formatChatUnread(4)).toBe("4");
     expect(formatChatUnread(100)).toBe("99+");
   });
@@ -286,6 +323,92 @@ describe("useChatScroll", () => {
     expect(screen.getByRole("button", { name: /К новому сообщению/u })).toBeVisible();
   });
 
+  it("не возвращает вниз при silent scroll без scroll event", () => {
+    const { rerender } = render(<Harness sessionID="ses-1" messages={chatMessages(3)} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 1000, clientHeight: 400 });
+    // Фиксируем нижнюю границу до ухода: это baseline для сверки offset.
+    fireEvent.scroll(element);
+    expect(isFollowing()).toBe(true);
+
+    readAboveSilently(element);
+    geometry.grow(300);
+    rerender(<Harness sessionID="ses-1" messages={chatMessages(4)} />);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+    expect(unread()).toBe(1);
+
+    // Resize callback не маскирует уход: запись scrollTop запрещена.
+    FakeResizeObserver.triggerAll();
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+
+    // Последующий scroll event только подтверждает чтение выше.
+    fireEvent.scroll(element);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+    expect(unread()).toBe(1);
+  });
+
+  it("silent scroll не перезаписывается resize/load fallback без ResizeObserver", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    render(<Harness sessionID="ses-1" messages={chatMessages(2)} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 700, clientHeight: 250 });
+    fireEvent.scroll(element);
+
+    readAboveSilently(element);
+    geometry.grow(100);
+    fireEvent(window, new Event("resize"));
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+
+    fireEvent.load(contentElement());
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+  });
+
+  it("чистое сокращение history не создаёт unread и не залипает при росте clientHeight", () => {
+    const messages = chatMessages(6);
+    const { rerender } = render(<Harness sessionID="ses-1" messages={messages} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 1200, clientHeight: 400 });
+    readAbove(element);
+    expect(unread()).toBe(0);
+    expect(isFollowing()).toBe(false);
+
+    // Pure canonical shrink: те же identity/текст, меньше сообщений.
+    geometry.setScrollHeight(700);
+    rerender(<Harness sessionID="ses-1" messages={chatMessages(3)} />);
+    expect(isFollowing()).toBe(false);
+    expect(element.scrollTop).toBe(0);
+    expect(unread()).toBe(0);
+
+    // clientHeight вырос без scroll event: контент сам дошёл до низа.
+    geometry.setClientHeight(1000);
+    rerender(<Harness sessionID="ses-1" messages={chatMessages(3)} />);
+    expect(isFollowing()).toBe(true);
+    expect(unread()).toBe(0);
+    expect(element.scrollTop).toBe(0);
+    expect(screen.queryByRole("button", { name: /К новому сообщению/u })).toBeNull();
+  });
+
+  it("ResizeObserver пересчитывает near-bottom при following=false", () => {
+    const messages = chatMessages(5);
+    render(<Harness sessionID="ses-1" messages={messages} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 1000, clientHeight: 400 });
+    readAbove(element);
+    expect(isFollowing()).toBe(false);
+
+    geometry.setClientHeight(1000);
+    FakeResizeObserver.triggerAll();
+    expect(isFollowing()).toBe(true);
+    expect(unread()).toBe(0);
+    expect(element.scrollTop).toBe(0);
+    expect(screen.queryByRole("button", { name: /К новому сообщению/u })).toBeNull();
+  });
+
   it("смена session сбрасывает unread и открывает конец новой истории", () => {
     const { rerender } = render(<Harness sessionID="ses-1" messages={chatMessages(5)} />);
     const element = scrollElement();
@@ -354,6 +477,74 @@ describe("useChatScroll", () => {
     fireEvent.load(contentElement());
     fireEvent.error(contentElement());
     expect(element.scrollTop).toBe(0);
+  });
+
+  it("без ResizeObserver реагирует на toggle details и pointerup/keyup", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    render(<Harness sessionID="ses-1" messages={chatMessages(2)} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 700, clientHeight: 250 });
+    const details = screen.getByTestId("tool");
+    expect(details.tagName).toBe("DETAILS");
+
+    // Реальный toggle от раскрытия tool `<details>` приходит из content, а
+    // listener висит в capture-фазе на контейнере.
+    geometry.grow(100);
+    fireEvent(details, new Event("toggle"));
+    expect(element.scrollTop).toBe(800 - 250);
+
+    // Resize перетаскиванием панели и клавиатурой без ResizeObserver.
+    geometry.grow(100);
+    fireEvent.pointerUp(window);
+    expect(element.scrollTop).toBe(900 - 250);
+
+    geometry.grow(100);
+    fireEvent.keyUp(window);
+    expect(element.scrollTop).toBe(1000 - 250);
+
+    // Чтение выше: fallback не возвращает вниз.
+    readAbove(element);
+    geometry.grow(100);
+    fireEvent(details, new Event("toggle"));
+    fireEvent.pointerUp(window);
+    fireEvent.keyUp(window);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+  });
+
+  it("без ResizeObserver очищает toggle/pointerup/keyup listeners", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    const addSpy = vi.spyOn(HTMLElement.prototype, "addEventListener");
+    const removeSpy = vi.spyOn(HTMLElement.prototype, "removeEventListener");
+    const windowAddSpy = vi.spyOn(window, "addEventListener");
+    const windowRemoveSpy = vi.spyOn(window, "removeEventListener");
+    const { unmount } = render(<Harness sessionID="ses-1" messages={chatMessages(2)} />);
+    const element = scrollElement();
+    const geometry = controlledGeometry(element, { scrollHeight: 700, clientHeight: 250 });
+
+    const toggleAdd = addSpy.mock.calls.find(
+      ([type, , options]) =>
+        type === "toggle" &&
+        (options === true ||
+          (typeof options === "object" &&
+            options !== null &&
+            (options as AddEventListenerOptions).capture === true)),
+    );
+    expect(toggleAdd).toBeDefined();
+    expect(windowAddSpy.mock.calls.some(([type]) => type === "pointerup")).toBe(true);
+    expect(windowAddSpy.mock.calls.some(([type]) => type === "keyup")).toBe(true);
+
+    unmount();
+    expect(removeSpy.mock.calls.some(([type]) => type === "toggle")).toBe(true);
+    expect(windowRemoveSpy.mock.calls.some(([type]) => type === "pointerup")).toBe(true);
+    expect(windowRemoveSpy.mock.calls.some(([type]) => type === "keyup")).toBe(true);
+
+    // После unmount поздние события не трогают scrollTop.
+    geometry.grow(500);
+    fireEvent(screen.queryByTestId("tool") ?? element, new Event("toggle"));
+    fireEvent.pointerUp(window);
+    fireEvent.keyUp(window);
+    expect(element.scrollTop).toBe(700 - 250);
   });
 
   it("passive scroll listener и observers очищаются, включая StrictMode", () => {

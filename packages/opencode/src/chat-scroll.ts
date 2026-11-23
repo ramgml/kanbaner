@@ -77,13 +77,20 @@ export function scrollChatToBottom(geometry: WritableChatScrollGeometry): boolea
 }
 
 /**
- * Дешёвая подпись содержимого для unread: identity и длина текста сообщений.
- * Повторный canonical refresh с тем же содержимым не считается новым сообщением.
+ * Identity новых или изменённых сообщений для unread. Чистое удаление истории и
+ * canonical no-op с тем же текстом ничего не добавляют; streamed delta и
+ * canonical replacement с другим текстом считаются изменением своего message ID.
  */
-export function chatContentSignature(messages: readonly ChatScrollMessage[]): string {
-  let signature = "";
-  for (const message of messages) signature += `${message.id}:${message.text.length};`;
-  return signature;
+export function chatUnreadIDs(
+  previous: readonly ChatScrollMessage[],
+  next: readonly ChatScrollMessage[],
+): string[] {
+  const previousText = new Map(previous.map((message) => [message.id, message.text]));
+  const ids: string[] = [];
+  for (const message of next) {
+    if (previousText.get(message.id) !== message.text) ids.push(message.id);
+  }
+  return ids;
 }
 
 /** Счётчик новых сообщений для badge; большие значения не ломают layout. */
@@ -93,6 +100,15 @@ export function formatChatUnread(count: number): string {
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
+interface ChatGeometrySnapshot {
+  readonly maxScrollTop: number;
+}
+
+interface ChatMessagesSnapshot {
+  readonly sessionID: string | null;
+  readonly messages: readonly ChatScrollMessage[];
+}
+
 /**
  * Управляет прокруткой ленты чата без виртуализации и IntersectionObserver:
  *
@@ -100,7 +116,8 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
  * - при чтении выше streaming/tool/canonical обновления не меняют scrollTop;
  * - смена session открывает конец новой истории и сбрасывает unread;
  * - динамические высоты (ResizeObserver контейнера/контента, window resize,
- *   capture load/error изображений) удерживают низ только в режиме follow.
+ *   capture load/error изображений, toggle/details и pointer/keyboard fallback)
+ *   удерживают низ только в режиме follow.
  *
  * Generation/abort в scroll-логику не входят: stale messages уже отсекаются
  * существующими guards до setMessages.
@@ -114,11 +131,9 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
   const containerElementRef = useRef<HTMLDivElement | null>(null);
   const followingRef = useRef(true);
   const unreadRef = useRef(0);
-  const previousRef = useRef<{
-    readonly sessionID: string | null;
-    readonly signature: string;
-    readonly length: number;
-  } | null>(null);
+  const unreadIDsRef = useRef<Set<string>>(new Set());
+  const previousRef = useRef<ChatMessagesSnapshot | null>(null);
+  const geometryRef = useRef<ChatGeometrySnapshot | null>(null);
 
   const containerRef = useCallback<RefCallback<HTMLDivElement>>((node) => {
     containerElementRef.current = node;
@@ -140,47 +155,104 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     setUnreadState(next);
   }, []);
 
-  const bumpUnread = useCallback((growth: number): void => {
-    const next = growth > 0 ? unreadRef.current + growth : Math.max(unreadRef.current, 1);
-    if (next === unreadRef.current) return;
-    unreadRef.current = next;
-    setUnreadState(next);
+  const recordGeometry = useCallback((element: ChatScrollGeometry): void => {
+    geometryRef.current = { maxScrollTop: chatMaxScrollTop(element) };
+  }, []);
+
+  const clearUnread = useCallback((): void => {
+    unreadIDsRef.current.clear();
+    applyUnread(0);
+  }, [applyUnread]);
+
+  const registerUnread = useCallback(
+    (ids: readonly string[]): void => {
+      let changed = false;
+      for (const id of ids) {
+        if (unreadIDsRef.current.has(id)) continue;
+        unreadIDsRef.current.add(id);
+        changed = true;
+      }
+      if (changed) applyUnread(unreadIDsRef.current.size);
+    },
+    [applyUnread],
+  );
+
+  /**
+   * Пользователь мог изменить scrollTop без доставленного scroll event. Тогда
+   * followingRef ещё true, но offset уже выше прежней нижней границы. Сверяем
+   * текущую позицию с последней сохранённой геометрией, а не только с ref-флагом.
+   */
+  const movedAbovePreviousBottom = useCallback((element: ChatScrollGeometry): boolean => {
+    if (isChatNearBottom(element)) return false;
+    const previous = geometryRef.current;
+    if (previous === null) return false;
+    return element.scrollTop < previous.maxScrollTop - CHAT_NEAR_BOTTOM_THRESHOLD_PX;
   }, []);
 
   /**
    * Следование и unread пересчитываются после commit сообщений, поэтому высота
-   * уже отражает новый контент. StrictMode-повтор идемпотентен: повторный вызов
-   * видит неизменившуюся подпись и уже нижний scrollTop.
+   * уже отражает новый контент. Перед любой записью scrollTop проверяется
+   * фактический offset: stale followingRef не возвращает пользователя вниз.
    */
   useIsomorphicLayoutEffect(() => {
     const element = containerElementRef.current;
-    const signature = chatContentSignature(messages);
     const previous = previousRef.current;
     const sessionChanged = previous === null || previous.sessionID !== sessionID;
+    const changedIDs = previous === null ? [] : chatUnreadIDs(previous.messages, messages);
+    previousRef.current = { sessionID, messages };
 
     if (sessionChanged) {
-      previousRef.current = { sessionID, signature, length: messages.length };
+      unreadIDsRef.current.clear();
       if (previous !== null) {
         applyFollowing(true);
         applyUnread(0);
       }
-      if (element !== null) scrollChatToBottom(element);
+      if (element !== null) {
+        scrollChatToBottom(element);
+        recordGeometry(element);
+      }
       return;
     }
 
-    const changed = previous.signature !== signature || previous.length !== messages.length;
-    previousRef.current = { sessionID, signature, length: messages.length };
-
-    if (followingRef.current) {
-      if (element !== null) scrollChatToBottom(element);
-      applyUnread(0);
+    if (element === null) {
+      if (!followingRef.current) registerUnread(changedIDs);
       return;
     }
 
-    if (!changed) return;
-    // Чтение выше: scrollTop не трогаем, только показываем новые сообщения.
-    bumpUnread(Math.max(0, messages.length - previous.length));
-  }, [applyFollowing, applyUnread, bumpUnread, container, messages, sessionID]);
+    if (!followingRef.current) {
+      registerUnread(changedIDs);
+      // Shrink или выросший clientHeight могли сами привести к нижней границе.
+      if (isChatNearBottom(element)) {
+        applyFollowing(true);
+        clearUnread();
+        scrollChatToBottom(element);
+      }
+      recordGeometry(element);
+      return;
+    }
+
+    if (movedAbovePreviousBottom(element)) {
+      // Silent scroll без события: не пишем scrollTop, показываем возврат.
+      applyFollowing(false);
+      registerUnread(changedIDs);
+      recordGeometry(element);
+      return;
+    }
+
+    scrollChatToBottom(element);
+    clearUnread();
+    recordGeometry(element);
+  }, [
+    applyFollowing,
+    applyUnread,
+    clearUnread,
+    container,
+    messages,
+    movedAbovePreviousBottom,
+    recordGeometry,
+    registerUnread,
+    sessionID,
+  ]);
 
   /** Passive scroll listener: ручной уход от низа выключает follow. */
   useEffect(() => {
@@ -188,23 +260,39 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     const onScroll = (): void => {
       const near = isChatNearBottom(container);
       applyFollowing(near);
-      if (near) applyUnread(0);
+      if (near) clearUnread();
+      recordGeometry(container);
     };
     container.addEventListener("scroll", onScroll, { passive: true });
     return () => container.removeEventListener("scroll", onScroll);
-  }, [applyFollowing, applyUnread, container]);
+  }, [applyFollowing, clearUnread, container, recordGeometry]);
 
   /**
    * Динамические высоты: content/container ResizeObserver, window resize как
    * fallback без ResizeObserver, capture load/error для image preview, а также
-   * раскрытие tool `<details>` и resize textarea/панели через те же observers.
-   * При чтении выше обработчики ничего не прокручивают.
+   * раскрытие tool `<details>` и resize textarea/панели. При чтении выше
+   * обработчики не прокручивают контейнер и не отключают native scroll anchoring.
    */
   useEffect(() => {
     if (container === null) return;
     const maintain = (): void => {
-      if (!followingRef.current) return;
+      if (!followingRef.current) {
+        // Геометрия могла сама вернуть контент к низу без scroll event.
+        if (isChatNearBottom(container)) {
+          applyFollowing(true);
+          clearUnread();
+          scrollChatToBottom(container);
+        }
+        recordGeometry(container);
+        return;
+      }
+      if (movedAbovePreviousBottom(container)) {
+        applyFollowing(false);
+        recordGeometry(container);
+        return;
+      }
       scrollChatToBottom(container);
+      recordGeometry(container);
     };
     const Resize = globalThis.ResizeObserver;
     const observer = typeof Resize === "function" ? new Resize(maintain) : null;
@@ -214,28 +302,41 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
     window.addEventListener("resize", maintain);
     container.addEventListener("load", maintain, true);
     container.addEventListener("error", maintain, true);
+    if (observer === null) {
+      // Без ResizeObserver высоту меняют раскрытие details и resize мышью/клавиатурой.
+      container.addEventListener("toggle", maintain, true);
+      window.addEventListener("pointerup", maintain);
+      window.addEventListener("keyup", maintain);
+    }
     return () => {
       observer?.disconnect();
       window.removeEventListener("resize", maintain);
       container.removeEventListener("load", maintain, true);
       container.removeEventListener("error", maintain, true);
+      container.removeEventListener("toggle", maintain, true);
+      window.removeEventListener("pointerup", maintain);
+      window.removeEventListener("keyup", maintain);
     };
-  }, [container, content]);
+  }, [applyFollowing, clearUnread, container, content, movedAbovePreviousBottom, recordGeometry]);
 
   const followNow = useCallback((): void => {
     applyFollowing(true);
-    applyUnread(0);
+    clearUnread();
     const element = containerElementRef.current;
-    if (element !== null) scrollChatToBottom(element);
-  }, [applyFollowing, applyUnread]);
+    if (element !== null) {
+      scrollChatToBottom(element);
+      recordGeometry(element);
+    }
+  }, [applyFollowing, clearUnread, recordGeometry]);
 
   const jumpToLatest = useCallback(
     (options?: { readonly focus?: boolean }): void => {
       applyFollowing(true);
-      applyUnread(0);
+      clearUnread();
       const element = containerElementRef.current;
       if (element === null) return;
       scrollChatToBottom(element);
+      recordGeometry(element);
       if (options?.focus === true) {
         // Кнопка размонтируется после возврата; фокус переходит на контейнер,
         // не вызывая дополнительный scroll от браузера.
@@ -246,7 +347,7 @@ export function useChatScroll({ sessionID, messages }: ChatScrollOptions): ChatS
         }
       }
     },
-    [applyFollowing, applyUnread],
+    [applyFollowing, clearUnread, recordGeometry],
   );
 
   return { containerRef, contentRef, following, unread, followNow, jumpToLatest };

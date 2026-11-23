@@ -241,6 +241,122 @@ async function readChatAbove(page: Page): Promise<void> {
   });
 }
 
+/** Середина истории: пользователь читает не начало и не конец. */
+async function readChatMiddle(page: Page): Promise<void> {
+  await page.getByTestId("opencode-messages").evaluate((element) => {
+    const max = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = Math.round(max / 2);
+  });
+}
+
+interface ChatAnchor {
+  readonly index: number;
+  readonly top: number;
+  readonly text: string;
+}
+
+/** Первое сообщение, пересекающее верхнюю границу viewport контейнера. */
+async function chatAnchor(page: Page): Promise<ChatAnchor> {
+  return page.getByTestId("opencode-messages").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const articles = Array.from(element.querySelectorAll("article"));
+    const index = articles.findIndex(
+      (article) => article.getBoundingClientRect().bottom > box.top + 8,
+    );
+    const anchor = articles[index];
+    if (anchor === undefined) throw new Error("visible anchor is missing");
+    return {
+      index,
+      top: anchor.getBoundingClientRect().top,
+      text: (anchor.textContent ?? "").slice(0, 40),
+    };
+  });
+}
+
+async function chatAnchorTop(page: Page, anchor: ChatAnchor): Promise<number> {
+  return page.getByTestId("opencode-messages").evaluate((element, index) => {
+    const target = Array.from(element.querySelectorAll("article"))[index];
+    if (target === undefined) throw new Error("anchor disappeared");
+    return target.getBoundingClientRect().top;
+  }, anchor.index);
+}
+
+test("desktop: чтение в середине истории сохраняет видимый anchor при росте раннего сообщения", async ({
+  page,
+}) => {
+  const history = Array.from({ length: 30 }, (_value, index) => ({
+    id: `assistant:history-${index}`,
+    role: "assistant" as const,
+    text: `Середина ${index}. ${"Подробный текст шага. ".repeat(6)}`,
+  }));
+  // Canonical refresh увеличивает высоту сообщения ВЫШЕ видимого фрагмента:
+  // native scroll anchoring должен удержать чтение, а не числовой scrollTop.
+  const canonical = [
+    ...history.map((message, index) =>
+      index === 2
+        ? {
+            ...message,
+            text: `${message.text} ${"Дополнительный ранний текст. ".repeat(40)}`,
+          }
+        : message,
+    ),
+    { id: "assistant:mid-answer", role: "assistant" as const, text: "Ответ в середине" },
+  ];
+  const mock = await mockOpenCode(
+    page,
+    () => [
+      { kind: "delta", id: "message-1:0", text: "Потоковый " },
+      { kind: "text", id: "message-1:0", text: "Потоковый ответ середины" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ],
+    history,
+    {
+      // Даём тесту уйти в середину до streaming и canonical refresh.
+      promptDelayMs: 900,
+      sessionDelayMs: 1400,
+      initialMessages: history,
+      sessionHistory: () => canonical,
+    },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const scroll = page.getByTestId("opencode-messages");
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await expect(scroll).toContainText("Середина 29.");
+  await expect.poll(async () => (await chatScrollMetrics(page)).bottomGap).toBeLessThanOrEqual(1);
+
+  await message.fill("Вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect.poll(() => mock.promptBodies.length).toBe(1);
+
+  await readChatMiddle(page);
+  const jump = page.getByTestId("opencode-jump-to-latest");
+  await expect(jump).toBeVisible();
+  const middle = await chatScrollMetrics(page);
+  expect(middle.top).toBeGreaterThan(0);
+  expect(middle.bottomGap).toBeGreaterThan(100);
+  const anchor = await chatAnchor(page);
+  expect(anchor.text).not.toContain("Середина 29.");
+
+  // Delta ниже viewport не перестраивает контент выше: числовой scrollTop цел.
+  await expect(scroll.getByText("Потоковый ответ середины", { exact: true })).toBeVisible();
+  expect((await chatScrollMetrics(page)).top).toBe(middle.top);
+
+  // Canonical replacement выросшего раннего сообщения: видимый anchor на месте.
+  await expect(scroll).toContainText("Дополнительный ранний текст.");
+  await expect(scroll.getByText("Ответ в середине", { exact: true })).toBeVisible();
+  const anchored = await chatAnchor(page);
+  expect(anchored.text).toBe(anchor.text);
+  expect(Math.abs((await chatAnchorTop(page, anchor)) - anchor.top)).toBeLessThanOrEqual(1);
+  // ScrollTop изменил браузер для компенсации reflow выше, а не hook.
+  expect((await chatScrollMetrics(page)).top).toBeGreaterThan(middle.top);
+  await expect(jump).toBeVisible();
+});
+
 test("mobile панель открывается явно, занимает экран и сохраняет закрытое состояние", async ({
   page,
 }) => {
