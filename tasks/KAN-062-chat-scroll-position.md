@@ -1,13 +1,13 @@
 ---
 id: KAN-062
 title: Прокрутка чата без потери позиции чтения
-status: backlog
+status: in_progress
 stage: 8
 priority: high
-owner: unassigned
-blocked_by: [KAN-061]
-branch: null
-worktree: null
+owner: worker-kan-062
+blocked_by: []
+branch: feat/kan-062-chat-scroll-position
+worktree: .worktrees/kan-062-chat-scroll-position
 created: 2026-11-23
 updated: 2026-11-23
 specs:
@@ -79,7 +79,10 @@ specs:
 
 ## Журнал
 
-- 2026-11-23 — Задача создана по пункту 3 roadmap; ожидает KAN-061.
+- 2026-11-23 — Задача создана по пункту 3 roadmap; ожидала KAN-061.
+- 2026-11-23 — KAN-061 завершена. Назначен `worker-kan-062`, создана ветка и
+  worktree; статус `in_progress`. Виртуализация и сохранение scroll position
+  между reload в срез не входят.
 
 ## Итог
 
