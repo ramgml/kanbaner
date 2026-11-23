@@ -198,6 +198,50 @@ function toolDetails(): HTMLDetailsElement {
   return details;
 }
 
+interface PanelScrollGeometry {
+  grow(delta: number): void;
+  readonly max: number;
+}
+
+/** jsdom не считает layout: задаём реальному scroll container управляемую геометрию. */
+function controlPanelScroll(
+  element: HTMLElement,
+  initial: { readonly scrollHeight: number; readonly clientHeight: number },
+): PanelScrollGeometry {
+  let scrollHeight = initial.scrollHeight;
+  const clientHeight = initial.clientHeight;
+  Object.defineProperty(element, "scrollHeight", {
+    configurable: true,
+    get: () => scrollHeight,
+  });
+  Object.defineProperty(element, "clientHeight", {
+    configurable: true,
+    get: () => clientHeight,
+  });
+  element.scrollTop = Math.max(0, scrollHeight - clientHeight);
+  return {
+    grow(delta) {
+      scrollHeight += delta;
+    },
+    get max() {
+      return Math.max(0, scrollHeight - clientHeight);
+    },
+  };
+}
+
+function panelScroll(): HTMLElement {
+  return screen.getByTestId("opencode-messages");
+}
+
+function jumpButton(): HTMLElement | null {
+  return screen.queryByTestId("opencode-jump-to-latest");
+}
+
+function readPanelAbove(element: HTMLElement): void {
+  element.scrollTop = 0;
+  fireEvent.scroll(element);
+}
+
 describe("OpenCodePanel", () => {
   it("обновляет один tool call по ID, заменяет delta финальным text и очищает attachment", async () => {
     fetchMock.mockImplementation(async (input, init) => {
@@ -1898,6 +1942,207 @@ describe("OpenCodePanel", () => {
     await waitFor(() => expect(screen.queryByRole("img")).toBeNull());
     expect(screen.getByText("pixel.png")).toBeVisible();
     expect(revokeObjectUrlMock).toHaveBeenCalledWith("blob:mock-2");
+  });
+
+  it("не выталкивает читающего выше из streaming/canonical и возвращает кнопкой", async () => {
+    const history = Array.from({ length: 8 }, (_value, index) => ({
+      id: `assistant:history-${index}`,
+      role: "assistant" as const,
+      text: `Длинная история ${index}. `.repeat(20),
+    }));
+    const canonical = [
+      ...history,
+      { id: "assistant:canonical", role: "assistant" as const, text: "Канонический ответ" },
+    ];
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let canonicalRequests = 0;
+
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") {
+        return success({ ...session(), messages: history });
+      }
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        canonicalRequests += 1;
+        return success({
+          session: { ...session(), messages: canonical },
+          outcome: "done",
+        });
+      }
+      if (url.endsWith("/prompt") && init?.method === "POST") {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+          },
+        });
+        return new Response(body, { headers: { "content-type": "application/x-ndjson" } });
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+
+    render(<OpenCodePanel />);
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+
+    const scroll = panelScroll();
+    await waitFor(() => expect(scroll).toHaveTextContent("Длинная история 0."));
+    const geometry = controlPanelScroll(scroll, { scrollHeight: 4000, clientHeight: 800 });
+    scroll.scrollTop = geometry.max;
+    fireEvent.scroll(scroll);
+    expect(jumpButton()).toBeNull();
+
+    const encoder = new TextEncoder();
+    const sendEvent = (event: unknown): void => {
+      act(() => {
+        streamController?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      });
+    };
+
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    // Отправка явно включает follow: optimistic user message виден.
+    await waitFor(() => expect(streamController).not.toBeNull());
+    expect(jumpButton()).toBeNull();
+    expect(scroll.scrollTop).toBe(geometry.max);
+
+    sendEvent({ kind: "delta", id: "message-1:0", text: "Потоковый " });
+    expect(await screen.findByText(/Потоковый/u)).toBeVisible();
+
+    // Пользователь уходит читать выше во время streaming.
+    readPanelAbove(scroll);
+    expect(jumpButton()).toBeVisible();
+
+    geometry.grow(600);
+    sendEvent({ kind: "delta", id: "message-1:0", text: "ответ" });
+    sendEvent({ kind: "text", id: "message-1:0", text: "Потоковый ответ" });
+    sendEvent({
+      kind: "tool",
+      id: "call-1",
+      name: "read",
+      status: "running",
+      text: "",
+      startedAt: 1000,
+    });
+    sendEvent({
+      kind: "tool",
+      id: "call-1",
+      name: "read",
+      status: "completed",
+      text: "",
+      output: "ok",
+      endedAt: 2000,
+    });
+    expect(await screen.findByText("Потоковый ответ")).toBeVisible();
+    expect(await screen.findByTestId("opencode-tool-call")).toBeInTheDocument();
+    expect(scroll.scrollTop).toBe(0);
+    expect(jumpButton()).toBeVisible();
+    expect(screen.getByTestId("opencode-unread-count")).toBeInTheDocument();
+
+    // Оборванный после finalizing поток даёт unconfirmed, но не двигает чтение.
+    sendEvent({ kind: "finalizing" });
+    act(() => streamController?.close());
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Результат не подтверждён"));
+    expect(scroll.scrollTop).toBe(0);
+    expect(jumpButton()).toBeVisible();
+
+    // Ручной canonical done той же сессии заменяет сообщения, но не scrollTop.
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    expect(await screen.findByText("Канонический ответ")).toBeVisible();
+    expect(canonicalRequests).toBe(1);
+    expect(scroll.scrollTop).toBe(0);
+    expect(jumpButton()).toBeVisible();
+
+    const button = jumpButton();
+    if (button === null) throw new Error("кнопка возврата не появилась");
+    expect(button.tagName).toBe("BUTTON");
+    expect(fireEvent.keyDown(button, { key: "Enter" })).toBe(true);
+    const focusSpy = vi.spyOn(scroll, "focus");
+    fireEvent.click(button);
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+    expect(scroll.scrollTop).toBe(geometry.max);
+    expect(jumpButton()).toBeNull();
+
+    // После явного возврата следующий prompt и его streaming снова следуют.
+    streamController = null;
+    geometry.grow(200);
+    fireEvent.change(message, { target: { value: "Ещё" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(streamController).not.toBeNull());
+    sendEvent({ kind: "delta", id: "message-2:0", text: "Второй ответ" });
+    expect(await screen.findByText("Второй ответ")).toBeVisible();
+    expect(scroll.scrollTop).toBe(geometry.max);
+    expect(jumpButton()).toBeNull();
+    sendEvent({ kind: "done" });
+    act(() => streamController?.close());
+  });
+
+  it("новая session сбрасывает unread и открывает конец истории", async () => {
+    const history = Array.from({ length: 5 }, (_value, index) => ({
+      id: `assistant:history-${index}`,
+      role: "assistant" as const,
+      text: `История ${index}. `.repeat(20),
+    }));
+    let created = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") {
+        created += 1;
+        return success({
+          ...session(created === 1 ? "ses-1" : "ses-2"),
+          messages: created === 1 ? history : [],
+        });
+      }
+      if (url === "/api/opencode/session/ses-1") {
+        return success({
+          ...session(),
+          messages: [
+            ...history,
+            { id: "user:new", role: "user", text: "Новый вопрос" },
+            { id: "assistant:new", role: "assistant", text: "Новый ответ" },
+          ],
+        });
+      }
+      if (url.endsWith("/prompt")) {
+        return stream([{ kind: "text", id: "message-1:0", text: "Новый ответ" }, { kind: "done" }]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+
+    render(<OpenCodePanel />);
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+
+    const scroll = panelScroll();
+    await waitFor(() => expect(scroll).toHaveTextContent("История 0."));
+    const geometry = controlPanelScroll(scroll, { scrollHeight: 3000, clientHeight: 600 });
+    scroll.scrollTop = geometry.max;
+    fireEvent.scroll(scroll);
+    readPanelAbove(scroll);
+    expect(jumpButton()).toBeVisible();
+
+    // Новый prompt включает follow, даже если пользователь читал выше.
+    fireEvent.change(message, { target: { value: "Новый вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    expect(jumpButton()).toBeNull();
+    expect(scroll.scrollTop).toBe(geometry.max);
+    expect(await screen.findByText("Новый ответ")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(jumpButton()).toBeNull();
+    expect(scroll.scrollTop).toBe(geometry.max);
+
+    readPanelAbove(scroll);
+    expect(jumpButton()).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-2"),
+    );
+    expect(jumpButton()).toBeNull();
+    expect(scroll.scrollTop).toBe(geometry.max);
   });
 });
 

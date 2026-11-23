@@ -129,6 +129,30 @@ Bearer token в браузер не передаётся. Ответы имею�
   runtime-зависимостей нет: используются browser `FileReader`, `Buffer` и
   `TextDecoder`.
 
+## Прокрутка чата
+
+Лента использует реальный scroll container и внутренний content wrapper; логика
+вынесена в `packages/opencode/src/chat-scroll.ts` и не использует виртуализацию,
+IntersectionObserver или `scrollIntoView`.
+
+- Follow включается только у нижней границы: расстояние
+  `scrollHeight - scrollTop - clientHeight` не больше 48 px. Порог проверяется по
+  фактическому контейнеру, а не по последнему сообщению.
+- При чтении выше `scrollTop` не меняется от streaming deltas, upsert tool call,
+  canonical refresh той же сессии и tool status. Число новых сообщений
+  показывается badge на кнопке «К новому сообщению».
+- Кнопка находится вне scroll content и является native `<button>`: работает
+  pointer/touch, Enter/Space и `focus-visible`. После возврата фокус переносится
+  на контейнер с `preventScroll`, чтобы исчезновение кнопки не прокручивало ленту.
+- Отправка prompt и retry явно включают follow. Смена `session.id` сбрасывает
+  unread и открывает конец новой истории; canonical refresh той же сессии follow
+  не сбрасывает.
+- `ResizeObserver` наблюдает container и content, window resize и capture
+  `load`/`error` (image preview) удерживают низ только в режиме follow. Это
+  покрывает раскрытие tool `<details>`, resize панели/textarea и mobile viewport.
+- `overscroll-contain` не отдаёт прокрутку чата внешней странице. Позиция между
+  перезагрузками не сохраняется; generation/abort в scroll-логику не входят.
+
 ## MCP и built-in tools
 
 `opencode.jsonc` в корне репозитория регистрирует локальный stdio server с
@@ -207,6 +231,10 @@ server. Поэтому повтор того же request внутри одно�
   merge/finish helpers, keyboard, stale generation, unconfirmed/error/cancelled
   tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
   завершения и ручной status check в том же scope.
+- `packages/opencode/src/chat-scroll.test.tsx` — геометрия near-bottom,
+  threshold 48 px, follow/чтение выше, unread, возврат, canonical refresh,
+  сброс при смене сессии, `ResizeObserver`/window resize/`load`/`error`,
+  StrictMode cleanup, passive listener и native keyboard/focus.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,
@@ -214,4 +242,6 @@ server. Поэтому повтор того же request внутри одно�
   авто-GET, ручные done/error/pending без нового prompt, compact tool call с
   duration, keyboard disclosure, длинным output без overflow и canonical
   timings после reload, streaming с mock OpenCode transport в production
-  Chromium.
+  Chromium. Scroll-сценарии проверяют чтение выше во время streaming и
+  canonical, tool disclosure, отложенную загрузку картинки, resize viewport,
+  Enter/Space-возврат, повторный follow и смену сессии на desktop и mobile 360.

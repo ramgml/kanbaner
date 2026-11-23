@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowDown,
   Bot,
   FileText,
   Loader2,
@@ -44,6 +45,7 @@ import {
   type OpenCodeToolView,
   type OpenCodeTurnStatus,
 } from "./types.ts";
+import { formatChatUnread, useChatScroll } from "./chat-scroll.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
 import {
   finishToolMessages,
@@ -652,9 +654,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     readonly ids: Set<string>;
   } | null>(null);
   const refreshControllersRef = useRef(new Set<AbortController>());
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentRef = useMemo(() => contextRefFromSearch(search), [search]);
   const busy = loading || creating || modelPending || promptPending;
+  const chatScroll = useChatScroll({ sessionID: session?.id ?? null, messages });
 
   const beginOperation = useCallback((): number => {
     const generation = ++generationRef.current;
@@ -758,10 +760,6 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const frame = window.requestAnimationFrame(() => setAttachedRef(null));
     return () => window.cancelAnimationFrame(frame);
   }, [currentRef]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView?.({ block: "end" });
-  }, [messages]);
 
   useEffect(() => {
     localImagesRef.current = localImages;
@@ -1260,6 +1258,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const send = async (): Promise<void> => {
     const text = input.trim();
     if (text.length === 0 || session === null || busy) return;
+    // Новый prompt явно включает follow: optimistic user message и ответ должны
+    // быть видны, даже если пользователь читал историю выше.
+    chatScroll.followNow();
     const context = attachedRef === currentRef ? attachedRef : null;
     await runPrompt({
       text: context === null ? text : `Контекст: ${context}\n\n${text}`,
@@ -1274,6 +1275,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     if (turn === null || busy || turn.generation !== generationRef.current || !turn.retryable) {
       return;
     }
+    chatScroll.followNow();
     void runPrompt({
       text: turn.requestText,
       displayText: turn.displayText,
@@ -1521,91 +1523,127 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         </div>
       </details>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3" aria-live="polite">
-        {loading ? <p className="text-sm text-muted-foreground">Подключаем OpenCode…</p> : null}
-        {!loading && creating ? (
-          <p className="text-sm text-muted-foreground">Создаём сессию…</p>
-        ) : null}
-        {panelError !== null ? (
-          <div
-            role="alert"
-            className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span>{panelError}</span>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void initialize()}
-                className={buttonClass}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={chatScroll.containerRef}
+          data-testid="opencode-messages"
+          tabIndex={-1}
+          aria-live="polite"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 outline-none"
+        >
+          <div ref={chatScroll.contentRef}>
+            {loading ? <p className="text-sm text-muted-foreground">Подключаем OpenCode…</p> : null}
+            {!loading && creating ? (
+              <p className="text-sm text-muted-foreground">Создаём сессию…</p>
+            ) : null}
+            {panelError !== null ? (
+              <div
+                role="alert"
+                className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
               >
-                <RefreshCw aria-hidden="true" className="size-3.5" /> Повторить
-              </button>
+                <div className="flex items-center justify-between gap-2">
+                  <span>{panelError}</span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void initialize()}
+                    className={buttonClass}
+                  >
+                    <RefreshCw aria-hidden="true" className="size-3.5" /> Повторить
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {!loading && !creating && messages.length === 0 && panelError === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <Sparkles aria-hidden="true" className="size-6" />
+                <p>Спросите о задачах, заметках или попросите изменить их.</p>
+              </div>
+            ) : null}
+            <div className="flex flex-col gap-3">
+              {messages.map((message, index) => {
+                const canonicalID = canonicalUserMessageID(message);
+                const toolMessage = message.role === "tool" ? message : null;
+                return (
+                  <article
+                    key={messageKey(message, index)}
+                    className={
+                      toolMessage !== null
+                        ? "min-w-0"
+                        : `rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : "mr-4 bg-muted/60"}`
+                    }
+                  >
+                    {toolMessage !== null ? <ToolCallMessage message={toolMessage} /> : null}
+                    {message.role === "user" &&
+                    message.attachments !== undefined &&
+                    message.attachments.length > 0 ? (
+                      <ul aria-label="Вложения сообщения" className="mb-1 flex flex-wrap gap-1">
+                        {message.attachments.map((attachment, attachmentIndex) => {
+                          const local =
+                            attachmentKind(attachment.name, attachment.mime) === "image"
+                              ? localImageMatch(
+                                  localImages,
+                                  session?.id ?? null,
+                                  userOrdinals[index] ?? -1,
+                                  attachmentIndex,
+                                  attachment,
+                                )
+                              : null;
+                          return (
+                            <li
+                              key={`${attachment.name}-${attachmentIndex}`}
+                              className="min-w-0 max-w-full"
+                            >
+                              <MessageAttachmentItem
+                                attachment={attachment}
+                                url={local?.url ?? null}
+                                sessionID={canonicalID === null ? null : (session?.id ?? null)}
+                                messageID={canonicalID}
+                                attachmentIndex={attachmentIndex}
+                              />
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : null}
+                    {message.role === "assistant" || message.role === "system" ? (
+                      <MarkdownMessage source={message.text} />
+                    ) : message.role === "user" ? (
+                      <div className="whitespace-pre-wrap break-words">{message.text}</div>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
           </div>
-        ) : null}
-        {!loading && !creating && messages.length === 0 && panelError === null ? (
-          <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
-            <Sparkles aria-hidden="true" className="size-6" />
-            <p>Спросите о задачах, заметках или попросите изменить их.</p>
+        </div>
+        {!chatScroll.following ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 flex justify-center px-3">
+            <button
+              type="button"
+              data-testid="opencode-jump-to-latest"
+              aria-label={
+                chatScroll.unread > 0
+                  ? `К новому сообщению, новых: ${chatScroll.unread > 99 ? "99+" : chatScroll.unread}`
+                  : "К новому сообщению"
+              }
+              onClick={() => chatScroll.jumpToLatest({ focus: true })}
+              className={`${buttonClass} pointer-events-auto max-w-full gap-1 bg-background shadow-md`}
+            >
+              <ArrowDown aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="truncate">К новому сообщению</span>
+              {chatScroll.unread > 0 ? (
+                <span
+                  aria-hidden="true"
+                  data-testid="opencode-unread-count"
+                  className="shrink-0 rounded-full bg-primary px-1.5 text-primary-foreground"
+                >
+                  {formatChatUnread(chatScroll.unread)}
+                </span>
+              ) : null}
+            </button>
           </div>
         ) : null}
-        <div className="flex flex-col gap-3">
-          {messages.map((message, index) => {
-            const canonicalID = canonicalUserMessageID(message);
-            const toolMessage = message.role === "tool" ? message : null;
-            return (
-              <article
-                key={messageKey(message, index)}
-                className={
-                  toolMessage !== null
-                    ? "min-w-0"
-                    : `rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : "mr-4 bg-muted/60"}`
-                }
-              >
-                {toolMessage !== null ? <ToolCallMessage message={toolMessage} /> : null}
-                {message.role === "user" &&
-                message.attachments !== undefined &&
-                message.attachments.length > 0 ? (
-                  <ul aria-label="Вложения сообщения" className="mb-1 flex flex-wrap gap-1">
-                    {message.attachments.map((attachment, attachmentIndex) => {
-                      const local =
-                        attachmentKind(attachment.name, attachment.mime) === "image"
-                          ? localImageMatch(
-                              localImages,
-                              session?.id ?? null,
-                              userOrdinals[index] ?? -1,
-                              attachmentIndex,
-                              attachment,
-                            )
-                          : null;
-                      return (
-                        <li
-                          key={`${attachment.name}-${attachmentIndex}`}
-                          className="min-w-0 max-w-full"
-                        >
-                          <MessageAttachmentItem
-                            attachment={attachment}
-                            url={local?.url ?? null}
-                            sessionID={canonicalID === null ? null : (session?.id ?? null)}
-                            messageID={canonicalID}
-                            attachmentIndex={attachmentIndex}
-                          />
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : null}
-                {message.role === "assistant" || message.role === "system" ? (
-                  <MarkdownMessage source={message.text} />
-                ) : message.role === "user" ? (
-                  <div className="whitespace-pre-wrap break-words">{message.text}</div>
-                ) : null}
-              </article>
-            );
-          })}
-        </div>
-        <div ref={messagesEndRef} />
       </div>
 
       {visibleTurn !== null ? (
