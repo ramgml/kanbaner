@@ -97,8 +97,23 @@ export type OpenCodeChatMessage =
       readonly id: string;
       readonly role: "tool";
       readonly name: string;
-      readonly status: "running" | "completed" | "error";
+      /**
+       * `cancelled` — UI-only terminal для прерванного turn или canonical tool
+       * с `error.type=aborted`; upstream streaming такого статуса не отдаёт.
+       */
+      readonly status: "running" | "completed" | "error" | "cancelled";
       readonly text: string;
+      /**
+       * Время начала/окончания tool call в epoch milliseconds. История берёт
+       * canonical `part.time`, stream — approximate top-level `event.created`
+       * до canonical reload. Невалидные значения не попадают в payload.
+       */
+      readonly startedAt?: number;
+      readonly endedAt?: number;
+      /** Сериализованный input инструмента; `metadata` и `native` не передаются. */
+      readonly input?: string;
+      /** Ограниченный текст результата без upstream error.message. */
+      readonly output?: string;
     };
 
 export interface OpenCodeSessionView {
@@ -157,7 +172,15 @@ export interface OpenCodeStreamEvent {
   readonly id?: string;
   readonly text?: string;
   readonly name?: string;
-  readonly status?: "running" | "completed" | "error";
+  readonly status?: "running" | "completed" | "error" | "cancelled";
+  /**
+   * Approximate время tool call из top-level `event.created`; canonical
+   * timestamps приходят только со следующим history reload.
+   */
+  readonly startedAt?: number;
+  readonly endedAt?: number;
+  readonly input?: string;
+  readonly output?: string;
   /**
    * Машинный признак ошибки, когда canonical outcome не удалось подтвердить.
    * UI не повторяет prompt автоматически и предлагает ручную проверку статуса.

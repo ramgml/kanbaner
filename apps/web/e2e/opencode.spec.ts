@@ -99,8 +99,23 @@ async function mockOpenCode(
         },
       );
       const events = promptEvents?.(state.promptBodies.length) ?? [
-        { kind: "tool", id: "message-1:call-1", name: "task_update", status: "running", text: "" },
-        { kind: "tool", id: "message-1:call-1", status: "completed", text: "Обновлено" },
+        {
+          kind: "tool",
+          id: "message-1:call-1",
+          name: "task_update",
+          status: "running",
+          text: "",
+          input: '{"id":"task-1"}',
+          startedAt: 1000,
+        },
+        {
+          kind: "tool",
+          id: "message-1:call-1",
+          status: "completed",
+          text: "Обновлено",
+          output: "Обновлено",
+          endedAt: 3600,
+        },
         { kind: "delta", id: "message-1:0", text: "Ответ " },
         { kind: "text", id: "message-1:0", text: "Ответ OpenCode" },
         { kind: "finalizing" },
@@ -146,6 +161,10 @@ async function mockOpenCode(
             name: "task_update",
             status: "completed",
             text: "Обновлено",
+            input: '{"id":"task-1"}',
+            output: "Обновлено",
+            startedAt: 1000,
+            endedAt: 3600,
           },
           { id: "assistant:message-1:0", role: "assistant", text: "Ответ OpenCode" },
         ],
@@ -254,8 +273,15 @@ test("desktop model switch, streaming tool upsert и новая сессия", a
   await page.getByRole("textbox", { name: "Сообщение OpenCode" }).fill("Проверка");
   await page.getByRole("button", { name: "Отправить", exact: true }).click();
   await expect(page.getByText("Ответ OpenCode", { exact: true })).toBeVisible();
+  const toolCall = page.getByTestId("opencode-tool-call");
+  await expect(toolCall).toHaveCount(1);
   await expect(page.getByText("task_update", { exact: true })).toHaveCount(1);
-  await expect(page.getByText("Обновлено", { exact: true })).toBeVisible();
+  await expect(toolCall).toHaveJSProperty("open", false);
+  await expect(toolCall.getByTestId("opencode-tool-call-duration")).toHaveText("2 с");
+  await expect(toolCall.getByTestId("opencode-tool-call-output")).toBeHidden();
+  await toolCall.getByTestId("opencode-tool-call-summary").click();
+  await expect(toolCall.getByTestId("opencode-tool-call-output")).toHaveText("Обновлено");
+  await expect(toolCall.getByTestId("opencode-tool-call-input")).toContainText('"id":"task-1"');
   await expect(page.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled();
   expect(mock.promptBodies).toEqual([expect.objectContaining({ text: "Проверка" })]);
 
@@ -266,6 +292,120 @@ test("desktop model switch, streaming tool upsert и новая сессия", a
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
     .toBe("ses-2");
+});
+
+test("tool call компактен: duration, keyboard disclosure и длинный output без overflow", async ({
+  page,
+}) => {
+  const longOutput = "0123456789".repeat(40);
+  const tool = {
+    id: "tool:message-1:call-1",
+    role: "tool",
+    name: "task_update",
+    status: "completed",
+    text: "",
+    input: '{"id":"task-1","description":"long output"}',
+    output: longOutput,
+    startedAt: 1000,
+    endedAt: 61_000,
+  };
+  const mock = await mockOpenCode(
+    page,
+    () => [
+      {
+        kind: "tool",
+        id: "message-1:call-1",
+        name: "task_update",
+        status: "running",
+        text: "",
+        input: '{"id":"task-1","description":"long output"}',
+        startedAt: 1000,
+      },
+      {
+        kind: "tool",
+        id: "message-1:call-1",
+        status: "completed",
+        text: "",
+        output: longOutput,
+        endedAt: 61_000,
+      },
+      { kind: "text", id: "message-1:0", text: "Ответ OpenCode" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ],
+    [
+      { id: "user:message-0", role: "user", text: "Проверка" },
+      tool,
+      { id: "assistant:message-1:0", role: "assistant", text: "Ответ OpenCode" },
+    ],
+  );
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(page.getByText("Ответ OpenCode", { exact: true })).toBeVisible();
+  await expect.poll(() => mock.promptBodies.length).toBe(1);
+
+  const toolCall = page.getByTestId("opencode-tool-call");
+  const summary = toolCall.getByTestId("opencode-tool-call-summary");
+  const output = toolCall.getByTestId("opencode-tool-call-output");
+  await expect(toolCall).toHaveCount(1);
+  await expect(toolCall).toHaveJSProperty("open", false);
+  await expect(toolCall.getByTestId("opencode-tool-call-duration")).toHaveText("1 мин 0 с");
+  await expect(output).toBeHidden();
+
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(toolCall).toHaveJSProperty("open", true);
+  await expect(output).toBeVisible();
+  await expect(output).toHaveText(longOutput);
+  await page.keyboard.press("Space");
+  await expect(toolCall).toHaveJSProperty("open", false);
+  await expect(output).toBeHidden();
+  await page.keyboard.press("Enter");
+  await expect(toolCall).toHaveJSProperty("open", true);
+
+  const metrics = await page.evaluate(() => {
+    const panel = document.querySelector<HTMLElement>('[data-testid="opencode-panel"]');
+    const details = document.querySelector<HTMLElement>('[data-testid="opencode-tool-call"]');
+    const outputElement = document.querySelector<HTMLElement>(
+      '[data-testid="opencode-tool-call-output"]',
+    );
+    if (panel === null || details === null || outputElement === null) {
+      throw new Error("tool call is missing");
+    }
+    const panelRect = panel.getBoundingClientRect();
+    const detailsRect = details.getBoundingClientRect();
+    const outputRect = outputElement.getBoundingClientRect();
+    return {
+      documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      panelOverflow: panel.scrollWidth - panel.clientWidth,
+      outputOverflow: outputElement.scrollWidth - outputElement.clientWidth,
+      detailsRight: detailsRect.right,
+      outputRight: outputRect.right,
+      panelRight: panelRect.right,
+    };
+  });
+  expect(metrics.documentOverflow).toBeLessThanOrEqual(0);
+  expect(metrics.panelOverflow).toBeLessThanOrEqual(1);
+  expect(metrics.outputOverflow).toBeLessThanOrEqual(1);
+  expect(metrics.detailsRight).toBeLessThanOrEqual(metrics.panelRight + 1);
+  expect(metrics.outputRight).toBeLessThanOrEqual(metrics.panelRight + 1);
+
+  await page.reload();
+  const open = page.getByTestId("opencode-open");
+  if (await open.isVisible()) await open.click();
+  const reloadedTool = page.getByTestId("opencode-tool-call");
+  await expect(reloadedTool).toHaveCount(1);
+  await expect(reloadedTool).toHaveJSProperty("open", false);
+  await expect(reloadedTool.getByTestId("opencode-tool-call-duration")).toHaveText("1 мин 0 с");
+  await expect(reloadedTool.getByTestId("opencode-tool-call-output")).toBeHidden();
+  await reloadedTool.getByTestId("opencode-tool-call-summary").click();
+  await expect(reloadedTool.getByTestId("opencode-tool-call-output")).toHaveText(longOutput);
 });
 
 test("composer: полноразмерная textarea, icon-only кнопки и отсутствие overflow", async ({

@@ -45,6 +45,12 @@ import {
   type OpenCodeTurnStatus,
 } from "./types.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
+import {
+  finishToolMessages,
+  mergeToolMessage,
+  ToolCallMessage,
+  type OpenCodeToolMessage,
+} from "./tool-call.tsx";
 
 export { OPENCODE_PLUGIN_ID, OPENCODE_UI_CONTRACT, opencodeUiContributions } from "./metadata.ts";
 
@@ -636,6 +642,15 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const initializeAbortRef = useRef<AbortController | null>(null);
   const modelAbortRef = useRef<AbortController | null>(null);
   const promptAbortRef = useRef<AbortController | null>(null);
+  /**
+   * Tool identity текущего prompt-хода. Global `status === "running"` по всей
+   * истории недопустим: unconfirmed tool предыдущего turn принадлежит другому
+   * generation и не должен завершаться terminal событием нового хода.
+   */
+  const turnToolsRef = useRef<{
+    readonly generation: number;
+    readonly ids: Set<string>;
+  } | null>(null);
   const refreshControllersRef = useRef(new Set<AbortController>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentRef = useMemo(() => contextRefFromSearch(search), [search]);
@@ -896,6 +911,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const generation = beginOperation();
     const controller = new AbortController();
     promptAbortRef.current = controller;
+    // Scope этого хода: только tools, пришедшие после его начала.
+    const turnTools = new Set<string>();
+    turnToolsRef.current = { generation, ids: turnTools };
     setPromptPending(true);
     setPanelError(null);
     setSelectionError(null);
@@ -940,20 +958,47 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     };
 
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    const finishTools = (kind: "done" | "cancelled" | "error", endedAt = Date.now()): void => {
+      if (turnTools.size === 0) return;
+      setMessages((current) =>
+        currentGeneration() ? finishToolMessages(current, turnTools, kind, endedAt) : current,
+      );
+    };
+    /**
+     * Correlation для stream tools без `event.id`. SDK path с ID не меняется.
+     * Без ID события одного вызова неразличимы, поэтому последовательность до
+     * terminal относится к одному anonymous вызову; terminal закрывает его, а
+     * следующий no-ID event получает новый монотонный ID. Date.now() не
+     * используется: он давал collision для событий в одну миллисекунду.
+     */
+    let anonymousToolSeq = 0;
+    let pendingAnonymousToolID: string | null = null;
+    const nextAnonymousToolID = (): string => {
+      anonymousToolSeq += 1;
+      return `tool:anonymous:${turnID}:${generation}:${anonymousToolSeq}`;
+    };
+    const resolveToolID = (event: OpenCodeStreamEvent): string => {
+      if (event.id !== undefined) return event.id;
+      const terminal =
+        event.status === "completed" || event.status === "error" || event.status === "cancelled";
+      const id = pendingAnonymousToolID ?? nextAnonymousToolID();
+      pendingAnonymousToolID = terminal ? null : id;
+      return id;
+    };
     const appendTool = (event: OpenCodeStreamEvent) => {
+      if (!currentGeneration()) return;
+      const toolID = resolveToolID(event);
+      // Набор получает ровно тот ID, под которым tool попадёт в messages.
+      turnTools.add(toolID);
       setMessages((current) => {
         if (!currentGeneration()) return current;
-        const eventID = event.id;
-        const index =
-          eventID === undefined ? -1 : current.findIndex((message) => message.id === eventID);
+        const index = current.findIndex((message) => message.id === toolID);
         const existing = index >= 0 ? current[index] : undefined;
-        const next: OpenCodeChatMessage = {
-          id: existing?.id ?? eventID ?? `tool:optimistic:${Date.now()}`,
-          role: "tool",
-          name: event.name ?? (existing?.role === "tool" ? existing.name : "tool"),
-          status: event.status ?? "running",
-          text: event.text ?? existing?.text ?? "",
-        };
+        const previous =
+          existing !== undefined && existing.role === "tool"
+            ? (existing as OpenCodeToolMessage)
+            : undefined;
+        const next = mergeToolMessage(previous, event, toolID);
         if (index < 0) return [...current, next];
         return [...current.slice(0, index), next, ...current.slice(index + 1)];
       });
@@ -1104,6 +1149,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "error") {
           terminal = "error";
           terminalUnconfirmed = event.reason === "unconfirmed";
+          // Явный nonAdmission означает, что prompt вообще не принят: рушить
+          // running tools текущего хода нечего, а предыдущий turn не трогаем.
+          if (!terminalUnconfirmed && event.nonAdmission !== true) finishTools("error");
           settle("error", {
             reason: terminalUnconfirmed ? "unconfirmed" : null,
             errorText: event.text ?? "Запрос OpenCode завершился с ошибкой",
@@ -1115,6 +1163,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "done" || event.kind === "cancelled") {
           terminal = event.kind;
           terminalUnconfirmed = false;
+          finishTools(event.kind);
           settle(event.kind, {
             reason: null,
             errorText: null,
@@ -1160,6 +1209,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (!stoppedByUser) controller.abort();
       if (currentGeneration()) {
         if (stoppedByUser) {
+          finishTools("cancelled");
           settle("cancelled", {
             reason: null,
             errorText: null,
@@ -1273,6 +1323,24 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (status.outcome === "done") {
         // Полный terminal ответ: только здесь допустима canonical замена.
         applySession(status.session, generation);
+      } else {
+        // Canonical cancelled/error подтверждён сервером: завершаем только
+        // running tools этого же хода, чтобы таймер не рос после terminal, но
+        // unconfirmed tool другого turn остался нетронутым.
+        const scoped = turnToolsRef.current;
+        const toolIDs = scoped !== null && scoped.generation === generation ? scoped.ids : null;
+        if (toolIDs !== null && toolIDs.size > 0) {
+          setMessages((current) =>
+            generation === generationRef.current
+              ? finishToolMessages(
+                  current,
+                  toolIDs,
+                  status.outcome === "cancelled" ? "cancelled" : "error",
+                  Date.now(),
+                )
+              : current,
+          );
+        }
       }
       setTurn((current) =>
         current !== null && current.generation === generation
@@ -1485,23 +1553,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         <div className="flex flex-col gap-3">
           {messages.map((message, index) => {
             const canonicalID = canonicalUserMessageID(message);
+            const toolMessage = message.role === "tool" ? message : null;
             return (
               <article
                 key={messageKey(message, index)}
-                className={`rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : message.role === "tool" ? "border bg-muted/40 text-xs" : "mr-4 bg-muted/60"}`}
+                className={
+                  toolMessage !== null
+                    ? "min-w-0"
+                    : `rounded-lg px-3 py-2 text-sm ${message.role === "user" ? "ml-6 bg-primary text-primary-foreground" : "mr-4 bg-muted/60"}`
+                }
               >
-                {message.role === "tool" ? (
-                  <div className="mb-1 flex items-center justify-between gap-2 font-medium">
-                    <span className="truncate">{message.name}</span>
-                    <span className="text-muted-foreground">
-                      {message.status === "running"
-                        ? "выполняется"
-                        : message.status === "completed"
-                          ? "готово"
-                          : "ошибка"}
-                    </span>
-                  </div>
-                ) : null}
+                {toolMessage !== null ? <ToolCallMessage message={toolMessage} /> : null}
                 {message.role === "user" &&
                 message.attachments !== undefined &&
                 message.attachments.length > 0 ? (
@@ -1536,9 +1598,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 ) : null}
                 {message.role === "assistant" || message.role === "system" ? (
                   <MarkdownMessage source={message.text} />
-                ) : (
+                ) : message.role === "user" ? (
                   <div className="whitespace-pre-wrap break-words">{message.text}</div>
-                )}
+                ) : null}
               </article>
             );
           })}

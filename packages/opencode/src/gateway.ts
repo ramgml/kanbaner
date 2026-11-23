@@ -67,6 +67,99 @@ function serialized(value: unknown): string {
   return text === undefined ? String(value) : truncated(text);
 }
 
+/**
+ * Tool timestamps приходят как epoch milliseconds. Поддерживается и ISO-строка
+ * для старых payloads; невалидное значение отбрасывается, чтобы UI не
+ * показывал фиктивную длительность.
+ */
+function timestampField(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function stateTime(state: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(state.time) ? state.time : {};
+}
+
+/**
+ * Canonical timestamps новой history: `ran ?? created` и `completed`.
+ * Fallback v1: `state.time.start/end`. Значения не синтезируются.
+ */
+function toolTiming(part: Record<string, unknown>): {
+  startedAt?: number;
+  endedAt?: number;
+} {
+  const time = isRecord(part.time) ? part.time : {};
+  const state = isRecord(part.state) ? part.state : {};
+  const fallback = stateTime(state);
+  const startedAt =
+    timestampField(time.ran) ?? timestampField(time.created) ?? timestampField(fallback.start);
+  const endedAt = timestampField(time.completed) ?? timestampField(fallback.end);
+  return {
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(endedAt === undefined || (startedAt !== undefined && endedAt < startedAt)
+      ? {}
+      : { endedAt }),
+  };
+}
+
+/** Canonical tool error с машинным `type=aborted` — это отмена, а не ошибка. */
+function toolErrorAborted(state: Record<string, unknown>): boolean {
+  return isRecord(state.error) && stringField(state.error.type) === "aborted";
+}
+
+function toolStatus(
+  state: Record<string, unknown>,
+): "running" | "completed" | "error" | "cancelled" {
+  if (state.status === "completed") return "completed";
+  if (state.status === "cancelled") return "cancelled";
+  if (state.status === "error") {
+    return toolErrorAborted(state) ? "cancelled" : "error";
+  }
+  return "running";
+}
+
+/** Input инструмента: допускается уже сериализованная строка или JSON value. */
+function toolInput(state: Record<string, unknown>): string | undefined {
+  const input = state.input;
+  if (typeof input === "string") return input.length === 0 ? undefined : truncated(input);
+  if (input === undefined) return undefined;
+  return serialized(input);
+}
+
+/** Вывод инструмента: content, v1 `state.output` или generic error без upstream-текста. */
+function toolOutput(state: Record<string, unknown>): string | undefined {
+  if (Array.isArray(state.content) && state.content.length > 0) {
+    const text = state.content
+      .map((item) => {
+        if (!isRecord(item)) return "";
+        if (typeof item.text === "string") return item.text;
+        if (typeof item.name === "string") return item.name;
+        return JSON.stringify(item);
+      })
+      .filter((item) => item.length > 0)
+      .join("\n");
+    return text.length === 0 ? undefined : truncated(text);
+  }
+  if (typeof state.output === "string" && state.output.length > 0) {
+    return truncated(state.output);
+  }
+  if (state.output !== undefined) return serialized(state.output);
+  // Aborted tool не должен получать противоречащую generic error-подпись.
+  if (toolErrorAborted(state)) return undefined;
+  // v2 error — record, v1 error — строка; upstream-текст наружу не попадает.
+  if (isRecord(state.error) || stringField(state.error) !== undefined) {
+    return "Инструмент завершился с ошибкой";
+  }
+  return undefined;
+}
+
 function toolText(state: unknown): string {
   if (!isRecord(state)) return "";
   if (Array.isArray(state.content) && state.content.length > 0) {
@@ -82,7 +175,10 @@ function toolText(state: unknown): string {
         .join("\n"),
     );
   }
-  if (isRecord(state.error)) return "Инструмент завершился с ошибкой";
+  if (toolErrorAborted(state)) return "";
+  if (isRecord(state.error) || stringField(state.error) !== undefined) {
+    return "Инструмент завершился с ошибкой";
+  }
   if (state.input !== undefined) return serialized(state.input);
   return "";
 }
@@ -117,8 +213,8 @@ function messageViews(
     const content = Array.isArray(message.content) ? message.content : [];
     const views = content.flatMap((part, index): OpenCodeChatMessage[] => {
       if (!isRecord(part) || typeof part.type !== "string") return [];
-      const partID = stringField(part.id) ?? String(index);
       if (part.type === "text" && typeof part.text === "string") {
+        const partID = stringField(part.id) ?? String(index);
         return [
           {
             id: `assistant:${message.id}:${partID}`,
@@ -129,19 +225,24 @@ function messageViews(
       }
       if (part.type === "tool") {
         const state = isRecord(part.state) ? part.state : {};
-        const status =
-          state.status === "error"
-            ? "error"
-            : state.status === "completed"
-              ? "completed"
-              : "running";
+        const input = toolInput(state);
+        const output = toolOutput(state);
+        const timing = toolTiming(part);
+        // v1 ToolPart содержит и PartID `id`, и tool call identity `callID`;
+        // публичный ID строится из callID. v2 callID не отдаёт, поэтому его
+        // поведение остаётся прежним (`id`, затем index). Text part выше
+        // по-прежнему использует PartID.
+        const partID = stringField(part.callID) ?? stringField(part.id) ?? String(index);
         return [
           {
             id: `tool:${message.id}:${partID}`,
             role: "tool",
-            name: stringField(part.name) ?? "tool",
-            status,
+            name: stringField(part.name) ?? stringField(part.tool) ?? "tool",
+            status: toolStatus(state),
             text: toolText(state),
+            ...timing,
+            ...(input === undefined ? {} : { input }),
+            ...(output === undefined ? {} : { output }),
           },
         ];
       }
@@ -247,6 +348,12 @@ function eventToolID(data: Record<string, unknown>): string | undefined {
   return `${stringField(dataField(data, "assistantMessageID")) ?? "session"}:${id}`;
 }
 
+/** Stream tool error: `type=aborted` — машинный признак отмены. */
+function eventToolErrorAborted(data: Record<string, unknown>): boolean {
+  const error = dataField(data, "error");
+  return isRecord(error) && stringField(error.type) === "aborted";
+}
+
 function eventTextID(data: Record<string, unknown>): string | undefined {
   const messageID = stringField(dataField(data, "assistantMessageID"));
   if (messageID === undefined) return undefined;
@@ -256,6 +363,9 @@ function eventTextID(data: Record<string, unknown>): string | undefined {
 
 export function streamEvent(event: OpenCodeEvent) {
   const data = isRecord(event.data) ? event.data : {};
+  const createdAt = timestampField(dataField(event, "created"));
+  const timingStart = createdAt === undefined ? {} : { startedAt: createdAt };
+  const timingEnd = createdAt === undefined ? {} : { endedAt: createdAt };
   // Синтетическое событие gateway перед canonical lookup, не terminal.
   if ((event.type as string) === FINALIZING_TYPE) return { kind: "finalizing" as const };
   // Синтетическое событие только при подмене admitted ID Service-ом.
@@ -290,33 +400,50 @@ export function streamEvent(event: OpenCodeEvent) {
         name: stringField(dataField(data, "name")) ?? "tool",
         status: "running" as const,
         text: "",
+        ...timingStart,
       };
     }
     case "session.tool.called": {
       const id = eventToolID(data);
+      const inputValue = dataField(data, "input");
+      const input = inputValue === undefined ? undefined : serialized(inputValue);
       return {
         kind: "tool" as const,
         ...(id === undefined ? {} : { id }),
         status: "running" as const,
-        text: serialized(dataField(data, "input")),
+        text: input === undefined ? "" : input,
+        ...timingStart,
+        ...(input === undefined ? {} : { input }),
       };
     }
     case "session.tool.success": {
       const id = eventToolID(data);
+      const output = toolOutput(data);
       return {
         kind: "tool" as const,
         ...(id === undefined ? {} : { id }),
         status: "completed" as const,
         text: toolText(data),
+        ...timingEnd,
+        ...(output === undefined ? {} : { output }),
       };
     }
     case "session.tool.failed": {
       const id = eventToolID(data);
+      const inputValue = dataField(data, "input");
+      const input = inputValue === undefined ? undefined : serialized(inputValue);
+      const aborted = eventToolErrorAborted(data);
+      // Streaming aborted нормализуется в cancelled, как canonical history;
+      // generic error-подпись и output для отмены не выставляются.
+      const output = aborted ? undefined : toolOutput(data);
       return {
         kind: "tool" as const,
         ...(id === undefined ? {} : { id }),
-        status: "error" as const,
-        text: toolText(data),
+        status: aborted ? ("cancelled" as const) : ("error" as const),
+        text: aborted ? "" : toolText(data),
+        ...timingEnd,
+        ...(input === undefined ? {} : { input }),
+        ...(output === undefined ? {} : { output }),
       };
     }
     case "session.execution.succeeded":

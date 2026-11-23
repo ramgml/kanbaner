@@ -68,8 +68,35 @@ catalog активных chat-моделей, streaming, полный built-in t
   client-generated ID.
 - System error в history показывается только для последнего assistant последнего
   user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
-- Tool calls объединяются по `assistantMessageID + tool call ID`; history
+- Tool calls объединяются по `assistantMessageID + tool call ID`. History
   загружается через paginated `message.list` и сохраняет running/error states.
+  v2 identity использует `id`/`name`; для v1 `ToolPart` tool call ID берётся из
+  `callID` (приоритетнее PartID `id`), имя — из `tool`; text parts по-прежнему
+  используют PartID. v1 строковый `state.error`, `state.output`/`state.time`
+  нормализуются без изменения v2 identity.
+- Tool call показывается компактным disclosure: status, имя, длительность и
+  свёрнутые input/output. Детали раскрываются pointer/touch, Enter или Space;
+  running duration тикает раз в секунду и фиксируется terminal/Stop/error.
+  Таймер помечен `role="timer" aria-live="off"`, чтобы screen reader не
+  объявлял каждую секунду; статусы остаются доступными. Невалидные,
+  отсутствующие и обратные timestamps не дают фиктивную длительность. Для
+  stream timings берутся из top-level `event.created` как приблизительные;
+  canonical `time.ran`/`time.completed` приходят со следующим history reload.
+  В публичный payload попадают только `input`, `output` и timings:
+  `state.metadata`, `part.native` и upstream `error.message` не передаются.
+  `cancelled` — UI-only terminal для Stop, подтверждённой отмены, canonical и
+  streaming `error.type=aborted`; обычная ошибка инструмента остаётся `error`.
+  Unconfirmed результат оставляет tool в running.
+- Terminal `done`/`cancelled`/`error` завершает только tools текущего prompt:
+  UI хранит набор identity, добавленных `appendTool` этого generation. Running
+  tool предыдущего unconfirmed turn не меняется, а explicit `nonAdmission`
+  вообще не запускает завершение. Ручная проверка статуса применяет тот же
+  turn-scoped набор, поэтому canonical outcome не затрагивает чужой ход.
+- Stream event без `event.id` не использует `Date.now()`: per-turn монотонный
+  anonymous ID исключает collision. События без ID до terminal коррелируются в
+  один вызов, terminal закрывает его. Без ID нельзя отличить параллельные
+  вызовы, поэтому такой поток трактуется последовательно; идентифицированный
+  SDK path `event.id` не меняется и никогда не смешивается с anonymous ID.
 
 Внутренние маршруты `/api/opencode/*` предназначены только для browser panel.
 Они требуют `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin
@@ -160,8 +187,9 @@ server. Поэтому повтор того же request внутри одно�
 
 - `packages/opencode/src/gateway.test.ts` — catalog whitelist/tools, ownership,
   pagination, stream readiness/finalizing/terminal/abort, canonical outcome,
-  stable turnID/admitted alias, transient lookup retry, tool event mapping и
-  inline files.
+  stable turnID/admitted alias, transient lookup retry, tool event mapping,
+  timings/input/output, v1 `callID`/`tool` identity, aborted→cancelled и inline
+  files.
 - `packages/opencode/src/gateway-service-version.test.ts` — Service version
   predicate: accept 2.x (2.2/2.3), reject 1.x/3.x и malformed.
 - `packages/opencode/src/tool-metadata.test.ts` — ordered deny/allow против
@@ -175,10 +203,15 @@ server. Поэтому повтор того же request внутри одно�
   races, attachments, turn-статусы, rejected stream без retry, stable ID
   второго prompt, delta→error без потери текста, cancelled/empty/tool-only,
   все четыре фазы, retry/status check, две группы tool catalog с
-  предупреждением и stop.
+  предупреждением, stop, compact tool disclosure, детерминированная duration,
+  merge/finish helpers, keyboard, stale generation, unconfirmed/error/cancelled
+  tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
+  завершения и ручной status check в том же scope.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,
   группы built-in/MCP tools, success с `finalizing`, unconfirmed без
-  авто-GET, ручные done/error/pending без нового prompt и streaming с mock
-  OpenCode transport в production Chromium.
+  авто-GET, ручные done/error/pending без нового prompt, compact tool call с
+  duration, keyboard disclosure, длинным output без overflow и canonical
+  timings после reload, streaming с mock OpenCode transport в production
+  Chromium.

@@ -12,8 +12,8 @@ function asClient(value: unknown): OpenCodeClient {
   return value as OpenCodeClient;
 }
 
-function event(type: string, data: Record<string, unknown> = {}): OpenCodeEvent {
-  return { id: `event-${type}`, created: 1, type, data } as OpenCodeEvent;
+function event(type: string, data: Record<string, unknown> = {}, created = 1): OpenCodeEvent {
+  return { id: `event-${type}`, created, type, data } as OpenCodeEvent;
 }
 
 function ownedInfo(id = "ses-1") {
@@ -299,6 +299,7 @@ describe("OpenCode gateway", () => {
                 type: "tool",
                 name: "task_update",
                 state: { status: "running", input: { id: "task-1" } },
+                time: { created: 1000, ran: 1200 },
               },
             ],
           },
@@ -332,11 +333,158 @@ describe("OpenCode gateway", () => {
         name: "task_update",
         status: "running",
         text: '{"id":"task-1"}',
+        startedAt: 1200,
+        input: '{"id":"task-1"}',
       },
       { id: "system:compact-1", role: "system", text: "Сводка" },
     ]);
     expect(JSON.stringify(session)).not.toContain("c2VjcmV0");
     expect(JSON.stringify(session)).not.toContain("base64");
+  });
+
+  it("маппит completed/error/cancelled и v1 timestamps, не раскрывая metadata и upstream error", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        {
+          id: "assistant-tools",
+          type: "assistant",
+          content: [
+            {
+              id: "call-completed",
+              type: "tool",
+              name: "task_update",
+              state: {
+                status: "completed",
+                input: { id: "task-1", expectedVersion: 2 },
+                content: [{ type: "text", text: "Обновлено" }],
+                metadata: { secret: "metadata-secret" },
+              },
+              native: { secret: "native-secret" },
+              time: { created: 1000, ran: 1100, completed: 3600 },
+            },
+            {
+              id: "call-error",
+              type: "tool",
+              name: "task_get",
+              state: {
+                status: "error",
+                input: { id: "task-2" },
+                error: {
+                  type: "tool_error",
+                  message: "secret upstream response",
+                  response: { body: "secret response body" },
+                },
+              },
+              time: { created: 4000, ran: 4200, completed: 4400 },
+            },
+            {
+              id: "call-aborted",
+              type: "tool",
+              name: "shell",
+              state: { status: "error", input: { command: "sleep 1" }, error: { type: "aborted" } },
+              time: { created: 5000, ran: 5100 },
+            },
+            {
+              id: "part-v1-completed",
+              callID: "call-v1",
+              type: "tool",
+              tool: "task_list",
+              state: {
+                status: "completed",
+                input: { limit: 10 },
+                output: "legacy output",
+                time: { start: 7000, end: 9500 },
+              },
+            },
+            {
+              id: "part-v1-error",
+              callID: "call-v1-error",
+              type: "tool",
+              tool: "task_delete",
+              state: {
+                status: "error",
+                input: { id: "task-3" },
+                error: "secret v1 upstream error",
+                time: { start: 10_000, end: 10_500 },
+              },
+            },
+            {
+              id: "call-invalid",
+              type: "tool",
+              name: "grep",
+              state: { status: "running", input: { pattern: "x" } },
+              time: { created: 1000, completed: 900 },
+            },
+          ],
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+    const tools = session.messages.filter((message) => message.role === "tool");
+
+    expect(tools[0]).toEqual({
+      id: "tool:assistant-tools:call-completed",
+      role: "tool",
+      name: "task_update",
+      status: "completed",
+      text: "Обновлено",
+      startedAt: 1100,
+      endedAt: 3600,
+      input: '{"id":"task-1","expectedVersion":2}',
+      output: "Обновлено",
+    });
+    expect(tools[1]).toEqual({
+      id: "tool:assistant-tools:call-error",
+      role: "tool",
+      name: "task_get",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      startedAt: 4200,
+      endedAt: 4400,
+      input: '{"id":"task-2"}',
+      output: "Инструмент завершился с ошибкой",
+    });
+    expect(tools[2]).toMatchObject({
+      status: "cancelled",
+      startedAt: 5100,
+      input: '{"command":"sleep 1"}',
+    });
+    expect(tools[2]).not.toHaveProperty("endedAt");
+    expect(tools[3]).toEqual({
+      id: "tool:assistant-tools:call-v1",
+      role: "tool",
+      name: "task_list",
+      status: "completed",
+      text: '{"limit":10}',
+      startedAt: 7000,
+      endedAt: 9500,
+      input: '{"limit":10}',
+      output: "legacy output",
+    });
+    expect(tools[4]).toEqual({
+      id: "tool:assistant-tools:call-v1-error",
+      role: "tool",
+      name: "task_delete",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      startedAt: 10_000,
+      endedAt: 10_500,
+      input: '{"id":"task-3"}',
+      output: "Инструмент завершился с ошибкой",
+    });
+    expect(tools[5]).toMatchObject({ status: "running", startedAt: 1000 });
+    expect(tools[5]).not.toHaveProperty("endedAt");
+    const serializedSession = JSON.stringify(session);
+    expect(serializedSession).not.toContain("metadata-secret");
+    expect(serializedSession).not.toContain("native-secret");
+    expect(serializedSession).not.toContain("secret upstream response");
+    expect(serializedSession).not.toContain("secret response body");
+    expect(serializedSession).not.toContain("secret v1 upstream error");
   });
 
   it("не воскрешает старый system error после нового успешного turn", async () => {
@@ -636,28 +784,54 @@ describe("OpenCode gateway", () => {
 
   it("маппит tool identity и не раскрывает upstream execution error", () => {
     const started = streamEvent(
-      event("session.tool.input.started", {
-        sessionID: "ses-1",
-        assistantMessageID: "message-1",
-        id: "call-1",
-        name: "task_update",
-      }),
+      event(
+        "session.tool.input.started",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          name: "task_update",
+        },
+        1000,
+      ),
     );
     const called = streamEvent(
-      event("session.tool.called", {
-        sessionID: "ses-1",
-        assistantMessageID: "message-1",
-        id: "call-1",
-        input: { id: "task-1", expectedVersion: 2 },
-      }),
+      event(
+        "session.tool.called",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          input: { id: "task-1", expectedVersion: 2 },
+        },
+        1100,
+      ),
     );
     const success = streamEvent(
-      event("session.tool.success", {
-        sessionID: "ses-1",
-        assistantMessageID: "message-1",
-        id: "call-1",
-        content: [{ type: "text", text: "Готово" }],
-      }),
+      event(
+        "session.tool.success",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          content: [{ type: "text", text: "Готово" }],
+        },
+        2300,
+      ),
+    );
+    const failure = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          error: { type: "tool_error", message: "secret upstream response" },
+          metadata: { secret: "metadata-secret" },
+          native: { secret: "native-secret" },
+        },
+        2400,
+      ),
     );
     const failed = streamEvent(
       event("session.execution.failed", {
@@ -670,18 +844,80 @@ describe("OpenCode gateway", () => {
       id: "message-1:call-1",
       name: "task_update",
       status: "running",
+      startedAt: 1000,
     });
     expect(called).toMatchObject({
       id: "message-1:call-1",
       text: '{"id":"task-1","expectedVersion":2}',
+      input: '{"id":"task-1","expectedVersion":2}',
+      startedAt: 1100,
     });
-    expect(success).toMatchObject({ id: "message-1:call-1", status: "completed", text: "Готово" });
+    expect(success).toMatchObject({
+      id: "message-1:call-1",
+      status: "completed",
+      text: "Готово",
+      output: "Готово",
+      endedAt: 2300,
+    });
+    expect(failure).toMatchObject({
+      id: "message-1:call-1",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      output: "Инструмент завершился с ошибкой",
+      endedAt: 2400,
+    });
+    expect(JSON.stringify(failure)).not.toContain("secret");
     expect(failed).toEqual({ kind: "error", text: "Запрос OpenCode завершился с ошибкой" });
     expect(JSON.stringify(failed)).not.toContain("secret");
     expect(streamEvent(event("session.execution.interrupted", { sessionID: "ses-1" }))).toEqual({
       kind: "cancelled",
       text: "Запрос остановлен",
     });
+  });
+
+  it("нормализует streaming aborted tool в cancelled без generic error-подписи", () => {
+    const aborted = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          error: { type: "aborted", message: "secret upstream response" },
+        },
+        1500,
+      ),
+    );
+    expect(aborted).toMatchObject({
+      id: "message-1:call-1",
+      status: "cancelled",
+      text: "",
+      endedAt: 1500,
+    });
+    expect(aborted).not.toHaveProperty("output");
+    expect(JSON.stringify(aborted)).not.toContain("secret");
+
+    // Обычная ошибка инструмента остаётся error с generic-подписью.
+    const failed = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-2",
+          error: { type: "tool_error", message: "secret upstream response" },
+        },
+        1600,
+      ),
+    );
+    expect(failed).toMatchObject({
+      id: "message-1:call-2",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      output: "Инструмент завершился с ошибкой",
+      endedAt: 1600,
+    });
+    expect(JSON.stringify(failed)).not.toContain("secret");
   });
 
   it("ждёт server.connected, фильтрует сессии и завершается на terminal event", async () => {
