@@ -1,13 +1,13 @@
 ---
 id: KAN-062
 title: Прокрутка чата без потери позиции чтения
-status: review
+status: done
 stage: 8
 priority: high
 owner: worker-kan-062
 blocked_by: []
-branch: feat/kan-062-chat-scroll-position
-worktree: .worktrees/kan-062-chat-scroll-position
+branch: dev
+worktree: .
 created: 2026-11-23
 updated: 2026-11-23
 specs:
@@ -31,10 +31,10 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить near-bottom detection и управление scroll anchoring.
-- [ ] Реализовать доступную кнопку возврата и индикацию новых сообщений.
-- [ ] Учесть streaming deltas, tool calls, картинки, resize и mobile viewport.
-- [ ] Добавить unit/E2E regression-тесты и документацию.
+- [x] Добавить near-bottom detection и управление scroll anchoring.
+- [x] Реализовать доступную кнопку возврата и индикацию новых сообщений.
+- [x] Учесть streaming deltas, tool calls, картинки, resize и mobile viewport.
+- [x] Добавить unit/E2E regression-тесты и документацию.
 
 ## Владение файлами
 
@@ -60,12 +60,12 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] У нижней границы streaming остаётся следуемым.
-- [ ] При прокрутке вверх позиция не скачет от deltas/tool updates.
-- [ ] Кнопка возврата доступна клавиатурой и прокручивает к актуальному концу.
-- [ ] После явного возврата автоследование включается снова.
-- [ ] Mobile/desktop и загрузка вложений не создают неуправляемый scroll jump.
-- [ ] Unit/E2E и полный `pnpm check` зелёные.
+- [x] У нижней границы streaming остаётся следуемым.
+- [x] При прокрутке вверх позиция не скачет от deltas/tool updates.
+- [x] Кнопка возврата доступна клавиатурой и прокручивает к актуальному концу.
+- [x] После явного возврата автоследование включается снова.
+- [x] Mobile/desktop и загрузка вложений не создают неуправляемый scroll jump.
+- [x] Unit/E2E и полный `pnpm check` зелёные.
 
 ## Проверки
 
@@ -96,7 +96,18 @@ specs:
   Финальное ревью не нашло blocker/high/medium/low. Focused tests 88/88,
   OpenCode E2E 17/17, полный `pnpm check` — 140 files / 1959 tests. Статус
   `review`.
+- 2026-11-23 — После rebase коммиты `729b810`, `80cf2f2`, `0eb9fc0`
+  интегрированы merge-коммитом `d02a50a`. Первый integration `pnpm check`
+  остановился на flaky `project-settings`; isolated 34/34 и повторная очередь
+  зелёные. OpenCode E2E на `dev` — 17/17, imports и SQLite smoke зелёные.
+  Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Пункт 3 roadmap реализован и смержен в `dev`. Auto-follow работает только у
+нижней границы; streaming и canonical refresh не выталкивают пользователя из
+читаемого фрагмента. Кнопка «К новому сообщению» показывает точный unread и
+возвращает к актуальному концу с повторным включением follow. Нативный scroll
+anchoring сохраняет видимый фрагмент при reflow выше viewport.
+
+Merge: `d02a50a`. Feature-ветка и worktree удалены. Push не выполнялся.
