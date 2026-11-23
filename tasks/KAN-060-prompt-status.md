@@ -1,7 +1,7 @@
 ---
 id: KAN-060
 title: Статусы и ошибки конкретного prompt
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-060
@@ -105,6 +105,9 @@ pnpm check
 - 2026-11-23 — Задача создана по пункту 1 roadmap.
 - 2026-11-23 — Назначен `worker-kan-060`, создана ветка и worktree; статус
   `in_progress`.
+- 2026-11-23 — Worker применил и ревьюнул baseline patch, реализовал этапы,
+  turn-scoped ошибки и ручную проверку статуса. Коммит `cd98faf`; focused
+  tests 89/89, OpenCode E2E 10/10, `pnpm check` зелёный. Статус `review`.
 
 ## Итог
 
