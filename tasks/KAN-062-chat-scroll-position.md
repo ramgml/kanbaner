@@ -1,7 +1,7 @@
 ---
 id: KAN-062
 title: Прокрутка чата без потери позиции чтения
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-062
@@ -92,6 +92,10 @@ specs:
   Нативный scroll anchoring сохраняется: контракт — стабильность видимого
   фрагмента, а не неизменный числовой `scrollTop` при reflow выше viewport.
   Задача возвращена в `in_progress`.
+- 2026-11-23 — Worker исправил замечания коммитами `fe7fd7a` и `1dd7658`.
+  Финальное ревью не нашло blocker/high/medium/low. Focused tests 88/88,
+  OpenCode E2E 17/17, полный `pnpm check` — 140 files / 1959 tests. Статус
+  `review`.
 
 ## Итог
 
