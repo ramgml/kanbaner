@@ -115,6 +115,31 @@ function requireReader(readers: readonly DeferredFileReader[]): DeferredFileRead
   return reader;
 }
 
+/** Первое чтение падает, второе отдаёт валидный text/plain base64. */
+class FailsOnceFileReader {
+  static calls = 0;
+  result: string | null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+
+  readAsDataURL(): void {
+    FailsOnceFileReader.calls += 1;
+    const call = FailsOnceFileReader.calls;
+    queueMicrotask(() => {
+      if (call === 1) this.onerror?.();
+      else {
+        this.result = "data:text/plain;base64,aGVsbG8=";
+        this.onload?.();
+      }
+    });
+  }
+
+  abort(): void {
+    this.onabort?.();
+  }
+}
+
 function pendingFilesList(): HTMLElement | null {
   return screen.queryByRole("list", { name: "Выбранные файлы" });
 }
@@ -420,6 +445,31 @@ describe("OpenCodePanel", () => {
         ([url, init]) => String(url) === "/api/opencode/session" && init?.method === "POST",
       ),
     ).toBe(false);
+  });
+
+  it("после 404 создаёт одну новую сессию и не трогает чужой draft", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-old");
+    writeDraft("ses-old", "чужой черновик", 1000);
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session/ses-old") return failure(404, "NOT_FOUND");
+      if (url === "/api/opencode/session" && init?.method === "POST")
+        return success(session("ses-new"));
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-new");
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) => String(url) === "/api/opencode/session" && init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+    expect(message).toHaveValue("");
+    expect(readDrafts().get("ses-old")).toBe("чужой черновик");
   });
 
   it("StrictMode не создаёт две сессии и не применяет aborted initialization", async () => {
@@ -3076,6 +3126,33 @@ describe("OpenCode drafts и copy code", () => {
     );
     expect(message).toHaveValue("Новый текст");
     expect(readDrafts().get("ses-1")).toBe("Новый текст");
+  });
+
+  it("retry не очищает composer, если после ошибки добавлен только trailing newline", async () => {
+    FailsOnceFileReader.calls = 0;
+    vi.stubGlobal("FileReader", FailsOnceFileReader);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1" });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(screen.getByLabelText("Файлы для OpenCode"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+    fireEvent.change(message, { target: { value: "Исходный текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByRole("button", { name: "Повторить запрос" })).toBeVisible();
+    // Trim-сравнение считало бы это тем же текстом; точное — изменением.
+    fireEvent.change(message, { target: { value: "Исходный текст\n" } });
+    fireEvent.click(screen.getByRole("button", { name: "Повторить запрос" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(message).toHaveValue("Исходный текст\n");
+    expect(readDrafts().get("ses-1")).toBe("Исходный текст\n");
   });
 
   it("не сохраняет вложения, base64 и историю сообщений", async () => {

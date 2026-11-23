@@ -512,6 +512,8 @@ interface TurnState {
   readonly retryable: boolean;
   readonly requestText: string;
   readonly displayText: string;
+  /** Точный composer.text на момент отправки; нужен для retry без trim. */
+  readonly composerText: string;
   readonly files: readonly File[];
   readonly optimisticAppended: boolean;
   readonly checking: boolean;
@@ -525,6 +527,7 @@ function terminalPhase(phase: TurnPhase): boolean {
 interface PromptAttempt {
   readonly text: string;
   readonly displayText: string;
+  readonly composerText: string;
   readonly files: readonly File[];
   readonly turnID: string;
   readonly optimisticAppended: boolean;
@@ -934,6 +937,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       retryable: false,
       requestText: attempt.text,
       displayText: attempt.displayText,
+      composerText: attempt.composerText,
       files,
       optimisticAppended: attempt.optimisticAppended,
       checking: false,
@@ -1273,6 +1277,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     await runPrompt({
       text: context === null ? text : `Контекст: ${context}\n\n${text}`,
       displayText: text,
+      composerText: composer.text,
       files: pendingFiles,
       turnID: createTurnID(),
       optimisticAppended: false,
@@ -1286,10 +1291,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     }
     chatScroll.followNow();
     // Если пользователь уже изменил composer, новый текст не очищается.
-    const composerUnchanged = composer.text.trim() === turn.displayText.trim();
+    // Сравнивается точное значение: добавленный leading/trailing whitespace —
+    // тоже изменение и не должен потеряться при retry.
+    const composerUnchanged = composer.text === turn.composerText;
     void runPrompt({
       text: turn.requestText,
       displayText: turn.displayText,
+      composerText: turn.composerText,
       files: turn.files,
       // Повтор — это тот же turn: сохраняем identity, чтобы canonical lookup
       // нашёл именно его.
