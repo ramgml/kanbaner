@@ -1571,3 +1571,224 @@ test("mobile 360: кнопка вне scroll, resize и загрузка кар�
   await expect(jump).toHaveCount(0);
   expect((await chatScrollMetrics(page)).top).toBe(0);
 });
+
+const COPY_CODE = [
+  "const answer = 42;",
+  "if (answer < 100) {",
+  '  console.log("ok & <safe>");',
+  "}",
+].join("\n");
+
+function markdownWithCode(): string {
+  return ["Результат:", "", "```ts", ...COPY_CODE.split("\n"), "```", "", "Инлайн `inline`."].join(
+    "\n",
+  );
+}
+
+test("desktop: копирует точный code block, показывает успех и сбрасывает состояние", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  const markdown = markdownWithCode();
+  await mockOpenCode(page, undefined, undefined, {
+    initialMessages: [{ id: "assistant:code", role: "assistant", text: markdown }],
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const panel = page.getByTestId("opencode-panel");
+  const messages = page.getByTestId("opencode-messages");
+  await expect(messages.getByText("const answer = 42;")).toBeVisible();
+
+  // Inline code не получает action: кнопка ровно одна — у fenced block.
+  const copies = messages.getByRole("button", { name: "Копировать код" });
+  await expect(copies).toHaveCount(1);
+  const copy = copies.first();
+  await expect(copy).toHaveAttribute("type", "button");
+  await expect(copy).toHaveAttribute("title", "Копировать код");
+
+  await copy.focus();
+  await expect(copy).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(messages.getByRole("button", { name: "Код скопирован" })).toBeVisible();
+
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboard).toBe(COPY_CODE);
+  expect(clipboard.endsWith("\n")).toBe(false);
+
+  // ~2 секунды: понятный успех сменяется исходным доступным именем.
+  await expect(messages.getByRole("button", { name: "Копировать код" })).toBeVisible({
+    timeout: 5000,
+  });
+  await expect(panel.getByRole("status")).toHaveCount(0);
+});
+
+test("mobile 360: copy action доступен с клавиатуры и не создаёт overflow", async ({ page }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  const markdown = markdownWithCode();
+  await mockOpenCode(page, undefined, undefined, {
+    initialMessages: [{ id: "assistant:code", role: "assistant", text: markdown }],
+  });
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const messages = page.getByTestId("opencode-messages");
+  const copy = messages.getByRole("button", { name: "Копировать код" });
+  await expect(copy).toHaveCount(1);
+  await expect(copy).toBeVisible();
+
+  const layout = await copy.evaluate((element) => {
+    const button = element.getBoundingClientRect();
+    const panel = document.querySelector<HTMLElement>('[data-testid="opencode-panel"]');
+    if (panel === null) throw new Error("panel is missing");
+    return {
+      width: button.width,
+      height: button.height,
+      buttonRight: button.right,
+      panelRight: panel.getBoundingClientRect().right,
+      documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      panelOverflow: panel.scrollWidth - panel.clientWidth,
+    };
+  });
+  expect(layout.width).toBeGreaterThanOrEqual(32);
+  expect(layout.height).toBeGreaterThanOrEqual(32);
+  expect(layout.buttonRight).toBeLessThanOrEqual(layout.panelRight + 1);
+  expect(layout.documentOverflow).toBeLessThanOrEqual(0);
+  expect(layout.panelOverflow).toBeLessThanOrEqual(1);
+
+  await copy.focus();
+  await page.keyboard.press("Space");
+  await expect(messages.getByRole("button", { name: "Код скопирован" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(COPY_CODE);
+
+  // Overlay-кнопка не расширяет pre и не ломает горизонтальный scroll блока.
+  const codeOverflow = await messages.locator("pre").evaluate((element) => ({
+    overflowX: getComputedStyle(element).overflowX,
+    parentClass: element.parentElement?.className ?? "",
+  }));
+  expect(codeOverflow.overflowX).toBe("auto");
+  expect(codeOverflow.parentClass).toContain("relative");
+});
+
+test("clipboard denial показывает доступную ошибку без unhandled rejection", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error("denied")) },
+    });
+    document.execCommand = () => false;
+  });
+  const markdown = markdownWithCode();
+  await mockOpenCode(page, undefined, undefined, {
+    initialMessages: [{ id: "assistant:code", role: "assistant", text: markdown }],
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const messages = page.getByTestId("opencode-messages");
+  const copy = messages.getByRole("button", { name: "Копировать код" });
+  await expect(copy).toBeVisible();
+  await copy.click();
+
+  const failed = messages.getByRole("button", { name: "Не удалось скопировать код" });
+  await expect(failed).toBeVisible();
+  await expect(failed).toHaveAttribute("title", "Не удалось скопировать код");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(messages.getByRole("button", { name: "Копировать код" })).toBeVisible({
+    timeout: 5000,
+  });
+  expect(pageErrors).toEqual([]);
+});
+
+test("drafts: изоляция сессий, reload, очистка отправкой и повреждённый storage", async ({
+  page,
+}) => {
+  await mockOpenCode(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  const draftsKey = "kanbaner.opencode.drafts.v1";
+  const drafts = () =>
+    page.evaluate((key) => {
+      const raw = localStorage.getItem(key);
+      return raw === null ? null : (JSON.parse(raw) as unknown);
+    }, draftsKey);
+
+  await expect(message).toBeEnabled();
+  await message.fill("Черновик первой сессии");
+
+  // Закрытие панели и reload не теряют ввод: storage, а не память компонента.
+  await page.getByTestId("opencode-close").click();
+  await page.getByTestId("opencode-open").click();
+  await expect(message).toHaveValue("Черновик первой сессии");
+  await page.reload();
+  await expect(message).toBeEnabled();
+  await expect(message).toHaveValue("Черновик первой сессии");
+
+  // Новая сессия пуста и не переносит черновик старой.
+  await page.getByRole("button", { name: "Новая сессия OpenCode" }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-2");
+  await expect(message).toHaveValue("");
+  await message.fill("Черновик второй сессии");
+
+  const stored = (await drafts()) as {
+    readonly v?: number;
+    readonly drafts?: Record<string, Record<string, unknown>>;
+  };
+  expect(stored.v).toBe(1);
+  expect(stored.drafts?.["ses-1"]?.["text"]).toBe("Черновик первой сессии");
+  expect(stored.drafts?.["ses-2"]?.["text"]).toBe("Черновик второй сессии");
+  for (const entry of Object.values(stored.drafts ?? {})) {
+    expect(Object.keys(entry).sort()).toEqual(["text", "updatedAt"]);
+  }
+
+  // Восстановление последней сессии возвращает именно её черновик.
+  await page.evaluate(() => localStorage.setItem("kanbaner.opencode.sessionId", "ses-1"));
+  await page.reload();
+  await expect(message).toBeEnabled();
+  await expect(message).toHaveValue("Черновик первой сессии");
+
+  // Отправка очищает только черновик своей сессии.
+  await message.fill("Отправить и очистить");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(message).toHaveValue("");
+  await expect.poll(async () => (await drafts()) !== null).toBe(true);
+  const afterSend = (await drafts()) as { readonly drafts?: Record<string, { text: string }> };
+  expect(afterSend.drafts?.["ses-1"]).toBeUndefined();
+  expect(afterSend.drafts?.["ses-2"]?.text).toBe("Черновик второй сессии");
+
+  // История и вложения не попадают в localStorage.
+  const storedValues = await page.evaluate(() =>
+    Object.keys(localStorage)
+      .map((key) => localStorage.getItem(key) ?? "")
+      .join("\n"),
+  );
+  expect(storedValues).not.toContain("Ответ OpenCode");
+  expect(storedValues).not.toContain("base64");
+  expect(storedValues).not.toContain("iVBORw0KGgo");
+
+  // Повреждённый JSON игнорируется, composer остаётся рабочим и снова пишет валидное значение.
+  await page.evaluate((key) => localStorage.setItem(key, "{not-json"), draftsKey);
+  await page.reload();
+  await expect(message).toBeEnabled();
+  await expect(message).toHaveValue("");
+  await message.fill("После повреждения");
+  await expect
+    .poll(async () => {
+      const current = (await drafts()) as {
+        readonly drafts?: Record<string, { text: string }>;
+      } | null;
+      return current?.drafts?.["ses-1"]?.text;
+    })
+    .toBe("После повреждения");
+  await expect(page.getByTestId("opencode-panel").getByRole("alert")).toHaveCount(0);
+});

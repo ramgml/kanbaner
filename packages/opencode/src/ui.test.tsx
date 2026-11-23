@@ -12,6 +12,7 @@ import {
   type OpenCodeToolMessage,
 } from "./tool-call.tsx";
 import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
+import { OPENCODE_DRAFTS_KEY, readDrafts, writeDraft } from "./drafts.ts";
 import type { OpenCodeCatalog, OpenCodeSessionView, OpenCodeStreamEvent } from "./types.ts";
 import { OpenCodePanel } from "./ui.tsx";
 
@@ -179,6 +180,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: undefined,
+  });
 });
 
 function toolMessage(patch: Partial<OpenCodeToolMessage> = {}): OpenCodeToolMessage {
@@ -2883,5 +2888,321 @@ describe("OpenCode tool calls в панели", () => {
     await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("ошибка"));
     expect(toolRow("task_a")).toHaveTextContent("выполняется");
     expect(screen.getAllByTestId("opencode-tool-call")).toHaveLength(2);
+  });
+});
+
+describe("OpenCode drafts и copy code", () => {
+  function storedSession(
+    sessionID: string,
+    messages: readonly unknown[] = [],
+  ): OpenCodeSessionView {
+    return { ...session(sessionID), messages: messages as OpenCodeSessionView["messages"] };
+  }
+
+  function mockPanel(options: {
+    readonly sessionID?: string;
+    readonly messages?: readonly unknown[];
+    readonly prompt?: () => Response;
+    readonly createdID?: string;
+  }): void {
+    const sessionID = options.sessionID ?? "ses-1";
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") {
+        return success(storedSession(options.createdID ?? sessionID));
+      }
+      if (url === `/api/opencode/session/${sessionID}`) {
+        return success(storedSession(sessionID, options.messages ?? []));
+      }
+      if (url === `/api/opencode/session/${options.createdID ?? sessionID}`) {
+        return success(storedSession(options.createdID ?? sessionID, options.messages ?? []));
+      }
+      if (url.endsWith("/prompt")) return options.prompt?.() ?? stream([{ kind: "done" }]);
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+  }
+
+  async function composer(): Promise<HTMLElement> {
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    return message;
+  }
+
+  it("восстанавливает свой черновик, сохраняет ввод и переживает remount", async () => {
+    writeDraft("ses-1", "сохранённый черновик", 1000);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1" });
+
+    const first = render(<OpenCodePanel />);
+    const message = await composer();
+
+    expect(message).toHaveValue("сохранённый черновик");
+    fireEvent.change(message, { target: { value: "изменённый текст" } });
+    expect(readDrafts().get("ses-1")).toBe("изменённый текст");
+
+    first.unmount();
+    render(<OpenCodePanel />);
+    expect(await composer()).toHaveValue("изменённый текст");
+  });
+
+  it("новая сессия изолирована и не стирает черновик старой", async () => {
+    writeDraft("ses-1", "старый черновик", 1000);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1", createdID: "ses-2" });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    expect(message).toHaveValue("старый черновик");
+
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-2"),
+    );
+    await waitFor(() => expect(message).toHaveValue(""));
+
+    expect(readDrafts().get("ses-1")).toBe("старый черновик");
+    fireEvent.change(message, { target: { value: "новый черновик" } });
+    expect(readDrafts().get("ses-1")).toBe("старый черновик");
+    expect(readDrafts().get("ses-2")).toBe("новый черновик");
+  });
+
+  it("send очищает только черновик своей сессии после optimistic append", async () => {
+    writeDraft("ses-1", "один", 1000);
+    writeDraft("ses-2", "два", 2000);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1" });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() => expect(readDrafts().get("ses-1")).toBeUndefined());
+    expect(readDrafts().get("ses-2")).toBe("два");
+    expect(message).toHaveValue("");
+  });
+
+  it("unconfirmed/error до optimistic append оставляет черновик, retry без правок очищает его", async () => {
+    class SwitchingReader {
+      static calls = 0;
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        SwitchingReader.calls += 1;
+        const call = SwitchingReader.calls;
+        queueMicrotask(() => {
+          if (call === 1) this.onerror?.();
+          else {
+            this.result = "data:text/plain;base64,aGVsbG8=";
+            this.onload?.();
+          }
+        });
+      }
+
+      abort(): void {
+        this.onabort?.();
+      }
+    }
+    SwitchingReader.calls = 0;
+    vi.stubGlobal("FileReader", SwitchingReader);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1" });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(screen.getByLabelText("Файлы для OpenCode"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+    fireEvent.change(message, { target: { value: "Повтори меня" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByRole("button", { name: "Повторить запрос" })).toBeVisible();
+    expect(message).toHaveValue("Повтори меня");
+    expect(readDrafts().get("ses-1")).toBe("Повтори меня");
+
+    fireEvent.click(screen.getByRole("button", { name: "Повторить запрос" }));
+    await waitFor(() => expect(readDrafts().get("ses-1")).toBeUndefined());
+    expect(message).toHaveValue("");
+  });
+
+  it("retry не очищает изменённый пользователем composer", async () => {
+    class SwitchingReader {
+      static calls = 0;
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+
+      readAsDataURL(): void {
+        SwitchingReader.calls += 1;
+        const call = SwitchingReader.calls;
+        queueMicrotask(() => {
+          if (call === 1) this.onerror?.();
+          else {
+            this.result = "data:text/plain;base64,aGVsbG8=";
+            this.onload?.();
+          }
+        });
+      }
+
+      abort(): void {
+        this.onabort?.();
+      }
+    }
+    SwitchingReader.calls = 0;
+    vi.stubGlobal("FileReader", SwitchingReader);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({ sessionID: "ses-1" });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(screen.getByLabelText("Файлы для OpenCode"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+    fireEvent.change(message, { target: { value: "Исходный текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByRole("button", { name: "Повторить запрос" })).toBeVisible();
+    fireEvent.change(message, { target: { value: "Новый текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Повторить запрос" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(message).toHaveValue("Новый текст");
+    expect(readDrafts().get("ses-1")).toBe("Новый текст");
+  });
+
+  it("не сохраняет вложения, base64 и историю сообщений", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({
+      sessionID: "ses-1",
+      messages: [
+        {
+          id: "user:message-0",
+          role: "user",
+          text: "Секретное содержимое истории",
+          attachments: [{ name: "notes.txt", mime: "text/plain" }],
+        },
+        { id: "assistant:message-1", role: "assistant", text: "Ответ истории" },
+      ],
+    });
+
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(screen.getByLabelText("Файлы для OpenCode"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    fireEvent.change(message, { target: { value: "Посмотри файл" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Выбранные файлы" })).toBeNull());
+
+    const values = Object.keys(window.localStorage).map(
+      (key) => window.localStorage.getItem(key) ?? "",
+    );
+    const stored = values.join("\n");
+
+    expect(stored).not.toContain("aGVsbG8=");
+    expect(stored).not.toContain("base64");
+    expect(stored).not.toContain("Ответ истории");
+    expect(stored).not.toContain("Секретное содержимое истории");
+
+    const raw = JSON.parse(window.localStorage.getItem(OPENCODE_DRAFTS_KEY) ?? "null") as {
+      readonly drafts?: Record<string, Record<string, unknown>>;
+    } | null;
+    for (const entry of Object.values(raw?.drafts ?? {})) {
+      expect(Object.keys(entry).sort()).toEqual(["text", "updatedAt"]);
+    }
+  });
+
+  it("полностью заблокированный localStorage не ломает initialize и composer", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("SecurityError");
+      },
+    });
+    try {
+      mockPanel({ sessionID: "ses-1" });
+      render(<OpenCodePanel />);
+
+      const message = await composer();
+      expect(screen.queryByRole("alert")).toBeNull();
+      fireEvent.change(message, { target: { value: "в памяти" } });
+      expect(message).toHaveValue("в памяти");
+      fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+      await waitFor(() => expect(message).toHaveValue(""));
+    } finally {
+      if (descriptor !== undefined) Object.defineProperty(window, "localStorage", descriptor);
+    }
+  });
+
+  it("копирует exact text code block, inline code не получает action и scroll не меняется", async () => {
+    const markdown = ["```ts", "const answer = 42;", "```", "", "`inline`"].join("\n");
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({
+      sessionID: "ses-1",
+      messages: [{ id: "assistant:message-1", role: "assistant", text: markdown }],
+    });
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    render(<OpenCodePanel />);
+    await composer();
+    expect(await screen.findByText("const answer = 42;")).toBeVisible();
+
+    const inline = screen.getByText("inline");
+    expect(inline).toHaveProperty("tagName", "CODE");
+    expect(within(inline).queryByRole("button")).toBeNull();
+
+    const copy = screen.getByRole("button", { name: "Копировать код" });
+    const scroll = panelScroll();
+    controlPanelScroll(scroll, { scrollHeight: 1200, clientHeight: 300 });
+    readPanelAbove(scroll);
+    const jump = jumpButton();
+    expect(jump).not.toBeNull();
+
+    fireEvent.click(copy);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Код скопирован" })).toBeInTheDocument(),
+    );
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("const answer = 42;");
+    expect(scroll.scrollTop).toBe(0);
+    expect(jumpButton()).not.toBeNull();
+  });
+
+  it("показывает доступную ошибку копирования без live-region и без второго action", async () => {
+    const markdown = ["```", "a", "```", "", "```", "b", "```", "", "`inline`"].join("\n");
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockPanel({
+      sessionID: "ses-1",
+      messages: [{ id: "assistant:message-1", role: "assistant", text: markdown }],
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error("denied")) },
+    });
+
+    render(<OpenCodePanel />);
+    await composer();
+    const copies = await screen.findAllByRole("button", { name: "Копировать код" });
+    expect(copies).toHaveLength(2);
+    expect(screen.getByText("inline").closest("pre")).toBeNull();
+
+    fireEvent.click(copies[0] as HTMLElement);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Не удалось скопировать код" }),
+      ).toBeInTheDocument(),
+    );
+    expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

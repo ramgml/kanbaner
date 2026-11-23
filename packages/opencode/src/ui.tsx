@@ -46,6 +46,13 @@ import {
   type OpenCodeTurnStatus,
 } from "./types.ts";
 import { formatChatUnread, useChatScroll } from "./chat-scroll.ts";
+import { CodeBlockCopyAction } from "./code-block.tsx";
+import {
+  clearStoredSessionID,
+  readStoredSessionID,
+  storeSessionID,
+  useSessionDraft,
+} from "./drafts.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
 import {
   finishToolMessages,
@@ -60,7 +67,6 @@ interface OpenCodePanelProps {
   readonly search?: string | undefined;
 }
 
-const SESSION_KEY = "kanbaner.opencode.sessionId";
 const buttonClass =
   "inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 const inputClass =
@@ -70,7 +76,7 @@ const iconButtonClass =
 
 /** Assistant/system Markdown рендерится тем же безопасным renderer, что и в остальных плагинах. */
 const MarkdownMessage = memo(function MarkdownMessage({ source }: { readonly source: string }) {
-  return <MarkdownContent source={source} />;
+  return <MarkdownContent source={source} codeBlockAction={CodeBlockCopyAction} />;
 });
 
 function ToolList({
@@ -522,6 +528,8 @@ interface PromptAttempt {
   readonly files: readonly File[];
   readonly turnID: string;
   readonly optimisticAppended: boolean;
+  /** Очистка composer допустима только после optimistic append этой сессии. */
+  readonly clearComposer: boolean;
 }
 
 function turnPhaseLabel(turn: TurnState): string {
@@ -627,7 +635,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [catalog, setCatalog] = useState<OpenCodeCatalog | null>(null);
   const [session, setSession] = useState<OpenCodeSessionView | null>(null);
   const [messages, setMessages] = useState<readonly OpenCodeChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const composer = useSessionDraft(session?.id ?? null);
   const [promptPending, setPromptPending] = useState(false);
   const [modelPending, setModelPending] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -679,7 +687,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     if (generation !== generationRef.current) return false;
     setSession(next);
     setMessages(next.messages);
-    window.localStorage.setItem(SESSION_KEY, next.id);
+    storeSessionID(next.id);
     return true;
   }, []);
 
@@ -711,8 +719,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       });
       if (generation !== generationRef.current) return;
       setCatalog(nextCatalog);
-      const stored = window.localStorage.getItem(SESSION_KEY);
-      if (stored !== null && stored.length > 0) {
+      const stored = readStoredSessionID();
+      if (stored !== null) {
         try {
           const restored = await request<OpenCodeSessionView>(
             `/api/opencode/session/${encodeURIComponent(stored)}`,
@@ -723,7 +731,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } catch (reason) {
           if (generation !== generationRef.current) return;
           if (!(reason instanceof ApiError && reason.status === 404)) throw reason;
-          window.localStorage.removeItem(SESSION_KEY);
+          clearStoredSessionID();
         }
       }
       await createSession(nextCatalog.defaultModel ?? undefined, generation, controller.signal);
@@ -1050,7 +1058,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 })),
               }),
         };
-        setInput("");
+        if (attempt.clearComposer) composer.clearDraft(sessionID);
         if (nextLocalImages.length > 0) {
           setLocalImages((current) => [...current, ...nextLocalImages]);
         }
@@ -1256,7 +1264,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   };
 
   const send = async (): Promise<void> => {
-    const text = input.trim();
+    const text = composer.text.trim();
     if (text.length === 0 || session === null || busy) return;
     // Новый prompt явно включает follow: optimistic user message и ответ должны
     // быть видны, даже если пользователь читал историю выше.
@@ -1268,6 +1276,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       files: pendingFiles,
       turnID: createTurnID(),
       optimisticAppended: false,
+      clearComposer: true,
     });
   };
 
@@ -1276,6 +1285,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       return;
     }
     chatScroll.followNow();
+    // Если пользователь уже изменил composer, новый текст не очищается.
+    const composerUnchanged = composer.text.trim() === turn.displayText.trim();
     void runPrompt({
       text: turn.requestText,
       displayText: turn.displayText,
@@ -1284,6 +1295,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       // нашёл именно его.
       turnID: turn.turnID,
       optimisticAppended: turn.optimisticAppended,
+      clearComposer: composerUnchanged,
     });
   };
 
@@ -1742,9 +1754,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           <textarea
             aria-label="Сообщение OpenCode"
             rows={3}
-            value={input}
+            value={composer.text}
             disabled={session === null || busy}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => composer.setText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
@@ -1782,7 +1794,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 <button
                   type="submit"
                   aria-label="Отправить"
-                  disabled={session === null || busy || input.trim().length === 0}
+                  disabled={session === null || busy || composer.text.trim().length === 0}
                   className={iconButtonClass}
                 >
                   {creating || modelPending ? (

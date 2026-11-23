@@ -10,7 +10,8 @@ catalog активных chat-моделей, streaming, полный built-in t
 - `app.assistant` добавляет правую desktop-панель и mobile fullscreen.
 - Панель закрыта по умолчанию; Service подключается только после явного
   открытия. Состояние хранится в `localStorage["kanbaner.opencode.panelOpen"]`,
-  последняя session ID — в `localStorage["kanbaner.opencode.sessionId"]`.
+  последняя session ID — в `localStorage["kanbaner.opencode.sessionId"]`, а
+  черновики composer — в `localStorage["kanbaner.opencode.drafts.v1"]`.
 - `Service.ensure({ version })` принимает только strict SemVer major 2.x
   (`2.minor.patch` с optional prerelease/build, например `2.2.5` или
   `2.3.1-beta.1`), но не `2.`, `2.foo`, `1.x` или `3.x`. Используется
@@ -129,6 +130,49 @@ Bearer token в браузер не передаётся. Ответы имею�
   runtime-зависимостей нет: используются browser `FileReader`, `Buffer` и
   `TextDecoder`.
 
+## Копирование кода и черновики composer
+
+Assistant/system Markdown использует тот же `MarkdownContent`, что и остальные
+плагины, с additive `codeBlockAction={CodeBlockCopyAction}`.
+
+- Action — native `<button type="button">` только у fenced/indented code block.
+  Inline code и пустой fence action не получают. Кнопка подписана
+  `Копировать код`, после успеха — `Код скопирован`, после ошибки —
+  `Не удалось скопировать код`; `aria-label` и `title` совпадают, есть
+  `focus-visible`, мобильная цель не меньше 36 px. Состояние сбрасывается через
+  2 секунды; таймер очищается при unmount и StrictMode-remount. Второй
+  live-region не добавляется, layout, панель и scroll position не меняются.
+- Копируется точный plain text блока без renderer-added trailing newline.
+  Сначала вызывается `navigator.clipboard.writeText`; при отсутствии API, отказе
+  или rejected Promise — legacy `document.execCommand("copy")` через временную
+  readonly offscreen textarea. `activeElement` и Selection ranges
+  восстанавливаются в `finally`, пустая строка не копируется, ошибка не покидает
+  функцию rejected Promise-ом.
+
+Composer хранит черновик отдельно для каждой OpenCode-сессии:
+
+- Один ключ `localStorage["kanbaner.opencode.drafts.v1"]` формата
+  `{ "v": 1, "drafts": { "<sessionID>": { "text": string, "updatedAt": number } } }`.
+- Не больше 16 384 символов на запись, 20 записей и 65 536 символов суммарно.
+  При превышении удаляются самые старые по `updatedAt` записи (при равенстве —
+  лексикографически меньший session ID), текущая запись защищена. Сверхлимитный
+  ввод остаётся в памяти composer, но не сохраняется; `maxLength` в textarea не
+  добавляется.
+- Пустой текст удаляет запись, последняя запись удаляет ключ. Невалидный JSON,
+  другая версия, неверная форма, `NaN`/отрицательное время и oversize entry
+  игнорируются по отдельности.
+- Все чтения/записи/удаления обёрнуты в try/catch; заблокированный или
+  переполненный `localStorage` не блокирует initialize панели и composer. Ошибки
+  storage не маскируются под сбой OpenCode Service. Последняя session ID
+  (`kanbaner.opencode.sessionId`) использует те же safe wrappers.
+- После reload и переключения сессий восстанавливается черновик именно этой
+  сессии. Новая сессия получает пустой или собственный черновик и не переносит
+  чужой текст. `send()` очищает черновик только своей сессии и только после
+  optimistic append; retry не очищает composer, если пользователь его изменил, а
+  unconfirmed/error до optimistic append черновик сохраняет.
+- В storage попадает только текст composer: вложения, base64, preview URL,
+  сообщения, история, turn/model, attached refs и ошибки не сохраняются.
+
 ## Прокрутка чата
 
 Лента использует реальный scroll container и внутренний content wrapper; логика
@@ -243,7 +287,16 @@ server. Поэтому повтор того же request внутри одно�
   предупреждением, stop, compact tool disclosure, детерминированная duration,
   merge/finish helpers, keyboard, stale generation, unconfirmed/error/cancelled
   tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
-  завершения и ручной status check в том же scope.
+  завершения и ручной status check в том же scope, drafts restore/send/retry,
+  отсутствие base64 и истории в storage, заблокированный localStorage, copy
+  action и его failure.
+- `packages/opencode/src/drafts.test.tsx` — valid/corrupt JSON, версия, формы
+  записей, LRU по `updatedAt` и размеру, oversize, storage throw/blocked,
+  необычные session ID, StrictMode и изоляция сессий.
+- `packages/opencode/src/clipboard.test.ts` — Clipboard API, legacy fallback,
+  denial/false/throw, пустая строка, восстановление фокуса и Selection.
+- `packages/opencode/src/code-block.test.tsx` — success/failure labels,
+  keyboard, reset timer, StrictMode и unmount cleanup.
 - `packages/opencode/src/chat-scroll.test.tsx` — геометрия near-bottom,
   threshold 48 px, follow/чтение выше, unread, возврат, canonical refresh,
   сброс при смене сессии, `ResizeObserver`/window resize/`load`/`error`,
@@ -258,3 +311,7 @@ server. Поэтому повтор того же request внутри одно�
   Chromium. Scroll-сценарии проверяют чтение выше во время streaming и
   canonical, tool disclosure, отложенную загрузку картинки, resize viewport,
   Enter/Space-возврат, повторный follow и смену сессии на desktop и mobile 360.
+  Copy/drafts-сценарии проверяют точный clipboard desktop/mobile, Enter/Space,
+  понятную ошибку при отказе clipboard, изоляцию и reload черновиков, пустую
+  новую сессию, очистку только своей сессии, повреждённый storage и отсутствие
+  base64/истории в `localStorage`.
