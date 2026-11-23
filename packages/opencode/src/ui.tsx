@@ -642,6 +642,15 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const initializeAbortRef = useRef<AbortController | null>(null);
   const modelAbortRef = useRef<AbortController | null>(null);
   const promptAbortRef = useRef<AbortController | null>(null);
+  /**
+   * Tool identity текущего prompt-хода. Global `status === "running"` по всей
+   * истории недопустим: unconfirmed tool предыдущего turn принадлежит другому
+   * generation и не должен завершаться terminal событием нового хода.
+   */
+  const turnToolsRef = useRef<{
+    readonly generation: number;
+    readonly ids: Set<string>;
+  } | null>(null);
   const refreshControllersRef = useRef(new Set<AbortController>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentRef = useMemo(() => contextRefFromSearch(search), [search]);
@@ -902,6 +911,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const generation = beginOperation();
     const controller = new AbortController();
     promptAbortRef.current = controller;
+    // Scope этого хода: только tools, пришедшие после его начала.
+    const turnTools = new Set<string>();
+    turnToolsRef.current = { generation, ids: turnTools };
     setPromptPending(true);
     setPanelError(null);
     setSelectionError(null);
@@ -947,11 +959,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
 
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     const finishTools = (kind: "done" | "cancelled" | "error", endedAt = Date.now()): void => {
+      if (turnTools.size === 0) return;
       setMessages((current) =>
-        currentGeneration() ? finishToolMessages(current, kind, endedAt) : current,
+        currentGeneration() ? finishToolMessages(current, turnTools, kind, endedAt) : current,
       );
     };
     const appendTool = (event: OpenCodeStreamEvent) => {
+      if (!currentGeneration()) return;
+      const fallbackID = `tool:optimistic:${Date.now()}`;
+      // mergeToolMessage сохраняет identity по event.id, поэтому набор получает
+      // ровно тот ID, под которым tool попадёт в messages.
+      turnTools.add(event.id ?? fallbackID);
       setMessages((current) => {
         if (!currentGeneration()) return current;
         const eventID = event.id;
@@ -962,7 +980,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           existing !== undefined && existing.role === "tool"
             ? (existing as OpenCodeToolMessage)
             : undefined;
-        const next = mergeToolMessage(previous, event, `tool:optimistic:${Date.now()}`);
+        const next = mergeToolMessage(previous, event, fallbackID);
         if (index < 0) return [...current, next];
         return [...current.slice(0, index), next, ...current.slice(index + 1)];
       });
@@ -1113,7 +1131,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "error") {
           terminal = "error";
           terminalUnconfirmed = event.reason === "unconfirmed";
-          if (!terminalUnconfirmed) finishTools("error");
+          // Явный nonAdmission означает, что prompt вообще не принят: рушить
+          // running tools текущего хода нечего, а предыдущий turn не трогаем.
+          if (!terminalUnconfirmed && event.nonAdmission !== true) finishTools("error");
           settle("error", {
             reason: terminalUnconfirmed ? "unconfirmed" : null,
             errorText: event.text ?? "Запрос OpenCode завершился с ошибкой",
@@ -1286,17 +1306,23 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         // Полный terminal ответ: только здесь допустима canonical замена.
         applySession(status.session, generation);
       } else {
-        // Canonical cancelled/error подтверждён сервером: завершаем running
-        // tools, чтобы таймер не продолжал расти после terminal.
-        setMessages((current) =>
-          generation === generationRef.current
-            ? finishToolMessages(
-                current,
-                status.outcome === "cancelled" ? "cancelled" : "error",
-                Date.now(),
-              )
-            : current,
-        );
+        // Canonical cancelled/error подтверждён сервером: завершаем только
+        // running tools этого же хода, чтобы таймер не рос после terminal, но
+        // unconfirmed tool другого turn остался нетронутым.
+        const scoped = turnToolsRef.current;
+        const toolIDs = scoped !== null && scoped.generation === generation ? scoped.ids : null;
+        if (toolIDs !== null && toolIDs.size > 0) {
+          setMessages((current) =>
+            generation === generationRef.current
+              ? finishToolMessages(
+                  current,
+                  toolIDs,
+                  status.outcome === "cancelled" ? "cancelled" : "error",
+                  Date.now(),
+                )
+              : current,
+          );
+        }
       }
       setTurn((current) =>
         current !== null && current.generation === generation

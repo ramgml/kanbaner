@@ -109,17 +109,24 @@ export function mergeToolMessage(
 }
 
 /**
- * Confirmed terminal turn завершает оставшиеся running tools, чтобы таймер не
- * рос после terminal события. Для unconfirmed этот helper не вызывается.
+ * Confirmed terminal turn завершает оставшиеся running tools ТОЛЬКО этого хода,
+ * чтобы таймер не рос после terminal события и не затрагивался unconfirmed tool
+ * предыдущего turn. `toolIDs` — набор identity, собранный appendTool текущего
+ * generation; пустой набор ничего не меняет. Для unconfirmed helper не
+ * вызывается.
  */
 export function finishToolMessages(
   messages: readonly OpenCodeChatMessage[],
+  toolIDs: ReadonlySet<string>,
   kind: "done" | "cancelled" | "error",
   endedAt: number,
 ): readonly OpenCodeChatMessage[] {
+  if (toolIDs.size === 0) return messages;
   let changed = false;
   const next = messages.map((message): OpenCodeChatMessage => {
-    if (message.role !== "tool" || message.status !== "running") return message;
+    if (message.role !== "tool" || message.status !== "running" || !toolIDs.has(message.id)) {
+      return message;
+    }
     changed = true;
     return {
       ...message,
@@ -216,6 +223,8 @@ export function ToolCallMessage({ message }: { readonly message: OpenCodeToolMes
         {duration !== null ? (
           <span
             data-testid="opencode-tool-call-duration"
+            role="timer"
+            aria-live="off"
             className="shrink-0 tabular-nums text-muted-foreground"
           >
             {duration}

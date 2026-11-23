@@ -385,14 +385,25 @@ describe("OpenCode gateway", () => {
               time: { created: 5000, ran: 5100 },
             },
             {
-              id: "call-v1",
+              callID: "call-v1",
               type: "tool",
-              name: "task_list",
+              tool: "task_list",
               state: {
                 status: "completed",
                 input: { limit: 10 },
                 output: "legacy output",
                 time: { start: 7000, end: 9500 },
+              },
+            },
+            {
+              callID: "call-v1-error",
+              type: "tool",
+              tool: "task_delete",
+              state: {
+                status: "error",
+                input: { id: "task-3" },
+                error: "secret v1 upstream error",
+                time: { start: 10_000, end: 10_500 },
               },
             },
             {
@@ -453,13 +464,25 @@ describe("OpenCode gateway", () => {
       input: '{"limit":10}',
       output: "legacy output",
     });
-    expect(tools[4]).toMatchObject({ status: "running", startedAt: 1000 });
-    expect(tools[4]).not.toHaveProperty("endedAt");
+    expect(tools[4]).toEqual({
+      id: "tool:assistant-tools:call-v1-error",
+      role: "tool",
+      name: "task_delete",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      startedAt: 10_000,
+      endedAt: 10_500,
+      input: '{"id":"task-3"}',
+      output: "Инструмент завершился с ошибкой",
+    });
+    expect(tools[5]).toMatchObject({ status: "running", startedAt: 1000 });
+    expect(tools[5]).not.toHaveProperty("endedAt");
     const serializedSession = JSON.stringify(session);
     expect(serializedSession).not.toContain("metadata-secret");
     expect(serializedSession).not.toContain("native-secret");
     expect(serializedSession).not.toContain("secret upstream response");
     expect(serializedSession).not.toContain("secret response body");
+    expect(serializedSession).not.toContain("secret v1 upstream error");
   });
 
   it("не воскрешает старый system error после нового успешного turn", async () => {
@@ -848,6 +871,51 @@ describe("OpenCode gateway", () => {
       kind: "cancelled",
       text: "Запрос остановлен",
     });
+  });
+
+  it("нормализует streaming aborted tool в cancelled без generic error-подписи", () => {
+    const aborted = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          error: { type: "aborted", message: "secret upstream response" },
+        },
+        1500,
+      ),
+    );
+    expect(aborted).toMatchObject({
+      id: "message-1:call-1",
+      status: "cancelled",
+      text: "",
+      endedAt: 1500,
+    });
+    expect(aborted).not.toHaveProperty("output");
+    expect(JSON.stringify(aborted)).not.toContain("secret");
+
+    // Обычная ошибка инструмента остаётся error с generic-подписью.
+    const failed = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-2",
+          error: { type: "tool_error", message: "secret upstream response" },
+        },
+        1600,
+      ),
+    );
+    expect(failed).toMatchObject({
+      id: "message-1:call-2",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      output: "Инструмент завершился с ошибкой",
+      endedAt: 1600,
+    });
+    expect(JSON.stringify(failed)).not.toContain("secret");
   });
 
   it("ждёт server.connected, фильтрует сессии и завершается на terminal event", async () => {

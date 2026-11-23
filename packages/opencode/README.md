@@ -70,17 +70,26 @@ catalog активных chat-моделей, streaming, полный built-in t
   user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
 - Tool calls объединяются по `assistantMessageID + tool call ID`; history
   загружается через paginated `message.list` и сохраняет running/error states.
+  Поддерживаются v2 identity (`id`/`name`) и v1 `ToolPart` (`callID`/`tool`,
+  строковый `state.error`, `state.output`/`state.time`) без изменения v2 ID.
 - Tool call показывается компактным disclosure: status, имя, длительность и
   свёрнутые input/output. Детали раскрываются pointer/touch, Enter или Space;
   running duration тикает раз в секунду и фиксируется terminal/Stop/error.
-  Невалидные, отсутствующие и обратные timestamps не дают фиктивную
-  длительность. Для stream timings берутся из top-level `event.created` как
-  приблизительные; canonical `time.ran`/`time.completed` приходят со следующим
-  history reload. В публичный payload попадают только `input`, `output` и
-  timings: `state.metadata`, `part.native` и upstream `error.message` не
-  передаются. `cancelled` — UI-only terminal для Stop, подтверждённой отмены и
-  canonical `error.type=aborted`; unconfirmed результат оставляет tool в
-  running.
+  Таймер помечен `role="timer" aria-live="off"`, чтобы screen reader не
+  объявлял каждую секунду; статусы остаются доступными. Невалидные,
+  отсутствующие и обратные timestamps не дают фиктивную длительность. Для
+  stream timings берутся из top-level `event.created` как приблизительные;
+  canonical `time.ran`/`time.completed` приходят со следующим history reload.
+  В публичный payload попадают только `input`, `output` и timings:
+  `state.metadata`, `part.native` и upstream `error.message` не передаются.
+  `cancelled` — UI-only terminal для Stop, подтверждённой отмены, canonical и
+  streaming `error.type=aborted`; обычная ошибка инструмента остаётся `error`.
+  Unconfirmed результат оставляет tool в running.
+- Terminal `done`/`cancelled`/`error` завершает только tools текущего prompt:
+  UI хранит набор identity, добавленных `appendTool` этого generation. Running
+  tool предыдущего unconfirmed turn не меняется, а explicit `nonAdmission`
+  вообще не запускает завершение. Ручная проверка статуса применяет тот же
+  turn-scoped набор, поэтому canonical outcome не затрагивает чужой ход.
 
 Внутренние маршруты `/api/opencode/*` предназначены только для browser panel.
 Они требуют `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin
@@ -172,7 +181,8 @@ server. Поэтому повтор того же request внутри одно�
 - `packages/opencode/src/gateway.test.ts` — catalog whitelist/tools, ownership,
   pagination, stream readiness/finalizing/terminal/abort, canonical outcome,
   stable turnID/admitted alias, transient lookup retry, tool event mapping,
-  timings/input/output и inline files.
+  timings/input/output, v1 `callID`/`tool` identity, aborted→cancelled и inline
+  files.
 - `packages/opencode/src/gateway-service-version.test.ts` — Service version
   predicate: accept 2.x (2.2/2.3), reject 1.x/3.x и malformed.
 - `packages/opencode/src/tool-metadata.test.ts` — ordered deny/allow против
@@ -187,8 +197,9 @@ server. Поэтому повтор того же request внутри одно�
   второго prompt, delta→error без потери текста, cancelled/empty/tool-only,
   все четыре фазы, retry/status check, две группы tool catalog с
   предупреждением, stop, compact tool disclosure, детерминированная duration,
-  merge/finish helpers, keyboard, stale generation и unconfirmed/error/cancelled
-  tools.
+  merge/finish helpers, keyboard, stale generation, unconfirmed/error/cancelled
+  tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
+  завершения и ручной status check в том же scope.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,

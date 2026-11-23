@@ -2022,13 +2022,18 @@ describe("mergeToolMessage", () => {
 });
 
 describe("finishToolMessages", () => {
-  it("завершает только running tools и сохраняет уже известный endedAt", () => {
+  it("завершает только running tools из переданного turn scope и сохраняет endedAt", () => {
     const running = toolMessage({ id: "tool:running", status: "running", startedAt: 1000 });
     const frozen = toolMessage({ id: "tool:frozen", status: "running", endedAt: 2500 });
     const done = toolMessage({ id: "tool:done", status: "completed", endedAt: 2000 });
     const assistant = { id: "assistant:1", role: "assistant", text: "Ответ" } as const;
 
-    const next = finishToolMessages([running, frozen, done, assistant], "done", 4000);
+    const next = finishToolMessages(
+      [running, frozen, done, assistant],
+      new Set(["tool:running", "tool:frozen", "tool:done"]),
+      "done",
+      4000,
+    );
     expect(next).toEqual([
       { ...running, status: "completed", endedAt: 4000 },
       { ...frozen, status: "completed", endedAt: 2500 },
@@ -2037,18 +2042,30 @@ describe("finishToolMessages", () => {
     ]);
   });
 
+  it("не завершает running tool вне scope и ничего не делает с пустым набором", () => {
+    const own = toolMessage({ id: "tool:own", status: "running", startedAt: 1000 });
+    const foreign = toolMessage({ id: "tool:foreign", status: "running", startedAt: 500 });
+    const messages = [foreign, own];
+
+    const scoped = finishToolMessages(messages, new Set(["tool:own"]), "cancelled", 2000);
+    expect(scoped).toEqual([foreign, { ...own, status: "cancelled", endedAt: 2000 }]);
+
+    expect(finishToolMessages(messages, new Set<string>(), "error", 3000)).toBe(messages);
+  });
+
   it("маппит terminal kind в cancelled/error и возвращает тот же массив без running", () => {
     const running = toolMessage({ id: "tool:running", status: "running" });
-    expect(finishToolMessages([running], "cancelled", 1000)).toEqual([
+    const scope = new Set(["tool:running"]);
+    expect(finishToolMessages([running], scope, "cancelled", 1000)).toEqual([
       { ...running, status: "cancelled", endedAt: 1000 },
     ]);
-    expect(finishToolMessages([running], "error", 1000)).toEqual([
+    expect(finishToolMessages([running], scope, "error", 1000)).toEqual([
       { ...running, status: "error", endedAt: 1000 },
     ]);
 
     const done = toolMessage({ id: "tool:done", status: "completed" });
     const messages = [done];
-    expect(finishToolMessages(messages, "done", 1000)).toBe(messages);
+    expect(finishToolMessages(messages, new Set(["tool:done"]), "done", 1000)).toBe(messages);
   });
 });
 
@@ -2099,6 +2116,10 @@ describe("ToolCallMessage", () => {
       />,
     );
     expect(screen.getByTestId("opencode-tool-call-duration")).toHaveTextContent("1 с");
+    // Ticking timer не должен анонсироваться screen reader-ом каждую секунду.
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveAttribute("role", "timer");
+    expect(screen.getByTestId("opencode-tool-call-duration")).toHaveAttribute("aria-live", "off");
+    expect(screen.getByTestId("opencode-tool-call-summary")).toHaveTextContent("выполняется");
 
     act(() => {
       vi.advanceTimersByTime(2000);
@@ -2377,5 +2398,178 @@ describe("OpenCode tool calls в панели", () => {
     expect(screen.getByText("выполняется")).toBeVisible();
     expect(screen.queryByText("отменено")).toBeNull();
     expect(screen.queryByText("task_update")).toBeNull();
+  });
+
+  function toolRow(name: string): HTMLElement {
+    const details = screen.getByText(name).closest("details");
+    if (!(details instanceof HTMLElement)) throw new Error(`tool details for ${name} is missing`);
+    return details;
+  }
+
+  function unconfirmedToolA(): OpenCodeStreamEvent[] {
+    return [
+      {
+        kind: "tool",
+        id: "turn-a:call-a",
+        name: "task_a",
+        status: "running",
+        startedAt: Date.now() - 2000,
+      },
+      { kind: "finalizing" },
+    ];
+  }
+
+  function mountTwoTurns(
+    second: readonly OpenCodeStreamEvent[],
+    secondSession?: () => Response,
+  ): { promptCalls: () => number } {
+    let promptCalls = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+        return secondSession === undefined ? success(session()) : secondSession();
+      }
+      if (url.endsWith("/prompt")) {
+        promptCalls += 1;
+        return stream(promptCalls === 1 ? unconfirmedToolA() : second);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    return { promptCalls: () => promptCalls };
+  }
+
+  async function sendTwoPrompts(): Promise<void> {
+    render(<OpenCodePanel />);
+    await sendPrompt("Первый вопрос");
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+    await sendPrompt("Второй вопрос");
+  }
+
+  it("terminal error нового хода не завершает unconfirmed tool предыдущего", async () => {
+    mountTwoTurns([
+      {
+        kind: "tool",
+        id: "turn-b:call-b",
+        name: "task_b",
+        status: "running",
+        startedAt: Date.now() - 1000,
+      },
+      { kind: "error", text: "Сбой инструмента" },
+    ]);
+    await sendTwoPrompts();
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("ошибка"));
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+  });
+
+  it("terminal cancelled нового хода не завершает unconfirmed tool предыдущего", async () => {
+    mountTwoTurns([
+      {
+        kind: "tool",
+        id: "turn-b:call-b",
+        name: "task_b",
+        status: "running",
+        startedAt: Date.now() - 1000,
+      },
+      { kind: "cancelled", text: "Запрос остановлен" },
+    ]);
+    await sendTwoPrompts();
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("отменено"));
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+  });
+
+  it("done нового хода завершает только его tool, даже если refresh не удался", async () => {
+    mountTwoTurns(
+      [
+        {
+          kind: "tool",
+          id: "turn-b:call-b",
+          name: "task_b",
+          status: "running",
+          startedAt: Date.now() - 1000,
+        },
+        { kind: "done" },
+      ],
+      () => failure(500),
+    );
+    await sendTwoPrompts();
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("готово"));
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+  });
+
+  it("явный nonAdmission не завершает tools текущего или прошлого хода", async () => {
+    mountTwoTurns([
+      {
+        kind: "tool",
+        id: "turn-b:call-b",
+        name: "task_b",
+        status: "running",
+        startedAt: Date.now() - 1000,
+      },
+      { kind: "error", text: "Prompt не принят", nonAdmission: true, retryable: true },
+    ]);
+    await sendTwoPrompts();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Ошибка запроса"),
+    );
+    expect(toolRow("task_b")).toHaveTextContent("выполняется");
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+  });
+
+  it("ручная проверка cancelled завершает только tools проверяемого хода", async () => {
+    let promptCalls = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=")) {
+        return success({ session: session("ses-1"), outcome: "cancelled" });
+      }
+      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+        return success(session());
+      }
+      if (url.endsWith("/prompt")) {
+        promptCalls += 1;
+        return stream(
+          promptCalls === 1
+            ? unconfirmedToolA()
+            : [
+                {
+                  kind: "tool",
+                  id: "turn-b:call-b",
+                  name: "task_b",
+                  status: "running",
+                  startedAt: Date.now() - 1000,
+                },
+                { kind: "finalizing" },
+              ],
+        );
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+    await sendPrompt("Первый вопрос");
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    await sendPrompt("Второй вопрос");
+    expect(await screen.findByTestId("opencode-turn-status")).toHaveTextContent(
+      "Результат не подтверждён",
+    );
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
+    expect(toolRow("task_b")).toHaveTextContent("выполняется");
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+
+    await waitFor(() => expect(toolRow("task_b")).toHaveTextContent("отменено"));
+    expect(toolRow("task_a")).toHaveTextContent("выполняется");
   });
 });
