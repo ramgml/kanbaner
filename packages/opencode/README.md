@@ -11,8 +11,10 @@ catalog активных chat-моделей, streaming, полный built-in t
 - Панель закрыта по умолчанию; Service подключается только после явного
   открытия. Состояние хранится в `localStorage["kanbaner.opencode.panelOpen"]`,
   последняя session ID — в `localStorage["kanbaner.opencode.sessionId"]`.
-- `Service.ensure({ version: v => v.startsWith("2.2.") })` находит или запускает
-  совместимый Service. Используется `@opencode/client`, не embedded SDK.
+- `Service.ensure({ version })` принимает только strict SemVer major 2.x
+  (`2.minor.patch` с optional prerelease/build, например `2.2.5` или
+  `2.3.1-beta.1`), но не `2.`, `2.foo`, `1.x` или `3.x`. Используется
+  `@opencode/client`, закреплённый на 2.2.5, не embedded SDK.
 - Catalog использует один project location и возвращает whitelist: ID, имена,
   activation, model type и variants. `settings`, `headers`, `body`, credentials
   и Service authentication остаются на сервере.
@@ -20,9 +22,28 @@ catalog активных chat-моделей, streaming, полный built-in t
   Тот же ownership проверяется для history, model switch и prompt.
 - Prompt ждёт `server.connected`, затем вызывает `session.prompt` с заранее
   созданным inbox ID. До `session.inbox.delivered` с этим ID события предыдущего
-  выполнения игнорируются; terminal текущего execution завершает NDJSON. После
-  admission отмена вызывает `session.inbox.cancel` и `session.interrupt`, затем
-  закрывает subscriber-local iterator.
+  выполнения игнорируются. Terminal execution не принимается по типу события:
+  outcome проверяется по canonical history текущего prompt (exact
+  `type=user && id===inboxID`, последний assistant до следующего user), поэтому
+  stale failed/interrupted старого execution не перекрывает canonical success.
+  Если canonical outcome не подтверждён за ограниченное число коротких проверок,
+  NDJSON завершается безопасной ошибкой без upstream-текста.
+- Чужой `session.inbox.cancelled` игнорируется даже после delivered; собственная
+  отмена завершает поток. После admission `session.inbox.cancel` и
+  `session.interrupt` вызываются только при abort сигнала; сбой SSE/iterator не
+  прерывает execution, а сначала пытается canonical resolve.
+- Перед canonical lookup gateway выпускает служебный `finalizing`, который
+  NDJSON transport передаёт клиенту без terminal-семантики. UI показывает
+  стадии `connecting/running/finalizing/done/cancelled/error`; terminal-статус
+  не исчезает после завершения запроса.
+- Если canonical outcome не подтверждён, UI показывает «Результат не подтверждён»
+  и кнопку «Проверить статус». Проверка использует существующий
+  `GET /api/opencode/session/{sessionID}`, не создаёт prompt и не теряет уже
+  streamed-сообщения. Автоматический refresh или retry в этом состоянии
+  запрещён; повтор доступен только для точно не принятого 408/429/5xx запроса
+  и отправляет тот же текст и файлы.
+- System error в history показывается только для последнего assistant последнего
+  user-turn, поэтому ошибка прошлого turn не воскресает после нового ответа.
 - Tool calls объединяются по `assistantMessageID + tool call ID`; history
   загружается через paginated `message.list` и сохраняет running/error states.
 
@@ -114,16 +135,21 @@ server. Поэтому повтор того же request внутри одно�
 ## Проверки
 
 - `packages/opencode/src/gateway.test.ts` — catalog whitelist/tools, ownership,
-  pagination, stream readiness/terminal/abort, tool event mapping и inline files.
+  pagination, stream readiness/finalizing/terminal/abort, canonical outcome,
+  transient lookup retry, tool event mapping и inline files.
+- `packages/opencode/src/gateway-service-version.test.ts` — Service version
+  predicate: accept 2.x (2.2/2.3), reject 1.x/3.x и malformed.
 - `packages/opencode/src/tool-metadata.test.ts` — ordered deny/allow против
   `opencode.jsonc`, отсутствие wildcard/`execute`/сторонних MCP, соответствие
   catalog 11 built-ins + 14 MCP tools.
 - `apps/web/src/server/opencode-http.test.ts` — guard, validation вложений
-  (Base64/UTF-8/сигнатуры/лимиты), публичные ошибки, NDJSON EOF и cancel.
+  (Base64/UTF-8/сигнатуры/лимиты), публичные ошибки, finalizing passthrough,
+  единственный terminal, NDJSON EOF и cancel.
 - `packages/opencode/src/ui.test.tsx` — StrictMode, streaming, model/session
-  races, attachments, две группы tool catalog с предупреждением и stop.
+  races, attachments, turn-статусы, retry/status check, две группы tool catalog
+  с предупреждением и stop.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
   expectedVersion, Bearer и idempotency.
 - `apps/web/e2e/opencode.spec.ts` — desktop/mobile панель, вложения prompt,
-  группы built-in/MCP tools, предупреждение и streaming с mock OpenCode
-  transport в production Chromium.
+  группы built-in/MCP tools, success/unconfirmed статусы, ручная проверка без
+  нового prompt и streaming с mock OpenCode transport в production Chromium.

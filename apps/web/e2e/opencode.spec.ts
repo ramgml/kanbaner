@@ -774,7 +774,9 @@ test("image attachment: preview в composer, optimistic/canonical и после 
 
 test("ошибка upstream в NDJSON сохраняет вложение для повтора до done", async ({ page }) => {
   const mock = await mockOpenCode(page, (call) =>
-    call === 1 ? [{ kind: "error", text: "Модель отклонила вложение" }] : [{ kind: "done" }],
+    call === 1
+      ? [{ kind: "finalizing" }, { kind: "error", text: "Модель отклонила вложение" }]
+      : [{ kind: "finalizing" }, { kind: "done" }],
   );
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
@@ -792,13 +794,14 @@ test("ошибка upstream в NDJSON сохраняет вложение для
 
   await message.fill("Посмотри файл");
   await page.getByRole("button", { name: "Отправить", exact: true }).click();
-  await expect(page.getByTestId("opencode-panel").getByRole("alert")).toContainText(
-    "Модель отклонила вложение",
-  );
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Модель отклонила вложение");
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
   await expect(selected.getByText("notes.txt")).toBeVisible();
 
   await message.fill("Посмотри файл");
   await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(turnStatus).toContainText("Готово");
   await expect(selected).toHaveCount(0);
   expect(mock.promptBodies).toEqual([
     {
@@ -810,4 +813,65 @@ test("ошибка upstream в NDJSON сохраняет вложение для
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
     },
   ]);
+});
+
+test("prompt success: Enter, один POST и сохранённый статус Готово", async ({ page }) => {
+  const mock = await mockOpenCode(page);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка клавиатуры");
+  await message.press("Enter");
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Готово");
+  await expect(turnStatus).toHaveAttribute("role", "status");
+  await expect(page.getByText("Ответ OpenCode", { exact: true })).toBeVisible();
+  await expect(message).toBeEnabled();
+  expect(mock.promptBodies).toEqual([{ text: "Проверка клавиатуры" }]);
+  await expect.poll(() => mock.sessionBodies.length).toBe(1);
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
+  await expect(turnStatus.getByRole("button", { name: "Проверить статус" })).toHaveCount(0);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("unconfirmed: нет авто-GET, Проверить статус делает один GET без нового prompt", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, () => [{ kind: "finalizing" }], [
+    { id: "user:message-0", role: "user", text: "Проверка" },
+  ]);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Проверка");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+  const turnStatus = page.getByTestId("opencode-turn-status");
+  await expect(turnStatus).toContainText("Результат не подтверждён");
+  await expect(turnStatus).toContainText("Не удалось подтвердить результат OpenCode");
+  await expect(turnStatus.getByRole("button", { name: "Повторить запрос" })).toHaveCount(0);
+  await expect(page.getByText("Проверка", { exact: true })).toBeVisible();
+  expect(mock.promptBodies).toHaveLength(1);
+  expect(mock.sessionBodies).toHaveLength(0);
+
+  await turnStatus.getByRole("button", { name: "Проверить статус" }).click();
+  await expect(turnStatus).toContainText("Результат пока не подтверждён");
+  expect(mock.sessionBodies).toHaveLength(1);
+  expect(mock.promptBodies).toHaveLength(1);
+  await expect(page.getByText("Проверка", { exact: true })).toBeVisible();
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
 });

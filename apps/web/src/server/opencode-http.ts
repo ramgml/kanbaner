@@ -312,6 +312,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   }
   let closed = false;
   let terminal = false;
+  let finalizing = false;
   const close = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
     if (closed) return;
     closed = true;
@@ -343,18 +344,30 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
           if (closed) return;
           const mapped = streamEvent(event);
           if (mapped === null) continue;
+          if (mapped.kind === "finalizing") {
+            // Этап перед canonical lookup: не terminal и не подтверждает результат.
+            finalizing = true;
+          }
           if (mapped.kind === "done" || mapped.kind === "cancelled" || mapped.kind === "error") {
             terminal = true;
           }
           if (!emit(controller, mapped)) return;
         }
-        if (!terminal && !signal.aborted) {
-          emit(controller, { kind: "error", text: "OpenCode завершил поток без результата" });
+        if (!terminal && !signal.aborted && !finalizing) {
+          emit(controller, {
+            kind: "error",
+            text: "Не удалось подтвердить результат OpenCode",
+            reason: "unconfirmed",
+          });
         }
         close(controller);
       } catch {
-        if (!closed && !signal.aborted) {
-          emit(controller, { kind: "error", text: "Запрос OpenCode завершился с ошибкой" });
+        if (!closed && !signal.aborted && !terminal && !finalizing) {
+          emit(controller, {
+            kind: "error",
+            text: "Не удалось подтвердить результат OpenCode",
+            reason: "unconfirmed",
+          });
         }
         close(controller);
       } finally {

@@ -327,7 +327,7 @@ describe("OpenCode UI HTTP transport", () => {
     expect(mock.prompt).not.toHaveBeenCalled();
   });
 
-  it("завершает NDJSON после terminal execution", async () => {
+  it("пробрасывает finalizing и завершает NDJSON ровно одним terminal execution", async () => {
     const mock = gateway({
       prompt: vi.fn(async function* () {
         yield event("session.text.delta", {
@@ -336,6 +336,7 @@ describe("OpenCode UI HTTP transport", () => {
           ordinal: 0,
           delta: "Ответ",
         });
+        yield event("session.execution.finalizing", { sessionID: "ses-1" });
         yield event("session.execution.succeeded", { sessionID: "ses-1" });
       }),
     });
@@ -355,7 +356,65 @@ describe("OpenCode UI HTTP transport", () => {
       .map((line) => JSON.parse(line) as { kind: string });
 
     expect(response.headers.get("content-type")).toContain("application/x-ndjson");
-    expect(lines).toEqual([{ kind: "delta", id: "message-1:0", text: "Ответ" }, { kind: "done" }]);
+    expect(lines).toEqual([
+      { kind: "delta", id: "message-1:0", text: "Ответ" },
+      { kind: "finalizing" },
+      { kind: "done" },
+    ]);
+    expect(lines.filter((line) => line.kind === "done")).toHaveLength(1);
+    expect(lines.filter((line) => line.kind === "error")).toHaveLength(0);
+  });
+
+  it("не добавляет terminal error после finalizing и EOF", async () => {
+    const mock = gateway({
+      prompt: vi.fn(async function* () {
+        yield event("session.execution.finalizing", { sessionID: "ses-1" });
+      }),
+    });
+    setOpenCodeGatewayForTests(mock);
+
+    const response = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос" }),
+      }),
+    );
+    const lines = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string });
+
+    expect(lines).toEqual([{ kind: "finalizing" }]);
+  });
+
+  it("не добавляет terminal error после finalizing и stream exception", async () => {
+    const mock = gateway({
+      prompt: vi.fn(async function* () {
+        yield event("session.execution.finalizing", { sessionID: "ses-1" });
+        throw new Error("secret upstream stream");
+      }),
+    });
+    setOpenCodeGatewayForTests(mock);
+
+    const response = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос" }),
+      }),
+    );
+    const text = await response.text();
+
+    expect(
+      text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { kind: string }),
+    ).toEqual([{ kind: "finalizing" }]);
+    expect(text).not.toContain("secret upstream");
   });
 
   it("cancel закрывает prompt signal без записи в закрытый stream", async () => {
@@ -417,7 +476,7 @@ describe("OpenCode UI HTTP transport", () => {
     expect(terminal.done).toBe(true);
   });
 
-  it("stream exception превращается в публичную ошибку без upstream message", async () => {
+  it("stream exception превращается в unconfirmed ошибку без upstream message", async () => {
     const mock = gateway({
       prompt: vi.fn(async function* () {
         throw new Error("secret upstream stream");
@@ -434,8 +493,18 @@ describe("OpenCode UI HTTP transport", () => {
       }),
     );
     const text = await response.text();
+    const lines = text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; text?: string; reason?: string });
 
-    expect(text).toContain('"kind":"error"');
+    expect(lines).toEqual([
+      {
+        kind: "error",
+        text: "Не удалось подтвердить результат OpenCode",
+        reason: "unconfirmed",
+      },
+    ]);
     expect(text).not.toContain("secret upstream");
   });
 

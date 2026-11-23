@@ -134,11 +134,17 @@ export interface OpenCodeGateway {
 }
 
 export interface OpenCodeStreamEvent {
-  readonly kind: "connected" | "delta" | "text" | "tool" | "done" | "cancelled" | "error";
+  readonly kind:
+    "connected" | "delta" | "text" | "tool" | "finalizing" | "done" | "cancelled" | "error";
   readonly id?: string;
   readonly text?: string;
   readonly name?: string;
   readonly status?: "running" | "completed" | "error";
+  /**
+   * Машинный признак ошибки, когда canonical outcome не удалось подтвердить.
+   * UI не повторяет prompt автоматически и предлагает ручную проверку статуса.
+   */
+  readonly reason?: "unconfirmed";
 }
 
 export type OpenCodeGatewayErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "DEPENDENCY_UNAVAILABLE";

@@ -477,6 +477,96 @@ function abortError(): DOMException {
   return new DOMException("Aborted", "AbortError");
 }
 
+type TurnPhase = "connecting" | "running" | "finalizing" | "done" | "cancelled" | "error";
+
+/**
+ * Состояние одного prompt-хода. generation/sessionID не дают stale-ответу
+ * перезаписать новый ход; snapshot текста и файлов нужен для безопасного
+ * повтора только точно не принятого запроса.
+ */
+interface TurnState {
+  readonly generation: number;
+  readonly sessionID: string;
+  readonly userOrdinal: number;
+  readonly phase: TurnPhase;
+  readonly reason: "unconfirmed" | null;
+  readonly errorText: string | null;
+  readonly retryable: boolean;
+  readonly requestText: string;
+  readonly displayText: string;
+  readonly files: readonly File[];
+  readonly optimisticAppended: boolean;
+  readonly checking: boolean;
+  readonly statusNote: string | null;
+}
+
+function terminalPhase(phase: TurnPhase): boolean {
+  return phase === "done" || phase === "cancelled" || phase === "error";
+}
+
+interface PromptAttempt {
+  readonly text: string;
+  readonly displayText: string;
+  readonly files: readonly File[];
+  readonly userOrdinal: number;
+  readonly optimisticAppended: boolean;
+}
+
+function turnPhaseLabel(turn: TurnState): string {
+  switch (turn.phase) {
+    case "connecting":
+      return "Подключаемся…";
+    case "running":
+      return "Выполняется…";
+    case "finalizing":
+      return "Завершаем…";
+    case "done":
+      return "Готово";
+    case "cancelled":
+      return "Остановлено";
+    case "error":
+      return turn.reason === "unconfirmed" ? "Результат не подтверждён" : "Ошибка запроса";
+  }
+}
+
+/**
+ * Ручная проверка canonical history по ordinal текущего user-turn.
+ * Ответ assistant или system error после этого user относится к ходу; всё до
+ * следующего user считается частью того же turn.
+ */
+function canonicalTurnStatus(
+  messages: readonly OpenCodeChatMessage[],
+  ordinal: number,
+): "done" | "error" | "pending" {
+  let userIndex = -1;
+  let current = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    current += 1;
+    if (current === ordinal) {
+      userIndex = index;
+      break;
+    }
+  }
+  if (userIndex < 0) return "pending";
+
+  let answered = false;
+  let failed = false;
+  for (let index = userIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message === undefined) continue;
+    if (message.role === "user") break;
+    if (message.role === "system" && message.id.startsWith("error:")) failed = true;
+    else if (message.role === "assistant" && message.text.trim().length > 0) answered = true;
+  }
+  return failed ? "error" : answered ? "done" : "pending";
+}
+
+function retryableResponseStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
 function readFileBase64(file: File, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -551,7 +641,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [modelPending, setModelPending] = useState(false);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [turn, setTurn] = useState<TurnState | null>(null);
   const [attachedRef, setAttachedRef] = useState<ResourceRef | null>(null);
   const [pendingFiles, setPendingFiles] = useState<readonly File[]>([]);
   const [localImages, setLocalImages] = useState<readonly LocalImageAttachment[]>([]);
@@ -612,7 +704,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const controller = new AbortController();
     initializeAbortRef.current = controller;
     setLoading(true);
-    setError(null);
+    setPanelError(null);
     try {
       const nextCatalog = await request<OpenCodeCatalog>("/api/opencode/catalog", {
         signal: controller.signal,
@@ -640,7 +732,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         generation === generationRef.current &&
         !(reason instanceof Error && reason.name === "AbortError")
       ) {
-        setError(publicError(reason, "OpenCode Service недоступен"));
+        setPanelError(publicError(reason, "OpenCode Service недоступен"));
       }
     } finally {
       if (initializeAbortRef.current === controller) initializeAbortRef.current = null;
@@ -731,7 +823,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const controller = new AbortController();
     modelAbortRef.current = controller;
     setModelPending(true);
-    setError(null);
+    setPanelError(null);
     try {
       await request(`/api/opencode/session/${encodeURIComponent(sessionID)}/model`, {
         method: "POST",
@@ -750,7 +842,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         generation === generationRef.current &&
         !(reason instanceof Error && reason.name === "AbortError")
       ) {
-        setError(publicError(reason, "Не удалось сменить модель"));
+        setPanelError(publicError(reason, "Не удалось сменить модель"));
       }
     } finally {
       if (modelAbortRef.current === controller) modelAbortRef.current = null;
@@ -789,17 +881,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const next = [...pendingFiles, ...incoming];
     const error = selectionValidationError(next.map(attachmentMetadata));
     if (error !== null) {
-      setError(error);
+      setSelectionError(error);
       return;
     }
-    setError(null);
+    setSelectionError(null);
     setPendingFiles(next);
   };
 
   const removeFile = (index: number): void => {
     if (busy) return;
     setPendingFiles((current) => current.filter((_file, currentIndex) => currentIndex !== index));
-    setError(null);
+    setSelectionError(null);
   };
 
   const clearFiles = (): void => {
@@ -807,22 +899,56 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     if (fileInputRef.current !== null) fileInputRef.current.value = "";
   };
 
-  const send = async () => {
-    const text = input.trim();
-    if (text.length === 0 || session === null || busy) return;
+  const runPrompt = async (attempt: PromptAttempt): Promise<void> => {
+    if (session === null || busy) return;
     const sessionID = session.id;
-    const files = pendingFiles;
-    const context = attachedRef === currentRef ? attachedRef : null;
+    const files = attempt.files;
     const generation = beginOperation();
     const controller = new AbortController();
     promptAbortRef.current = controller;
     setPromptPending(true);
-    setError(null);
+    setPanelError(null);
+    setSelectionError(null);
+    setTurn({
+      generation,
+      sessionID,
+      userOrdinal: attempt.userOrdinal,
+      phase: "connecting",
+      reason: null,
+      errorText: null,
+      retryable: false,
+      requestText: attempt.text,
+      displayText: attempt.displayText,
+      files,
+      optimisticAppended: attempt.optimisticAppended,
+      checking: false,
+      statusNote: null,
+    });
 
     const currentGeneration = () => generation === generationRef.current;
     const stale = () => generation !== generationRef.current || controller.signal.aborted;
+    const updateTurn = (update: (current: TurnState) => TurnState): void => {
+      setTurn((current) =>
+        current === null || current.generation !== generation ? current : update(current),
+      );
+    };
+    const advanceTo = (phase: "running" | "finalizing"): void => {
+      updateTurn((current) => {
+        if (terminalPhase(current.phase)) return current;
+        if (phase === "running" && current.phase !== "connecting") return current;
+        return { ...current, phase };
+      });
+    };
+    const settle = (
+      phase: "done" | "cancelled" | "error",
+      patch: Partial<TurnState> = {},
+    ): void => {
+      updateTurn((current) =>
+        terminalPhase(current.phase) ? current : { ...current, phase, ...patch },
+      );
+    };
+
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-    let abnormal = false;
     const appendTool = (event: OpenCodeStreamEvent) => {
       setMessages((current) => {
         if (!currentGeneration()) return current;
@@ -843,6 +969,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     };
 
     let terminal: "done" | "cancelled" | "error" | null = null;
+    let terminalUnconfirmed = false;
+    let sawFinalizing = false;
+    let streamAccepted = false;
     try {
       let payloads: readonly OpenCodeAttachmentPayload[] = [];
       if (files.length > 0) {
@@ -853,52 +982,49 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       // Подготовка вложений отменяема: после каждого await и перед fetch сверяем поколение.
       if (stale()) return;
 
-      const userOrdinal = messages.reduce(
-        (count, message) => count + (message.role === "user" ? 1 : 0),
-        0,
-      );
-      const nextLocalImages: LocalImageAttachment[] = [];
-      payloads.forEach((payload, index) => {
-        if (attachmentKind(payload.name, payload.mime) !== "image") return;
-        const file = files[index];
-        if (file === undefined) return;
-        const url = createObjectUrl(file);
-        if (url === null) return;
-        nextLocalImages.push({
-          sessionID,
-          userOrdinal,
-          attachmentIndex: index,
-          name: payload.name,
-          mime: payload.mime,
-          size: file.size,
-          file,
-          url,
+      if (!attempt.optimisticAppended) {
+        const nextLocalImages: LocalImageAttachment[] = [];
+        payloads.forEach((payload, index) => {
+          if (attachmentKind(payload.name, payload.mime) !== "image") return;
+          const file = files[index];
+          if (file === undefined) return;
+          const url = createObjectUrl(file);
+          if (url === null) return;
+          nextLocalImages.push({
+            sessionID,
+            userOrdinal: attempt.userOrdinal,
+            attachmentIndex: index,
+            name: payload.name,
+            mime: payload.mime,
+            size: file.size,
+            file,
+            url,
+          });
         });
-      });
 
-      const prompt = context === null ? text : `Контекст: ${context}\n\n${text}`;
-      const userMessage: OpenCodeChatMessage = {
-        id: `user:optimistic:${Date.now()}`,
-        role: "user",
-        text,
-        ...(payloads.length === 0
-          ? {}
-          : {
-              attachments: payloads.map((payload, index) => ({
-                name: payload.name,
-                mime: payload.mime,
-                size: files[index]?.size ?? 0,
-              })),
-            }),
-      };
-      setInput("");
-      if (nextLocalImages.length > 0) {
-        setLocalImages((current) => [...current, ...nextLocalImages]);
+        const userMessage: OpenCodeChatMessage = {
+          id: `user:optimistic:${Date.now()}`,
+          role: "user",
+          text: attempt.displayText,
+          ...(payloads.length === 0
+            ? {}
+            : {
+                attachments: payloads.map((payload, index) => ({
+                  name: payload.name,
+                  mime: payload.mime,
+                  size: files[index]?.size ?? 0,
+                })),
+              }),
+        };
+        setInput("");
+        if (nextLocalImages.length > 0) {
+          setLocalImages((current) => [...current, ...nextLocalImages]);
+        }
+        setMessages((current) => (currentGeneration() ? [...current, userMessage] : current));
+        updateTurn((current) => ({ ...current, optimisticAppended: true }));
       }
-      setMessages((current) => (currentGeneration() ? [...current, userMessage] : current));
 
       if (stale()) return;
-      abnormal = true;
       const response = await fetch(
         `/api/opencode/session/${encodeURIComponent(sessionID)}/prompt`,
         {
@@ -909,7 +1035,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             "x-kanbaner-client": "ui",
           },
           body: JSON.stringify({
-            text: prompt,
+            text: attempt.text,
             ...(payloads.length === 0 ? {} : { files: payloads }),
           }),
           signal: controller.signal,
@@ -917,6 +1043,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       );
       if (!response.ok) await envelope<never>(response);
       if (response.body === null) throw new Error("EMPTY_OPENCODE_STREAM");
+      streamAccepted = true;
 
       const streamReader = response.body.getReader();
       reader = streamReader;
@@ -925,7 +1052,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       const processLine = (line: string): void => {
         if (line.trim().length === 0 || !currentGeneration()) return;
         const event = JSON.parse(line) as OpenCodeStreamEvent;
-        if (event.kind === "delta") {
+        if (event.kind === "connected") {
+          advanceTo("running");
+        } else if (event.kind === "delta") {
+          advanceTo("running");
           const streamID = `streaming:${event.id ?? "default"}`;
           setMessages((current) => {
             if (!currentGeneration()) return current;
@@ -942,6 +1072,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             return [...current, { id: streamID, role: "assistant", text: event.text ?? "" }];
           });
         } else if (event.kind === "text") {
+          advanceTo("running");
           const streamID = `streaming:${event.id ?? "default"}`;
           const finalID = `assistant:${event.id ?? `optimistic:${Date.now()}`}`;
           setMessages((current) => {
@@ -958,12 +1089,29 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             return [...current.slice(0, index), next, ...current.slice(index + 1)];
           });
         } else if (event.kind === "tool") {
+          advanceTo("running");
           appendTool(event);
+        } else if (event.kind === "finalizing") {
+          sawFinalizing = true;
+          advanceTo("finalizing");
         } else if (event.kind === "error") {
           terminal = "error";
-          if (currentGeneration()) setError(event.text ?? "Запрос OpenCode завершился с ошибкой");
+          terminalUnconfirmed = event.reason === "unconfirmed";
+          settle("error", {
+            reason: terminalUnconfirmed ? "unconfirmed" : null,
+            errorText: event.text ?? "Запрос OpenCode завершился с ошибкой",
+            retryable: false,
+            statusNote: null,
+          });
         } else if (event.kind === "done" || event.kind === "cancelled") {
           terminal = event.kind;
+          terminalUnconfirmed = false;
+          settle(event.kind, {
+            reason: null,
+            errorText: null,
+            retryable: false,
+            statusNote: null,
+          });
         }
       };
 
@@ -977,14 +1125,24 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       }
       buffer += decoder.decode();
       if (buffer.length > 0) processLine(buffer);
-      if (terminal === null) throw new Error("INCOMPLETE_OPENCODE_STREAM");
-      abnormal = false;
+      if (terminal === null) {
+        if (!sawFinalizing) throw new Error("INCOMPLETE_OPENCODE_STREAM");
+        // Поток оборвался после «Завершаем»: результат не подтверждён, streamed
+        // текст сохраняется, автоматический canonical refresh запрещён.
+        settle("error", {
+          reason: "unconfirmed",
+          errorText: "Не удалось подтвердить результат OpenCode",
+          retryable: false,
+          statusNote: null,
+        });
+        return;
+      }
       if (currentGeneration()) {
         if (terminal === "done") {
           setAttachedRef(null);
           clearFiles();
         }
-        refreshSession(sessionID, generation);
+        if (!terminalUnconfirmed) refreshSession(sessionID, generation);
       }
     } catch (reason) {
       const stoppedByUser = controller.signal.aborted;
@@ -992,11 +1150,37 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (!stoppedByUser) controller.abort();
       if (currentGeneration()) {
         if (stoppedByUser) {
-          setError(null);
+          settle("cancelled", {
+            reason: null,
+            errorText: null,
+            retryable: false,
+            statusNote: null,
+          });
+        } else if (reason instanceof ApiError) {
+          // HTTP-ответ до NDJSON: prompt точно не принят. 4xx не повторяем.
+          settle("error", {
+            reason: null,
+            errorText: reason.message,
+            retryable: retryableResponseStatus(reason.status),
+            statusNote: null,
+          });
+        } else if (!streamAccepted) {
+          // Сбой до получения stream body: prompt не был принят.
+          settle("error", {
+            reason: null,
+            errorText: publicError(reason, "Запрос OpenCode завершился с ошибкой"),
+            retryable: true,
+            statusNote: null,
+          });
         } else {
-          setError(publicError(reason, "Запрос OpenCode завершился с ошибкой"));
+          // После admission нельзя отличить сбой от выполненного prompt.
+          settle("error", {
+            reason: "unconfirmed",
+            errorText: "Не удалось подтвердить результат OpenCode",
+            retryable: false,
+            statusNote: null,
+          });
         }
-        if (abnormal) refreshSession(sessionID, generation);
       }
     } finally {
       if (reader !== null) {
@@ -1011,6 +1195,103 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     }
   };
 
+  const send = async (): Promise<void> => {
+    const text = input.trim();
+    if (text.length === 0 || session === null || busy) return;
+    const context = attachedRef === currentRef ? attachedRef : null;
+    const userOrdinal = messages.reduce(
+      (count, message) => count + (message.role === "user" ? 1 : 0),
+      0,
+    );
+    await runPrompt({
+      text: context === null ? text : `Контекст: ${context}\n\n${text}`,
+      displayText: text,
+      files: pendingFiles,
+      userOrdinal,
+      optimisticAppended: false,
+    });
+  };
+
+  const retryTurn = (): void => {
+    if (turn === null || busy || turn.generation !== generationRef.current || !turn.retryable) {
+      return;
+    }
+    void runPrompt({
+      text: turn.requestText,
+      displayText: turn.displayText,
+      files: turn.files,
+      userOrdinal: turn.userOrdinal,
+      optimisticAppended: turn.optimisticAppended,
+    });
+  };
+
+  const checkTurnStatus = async (): Promise<void> => {
+    if (turn === null || busy || turn.checking || turn.generation !== generationRef.current) return;
+    const generation = turn.generation;
+    const sessionID = turn.sessionID;
+    const userOrdinal = turn.userOrdinal;
+    const controller = new AbortController();
+    refreshControllersRef.current.add(controller);
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    setTurn((current) =>
+      current !== null && current.generation === generation
+        ? { ...current, checking: true, statusNote: null }
+        : current,
+    );
+    try {
+      const restored = await request<OpenCodeSessionView>(
+        `/api/opencode/session/${encodeURIComponent(sessionID)}`,
+        { signal: controller.signal },
+      );
+      if (generation !== generationRef.current) return;
+      const status = canonicalTurnStatus(restored.messages, userOrdinal);
+      if (status === "pending") {
+        // Не заменяем streamed-сообщения: canonical ответ ещё не готов.
+        setTurn((current) =>
+          current !== null && current.generation === generation
+            ? {
+                ...current,
+                checking: false,
+                statusNote: "Результат пока не подтверждён. Проверьте ещё раз позже.",
+              }
+            : current,
+        );
+        return;
+      }
+      applySession(restored, generation);
+      setTurn((current) =>
+        current !== null && current.generation === generation
+          ? {
+              ...current,
+              checking: false,
+              phase: status === "done" ? "done" : "error",
+              reason: null,
+              errorText: status === "error" ? "OpenCode сообщил об ошибке" : null,
+              retryable: false,
+              statusNote: null,
+            }
+          : current,
+      );
+    } catch (reason) {
+      if (generation !== generationRef.current) return;
+      setTurn((current) =>
+        current !== null && current.generation === generation
+          ? {
+              ...current,
+              checking: false,
+              statusNote: `Не удалось проверить статус: ${publicError(
+                reason,
+                "OpenCode недоступен",
+              )}`,
+            }
+          : current,
+      );
+    } finally {
+      window.clearTimeout(timeout);
+      refreshControllersRef.current.delete(controller);
+    }
+  };
+
   const newChat = async () => {
     if (catalog === null || busy) return;
     const generation = beginOperation();
@@ -1019,7 +1300,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     setCreating(true);
     setAttachedRef(null);
     clearFiles();
-    setError(null);
+    setPanelError(null);
     try {
       await createSession(selectedModel ?? undefined, generation, controller.signal);
     } catch (reason) {
@@ -1027,13 +1308,18 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         generation === generationRef.current &&
         !(reason instanceof Error && reason.name === "AbortError")
       ) {
-        setError(publicError(reason, "Не удалось создать сессию"));
+        setPanelError(publicError(reason, "Не удалось создать сессию"));
       }
     } finally {
       if (initializeAbortRef.current === controller) initializeAbortRef.current = null;
       if (generation === generationRef.current) setCreating(false);
     }
   };
+
+  const visibleTurn =
+    turn !== null && turn.generation === generationRef.current && turn.sessionID === session?.id
+      ? turn
+      : null;
 
   return (
     <section
@@ -1152,13 +1438,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         {!loading && creating ? (
           <p className="text-sm text-muted-foreground">Создаём сессию…</p>
         ) : null}
-        {error !== null ? (
+        {panelError !== null ? (
           <div
             role="alert"
             className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
           >
             <div className="flex items-center justify-between gap-2">
-              <span>{error}</span>
+              <span>{panelError}</span>
               <button
                 type="button"
                 disabled={busy}
@@ -1170,7 +1456,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             </div>
           </div>
         ) : null}
-        {!loading && !creating && messages.length === 0 && error === null ? (
+        {!loading && !creating && messages.length === 0 && panelError === null ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
             <Sparkles aria-hidden="true" className="size-6" />
             <p>Спросите о задачах, заметках или попросите изменить их.</p>
@@ -1240,6 +1526,56 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         <div ref={messagesEndRef} />
       </div>
 
+      {visibleTurn !== null ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="opencode-turn-status"
+          className="border-t p-2 text-sm"
+        >
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <span
+              className={
+                visibleTurn.phase === "error"
+                  ? "min-w-0 break-words text-destructive"
+                  : "min-w-0 break-words text-muted-foreground"
+              }
+            >
+              {visibleTurn.phase === "error" && visibleTurn.errorText !== null
+                ? `${turnPhaseLabel(visibleTurn)}: ${visibleTurn.errorText}`
+                : turnPhaseLabel(visibleTurn)}
+            </span>
+            {visibleTurn.retryable || visibleTurn.reason === "unconfirmed" ? (
+              <div className="flex shrink-0 items-center gap-1">
+                {visibleTurn.retryable ? (
+                  <button type="button" disabled={busy} onClick={retryTurn} className={buttonClass}>
+                    <RefreshCw aria-hidden="true" className="size-3.5" /> Повторить запрос
+                  </button>
+                ) : null}
+                {visibleTurn.reason === "unconfirmed" ? (
+                  <button
+                    type="button"
+                    disabled={busy || visibleTurn.checking}
+                    onClick={() => void checkTurnStatus()}
+                    className={buttonClass}
+                  >
+                    {visibleTurn.checking ? (
+                      <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw aria-hidden="true" className="size-3.5" />
+                    )}
+                    Проверить статус
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {visibleTurn.statusNote !== null ? (
+            <p className="mt-1 text-xs text-muted-foreground">{visibleTurn.statusNote}</p>
+          ) : null}
+        </div>
+      ) : null}
+
       {currentRef !== null ? (
         <div className="border-t p-2">
           <button
@@ -1266,6 +1602,11 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             void send();
           }}
         >
+          {selectionError !== null ? (
+            <p role="alert" className="text-xs text-destructive">
+              {selectionError}
+            </p>
+          ) : null}
           {pendingFiles.length > 0 ? (
             <ul aria-label="Выбранные файлы" className="flex max-w-full flex-wrap gap-1">
               {pendingFiles.map((file, index) => (
