@@ -1,7 +1,7 @@
 ---
 id: KAN-061
 title: Компактное представление tool calls
-status: review
+status: in_progress
 stage: 8
 priority: high
 owner: worker-kan-061
@@ -42,6 +42,7 @@ specs:
 Разрешено:
 
 - `packages/opencode/src/ui.tsx`, `ui.test.tsx`;
+- `packages/opencode/src/tool-call.tsx` и связанные focused-тесты;
 - при необходимости `packages/opencode/src/types.ts`, `gateway.ts` и их тесты;
 - `packages/opencode/README.md`;
 - `apps/web/e2e/opencode.spec.ts`;
@@ -88,7 +89,12 @@ specs:
   входит, поскольку roadmap делает её опциональной.
 - 2026-11-23 — Worker реализовал compact disclosure, duration и canonical
   timings. Коммит `4fb90ff`; gateway 45/45, UI 57/57, E2E 13/13, полный
-  `pnpm check` — 139 files / 1927 tests. Статус `review`.
+  `pnpm check` — 139 files / 1927 tests.
+- 2026-11-23 — Ревью нашло high: terminal одного prompt завершал tools других
+  ходов и non-admission мог изменить старый running tool. Также требуются
+  aborted streaming normalization, representative v1 fixture и `aria-live=off`
+  для ticking duration. Задача возвращена в `in_progress`; новый
+  `tool-call.tsx` явно добавлен во владение.
 
 ## Итог
 
