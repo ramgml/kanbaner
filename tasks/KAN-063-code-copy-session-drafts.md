@@ -1,7 +1,7 @@
 ---
 id: KAN-063
 title: Копирование кода и черновики по OpenCode-сессиям
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-063
@@ -95,6 +95,9 @@ specs:
   worktree; статус `in_progress`. Оркестратор согласовал additive
   `codeBlockAction` в `markdown-ui`, bounded draft limits и safe fallback для
   существующего last session ID.
+- 2026-11-23 — Worker реализовал copy action и per-session drafts. Коммит
+  `0ab7b14`; focused unit 36/36 + UI 76/76, E2E 21/21, полный `pnpm check` —
+  143 files / 2003 tests. Статус `review`.
 
 ## Итог
 
