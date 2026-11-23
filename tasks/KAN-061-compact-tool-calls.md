@@ -1,13 +1,13 @@
 ---
 id: KAN-061
 title: Компактное представление tool calls
-status: backlog
+status: in_progress
 stage: 8
 priority: high
-owner: unassigned
-blocked_by: [KAN-060]
-branch: null
-worktree: null
+owner: worker-kan-061
+blocked_by: []
+branch: feat/kan-061-compact-tool-calls
+worktree: .worktrees/kan-061-compact-tool-calls
 created: 2026-11-23
 updated: 2026-11-23
 specs:
@@ -82,7 +82,10 @@ specs:
 
 ## Журнал
 
-- 2026-11-23 — Задача создана по пункту 2 roadmap; ожидает KAN-060.
+- 2026-11-23 — Задача создана по пункту 2 roadmap; ожидала KAN-060.
+- 2026-11-23 — KAN-060 завершена. Назначен `worker-kan-061`, создана ветка и
+  worktree; статус `in_progress`. Группировка вызовов в минимальный срез не
+  входит, поскольку roadmap делает её опциональной.
 
 ## Итог
 
