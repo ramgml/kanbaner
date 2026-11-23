@@ -218,7 +218,7 @@ describe("OpenCodePanel", () => {
     expect(screen.queryByText("Черновой ответ")).toBeNull();
 
     const promptCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/prompt"));
-    expect(JSON.parse(String(promptCall?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(promptCall?.[1]?.body))).toMatchObject({
       text: "Контекст: kanbaner.notes:note:note-1\n\nОбнови задачу",
     });
     expect(screen.queryByRole("button", { name: "Убрать контекст" })).toBeNull();
@@ -388,6 +388,50 @@ describe("OpenCodePanel", () => {
     expect(promptSignal?.aborted).toBe(true);
   });
 
+  it("rejected stream после admission даёт unconfirmed без retry и второго POST", async () => {
+    let promptCalls = 0;
+    let pullCount = 0;
+    const broken = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pullCount += 1;
+        if (pullCount === 1) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `${JSON.stringify({ kind: "delta", id: "message-1:0", text: "Черновик" })}\n`,
+            ),
+          );
+          return;
+        }
+        controller.error(new Error("network reset after admission"));
+      },
+    });
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && init?.method === "POST") {
+        return Promise.resolve(success(session()));
+      }
+      if (url.endsWith("/prompt")) {
+        promptCalls += 1;
+        return Promise.resolve(new Response(broken));
+      }
+      return Promise.reject(new Error(`Unexpected fetch ${url}`));
+    });
+    render(<OpenCodePanel />);
+
+    const input = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "Запрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(status).toHaveTextContent("Проверить статус");
+    expect(screen.queryByRole("button", { name: "Повторить запрос" })).toBeNull();
+    expect(screen.getByText("Черновик")).toBeVisible();
+    expect(promptCalls).toBe(1);
+  });
+
   it("не удерживает composer на зависшем canonical refresh", async () => {
     fetchMock.mockImplementation((input, init) => {
       const url = String(input);
@@ -453,7 +497,9 @@ describe("OpenCodePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
 
     const promptCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/prompt"));
-    expect(JSON.parse(String(promptCall?.[1]?.body))).toEqual({ text: "Без старого контекста" });
+    expect(JSON.parse(String(promptCall?.[1]?.body))).toMatchObject({
+      text: "Без старого контекста",
+    });
   });
 
   it("Stop aborts fetch, очищает optimistic stream и возвращает управление", async () => {
@@ -673,10 +719,10 @@ describe("OpenCodePanel", () => {
 
     await waitFor(() => expect(screen.queryByText("5 B")).toBeNull());
     expect(promptBodies).toEqual([
-      {
+      expect.objectContaining({
         text: "Посмотри файл",
         files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
-      },
+      }),
     ]);
   });
 
@@ -927,7 +973,7 @@ describe("OpenCodePanel", () => {
 
     requireReader(readers).finish("aGVsbG8=");
     await waitFor(() => expect(promptBodies).toHaveLength(1));
-    expect(promptBodies[0]).toEqual({
+    expect(promptBodies[0]).toMatchObject({
       text: "Посмотри файл",
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
     });
@@ -972,7 +1018,7 @@ describe("OpenCodePanel", () => {
 
     requireReader(readers).finish("aGVsbG8=");
     await waitFor(() => expect(promptBodies).toHaveLength(1));
-    expect(promptBodies[0]).toEqual({
+    expect(promptBodies[0]).toMatchObject({
       text: "Контекст: kanbaner.notes:note:note-1\n\nПосмотри файл",
       files: [{ name: "notes.txt", mime: "text/plain", base64: "aGVsbG8=" }],
     });
@@ -1160,28 +1206,34 @@ describe("OpenCodePanel", () => {
 
   it("Проверить статус: pending сохраняет сообщения, success применяет canonical без prompt", async () => {
     const promptBodies: unknown[] = [];
-    const sessionResponses: Array<() => Response> = [
+    const statusResponses: Array<() => Response> = [
       () =>
         success({
-          ...session(),
-          messages: [{ id: "user:1", role: "user", text: "Вопрос" }],
+          session: {
+            ...session(),
+            messages: [{ id: "user:1", role: "user", text: "Вопрос" }],
+          },
+          outcome: "pending",
         }),
       () =>
         success({
-          ...session(),
-          messages: [
-            { id: "user:1", role: "user", text: "Вопрос" },
-            { id: "assistant:1", role: "assistant", text: "Канонический ответ" },
-          ],
+          session: {
+            ...session(),
+            messages: [
+              { id: "user:1", role: "user", text: "Вопрос" },
+              { id: "assistant:1", role: "assistant", text: "Канонический ответ" },
+            ],
+          },
+          outcome: "done",
         }),
     ];
     fetchMock.mockImplementation(async (input, init) => {
       const url = String(input);
       if (url === "/api/opencode/catalog") return success(catalog);
       if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
-      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
-        const next = sessionResponses.shift();
-        if (next === undefined) throw new Error("Unexpected session GET");
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        const next = statusResponses.shift();
+        if (next === undefined) throw new Error("Unexpected status GET");
         return next();
       }
       if (url.endsWith("/prompt")) {
@@ -1200,19 +1252,19 @@ describe("OpenCodePanel", () => {
     const status = await screen.findByTestId("opencode-turn-status");
     expect(status).toHaveTextContent("Результат не подтверждён");
     expect(promptBodies).toHaveLength(1);
-    expect(sessionResponses).toHaveLength(2);
+    expect(statusResponses).toHaveLength(2);
     expect(screen.getByText("Вопрос")).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
     await waitFor(() => expect(status).toHaveTextContent("Результат пока не подтверждён"));
-    expect(sessionResponses).toHaveLength(1);
+    expect(statusResponses).toHaveLength(1);
     expect(promptBodies).toHaveLength(1);
     expect(screen.getByText("Вопрос")).toBeVisible();
     expect(screen.queryByText("Канонический ответ")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
     await waitFor(() => expect(status).toHaveTextContent("Готово"));
-    expect(sessionResponses).toHaveLength(0);
+    expect(statusResponses).toHaveLength(0);
     expect(promptBodies).toHaveLength(1);
     expect(screen.getByText("Канонический ответ")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Проверить статус" })).toBeNull();
@@ -1224,15 +1276,18 @@ describe("OpenCodePanel", () => {
       const url = String(input);
       if (url === "/api/opencode/catalog") return success(catalog);
       if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
-      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
         getCount += 1;
         if (getCount === 1) return failure(503);
         return success({
-          ...session(),
-          messages: [
-            { id: "user:1", role: "user", text: "Вопрос" },
-            { id: "error:assistant-1", role: "system", text: "Canonical failure" },
-          ],
+          session: {
+            ...session(),
+            messages: [
+              { id: "user:1", role: "user", text: "Вопрос" },
+              { id: "error:assistant-1", role: "system", text: "Canonical failure" },
+            ],
+          },
+          outcome: "error",
         });
       }
       if (url.endsWith("/prompt")) return stream([{ kind: "finalizing" }]);
@@ -1269,7 +1324,7 @@ describe("OpenCodePanel", () => {
         sessionPosts += 1;
         return Promise.resolve(success(session(sessionPosts === 1 ? "ses-1" : "ses-2")));
       }
-      if (url === "/api/opencode/session/ses-1" && init?.method === undefined) {
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
         statusSignal = init?.signal;
         return new Promise<Response>((resolve) => {
           resolveStatus = resolve;
@@ -1294,17 +1349,259 @@ describe("OpenCodePanel", () => {
     await waitFor(() => expect(sessionPosts).toBe(2));
     resolveStatus(
       success({
-        ...session("ses-1"),
-        messages: [
-          { id: "user:1", role: "user", text: "Старый вопрос" },
-          { id: "assistant:stale", role: "assistant", text: "Устаревший ответ" },
-        ],
+        session: {
+          ...session("ses-1"),
+          messages: [
+            { id: "user:1", role: "user", text: "Старый вопрос" },
+            { id: "assistant:stale", role: "assistant", text: "Устаревший ответ" },
+          ],
+        },
+        outcome: "done",
       }),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(screen.queryByText("Устаревший ответ")).toBeNull();
     expect(screen.queryByTestId("opencode-turn-status")).toBeNull();
+  });
+
+  it("ручной canonical error сохраняет streamed assistant текст", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        return success({
+          session: {
+            ...session(),
+            messages: [
+              { id: "user:1", role: "user", text: "Вопрос" },
+              { id: "error:assistant-1", role: "system", text: "Сбой canonical" },
+            ],
+          },
+          outcome: "error",
+        });
+      }
+      if (url.endsWith("/prompt")) {
+        return stream([
+          { kind: "delta", id: "message-1:0", text: "Черновик" },
+          { kind: "finalizing" },
+        ]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(screen.getByText("Черновик")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("OpenCode сообщил об ошибке"));
+    expect(screen.getByText("Черновик")).toBeVisible();
+    expect(screen.queryByText("Сбой canonical")).toBeNull();
+  });
+
+  it("ручной canonical cancelled сохраняет streamed assistant текст", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        return success({ session: session(), outcome: "cancelled" });
+      }
+      if (url.endsWith("/prompt")) {
+        return stream([
+          { kind: "delta", id: "message-1:0", text: "Черновик" },
+          { kind: "finalizing" },
+        ]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Результат не подтверждён"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("Остановлено"));
+    expect(screen.getByText("Черновик")).toBeVisible();
+  });
+
+  it("ручной canonical done принимает пустой успешный ответ", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        return success({ session: session(), outcome: "done" });
+      }
+      if (url.endsWith("/prompt")) return stream([{ kind: "finalizing" }]);
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Результат не подтверждён"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+    expect(screen.queryByRole("button", { name: "Проверить статус" })).toBeNull();
+    expect(message).toBeEnabled();
+  });
+
+  it("tool-only успешный stream завершается done без assistant текста", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1") {
+        return success({
+          ...session(),
+          messages: [
+            {
+              id: "message-1:call-1",
+              role: "tool",
+              name: "task_get",
+              status: "completed",
+              text: "Готово",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/prompt")) {
+        return stream([
+          { kind: "tool", id: "message-1:call-1", name: "task_get", status: "running", text: "" },
+          { kind: "tool", id: "message-1:call-1", status: "completed", text: "Готово" },
+          { kind: "finalizing" },
+          { kind: "done" },
+        ]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+    expect(screen.getByText("task_get")).toBeVisible();
+    expect(screen.getAllByText("Готово").length).toBeGreaterThan(0);
+  });
+
+  it("показывает стадии prompt: Подключаемся → Выполняется → Завершаем → Готово", async () => {
+    let writer: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        writer = controller;
+      },
+    });
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1") return success(session());
+      if (url.endsWith("/prompt")) return new Response(body);
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Подключаемся");
+    const encode = (event: unknown): Uint8Array =>
+      new TextEncoder().encode(`${JSON.stringify(event)}\n`);
+    if (writer === undefined) throw new Error("stream controller is missing");
+
+    writer.enqueue(encode({ kind: "delta", id: "message-1:0", text: "Ответ" }));
+    await waitFor(() => expect(status).toHaveTextContent("Выполняется"));
+    writer.enqueue(encode({ kind: "finalizing" }));
+    await waitFor(() => expect(status).toHaveTextContent("Завершаем"));
+    writer.enqueue(encode({ kind: "done" }));
+    writer.close();
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+  });
+
+  it("ручная проверка второго prompt использует его stable ID, а не ordinal", async () => {
+    const promptBodies: Array<{ turnID: string }> = [];
+    const statusQueries: string[] = [];
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=") && init?.method === undefined) {
+        const turnID = decodeURIComponent(url.split("turnID=")[1] ?? "");
+        statusQueries.push(turnID);
+        const second = promptBodies[1]?.turnID;
+        if (turnID === second) {
+          return success({
+            session: {
+              ...session(),
+              messages: [
+                { id: second, role: "user", text: "Второй" },
+                { id: "assistant:second", role: "assistant", text: "Второй ответ" },
+              ],
+            },
+            outcome: "done",
+          });
+        }
+        return success({ session: session(), outcome: "missing" });
+      }
+      if (url.endsWith("/prompt")) {
+        promptBodies.push(JSON.parse(String(init?.body)) as { turnID: string });
+        return stream([{ kind: "finalizing" }]);
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Первый" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent(
+        "Результат не подтверждён",
+      ),
+    );
+
+    fireEvent.change(message, { target: { value: "Второй" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent(
+        "Результат не подтверждён",
+      ),
+    );
+    expect(promptBodies).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(screen.getByText("Второй ответ")).toBeVisible();
+    expect(statusQueries).not.toContain(promptBodies[0]?.turnID);
+    expect(statusQueries.at(-1)).toBe(promptBodies[1]?.turnID);
   });
 
   it("показывает thumbnail только для image в composer и освобождает URL", async () => {

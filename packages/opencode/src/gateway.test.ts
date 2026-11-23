@@ -836,6 +836,116 @@ describe("OpenCode gateway", () => {
     );
   });
 
+  it("использует client turnID и не выпускает admitted, если Service сохранил ID", async () => {
+    const turnID = "msg_client0001";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: turnID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({ id: turnID, sessionID: "ses-1", delivery: "queue" }));
+    const list = vi.fn(async () => canonicalTurn(turnID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ id: turnID }));
+    expect(received.map((item) => item.type)).not.toContain("kanbaner.turn.admitted");
+    expect(streamEvent(last(received))).toEqual({ kind: "done" });
+  });
+
+  it("явно связывает admitted ID, если Service подменил client turnID", async () => {
+    const turnID = "msg_client0002";
+    const admittedID = "msg_server0002";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: admittedID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({
+      id: admittedID,
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const list = vi.fn(async () => canonicalTurn(admittedID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    const admitted = received.find((item) => (item.type as string) === "kanbaner.turn.admitted");
+
+    expect(admitted).toBeDefined();
+    expect(streamEvent(admitted as OpenCodeEvent)).toEqual({ kind: "admitted", id: admittedID });
+    const status = await gateway.getTurnStatus("ses-1", turnID);
+    expect(status.outcome).toBe("done");
+  });
+
+  it("getTurnStatus вычисляет outcome ровно по переданному turn ID", async () => {
+    const doneID = "msg_done000001";
+    const errorID = "msg_error00001";
+    const list = vi.fn(async () => ({
+      data: [
+        { id: doneID, type: "user", text: "Вопрос" },
+        completedAssistant("assistant-done"),
+        { id: errorID, type: "user", text: "Второй" },
+        failedAssistant("assistant-error"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+
+    expect((await gateway.getTurnStatus("ses-1", doneID)).outcome).toBe("done");
+    expect((await gateway.getTurnStatus("ses-1", errorID)).outcome).toBe("error");
+    expect((await gateway.getTurnStatus("ses-1", "msg_missing0001")).outcome).toBe("missing");
+    await expect(gateway.getTurnStatus("ses-1", "not-a-turn")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+  });
+
+  it("находит второй prompt по stable ID, если первый отсутствует в canonical history", async () => {
+    const firstID = "msg_first000001";
+    const secondID = "msg_second00001";
+    const list = vi.fn(async () => ({
+      data: [
+        { id: secondID, type: "user", text: "Второй вопрос" },
+        completedAssistant("assistant-second"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+
+    expect((await gateway.getTurnStatus("ses-1", firstID)).outcome).toBe("missing");
+    expect((await gateway.getTurnStatus("ses-1", secondID)).outcome).toBe("done");
+  });
+
   it("принимает stale failed/interrupted как done, если canonical assistant завершён", async () => {
     for (const type of ["session.execution.failed", "session.execution.interrupted"]) {
       const stream = subscription([

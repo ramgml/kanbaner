@@ -51,7 +51,7 @@ TypeScript закреплён на `6.0.x`, а не на актуальном 7.
 | UI primitives | Radix UI | 1.8.x | CLI устанавливает нужный Radix-пакет вместе с компонентом |
 | Иконки | Lucide React | 1.70.x | Единый набор иконок |
 | HTTP-клиент | встроенный `fetch` | — | Без Axios и аналогичных обёрток |
-| OpenCode client | `@opencode/client` | 2.2.5 (pinned) | Только внешний Service через `Service.ensure()` и Promise client; embedded SDK не используется. Версия пакета закреплена. Predicate принимает strict SemVer major 2.x (`2.minor.patch`, optional prerelease/build), включая 2.2 и 2.3, и отклоняет `1.x`, `3.x`, `2.` и malformed-версии; Service 2.3 live не проверялся, пока не установлен |
+| OpenCode client | `@opencode/client` | 2.2.5 (pinned) | Только внешний Service через `Service.ensure()` и Promise client; embedded SDK не используется. Версия пакета закреплена. Predicate принимает strict SemVer major 2.x (`2.minor.patch`, optional prerelease/build), включая 2.2 и 2.3, и отклоняет `1.x`, `3.x`, `2.` и malformed-версии; Service 2.3 live не проверялся, пока не установлен. Для prompt используются `SessionPromptInput.id` (stable client turn ID) и inbox events `session.inbox.delivered`/`session.inbox.cancel` |
 | CLI | `node:util.parseArgs` + встроенный `fetch` | Node.js 24 | Без отдельного command parser и HTTP client; JSON для агентов |
 | Markdown | `react-markdown` + `remark-gfm` | 10.1.x / 4.0.x | Только React-рендер без raw HTML; исходный Markdown хранится доменом, sanitization URL по умолчанию |
 | Визуальный Markdown-редактор | `@blocknote/core` + `@blocknote/react` + `@blocknote/shadcn` | 0.54.x | Блоки, side menu, formatting toolbar и slash-действия в `plugin-notes`; canonical content остаётся Markdown, UI использует существующий shadcn/Tailwind-стек |

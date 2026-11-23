@@ -9,6 +9,7 @@ import { OPENCODE_AGENT_ID } from "./metadata.ts";
 import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
 import {
   isRecord,
+  isOpenCodeTurnID,
   OpenCodeGatewayError,
   stringField,
   truncated,
@@ -38,6 +39,7 @@ const TERMINAL_EVENTS = new Set([
 const UNCONFIRMED_TEXT = "Не удалось подтвердить результат OpenCode";
 const UNCONFIRMED_FIELD = "kanbanerUnconfirmed";
 const FINALIZING_TYPE = "session.execution.finalizing";
+const ADMITTED_TYPE = "kanbaner.turn.admitted";
 const CANONICAL_ATTEMPTS = 3;
 const CANONICAL_DELAY_MS = 50;
 const CANONICAL_DEADLINE_MS = 600;
@@ -255,6 +257,11 @@ export function streamEvent(event: OpenCodeEvent) {
   const data = isRecord(event.data) ? event.data : {};
   // Синтетическое событие gateway перед canonical lookup, не terminal.
   if ((event.type as string) === FINALIZING_TYPE) return { kind: "finalizing" as const };
+  // Синтетическое событие только при подмене admitted ID Service-ом.
+  if ((event.type as string) === ADMITTED_TYPE) {
+    const id = stringField(dataField(data, "turnID"));
+    return { kind: "admitted" as const, ...(id === undefined ? {} : { id }) };
+  }
   switch (event.type) {
     case "server.connected":
       return { kind: "connected" as const };
@@ -497,6 +504,20 @@ function finalizingEvent(sessionID: string): OpenCodeEvent {
   } as unknown as OpenCodeEvent;
 }
 
+/**
+ * Service мог вернуть собственный admitted inbox ID вместо client turn ID.
+ * Событие сообщает UI фактическую identity, чтобы ручная проверка не искала
+ * несуществующий turn.
+ */
+function admittedEvent(sessionID: string, turnID: string): OpenCodeEvent {
+  return {
+    id: `kanbaner-${randomUUID()}`,
+    created: Date.now(),
+    type: ADMITTED_TYPE,
+    data: { sessionID, turnID },
+  } as unknown as OpenCodeEvent;
+}
+
 /** Terminal событие для NDJSON-контракта: только sessionID, без upstream data. */
 function terminalEvent(outcome: "done" | "error" | "cancelled", sessionID: string): OpenCodeEvent {
   return {
@@ -587,6 +608,21 @@ function attachmentPreview(message: unknown, attachmentIndex: number): OpenCodeA
 }
 
 export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
+  /**
+   * Client turn ID → фактический admitted inbox ID. Нужен, если Service
+   * заменил ID: ручная проверка не должна молча искать несуществующий turn.
+   * Размер ограничен, чтобы карта не росла бесконечно.
+   */
+  const turnAliases = new Map<string, string>();
+  const turnKey = (sessionID: string, turnID: string): string => `${sessionID}\u0000${turnID}`;
+  const rememberTurnAlias = (sessionID: string, requested: string, admitted: string): void => {
+    if (requested === admitted) return;
+    turnAliases.set(turnKey(sessionID, requested), admitted);
+    if (turnAliases.size > 256) {
+      const oldest = turnAliases.keys().next().value;
+      if (oldest !== undefined) turnAliases.delete(oldest);
+    }
+  };
   return {
     status: () =>
       translated(async () => {
@@ -658,6 +694,20 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         return sessionView(info, await allMessages(client, sessionID));
       }),
 
+    getTurnStatus: (sessionID, turnID) =>
+      translated(async () => {
+        if (!isOpenCodeTurnID(turnID)) {
+          throw new OpenCodeGatewayError("VALIDATION_ERROR", "Некорректный идентификатор хода");
+        }
+        const info = await ownedSession(client, sessionID);
+        const messages = await allMessages(client, sessionID);
+        const canonicalID = turnAliases.get(turnKey(sessionID, turnID)) ?? turnID;
+        return {
+          session: sessionView(info, messages),
+          outcome: canonicalOutcome(messages, canonicalID),
+        };
+      }),
+
     getAttachmentPreview: (sessionID, messageID, attachmentIndex) =>
       translated(async () => {
         if (!Number.isSafeInteger(attachmentIndex) || attachmentIndex < 0) {
@@ -677,7 +727,10 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         await client.session.switchModel({ sessionID, model });
       }),
 
-    async *prompt(sessionID, text, signal, attachments = []) {
+    async *prompt(sessionID, text, signal, attachments = [], requestedTurnID) {
+      if (requestedTurnID !== undefined && !isOpenCodeTurnID(requestedTurnID)) {
+        throw new OpenCodeGatewayError("VALIDATION_ERROR", "Некорректный идентификатор хода");
+      }
       await ownedSession(client, sessionID);
       if (signal.aborted) return;
 
@@ -691,7 +744,8 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
       let promptStarted = false;
       let promptAdmitted = false;
       let finalizingEmitted = false;
-      let inboxID = `msg_${randomUUID()}`;
+      let inboxID = requestedTurnID ?? `msg_${randomUUID()}`;
+      const clientTurnID = inboxID;
       let cancellation: Promise<void> | undefined;
       let subscriptionClosed = false;
       const closeSubscription = async (): Promise<void> => {
@@ -790,7 +844,7 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         promptStarted = true;
         const admitted = await client.session.prompt({
           sessionID,
-          id: inboxID,
+          id: clientTurnID,
           text,
           ...(attachments.length === 0
             ? {}
@@ -804,9 +858,15 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
           delivery: "queue",
           metadata: { source: "kanbaner" },
         });
-        inboxID = stringField(admitted.id) ?? inboxID;
+        inboxID = stringField(admitted.id) ?? clientTurnID;
         promptAdmitted = true;
+        rememberTurnAlias(sessionID, clientTurnID, inboxID);
         if (signal.aborted) return;
+        if (requestedTurnID !== undefined && inboxID !== requestedTurnID) {
+          // Явная identity, если Service подменил ID: ordinal или client ID
+          // больше не должны использоваться для поиска canonical turn.
+          yield admittedEvent(sessionID, inboxID);
+        }
 
         let delivered = false;
         for (;;) {

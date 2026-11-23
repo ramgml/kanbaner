@@ -7,6 +7,7 @@ import {
 import {
   ATTACHMENT_LIMITS,
   ensureOpenCodeGateway,
+  isOpenCodeTurnID,
   isRecord,
   OpenCodeGatewayError,
   OPENCODE_AGENT_ID,
@@ -209,7 +210,14 @@ export async function handleOpenCodeSessionGet(
   const denied = uiGuard(request);
   if (denied !== null) return denied;
   try {
+    const turnID = new URL(request.url).searchParams.get("turnID");
     const gateway = await getOpenCodeGateway();
+    if (turnID !== null) {
+      if (!isOpenCodeTurnID(turnID)) {
+        return failure("VALIDATION_ERROR", "Некорректный идентификатор хода");
+      }
+      return success(await gateway.getTurnStatus(sessionID, turnID));
+    }
     return success(await gateway.getSession(sessionID));
   } catch (error) {
     return internalError(error);
@@ -280,6 +288,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   if (denied !== null) return denied;
   let gateway: OpenCodeGateway;
   let text: string;
+  let turnID: string | undefined;
   let attachments: readonly OpenCodePromptAttachment[] = [];
   const abortController = new AbortController();
   const signal = abortController.signal;
@@ -297,6 +306,13 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
     if (text.length > 100_000) {
       throw new PublicHttpError("VALIDATION_ERROR", "Текст запроса слишком большой");
     }
+    if (body.turnID !== undefined) {
+      const candidate = body.turnID;
+      if (!isOpenCodeTurnID(candidate)) {
+        throw new PublicHttpError("VALIDATION_ERROR", "Некорректный идентификатор хода");
+      }
+      turnID = candidate;
+    }
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
     gateway = await getOpenCodeGateway();
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
@@ -313,6 +329,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   let closed = false;
   let terminal = false;
   let finalizing = false;
+  let admitted = false;
   const close = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
     if (closed) return;
     closed = true;
@@ -340,10 +357,13 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const event of gateway.prompt(sessionID, text, signal, attachments)) {
+        for await (const event of gateway.prompt(sessionID, text, signal, attachments, turnID)) {
           if (closed) return;
           const mapped = streamEvent(event);
           if (mapped === null) continue;
+          if (mapped.kind === "admitted") {
+            admitted = true;
+          }
           if (mapped.kind === "finalizing") {
             // Этап перед canonical lookup: не terminal и не подтверждает результат.
             finalizing = true;
@@ -361,13 +381,29 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
           });
         }
         close(controller);
-      } catch {
-        if (!closed && !signal.aborted && !terminal && !finalizing) {
-          emit(controller, {
-            kind: "error",
-            text: "Не удалось подтвердить результат OpenCode",
-            reason: "unconfirmed",
-          });
+      } catch (error) {
+        if (!closed && !signal.aborted && !terminal) {
+          if (!finalizing && !admitted && error instanceof OpenCodeGatewayError) {
+            // Gateway гарантирует: OpenCodeGatewayError наружу означает сбой
+            // строго до admission. Это единственный явный server-confirmed
+            // non-admission, кроме HTTP-ответа до NDJSON.
+            emit(controller, {
+              kind: "error",
+              text: error.message,
+              nonAdmission: true,
+              retryable: error.code === "DEPENDENCY_UNAVAILABLE",
+            });
+          } else if (!finalizing) {
+            // Любая неопределённость после возможного admission безопаснее
+            // как unconfirmed: повтор prompt запрещён. После «Завершаем»
+            // terminal не дублируется: клиент сам трактует оборванный поток
+            // как unconfirmed.
+            emit(controller, {
+              kind: "error",
+              text: "Не удалось подтвердить результат OpenCode",
+              reason: "unconfirmed",
+            });
+          }
         }
         close(controller);
       } finally {

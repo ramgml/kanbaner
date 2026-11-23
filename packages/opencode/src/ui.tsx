@@ -42,6 +42,7 @@ import {
   type OpenCodeSessionView,
   type OpenCodeStreamEvent,
   type OpenCodeToolView,
+  type OpenCodeTurnStatus,
 } from "./types.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
 
@@ -487,7 +488,10 @@ type TurnPhase = "connecting" | "running" | "finalizing" | "done" | "cancelled" 
 interface TurnState {
   readonly generation: number;
   readonly sessionID: string;
-  readonly userOrdinal: number;
+  /** Client-generated stable identity; не ordinal и не зависит от history. */
+  readonly turnID: string;
+  /** Фактический admitted ID, если Service его подменил. */
+  readonly admittedTurnID: string | null;
   readonly phase: TurnPhase;
   readonly reason: "unconfirmed" | null;
   readonly errorText: string | null;
@@ -508,7 +512,7 @@ interface PromptAttempt {
   readonly text: string;
   readonly displayText: string;
   readonly files: readonly File[];
-  readonly userOrdinal: number;
+  readonly turnID: string;
   readonly optimisticAppended: boolean;
 }
 
@@ -530,37 +534,16 @@ function turnPhaseLabel(turn: TurnState): string {
 }
 
 /**
- * Ручная проверка canonical history по ordinal текущего user-turn.
- * Ответ assistant или system error после этого user относится к ходу; всё до
- * следующего user считается частью того же turn.
+ * Stable client turn identity, известная ещё до сетевого запроса. Ordinal или
+ * UI-текст не используются: canonical outcome считает сервер по raw history.
  */
-function canonicalTurnStatus(
-  messages: readonly OpenCodeChatMessage[],
-  ordinal: number,
-): "done" | "error" | "pending" {
-  let userIndex = -1;
-  let current = -1;
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message?.role !== "user") continue;
-    current += 1;
-    if (current === ordinal) {
-      userIndex = index;
-      break;
-    }
-  }
-  if (userIndex < 0) return "pending";
-
-  let answered = false;
-  let failed = false;
-  for (let index = userIndex + 1; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message === undefined) continue;
-    if (message.role === "user") break;
-    if (message.role === "system" && message.id.startsWith("error:")) failed = true;
-    else if (message.role === "assistant" && message.text.trim().length > 0) answered = true;
-  }
-  return failed ? "error" : answered ? "done" : "pending";
+function createTurnID(): string {
+  const uuid =
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+  return `msg_${uuid}`;
 }
 
 function retryableResponseStatus(status: number): boolean {
@@ -903,6 +886,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     if (session === null || busy) return;
     const sessionID = session.id;
     const files = attempt.files;
+    const turnID = attempt.turnID;
+    // Ordinal нужен только для сопоставления локальных image preview с
+    // canonical attachment; identity turn — turnID.
+    const userOrdinal = messages.reduce(
+      (count, message) => count + (message.role === "user" ? 1 : 0),
+      0,
+    );
     const generation = beginOperation();
     const controller = new AbortController();
     promptAbortRef.current = controller;
@@ -912,7 +902,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     setTurn({
       generation,
       sessionID,
-      userOrdinal: attempt.userOrdinal,
+      turnID,
+      admittedTurnID: null,
       phase: "connecting",
       reason: null,
       errorText: null,
@@ -971,7 +962,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     let terminal: "done" | "cancelled" | "error" | null = null;
     let terminalUnconfirmed = false;
     let sawFinalizing = false;
-    let streamAccepted = false;
+    let requestSent = false;
     try {
       let payloads: readonly OpenCodeAttachmentPayload[] = [];
       if (files.length > 0) {
@@ -992,7 +983,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           if (url === null) return;
           nextLocalImages.push({
             sessionID,
-            userOrdinal: attempt.userOrdinal,
+            userOrdinal,
             attachmentIndex: index,
             name: payload.name,
             mime: payload.mime,
@@ -1025,6 +1016,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       }
 
       if (stale()) return;
+      requestSent = true;
       const response = await fetch(
         `/api/opencode/session/${encodeURIComponent(sessionID)}/prompt`,
         {
@@ -1036,14 +1028,22 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           },
           body: JSON.stringify({
             text: attempt.text,
+            turnID,
             ...(payloads.length === 0 ? {} : { files: payloads }),
           }),
           signal: controller.signal,
         },
       );
-      if (!response.ok) await envelope<never>(response);
+      if (!response.ok) {
+        // HTTP-ответ до NDJSON — явное server-confirmed non-admission.
+        try {
+          await envelope<never>(response);
+        } catch (reason) {
+          if (reason instanceof ApiError) throw reason;
+          throw new ApiError("Запрос OpenCode отклонён", response.status, "INTERNAL_ERROR");
+        }
+      }
       if (response.body === null) throw new Error("EMPTY_OPENCODE_STREAM");
-      streamAccepted = true;
 
       const streamReader = response.body.getReader();
       reader = streamReader;
@@ -1091,6 +1091,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } else if (event.kind === "tool") {
           advanceTo("running");
           appendTool(event);
+        } else if (event.kind === "admitted") {
+          // Фактическая identity от Service: дальнейшая ручная проверка идёт
+          // по ней, а не по client turnID.
+          updateTurn((current) => ({
+            ...current,
+            admittedTurnID: event.id ?? current.admittedTurnID,
+          }));
         } else if (event.kind === "finalizing") {
           sawFinalizing = true;
           advanceTo("finalizing");
@@ -1100,7 +1107,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           settle("error", {
             reason: terminalUnconfirmed ? "unconfirmed" : null,
             errorText: event.text ?? "Запрос OpenCode завершился с ошибкой",
-            retryable: false,
+            // Retry только для явного server-confirmed non-admission.
+            retryable:
+              !terminalUnconfirmed && event.nonAdmission === true && event.retryable === true,
             statusNote: null,
           });
         } else if (event.kind === "done" || event.kind === "cancelled") {
@@ -1141,8 +1150,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         if (terminal === "done") {
           setAttachedRef(null);
           clearFiles();
+          // Canonical replacement допустим только для подтверждённого done.
+          refreshSession(sessionID, generation);
         }
-        if (!terminalUnconfirmed) refreshSession(sessionID, generation);
       }
     } catch (reason) {
       const stoppedByUser = controller.signal.aborted;
@@ -1157,15 +1167,16 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             statusNote: null,
           });
         } else if (reason instanceof ApiError) {
-          // HTTP-ответ до NDJSON: prompt точно не принят. 4xx не повторяем.
+          // HTTP-ответ до NDJSON — единственное явное server-confirmed
+          // non-admission. Повтор разрешён только для 408/429/5xx.
           settle("error", {
             reason: null,
             errorText: reason.message,
             retryable: retryableResponseStatus(reason.status),
             statusNote: null,
           });
-        } else if (!streamAccepted) {
-          // Сбой до получения stream body: prompt не был принят.
+        } else if (!requestSent) {
+          // Запрос даже не отправлен: безопасно повторить.
           settle("error", {
             reason: null,
             errorText: publicError(reason, "Запрос OpenCode завершился с ошибкой"),
@@ -1173,7 +1184,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             statusNote: null,
           });
         } else {
-          // После admission нельзя отличить сбой от выполненного prompt.
+          // fetch() rejected, пустой body или сбой после отправки: браузер не
+          // доказывает non-admission, сервер мог принять prompt. Retry запрещён.
           settle("error", {
             reason: "unconfirmed",
             errorText: "Не удалось подтвердить результат OpenCode",
@@ -1199,15 +1211,11 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const text = input.trim();
     if (text.length === 0 || session === null || busy) return;
     const context = attachedRef === currentRef ? attachedRef : null;
-    const userOrdinal = messages.reduce(
-      (count, message) => count + (message.role === "user" ? 1 : 0),
-      0,
-    );
     await runPrompt({
       text: context === null ? text : `Контекст: ${context}\n\n${text}`,
       displayText: text,
       files: pendingFiles,
-      userOrdinal,
+      turnID: createTurnID(),
       optimisticAppended: false,
     });
   };
@@ -1220,7 +1228,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       text: turn.requestText,
       displayText: turn.displayText,
       files: turn.files,
-      userOrdinal: turn.userOrdinal,
+      // Повтор — это тот же turn: сохраняем identity, чтобы canonical lookup
+      // нашёл именно его.
+      turnID: turn.turnID,
       optimisticAppended: turn.optimisticAppended,
     });
   };
@@ -1229,7 +1239,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     if (turn === null || busy || turn.checking || turn.generation !== generationRef.current) return;
     const generation = turn.generation;
     const sessionID = turn.sessionID;
-    const userOrdinal = turn.userOrdinal;
+    const turnID = turn.admittedTurnID ?? turn.turnID;
     const controller = new AbortController();
     refreshControllersRef.current.add(controller);
     const timeout = window.setTimeout(() => controller.abort(), 5000);
@@ -1239,34 +1249,44 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         : current,
     );
     try {
-      const restored = await request<OpenCodeSessionView>(
-        `/api/opencode/session/${encodeURIComponent(sessionID)}`,
+      const status = await request<OpenCodeTurnStatus>(
+        `/api/opencode/session/${encodeURIComponent(sessionID)}?turnID=${encodeURIComponent(turnID)}`,
         { signal: controller.signal },
       );
       if (generation !== generationRef.current) return;
-      const status = canonicalTurnStatus(restored.messages, userOrdinal);
-      if (status === "pending") {
-        // Не заменяем streamed-сообщения: canonical ответ ещё не готов.
+      if (status.outcome === "pending" || status.outcome === "missing") {
+        // Canonical outcome ещё не терминален: streamed-сообщения не трогаем.
         setTurn((current) =>
           current !== null && current.generation === generation
             ? {
                 ...current,
                 checking: false,
-                statusNote: "Результат пока не подтверждён. Проверьте ещё раз позже.",
+                statusNote:
+                  status.outcome === "missing"
+                    ? "Ход не найден в истории OpenCode. Результат не подтверждён."
+                    : "Результат пока не подтверждён. Проверьте ещё раз позже.",
               }
             : current,
         );
         return;
       }
-      applySession(restored, generation);
+      if (status.outcome === "done") {
+        // Полный terminal ответ: только здесь допустима canonical замена.
+        applySession(status.session, generation);
+      }
       setTurn((current) =>
         current !== null && current.generation === generation
           ? {
               ...current,
               checking: false,
-              phase: status === "done" ? "done" : "error",
+              phase:
+                status.outcome === "done"
+                  ? "done"
+                  : status.outcome === "cancelled"
+                    ? "cancelled"
+                    : "error",
               reason: null,
-              errorText: status === "error" ? "OpenCode сообщил об ошибке" : null,
+              errorText: status.outcome === "error" ? "OpenCode сообщил об ошибке" : null,
               retryable: false,
               statusNote: null,
             }

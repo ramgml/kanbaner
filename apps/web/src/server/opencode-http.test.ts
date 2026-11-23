@@ -49,6 +49,7 @@ function gateway(overrides: Partial<OpenCodeGateway> = {}): OpenCodeGateway {
     catalog: vi.fn(async () => catalog),
     createSession: vi.fn(async () => session),
     getSession: vi.fn(async () => session),
+    getTurnStatus: vi.fn(async () => ({ session, outcome: "done" as const })),
     getAttachmentPreview: vi.fn(async () => ({
       name: "pixel.png",
       mime: "image/png",
@@ -506,6 +507,135 @@ describe("OpenCode UI HTTP transport", () => {
       },
     ]);
     expect(text).not.toContain("secret upstream");
+  });
+
+  it("pre-admission OpenCodeGatewayError даёт явный non-admission и retryable только для dependency", async () => {
+    const dependency = gateway({
+      prompt: vi.fn(async function* () {
+        throw new OpenCodeGatewayError("DEPENDENCY_UNAVAILABLE", "OpenCode Service недоступен");
+      }),
+    });
+    setOpenCodeGatewayForTests(dependency);
+    const retry = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос" }),
+      }),
+    );
+    const retryText = await retry.text();
+    expect(
+      retryText
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+    ).toEqual([
+      {
+        kind: "error",
+        text: "OpenCode Service недоступен",
+        nonAdmission: true,
+        retryable: true,
+      },
+    ]);
+
+    const validation = gateway({
+      prompt: vi.fn(async function* () {
+        throw new OpenCodeGatewayError("VALIDATION_ERROR", "OpenCode отклонил аргументы запроса");
+      }),
+    });
+    setOpenCodeGatewayForTests(validation);
+    const notRetryable = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос" }),
+      }),
+    );
+    const notRetryableText = await notRetryable.text();
+    expect(
+      notRetryableText
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+    ).toEqual([
+      {
+        kind: "error",
+        text: "OpenCode отклонил аргументы запроса",
+        nonAdmission: true,
+        retryable: false,
+      },
+    ]);
+    expect(retryText).not.toContain("secret");
+    expect(notRetryableText).not.toContain("secret");
+  });
+
+  it("неизвестная ошибка после возможного admission остаётся unconfirmed", async () => {
+    const mock = gateway({
+      prompt: vi.fn(async function* () {
+        yield event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" });
+        throw new Error("secret upstream after admission");
+      }),
+    });
+    setOpenCodeGatewayForTests(mock);
+    const response = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос" }),
+      }),
+    );
+    const text = await response.text();
+    expect(
+      text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+    ).toEqual([
+      {
+        kind: "error",
+        text: "Не удалось подтвердить результат OpenCode",
+        reason: "unconfirmed",
+      },
+    ]);
+    expect(text).not.toContain("secret upstream");
+  });
+
+  it("валидирует turnID до запуска prompt и отдаёт статус по существующему GET", async () => {
+    const prompt = vi.fn(async function* () {
+      yield event("session.execution.succeeded", { sessionID: "ses-1" });
+    });
+    const getTurnStatus = vi.fn(async () => ({ session, outcome: "pending" as const }));
+    const mock = gateway({ prompt, getTurnStatus });
+    setOpenCodeGatewayForTests(mock);
+
+    const invalid = await handleOpenCodePrompt(
+      "ses-1",
+      request("/api/opencode/session/ses-1/prompt", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Вопрос", turnID: "bad" }),
+      }),
+    );
+    expect(invalid.status).toBe(400);
+    expect(prompt).not.toHaveBeenCalled();
+
+    const status = await handleOpenCodeSessionGet(
+      "ses-1",
+      request("/api/opencode/session/ses-1?turnID=msg_turn000001"),
+    );
+    expect(status.status).toBe(200);
+    expect(await body(status)).toEqual({ ok: true, data: { session, outcome: "pending" } });
+    expect(getTurnStatus).toHaveBeenCalledWith("ses-1", "msg_turn000001");
+
+    const invalidStatus = await handleOpenCodeSessionGet(
+      "ses-1",
+      request("/api/opencode/session/ses-1?turnID=invalid"),
+    );
+    expect(invalidStatus.status).toBe(400);
+    expect(getTurnStatus).toHaveBeenCalledTimes(1);
   });
 
   it("принимает поддерживаемые image/PDF сигнатуры и нормализует data URL", () => {
