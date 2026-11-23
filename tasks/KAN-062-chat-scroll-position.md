@@ -1,7 +1,7 @@
 ---
 id: KAN-062
 title: Прокрутка чата без потери позиции чтения
-status: review
+status: in_progress
 stage: 8
 priority: high
 owner: worker-kan-062
@@ -85,7 +85,13 @@ specs:
   между reload в срез не входят.
 - 2026-11-23 — Worker реализовал near-bottom follow, кнопку возврата и dynamic
   height handling. Коммит `2da15f5`; focused unit 79/79, E2E 15/15, полный
-  `pnpm check` — 140 files / 1950 tests. Статус `review`.
+  `pnpm check` — 140 files / 1950 tests.
+- 2026-11-23 — Ревью нашло high: streaming commit мог опередить async scroll
+  event и вернуть пользователя вниз. Также требуются исправления unread при
+  сокращении history, recovery near-bottom после shrink и fallback `toggle`.
+  Нативный scroll anchoring сохраняется: контракт — стабильность видимого
+  фрагмента, а не неизменный числовой `scrollTop` при reflow выше viewport.
+  Задача возвращена в `in_progress`.
 
 ## Итог
 
