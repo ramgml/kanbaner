@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import { AppShell } from "../components/shell/app-shell";
+import { FONT_SCALE_BOOTSTRAP_SCRIPT } from "../components/shell/font-scale";
 import { toUiPluginAvailability } from "../lib/plugin-manager-types";
 import { executePluginOperation } from "../server/plugin-operations";
 import { getPluginManagerState, getPluginUiContributions } from "../server/plugin-service";
@@ -24,7 +25,10 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   const availability = toUiPluginAvailability(pluginState);
 
   return (
-    <html lang="ru">
+    <html lang="ru" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: FONT_SCALE_BOOTSTRAP_SCRIPT }} />
+      </head>
       <body className="min-h-dvh bg-background text-foreground antialiased">
         <UiRegistryProvider availability={availability} invoke={executePluginOperation}>
           <ServerUiContributions contributions={uiContributions} />
