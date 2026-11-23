@@ -1,7 +1,7 @@
 ---
 id: KAN-060
 title: Статусы и ошибки конкретного prompt
-status: review
+status: in_progress
 stage: 8
 priority: high
 owner: worker-kan-060
@@ -107,7 +107,10 @@ pnpm check
   `in_progress`.
 - 2026-11-23 — Worker применил и ревьюнул baseline patch, реализовал этапы,
   turn-scoped ошибки и ручную проверку статуса. Коммит `cd98faf`; focused
-  tests 89/89, OpenCode E2E 10/10, `pnpm check` зелёный. Статус `review`.
+  tests 89/89, OpenCode E2E 10/10, `pnpm check` зелёный.
+- 2026-11-23 — Независимое ревью нашло blocker/high: retry при ambiguous fetch
+  failure, ordinal вместо stable turn ID и преждевременный done по assistant
+  text. Merge остановлен; задача возвращена worker в `in_progress`.
 
 ## Итог
 
