@@ -1,7 +1,7 @@
 ---
 id: KAN-065
 title: Сквозные регрессии OpenCode UX
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-065
@@ -86,6 +86,9 @@ specs:
 
 - 2026-11-24 — Задача создана по результатам сквозного ревью; назначен
   `worker-kan-065`, создана ветка и worktree, статус `in_progress`.
+- 2026-11-24 — Worker исправил model/newChat guards, user-unread и history
+  invalidation. Коммит `67c77a6`; focused 133/133, полный Playwright 171/171,
+  `pnpm check` — 144 files / 2056 tests. Статус `review`.
 
 ## Итог
 
