@@ -1,7 +1,7 @@
 ---
 id: KAN-064
 title: История и управление OpenCode-сессиями
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-064
@@ -113,6 +113,11 @@ specs:
   отменяли canonical refresh. Также требуются invalidation in-flight list,
   code-point title validation и focus recovery после 404. Задача возвращена в
   `in_progress`; merge запрещён до повторного ревью.
+- 2026-11-24 — Worker исправил замечания коммитами `5d8aecd` и `bb4b824`.
+  Финальное ревью не нашло blocker/high/medium/low. Focused tests 192/192,
+  OpenCode E2E 27/27, полный `pnpm check` — 144 files / 2049 tests. Live smoke
+  реального Service 2.2.5 подтвердил list/whitelist/pagination/rename/
+  ownership/drafts/reload/404. Статус `review`.
 
 ## Итог
 
