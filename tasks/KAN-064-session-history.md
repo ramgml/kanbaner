@@ -1,7 +1,7 @@
 ---
 id: KAN-064
 title: История и управление OpenCode-сессиями
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-064
@@ -106,6 +106,9 @@ specs:
 - 2026-11-24 — KAN-063 завершена. Назначен `worker-kan-064`, создана ветка и
   worktree; статус `in_progress`. Зафиксированы bounded list, явный rename,
   запрет delete, блокировка switching во время prompt и 404 без автосоздания.
+- 2026-11-24 — Worker реализовал list/switch/rename. Коммит `1b1fad5`; focused
+  179/179, E2E 26/26, полный `pnpm check` — 144 files / 2036 tests. Live smoke
+  остаётся оркестратору. Статус `review`.
 
 ## Итог
 
