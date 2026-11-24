@@ -1,7 +1,7 @@
 ---
 id: KAN-063
 title: Копирование кода и черновики по OpenCode-сессиям
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-063
@@ -9,7 +9,7 @@ blocked_by: []
 branch: feat/kan-063-code-copy-session-drafts
 worktree: .worktrees/kan-063-code-copy-session-drafts
 created: 2026-11-23
-updated: 2026-11-23
+updated: 2026-11-24
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -101,6 +101,9 @@ specs:
 - 2026-11-23 — Ревью не нашло blocker/high, но выявило удаление нормативного
   абзаца разрешений из `architecture.md`, trim-признак изменённого composer и
   отсутствие 404 regression. Задача возвращена в `in_progress`.
+- 2026-11-24 — Worker закрыл замечания коммитом `fa64b919`; focused unit
+  114/114, E2E 21/21, полный `pnpm check` — 143 files / 2005 tests. Статус
+  `review` перед финальным независимым ревью.
 
 ## Итог
 
