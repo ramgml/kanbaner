@@ -1,13 +1,13 @@
 ---
 id: KAN-065
 title: Сквозные регрессии OpenCode UX
-status: review
+status: done
 stage: 8
 priority: high
 owner: worker-kan-065
 blocked_by: []
-branch: feat/kan-065-opencode-ux-regressions
-worktree: .worktrees/kan-065-opencode-ux-regressions
+branch: dev
+worktree: .
 created: 2026-11-24
 updated: 2026-11-24
 specs:
@@ -32,12 +32,12 @@ specs:
 
 ## Объём работ
 
-- [ ] Перевести model switch и newChat на отдельные request token/controller;
+- [x] Перевести model switch и newChat на отдельные request token/controller;
   generation меняется только после успешного создания новой сессии.
-- [ ] Синхронизировать optimistic/canonical unread для реальной формы history
+- [x] Синхронизировать optimistic/canonical unread для реальной формы history
   `user:<turnID>` + assistant/tools.
-- [ ] Инвалидировать history при ручном terminal outcome.
-- [ ] Добавить unit/E2E regression и обновить документацию.
+- [x] Инвалидировать history при ручном terminal outcome.
+- [x] Добавить unit/E2E regression и обновить документацию.
 
 ## Владение файлами
 
@@ -65,11 +65,11 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Unconfirmed сохраняется после model success/error и failed newChat.
-- [ ] Delayed canonical refresh после done применяется при model switch.
-- [ ] Один assistant-ответ после canonical user+assistant даёт unread=1, не 2.
-- [ ] Ручной done/error/cancelled инвалидирует history cache.
-- [ ] Unit/E2E и полный `pnpm check` зелёные.
+- [x] Unconfirmed сохраняется после model success/error и failed newChat.
+- [x] Delayed canonical refresh после done применяется при model switch.
+- [x] Один assistant-ответ после canonical user+assistant даёт unread=1, не 2.
+- [x] Ручной done/error/cancelled инвалидирует history cache.
+- [x] Unit/E2E и полный `pnpm check` зелёные.
 
 ## Проверки
 
@@ -96,7 +96,16 @@ specs:
   коммитом `33051d4`. Финальное ревью не нашло blocker/high/medium/low.
   Focused 133/133, OpenCode E2E 27/27, полный `pnpm check` — 144 files /
   2056 tests. Статус `review`.
+- 2026-11-24 — После rebase коммиты `e96bacb` и `4423e62` интегрированы
+  merge-коммитом `e5406e6`. `pnpm check` на ветке и `dev` зелёный; OpenCode
+  E2E на `dev` — 27/27, imports и SQLite smoke зелёные. Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Сквозные регрессии устранены и смержены в `dev`. Смена модели и ошибочное
+создание новой сессии больше не скрывают unconfirmed-turn и не отменяют
+canonical refresh. Подтверждённые model/title защищены от старых GET без
+блокировки более новых canonical значений. Собственный user-turn не увеличивает
+unread, а ручной terminal outcome инвалидирует history cache.
+
+Merge: `e5406e6`. Feature-ветка и worktree удалены. Push не выполнялся.
