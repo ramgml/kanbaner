@@ -1,7 +1,7 @@
 ---
 id: KAN-066
 title: Автоматические названия OpenCode-сессий из первого запроса
-status: review
+status: in_progress
 stage: 8
 priority: medium
 owner: worker-kan-066
@@ -117,7 +117,11 @@ specs:
   `worker-kan-066`, статус `in_progress`.
 - 2026-11-24 — Worker реализовал auto title и немедленное обновление UI.
   Коммит `d1ad061`; focused 217/217, OpenCode E2E 29/29, полный `pnpm check` —
-  145 files / 2085 tests. Live smoke остаётся оркестратору. Статус `review`.
+  145 files / 2085 tests.
+- 2026-11-24 — Ревью нашло high: зависший title preflight не реагировал на
+  abort и мог заблокировать prompt; medium: параллельные первые prompt не были
+  сериализованы. Также требуется реальный same-generation overlay regression.
+  Задача возвращена в `in_progress`.
 
 ## Итог
 
