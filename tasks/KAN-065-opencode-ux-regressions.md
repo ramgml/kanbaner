@@ -1,7 +1,7 @@
 ---
 id: KAN-065
 title: Сквозные регрессии OpenCode UX
-status: in_progress
+status: review
 stage: 8
 priority: high
 owner: worker-kan-065
@@ -92,6 +92,10 @@ specs:
 - 2026-11-24 — Ревью подтвердило основные исправления, но нашло medium:
   pre-switch canonical GET мог откатить выбранную модель. Также требуется
   regression вложений при failed newChat. Задача возвращена в `in_progress`.
+- 2026-11-24 — Worker добавил model overlay и усилил attachments regression
+  коммитом `33051d4`. Финальное ревью не нашло blocker/high/medium/low.
+  Focused 133/133, OpenCode E2E 27/27, полный `pnpm check` — 144 files /
+  2056 tests. Статус `review`.
 
 ## Итог
 
