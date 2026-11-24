@@ -2,11 +2,68 @@
 
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useMemo } from "react";
+import type { ComponentType } from "react";
 
 const REMARK_PLUGINS = [remarkGfm];
 
 const headingClass = "mt-3 mb-2 font-semibold break-words first:mt-0";
 const listItemClass = "my-0.5";
+const preClass =
+  "my-2 max-w-full overflow-x-auto rounded-md bg-muted p-2 text-xs leading-relaxed whitespace-pre";
+
+/**
+ * Минимальная структурная форма HAST-узла. Полная типизация `@types/hast` не
+ * добавляется в публичные зависимости пакета: нужны только type/value/children.
+ */
+interface HastNode {
+  readonly type: string;
+  readonly value?: string | undefined;
+  readonly children?: readonly HastNode[] | undefined;
+}
+
+/** Plain text рекурсивно только из text-узлов; raw HTML и атрибуты не читаются. */
+function hastText(node: HastNode | undefined): string {
+  if (node === undefined) return "";
+  if (node.type === "text") return node.value ?? "";
+  let text = "";
+  for (const child of node.children ?? []) text += hastText(child);
+  return text;
+}
+
+/** Fenced codeblock получает ровно один renderer-added trailing newline. */
+function codeBlockText(node: HastNode | undefined): string {
+  const text = hastText(node);
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
+type CodeBlockAction = ComponentType<{ readonly code: string }>;
+
+function createPreRenderer(action: CodeBlockAction | undefined): NonNullable<Components["pre"]> {
+  if (action === undefined) {
+    return function PreWithoutAction({ children }) {
+      return <pre className={preClass}>{children}</pre>;
+    };
+  }
+
+  return function PreWithAction({ children, node }) {
+    const code = codeBlockText(node as unknown as HastNode | undefined);
+    // Inline code сюда не попадает, а пустой fence не получает action.
+    if (code.length === 0) return <pre className={preClass}>{children}</pre>;
+
+    const CodeBlockAction = action;
+    return (
+      <div className="relative">
+        <pre className={preClass}>{children}</pre>
+        <div className="absolute top-1 right-1">
+          <CodeBlockAction code={code} />
+        </div>
+      </div>
+    );
+  };
+}
+
+const PRE_WITHOUT_ACTION = createPreRenderer(undefined);
 
 /** Единое оформление CommonMark/GFM без dangerouslySetInnerHTML и raw HTML. */
 const MARKDOWN_COMPONENTS: Components = {
@@ -67,11 +124,7 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </code>
   ),
-  pre: ({ children }) => (
-    <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-muted p-2 text-xs leading-relaxed whitespace-pre">
-      {children}
-    </pre>
-  ),
+  pre: PRE_WITHOUT_ACTION,
   table: ({ children }) => (
     <table className="my-2 w-full border-collapse text-left text-xs">{children}</table>
   ),
@@ -96,12 +149,30 @@ const MARKDOWN_COMPONENTS: Components = {
 export interface MarkdownContentProps {
   readonly source: string;
   readonly className?: string;
+  /**
+   * Additive action для fenced/indented code block. Без prop разметка и
+   * поведение не меняются. Компонент получает точный plain text блока, а
+   * inline code и пустые блоки action не получают.
+   */
+  readonly codeBlockAction?: CodeBlockAction | undefined;
 }
 
-export function MarkdownContent({ source, className = "text-sm" }: MarkdownContentProps) {
+export function MarkdownContent({
+  source,
+  className = "text-sm",
+  codeBlockAction,
+}: MarkdownContentProps) {
+  const components = useMemo<Components>(
+    () =>
+      codeBlockAction === undefined
+        ? MARKDOWN_COMPONENTS
+        : { ...MARKDOWN_COMPONENTS, pre: createPreRenderer(codeBlockAction) },
+    [codeBlockAction],
+  );
+
   return (
     <div data-markdown-content className={`min-w-0 leading-relaxed break-words ${className}`}>
-      <Markdown remarkPlugins={REMARK_PLUGINS} skipHtml components={MARKDOWN_COMPONENTS}>
+      <Markdown remarkPlugins={REMARK_PLUGINS} skipHtml components={components}>
         {source}
       </Markdown>
     </div>
