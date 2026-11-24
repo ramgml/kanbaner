@@ -447,7 +447,7 @@ describe("OpenCodePanel", () => {
     ).toBe(false);
   });
 
-  it("после 404 создаёт одну новую сессию и не трогает чужой draft", async () => {
+  it("после 404 показывает empty state с CTA, не создаёт сессию и не трогает чужой draft", async () => {
     window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-old");
     writeDraft("ses-old", "чужой черновик", 1000);
     fetchMock.mockImplementation(async (input, init) => {
@@ -460,9 +460,22 @@ describe("OpenCodePanel", () => {
     });
     render(<OpenCodePanel />);
 
-    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    expect(await screen.findByText("Сохранённая сессия не найдена.")).toBeVisible();
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBeNull();
+    const message = screen.getByRole("textbox", { name: "Сообщение OpenCode" });
+    expect(message).toBeDisabled();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) => String(url) === "/api/opencode/session" && init?.method === "POST",
+      ),
+    ).toBe(false);
+    expect(readDrafts().get("ses-old")).toBe("чужой черновик");
+
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия" }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-new"),
+    );
     await waitFor(() => expect(message).toBeEnabled());
-    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-new");
     expect(
       fetchMock.mock.calls.filter(
         ([url, init]) => String(url) === "/api/opencode/session" && init?.method === "POST",
@@ -3281,5 +3294,264 @@ describe("OpenCode drafts и copy code", () => {
     );
     expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("OpenCode session history", () => {
+  async function composer(): Promise<HTMLElement> {
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    return message;
+  }
+
+  function historyDetails(): HTMLDetailsElement {
+    const details = screen.getByTestId("opencode-session-history");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("history is missing");
+    return details;
+  }
+
+  function openHistory(): void {
+    if (!historyDetails().open) {
+      fireEvent.click(within(historyDetails()).getByText("История сессий"));
+    }
+    expect(historyDetails().open).toBe(true);
+  }
+
+  function summary(id: string, title: string | null, updatedAt = 2_000) {
+    return { id, title, updatedAt };
+  }
+
+  interface ApiMock {
+    readonly list?: () => Response | Promise<Response>;
+    readonly get?: (sessionID: string) => Response | Promise<Response>;
+    readonly create?: () => Response | Promise<Response>;
+    readonly rename?: (body: unknown) => Response | Promise<Response>;
+    readonly prompt?: () => Promise<Response>;
+  }
+
+  function mockApi(options: ApiMock = {}): void {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session") {
+        if (method === "POST") return options.create?.() ?? success(session("ses-new"));
+        return options.list?.() ?? success([]);
+      }
+      if (url.endsWith("/prompt")) return options.prompt?.() ?? stream([{ kind: "done" }]);
+      if (method === "PATCH" && /^\/api\/opencode\/session\/[^/]+$/u.test(url)) {
+        return (
+          options.rename?.(JSON.parse(String(init?.body))) ??
+          success({ id: "ses-1", title: "Новое" })
+        );
+      }
+      const match = /^\/api\/opencode\/session\/([^/]+)$/u.exec(url);
+      if (match !== null && method === "GET") {
+        const sessionID = decodeURIComponent(match[1] as string);
+        return options.get?.(sessionID) ?? success(session(sessionID));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+  }
+
+  it("загружает историю лениво и различает одинаковые заголовки по суффиксу ID", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    const list = vi.fn(async () =>
+      success([
+        summary("ses-1", "Kanbaner chat", 3_000),
+        summary("ses-2", "Одинаковая", 2_000),
+        summary("ses-3", "Одинаковая", 1_000),
+      ]),
+    );
+    mockApi({ list, get: (sessionID) => success(session(sessionID)) });
+    render(<OpenCodePanel />);
+    await composer();
+
+    expect(list).not.toHaveBeenCalled();
+    openHistory();
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+
+    expect(
+      await within(historyDetails()).findByRole("button", { name: /Одинаковая.*ses-2/u }),
+    ).toBeVisible();
+    expect(
+      within(historyDetails()).getByRole("button", { name: /Одинаковая.*ses-3/u }),
+    ).toBeVisible();
+    expect(
+      within(historyDetails()).getByRole("button", { name: /Kanbaner chat/u }),
+    ).toHaveAttribute("aria-current", "true");
+  });
+
+  it("переключает сессию, сохраняет ID и подхватывает отдельный draft", async () => {
+    writeDraft("ses-1", "черновик первой", 1_000);
+    writeDraft("ses-2", "черновик второй", 2_000);
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockApi({
+      list: () =>
+        success([summary("ses-1", "Kanbaner chat", 3_000), summary("ses-2", "Вторая", 2_000)]),
+      get: (sessionID) =>
+        success({
+          ...session(sessionID),
+          title: sessionID === "ses-2" ? "Вторая" : "Kanbaner chat",
+        }),
+    });
+    render(<OpenCodePanel />);
+    expect(await composer()).toHaveValue("черновик первой");
+
+    openHistory();
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Вторая/u }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Вторая"),
+    );
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-2");
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Сообщение OpenCode" })).toHaveValue(
+        "черновик второй",
+      ),
+    );
+    expect(readDrafts().get("ses-1")).toBe("черновик первой");
+    expect(historyDetails().open).toBe(false);
+  });
+
+  it("404 удаляет только запись, 503 сохраняет текущую сессию и повторяется", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let problemCalls = 0;
+    const get = vi.fn((sessionID: string) => {
+      if (sessionID === "ses-2") return failure(404, "NOT_FOUND");
+      if (sessionID === "ses-3") {
+        problemCalls += 1;
+        return problemCalls === 1
+          ? failure(503)
+          : success({ ...session("ses-3"), title: "Проблемная" });
+      }
+      return success(session(sessionID));
+    });
+    mockApi({
+      list: () =>
+        success([
+          summary("ses-1", "Kanbaner chat", 3_000),
+          summary("ses-2", "Удалённая", 2_000),
+          summary("ses-3", "Проблемная", 1_000),
+        ]),
+      get,
+    });
+    render(<OpenCodePanel />);
+    await composer();
+    openHistory();
+
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Удалённая/u }));
+    await waitFor(() => expect(within(historyDetails()).queryByText("Удалённая")).toBeNull());
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-1");
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+
+    fireEvent.click(within(historyDetails()).getByRole("button", { name: /^Проблемная/u }));
+    const alert = await within(historyDetails()).findByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось открыть сессию");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-1");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Повторить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Проблемная"),
+    );
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-3");
+  });
+
+  it("во время prompt-busy записи истории недоступны", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    const get = vi.fn((sessionID: string) => success(session(sessionID)));
+    mockApi({
+      list: () =>
+        success([summary("ses-1", "Kanbaner chat", 3_000), summary("ses-2", "Вторая", 2_000)]),
+      get,
+      prompt: () => new Promise<Response>(() => undefined),
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Долгий вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await screen.findByRole("button", { name: "Остановить OpenCode" });
+
+    openHistory();
+    const target = await within(historyDetails()).findByRole("button", { name: /^Вторая/u });
+    expect(target).toBeDisabled();
+    fireEvent.click(target);
+    expect(get).not.toHaveBeenCalledWith("ses-2");
+  });
+
+  it("переименовывает exact title, обновляет заголовок, историю и Escape-фокус", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let listCalls = 0;
+    const list = vi.fn(async () => {
+      listCalls += 1;
+      return success([summary("ses-1", listCalls === 1 ? "Kanbaner chat" : "Новое", 3_000)]);
+    });
+    const rename = vi.fn((body: unknown) => {
+      expect(body).toEqual({ title: "  Новое  " });
+      return success({ id: "ses-1", title: "Новое" });
+    });
+    mockApi({ list, get: (sessionID) => success(session(sessionID)), rename });
+    render(<OpenCodePanel />);
+    await composer();
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+
+    openHistory();
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    const input = screen.getByRole("textbox", { name: "Название сессии" });
+    expect(input).toHaveValue("Kanbaner chat");
+    fireEvent.change(input, { target: { value: "  Новое  " } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    await waitFor(() => expect(rename).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Новое"),
+    );
+    expect(screen.queryByRole("textbox", { name: "Название сессии" })).toBeNull();
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    const reopened = screen.getByRole("textbox", { name: "Название сессии" });
+    expect(reopened).toHaveValue("Новое");
+    fireEvent.keyDown(reopened, { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "Название сессии" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Переименовать сессию" })).toHaveFocus();
+  });
+
+  it("newChat сбрасывает stale-кэш истории и показывает новую сессию", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let listCalls = 0;
+    const list = vi.fn(async () => {
+      listCalls += 1;
+      return success(
+        listCalls === 1
+          ? [summary("ses-1", "Kanbaner chat", 3_000)]
+          : [summary("ses-new", "Свежая", 4_000), summary("ses-1", "Kanbaner chat", 3_000)],
+      );
+    });
+    mockApi({
+      list,
+      get: (sessionID) => success(session(sessionID)),
+      create: () => success({ ...session("ses-new"), title: "Свежая" }),
+    });
+    render(<OpenCodePanel />);
+    await composer();
+
+    openHistory();
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+    fireEvent.click(within(historyDetails()).getByText("История сессий"));
+    expect(historyDetails().open).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-new"),
+    );
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Свежая");
+
+    openHistory();
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(await within(historyDetails()).findByText("Свежая")).toBeVisible();
+    expect(within(historyDetails()).getByText(/es-new/u)).toBeVisible();
   });
 });

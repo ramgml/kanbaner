@@ -16,6 +16,7 @@ import {
   type OpenCodeGateway,
   type OpenCodeModelRefView,
   type OpenCodePromptAttachment,
+  type OpenCodeSessionRename,
 } from "@kanbaner/opencode";
 
 import { parsePromptAttachments } from "./opencode-attachments.ts";
@@ -220,6 +221,42 @@ export async function handleOpenCodeSessionGet(
       return success(await gateway.getTurnStatus(sessionID, turnID));
     }
     return success(await gateway.getSession(sessionID));
+  } catch (error) {
+    return internalError(error);
+  }
+}
+
+/** Cursor, directory, project и limit не принимаются от браузера. */
+export async function handleOpenCodeSessionList(request: Request): Promise<Response> {
+  const denied = uiGuard(request);
+  if (denied !== null) return denied;
+  if (new URL(request.url).search.length > 0) {
+    return failure("VALIDATION_ERROR", "Параметры списка сессий не поддерживаются");
+  }
+  try {
+    const gateway = await getOpenCodeGateway();
+    return success(await gateway.listSessions());
+  } catch (error) {
+    return internalError(error);
+  }
+}
+
+/** Rename — только текущая сессия и только поле title в строгом JSON body. */
+export async function handleOpenCodeSessionRename(
+  sessionID: string,
+  request: Request,
+): Promise<Response> {
+  const denied = uiGuard(request);
+  if (denied !== null) return denied;
+  try {
+    const body = await jsonBody(request, 4 * 1024);
+    const keys = Object.keys(body);
+    if (keys.length !== 1 || keys[0] !== "title" || typeof body.title !== "string") {
+      throw new PublicHttpError("VALIDATION_ERROR", "Тело запроса должно содержать только title");
+    }
+    const gateway = await getOpenCodeGateway();
+    const renamed: OpenCodeSessionRename = await gateway.renameSession(sessionID, body.title);
+    return success(renamed);
   } catch (error) {
     return internalError(error);
   }

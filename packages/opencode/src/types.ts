@@ -129,6 +129,22 @@ export interface OpenCodeSessionCreate {
   readonly model?: OpenCodeModelRefView;
 }
 
+/**
+ * Whitelist-запись списка сессий. Metadata, location, projectID, стоимость,
+ * токены, разрешения, модель, агент, outcome и archived наружу не передаются.
+ */
+export interface OpenCodeSessionSummary {
+  readonly id: string;
+  readonly title: string | null;
+  /** Canonical `time.updated` в epoch milliseconds. */
+  readonly updatedAt: number;
+}
+
+export interface OpenCodeSessionRename {
+  readonly id: string;
+  readonly title: string;
+}
+
 /** Canonical outcome точного prompt-turn, вычисленный gateway по raw history. */
 export type OpenCodeTurnOutcome = "done" | "error" | "cancelled" | "pending" | "missing";
 
@@ -141,6 +157,8 @@ export interface OpenCodeGateway {
   status(): Promise<OpenCodeStatus>;
   catalog(): Promise<OpenCodeCatalog>;
   createSession(input?: OpenCodeSessionCreate): Promise<OpenCodeSessionView>;
+  listSessions(): Promise<readonly OpenCodeSessionSummary[]>;
+  renameSession(sessionID: string, title: string): Promise<OpenCodeSessionRename>;
   getSession(sessionID: string): Promise<OpenCodeSessionView>;
   getTurnStatus(sessionID: string, turnID: string): Promise<OpenCodeTurnStatus>;
   getAttachmentPreview(

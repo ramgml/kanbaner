@@ -6,6 +6,7 @@ import {
   FileText,
   Loader2,
   Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
   Send,
@@ -40,6 +41,8 @@ import {
   type OpenCodeChatMessage,
   type OpenCodeModelRefView,
   type OpenCodeModelView,
+  type OpenCodeSessionRename,
+  type OpenCodeSessionSummary,
   type OpenCodeSessionView,
   type OpenCodeStreamEvent,
   type OpenCodeToolView,
@@ -54,6 +57,7 @@ import {
   useSessionDraft,
 } from "./drafts.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
+import { SessionHistory, type SessionSwitchResult } from "./session-history.tsx";
 import {
   finishToolMessages,
   mergeToolMessage,
@@ -642,6 +646,12 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [promptPending, setPromptPending] = useState(false);
   const [modelPending, setModelPending] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [renamePending, setRenamePending] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState<string | null>(null);
@@ -655,6 +665,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const initializeAbortRef = useRef<AbortController | null>(null);
   const modelAbortRef = useRef<AbortController | null>(null);
   const promptAbortRef = useRef<AbortController | null>(null);
+  const switchAbortRef = useRef<AbortController | null>(null);
+  const renameAbortRef = useRef<AbortController | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const renameButtonRef = useRef<HTMLButtonElement | null>(null);
   /**
    * Tool identity текущего prompt-хода. Global `status === "running"` по всей
    * истории недопустим: unconfirmed tool предыдущего turn принадлежит другому
@@ -666,7 +680,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   } | null>(null);
   const refreshControllersRef = useRef(new Set<AbortController>());
   const currentRef = useMemo(() => contextRefFromSearch(search), [search]);
-  const busy = loading || creating || modelPending || promptPending;
+  const busy = loading || creating || modelPending || promptPending || switching || renamePending;
   const chatScroll = useChatScroll({ sessionID: session?.id ?? null, messages });
 
   const beginOperation = useCallback((): number => {
@@ -674,15 +688,21 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     initializeAbortRef.current?.abort();
     modelAbortRef.current?.abort();
     promptAbortRef.current?.abort();
+    switchAbortRef.current?.abort();
+    renameAbortRef.current?.abort();
     for (const controller of refreshControllersRef.current) controller.abort();
     refreshControllersRef.current.clear();
     initializeAbortRef.current = null;
     modelAbortRef.current = null;
     promptAbortRef.current = null;
+    switchAbortRef.current = null;
+    renameAbortRef.current = null;
     setLoading(false);
     setCreating(false);
     setModelPending(false);
     setPromptPending(false);
+    setSwitching(false);
+    setRenamePending(false);
     return generation;
   }, []);
 
@@ -705,7 +725,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         }),
         signal,
       });
-      applySession(created, generation);
+      if (applySession(created, generation)) setHistoryVersion((current) => current + 1);
     },
     [applySession],
   );
@@ -734,7 +754,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         } catch (reason) {
           if (generation !== generationRef.current) return;
           if (!(reason instanceof ApiError && reason.status === 404)) throw reason;
+          // Удалённая/чужая сессия: только сохранённый ID и пустое состояние,
+          // без автоматического создания новой сессии.
           clearStoredSessionID();
+          setSession(null);
+          setMessages([]);
+          setTurn(null);
+          return;
         }
       }
       await createSession(nextCatalog.defaultModel ?? undefined, generation, controller.signal);
@@ -762,6 +788,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       initializeAbortRef.current?.abort();
       modelAbortRef.current?.abort();
       promptAbortRef.current?.abort();
+      switchAbortRef.current?.abort();
+      renameAbortRef.current?.abort();
       for (const controller of refreshControllers) controller.abort();
       refreshControllers.clear();
     };
@@ -854,6 +882,133 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     } finally {
       if (modelAbortRef.current === controller) modelAbortRef.current = null;
       if (generation === generationRef.current) setModelPending(false);
+    }
+  };
+
+  const loadSessions = useCallback(
+    async (signal: AbortSignal): Promise<readonly OpenCodeSessionSummary[]> => {
+      const list = await request<readonly OpenCodeSessionSummary[]>("/api/opencode/session", {
+        signal,
+      });
+      return Array.isArray(list) ? list : [];
+    },
+    [],
+  );
+
+  /**
+   * Переключение — отдельная generation-операция. Ответ применяется только к
+   * своему поколению; 404/503 не меняют текущую сессию и сохранённый ID.
+   */
+  const switchSession = async (targetID: string): Promise<SessionSwitchResult> => {
+    if (busy || session?.id === targetID) return { ok: false, reason: "cancelled" };
+    const generation = beginOperation();
+    const controller = new AbortController();
+    switchAbortRef.current = controller;
+    setSwitching(true);
+    setPanelError(null);
+    setRenameOpen(false);
+    setRenameError(null);
+    try {
+      const next = await request<OpenCodeSessionView>(
+        `/api/opencode/session/${encodeURIComponent(targetID)}`,
+        { signal: controller.signal },
+      );
+      if (generation !== generationRef.current || !applySession(next, generation)) {
+        return { ok: false, reason: "cancelled" };
+      }
+      setTurn(null);
+      setAttachedRef(null);
+      setSelectionError(null);
+      clearFiles();
+      // Локальные preview принадлежат прежней сессии; их URL освобождаются.
+      const transient = localImagesRef.current;
+      localImagesRef.current = [];
+      setLocalImages([]);
+      for (const local of transient) revokeObjectUrl(local.url);
+      return { ok: true };
+    } catch (reason) {
+      if (generation !== generationRef.current) return { ok: false, reason: "cancelled" };
+      if (reason instanceof Error && reason.name === "AbortError") {
+        return { ok: false, reason: "cancelled" };
+      }
+      if (reason instanceof ApiError && reason.status === 404) {
+        if (readStoredSessionID() === targetID) clearStoredSessionID();
+        return { ok: false, reason: "not-found" };
+      }
+      return { ok: false, reason: "unavailable" };
+    } finally {
+      if (switchAbortRef.current === controller) switchAbortRef.current = null;
+      if (generation === generationRef.current) setSwitching(false);
+    }
+  };
+
+  const openRename = (): void => {
+    if (session === null || busy) return;
+    setRenameValue(session.title ?? "");
+    setRenameError(null);
+    setRenameOpen(true);
+  };
+
+  const closeRename = (): void => {
+    setRenameOpen(false);
+    setRenameError(null);
+    renameButtonRef.current?.focus();
+  };
+
+  const submitRename = async (): Promise<void> => {
+    if (session === null || renamePending) return;
+    const sessionID = session.id;
+    const generation = beginOperation();
+    const controller = new AbortController();
+    renameAbortRef.current = controller;
+    setRenamePending(true);
+    setRenameError(null);
+    let renamed = false;
+    try {
+      const result = await request<OpenCodeSessionRename>(
+        `/api/opencode/session/${encodeURIComponent(sessionID)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: renameValue }),
+          signal: controller.signal,
+        },
+      );
+      if (generation !== generationRef.current) return;
+      setSession((current) =>
+        current === null || current.id !== sessionID
+          ? current
+          : { ...current, title: result.title },
+      );
+      setRenameValue(result.title);
+      setRenameOpen(false);
+      setHistoryVersion((current) => current + 1);
+      renamed = true;
+    } catch (reason) {
+      if (generation !== generationRef.current) return;
+      if (reason instanceof Error && reason.name === "AbortError") return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        // Текущая сессия исчезла: только сохранённый ID и пустое состояние.
+        clearStoredSessionID();
+        setSession(null);
+        setMessages([]);
+        setTurn(null);
+        setRenameOpen(false);
+        setRenameError(null);
+        setPanelError(null);
+        setHistoryVersion((current) => current + 1);
+        return;
+      }
+      setRenameError(publicError(reason, "Не удалось переименовать сессию"));
+    } finally {
+      if (renameAbortRef.current === controller) renameAbortRef.current = null;
+      if (generation === generationRef.current) {
+        setRenamePending(false);
+        // Фокус ставим после снятия disabled, иначе браузер его игнорирует.
+        if (renamed) {
+          window.requestAnimationFrame(() => renameButtonRef.current?.focus());
+        }
+      }
     }
   };
 
@@ -1206,6 +1361,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         return;
       }
       if (currentGeneration()) {
+        // Список сессий устарел после любого terminal этого prompt.
+        setHistoryVersion((current) => current + 1);
         if (terminal === "done") {
           setAttachedRef(null);
           clearFiles();
@@ -1411,6 +1568,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     setAttachedRef(null);
     clearFiles();
     setPanelError(null);
+    setRenameOpen(false);
+    setRenameError(null);
     try {
       await createSession(selectedModel ?? undefined, generation, controller.signal);
     } catch (reason) {
@@ -1437,22 +1596,112 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       data-testid="opencode-panel"
       className="flex min-h-0 flex-1 flex-col"
     >
-      <header className="flex items-center justify-between border-b px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <header className="flex min-w-0 items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <Bot aria-hidden="true" className="size-4 shrink-0" />
-          <h2 className="truncate text-sm font-semibold">OpenCode</h2>
+          <div className="flex min-w-0 flex-col">
+            <h2 className="truncate text-sm font-semibold">OpenCode</h2>
+            {session !== null ? (
+              <p
+                data-testid="opencode-session-title"
+                className="truncate text-xs text-muted-foreground"
+                title={session.title ?? "Без названия"}
+              >
+                {session.title ?? "Без названия"}
+              </p>
+            ) : null}
+          </div>
         </div>
-        <button
-          type="button"
-          aria-label="Новая сессия OpenCode"
-          title="Новая сессия"
-          onClick={() => void newChat()}
-          disabled={busy || catalog === null}
-          className={buttonClass}
-        >
-          <Plus aria-hidden="true" className="size-4" />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          {session !== null ? (
+            <button
+              ref={renameButtonRef}
+              type="button"
+              aria-label="Переименовать сессию"
+              title="Переименовать сессию"
+              onClick={openRename}
+              disabled={busy}
+              className={iconButtonClass}
+            >
+              <Pencil aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Новая сессия OpenCode"
+            title="Новая сессия"
+            onClick={() => void newChat()}
+            disabled={busy || catalog === null}
+            className={buttonClass}
+          >
+            <Plus aria-hidden="true" className="size-4" />
+          </button>
+        </div>
       </header>
+
+      {renameOpen && session !== null ? (
+        <form
+          className="flex min-w-0 flex-col gap-2 border-b px-3 py-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitRename();
+          }}
+        >
+          <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+            Название сессии
+            <input
+              ref={renameInputRef}
+              autoFocus
+              value={renameValue}
+              maxLength={100}
+              disabled={busy}
+              onChange={(event) => {
+                setRenameValue(event.target.value);
+                setRenameError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeRename();
+                }
+              }}
+              className={`${inputClass} block w-full min-w-0`}
+            />
+          </label>
+          {renameError !== null ? (
+            <p role="alert" className="text-xs text-destructive">
+              {renameError}
+            </p>
+          ) : null}
+          <div className="flex min-w-0 flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={busy || renameValue.trim().length === 0}
+              className={buttonClass}
+            >
+              Сохранить
+            </button>
+            <button
+              type="button"
+              disabled={renamePending}
+              onClick={closeRename}
+              className={buttonClass}
+            >
+              Отмена
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      <SessionHistory
+        currentID={session?.id ?? null}
+        currentTitle={session?.title ?? null}
+        busy={busy}
+        version={historyVersion}
+        loadSessions={loadSessions}
+        onSelect={switchSession}
+      />
 
       {catalog !== null ? <ToolCatalog tools={catalog.tools} /> : null}
 
@@ -1574,7 +1823,25 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 </div>
               </div>
             ) : null}
-            {!loading && !creating && messages.length === 0 && panelError === null ? (
+            {!loading && !creating && session === null && panelError === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <Sparkles aria-hidden="true" className="size-6" />
+                <p>Сохранённая сессия не найдена.</p>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void newChat()}
+                  className={buttonClass}
+                >
+                  <Plus aria-hidden="true" className="size-3.5" /> Новая сессия
+                </button>
+              </div>
+            ) : null}
+            {!loading &&
+            !creating &&
+            session !== null &&
+            messages.length === 0 &&
+            panelError === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <Sparkles aria-hidden="true" className="size-6" />
                 <p>Спросите о задачах, заметках или попросите изменить их.</p>

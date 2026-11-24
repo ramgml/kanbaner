@@ -41,6 +41,12 @@ async function mockOpenCode(
     readonly initialMessages?: readonly unknown[];
     /** История для конкретного GET; нужна, чтобы отличить initial load и canonical refresh. */
     readonly sessionHistory?: (call: number) => readonly unknown[] | undefined;
+    /** Whitelist-записи GET /api/opencode/session; по умолчанию только текущая ses-1. */
+    readonly listSessions?: () => readonly unknown[];
+    /** Заголовок конкретной сессии в GET/PATCH. */
+    readonly sessionTitle?: (sessionID: string) => string;
+    /** Ошибка конкретной сессии: удалённая запись или временная недоступность. */
+    readonly sessionStatus?: (sessionID: string) => "not-found" | "unavailable" | undefined;
     readonly statusOutcome?:
       | "done"
       | "error"
@@ -58,6 +64,8 @@ async function mockOpenCode(
     previewHeaders: [] as Array<Record<string, string>>,
     sessionBodies: [] as unknown[],
     sessionGetCalls: 0,
+    listCalls: 0,
+    renameBodies: [] as Array<{ title?: unknown }>,
     statusQueries: [] as string[],
     promptBodies: [] as Array<{
       text?: string;
@@ -92,6 +100,43 @@ async function mockOpenCode(
         model: catalog.defaultModel,
         messages: state.createdSessions === 1 ? (options?.initialMessages ?? []) : [],
       });
+      return;
+    }
+    if (path === "/api/opencode/session" && method === "GET") {
+      state.listCalls += 1;
+      await json(
+        options?.listSessions?.() ?? [
+          { id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 },
+        ],
+      );
+      return;
+    }
+    const renameMatch = /^\/api\/opencode\/session\/(ses-\d+)$/u.exec(path);
+    if (renameMatch !== null && method === "PATCH") {
+      const body = request.postDataJSON() as { title?: unknown };
+      state.renameBodies.push(body);
+      const sessionID = renameMatch[1] as string;
+      const status = options?.sessionStatus?.(sessionID);
+      if (status !== undefined) {
+        await route.fulfill({
+          status: status === "not-found" ? 404 : 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: false,
+            error: {
+              code: status === "not-found" ? "NOT_FOUND" : "DEPENDENCY_UNAVAILABLE",
+              message: "Недоступно",
+              retryable: status !== "not-found",
+            },
+          }),
+        });
+        return;
+      }
+      const title =
+        typeof body.title === "string"
+          ? body.title.trim().replace(/\s+/gu, " ")
+          : (options?.sessionTitle?.(sessionID) ?? "Kanbaner chat");
+      await json({ id: sessionID, title });
       return;
     }
     if (path.endsWith("/model") && method === "POST") {
@@ -163,6 +208,23 @@ async function mockOpenCode(
     }
     if (/^\/api\/opencode\/session\/ses-\d+$/u.test(path) && method === "GET") {
       state.sessionGetCalls += 1;
+      const sessionID = path.split("/").at(-1) as string;
+      const sessionStatus = options?.sessionStatus?.(sessionID);
+      if (sessionStatus !== undefined) {
+        await route.fulfill({
+          status: sessionStatus === "not-found" ? 404 : 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: false,
+            error: {
+              code: sessionStatus === "not-found" ? "NOT_FOUND" : "DEPENDENCY_UNAVAILABLE",
+              message: "Недоступно",
+              retryable: sessionStatus !== "not-found",
+            },
+          }),
+        });
+        return;
+      }
       // Задержка только для canonical refresh после prompt: даёт проверить
       // optimistic-состояние до замены сообщений ответом сервера.
       if (state.promptBodies.length > 0 && options?.sessionDelayMs !== undefined) {
@@ -185,8 +247,8 @@ async function mockOpenCode(
           { id: "assistant:message-1:0", role: "assistant", text: "Ответ OpenCode" },
         ];
       const body = {
-        id: path.split("/").at(-1),
-        title: "Kanbaner chat",
+        id: sessionID,
+        title: options?.sessionTitle?.(sessionID) ?? "Kanbaner chat",
         agent: "kanbaner",
         model: catalog.defaultModel,
         messages: sessionMessages,
@@ -1791,4 +1853,172 @@ test("drafts: изоляция сессий, reload, очистка отправ
     })
     .toBe("После повреждения");
   await expect(page.getByTestId("opencode-panel").getByRole("alert")).toHaveCount(0);
+});
+
+test("desktop history: lazy list, switch, per-session draft и возврат назад", async ({ page }) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    listSessions: () => [
+      { id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 },
+      { id: "ses-2", title: "Вторая", updatedAt: 1_700_000_001_000 },
+    ],
+    sessionTitle: (sessionID) => (sessionID === "ses-2" ? "Вторая" : "Kanbaner chat"),
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  expect(mock.listCalls).toBe(0);
+  await message.fill("Черновик первой");
+
+  const history = page.getByTestId("opencode-session-history");
+  await history.getByText("История сессий").click();
+  await expect.poll(() => mock.listCalls).toBe(1);
+  await expect(history.getByRole("button", { name: /^Вторая/u })).toBeVisible();
+  await history.getByRole("button", { name: /^Вторая/u }).click();
+
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Вторая");
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-2");
+  await expect(message).toHaveValue("");
+  await message.fill("Черновик второй");
+
+  await history.getByText("История сессий").click();
+  await expect(history.getByRole("button", { name: /^Kanbaner chat/u })).toBeVisible();
+  await history.getByRole("button", { name: /^Kanbaner chat/u }).click();
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Kanbaner chat");
+  await expect(message).toHaveValue("Черновик первой");
+});
+
+test("mobile reload: исчезнувшая сессия даёт CTA без POST и сохраняет чужой draft", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    sessionStatus: (sessionID) => (sessionID === "ses-404" ? "not-found" : undefined),
+  });
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Черновик старой");
+  await page.getByTestId("opencode-close").click();
+
+  await page.evaluate(() => localStorage.setItem("kanbaner.opencode.sessionId", "ses-404"));
+  await page.reload();
+  await page.getByTestId("opencode-open").click();
+
+  await expect(page.getByText("Сохранённая сессия не найдена.")).toBeVisible();
+  await expect(message).toBeDisabled();
+  expect(mock.createdSessions).toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBeNull();
+
+  await page.getByRole("button", { name: "Новая сессия", exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-2");
+  expect(mock.createdSessions).toBe(2);
+  await expect(message).toBeEnabled();
+  await expect(message).toHaveValue("");
+});
+
+test("desktop rename: Enter, PATCH exact title, refresh истории и Escape-фокус", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    listSessions: () => [{ id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 }],
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+  await expect(page.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled();
+
+  const history = page.getByTestId("opencode-session-history");
+  await history.getByText("История сессий").click();
+  await expect.poll(() => mock.listCalls).toBe(1);
+
+  const rename = page.getByRole("button", { name: "Переименовать сессию" });
+  await rename.click();
+  const input = page.getByRole("textbox", { name: "Название сессии" });
+  await expect(input).toHaveValue("Kanbaner chat");
+  await input.fill("  Новое   название  ");
+  await input.press("Enter");
+
+  await expect.poll(() => mock.renameBodies).toEqual([{ title: "  Новое   название  " }]);
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Новое название");
+  await expect(input).toHaveCount(0);
+  await expect(rename).toBeFocused();
+  await expect.poll(() => mock.listCalls).toBe(2);
+
+  await rename.click();
+  const reopened = page.getByRole("textbox", { name: "Название сессии" });
+  await expect(reopened).toHaveValue("Новое название");
+  await reopened.press("Escape");
+  await expect(reopened).toHaveCount(0);
+  await expect(rename).toBeFocused();
+});
+
+test("desktop prompt-busy: записи истории заблокированы до завершения хода", async ({ page }) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    listSessions: () => [
+      { id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 },
+      { id: "ses-2", title: "Вторая", updatedAt: 1_700_000_001_000 },
+    ],
+    sessionTitle: (sessionID) => (sessionID === "ses-2" ? "Вторая" : "Kanbaner chat"),
+    promptDelayMs: 900,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Долгий вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Остановить OpenCode" })).toBeVisible();
+
+  const history = page.getByTestId("opencode-session-history");
+  await history.getByText("История сессий").click();
+  const target = history.getByRole("button", { name: /^Вторая/u });
+  await expect(target).toBeVisible();
+  await expect(target).toBeDisabled();
+  await expect.poll(() => mock.promptBodies.length).toBe(1);
+
+  await expect(page.getByRole("button", { name: "Остановить OpenCode" })).toHaveCount(0);
+  await expect(target).toBeEnabled();
+});
+
+test("desktop history: 404 удаляет запись, 503 сохраняет текущую сессию", async ({ page }) => {
+  await mockOpenCode(page, undefined, undefined, {
+    listSessions: () => [
+      { id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 },
+      { id: "ses-2", title: "Удалённая", updatedAt: 1_700_000_001_000 },
+      { id: "ses-3", title: "Проблемная", updatedAt: 1_700_000_002_000 },
+    ],
+    sessionStatus: (sessionID) =>
+      sessionID === "ses-2" ? "not-found" : sessionID === "ses-3" ? "unavailable" : undefined,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+  await expect(page.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled();
+
+  const history = page.getByTestId("opencode-session-history");
+  await history.getByText("История сессий").click();
+  await history.getByRole("button", { name: /^Удалённая/u }).click();
+  await expect(history.getByRole("button", { name: /^Удалённая/u })).toHaveCount(0);
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Kanbaner chat");
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-1");
+
+  await history.getByRole("button", { name: /^Проблемная/u }).click();
+  await expect(history.getByRole("alert")).toContainText("Не удалось открыть сессию");
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Kanbaner chat");
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBe("ses-1");
 });

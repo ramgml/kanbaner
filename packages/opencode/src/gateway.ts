@@ -18,6 +18,8 @@ import {
   type OpenCodeChatMessage,
   type OpenCodeGateway,
   type OpenCodeModelRefView,
+  type OpenCodeSessionRename,
+  type OpenCodeSessionSummary,
   type OpenCodeSessionView,
 } from "./types.ts";
 
@@ -32,6 +34,29 @@ const PROJECT_DIRECTORY = process.env.KANBANER_PROJECT_DIR
   ? path.resolve(process.env.KANBANER_PROJECT_DIR)
   : defaultProjectDirectory();
 const LOCATION = { directory: PROJECT_DIRECTORY } as const;
+const SESSION_LIST_PAGE_LIMIT = 50;
+const SESSION_LIST_MAX_PAGES = 4;
+const SESSION_LIST_MAX_ITEMS = 30;
+const SESSION_TITLE_MAX_POINTS = 100;
+const SESSION_TITLE_CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
+const SESSION_TITLE_WHITESPACE = /\s+/gu;
+
+/**
+ * Один проект сравнивается по canonical absolute directory. Windows не
+ * различает регистр, поэтому ключ детерминированно нормализуется.
+ */
+function directoryKey(directory: string): string {
+  const resolved = path.resolve(directory);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+const PROJECT_DIRECTORY_KEY = directoryKey(PROJECT_DIRECTORY);
+
+function currentProject(info: Record<string, unknown>): boolean {
+  if (!isRecord(info.location)) return false;
+  const directory = stringField(info.location.directory);
+  return directory !== undefined && directoryKey(directory) === PROJECT_DIRECTORY_KEY;
+}
 const TERMINAL_EVENTS = new Set([
   "session.execution.succeeded",
   "session.execution.failed",
@@ -342,6 +367,44 @@ function sessionView(info: unknown, messages: readonly unknown[]): OpenCodeSessi
   };
 }
 
+/**
+ * Whitelist-запись list: только разрешённая top-level сессия текущего проекта
+ * с canonical `time.updated`. Всё остальное отбрасывается до ответа клиенту.
+ */
+function sessionSummary(info: unknown): OpenCodeSessionSummary | null {
+  if (!isRecord(info)) return null;
+  const id = stringField(info.id);
+  if (id === undefined) return null;
+  if (info.parentID !== undefined && info.parentID !== null) return null;
+  if (!isRecord(info.metadata) || info.metadata.source !== "kanbaner") return null;
+  if (info.agent !== OPENCODE_AGENT_ID) return null;
+  if (!currentProject(info)) return null;
+  if (!isRecord(info.time)) return null;
+  const updated = info.time.updated;
+  if (typeof updated !== "number" || !Number.isFinite(updated)) return null;
+  const archived = info.time.archived;
+  if (archived !== undefined && archived !== null) return null;
+  return { id, title: stringField(info.title) ?? null, updatedAt: updated };
+}
+
+/**
+ * Заголовок валидируется до ownership-запроса: control/NUL отклоняются,
+ * пробелы схлопываются, длина ограничена 100 code points.
+ */
+function normalizedSessionTitle(value: unknown): string {
+  if (typeof value !== "string" || SESSION_TITLE_CONTROL.test(value)) {
+    throw new OpenCodeGatewayError("VALIDATION_ERROR", "Некорректное название сессии");
+  }
+  const title = value.trim().replace(SESSION_TITLE_WHITESPACE, " ");
+  if (title.length === 0 || [...title].length > SESSION_TITLE_MAX_POINTS) {
+    throw new OpenCodeGatewayError(
+      "VALIDATION_ERROR",
+      `Название сессии должно содержать от 1 до ${SESSION_TITLE_MAX_POINTS} символов`,
+    );
+  }
+  return title;
+}
+
 function eventToolID(data: Record<string, unknown>): string | undefined {
   const id = stringField(dataField(data, "id"));
   if (id === undefined) return undefined;
@@ -498,13 +561,20 @@ async function translated<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Ownership сессии: только top-level сессия агента kanbaner с
+ * `metadata.source=kanbaner` в текущем проекте. Чужая, child или сессия
+ * другого проекта неотличима от отсутствующей.
+ */
 async function ownedSession(client: OpenCodeClient, sessionID: string): Promise<unknown> {
   const info = await translated(() => client.session.get({ sessionID }));
   if (
     !isRecord(info) ||
     !isRecord(info.metadata) ||
     info.metadata.source !== "kanbaner" ||
-    info.agent !== OPENCODE_AGENT_ID
+    info.agent !== OPENCODE_AGENT_ID ||
+    (info.parentID !== undefined && info.parentID !== null) ||
+    !currentProject(info)
   ) {
     throw new OpenCodeGatewayError("NOT_FOUND", "Сессия OpenCode не найдена");
   }
@@ -814,6 +884,64 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
           ...(input.model === undefined ? {} : { model: input.model }),
         });
         return sessionView(created, []);
+      }),
+
+    listSessions: () =>
+      translated(async () => {
+        const summaries: OpenCodeSessionSummary[] = [];
+        const seenIDs = new Set<string>();
+        const seenCursors = new Set<string>();
+        let cursor: string | undefined;
+        for (let pageIndex = 0; pageIndex < SESSION_LIST_MAX_PAGES; pageIndex += 1) {
+          const page = await translated(() =>
+            cursor === undefined
+              ? client.session.list({
+                  directory: PROJECT_DIRECTORY,
+                  parentID: null,
+                  archived: false,
+                  order: "desc",
+                  limit: SESSION_LIST_PAGE_LIMIT,
+                })
+              : client.session.list({ cursor, limit: SESSION_LIST_PAGE_LIMIT }),
+          );
+          if (!isRecord(page) || !Array.isArray(page.data)) {
+            throw new OpenCodeGatewayError(
+              "DEPENDENCY_UNAVAILABLE",
+              "OpenCode вернул некорректный список сессий",
+            );
+          }
+          for (const item of page.data) {
+            const summary = sessionSummary(item);
+            if (summary === null || seenIDs.has(summary.id)) continue;
+            seenIDs.add(summary.id);
+            summaries.push(summary);
+          }
+          const next = isRecord(page.cursor) ? stringField(page.cursor.next) : undefined;
+          // Cursor не отдаётся клиенту и не может зациклить пагинацию.
+          if (next === undefined || seenCursors.has(next)) break;
+          seenCursors.add(next);
+          cursor = next;
+        }
+        return summaries
+          .sort((left, right) =>
+            left.updatedAt !== right.updatedAt
+              ? right.updatedAt - left.updatedAt
+              : left.id < right.id
+                ? -1
+                : left.id > right.id
+                  ? 1
+                  : 0,
+          )
+          .slice(0, SESSION_LIST_MAX_ITEMS);
+      }),
+
+    renameSession: (sessionID, title): Promise<OpenCodeSessionRename> =>
+      translated(async () => {
+        const normalized = normalizedSessionTitle(title);
+        await ownedSession(client, sessionID);
+        // Только title: metadata/permissions/archived не перезаписываются.
+        await client.session.update({ sessionID, title: normalized });
+        return { id: sessionID, title: normalized };
       }),
 
     getSession: (sessionID) =>

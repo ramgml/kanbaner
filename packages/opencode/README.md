@@ -20,7 +20,9 @@ catalog активных chat-моделей, streaming, полный built-in t
   activation, model type и variants. `settings`, `headers`, `body`, credentials
   и Service authentication остаются на сервере.
 - Создаются только сессии агента `kanbaner` с `metadata.source=kanbaner`.
-  Тот же ownership проверяется для history, model switch и prompt.
+  Тот же ownership проверяется для history, списка, переименования, model switch
+  и prompt. Список дополнительно требует root-сессию (`parentID: null`), тот же
+  нормализованный project directory и отсутствие `time.archived`.
 - Prompt ждёт `server.connected`, затем вызывает `session.prompt({ id })` с
   client-generated stable turn ID (`^msg_[A-Za-z0-9_-]{8,64}$`). ID не зависит
   от ordinal и переживает несколько prompt в одной сессии. Если Service вернул
@@ -104,6 +106,39 @@ catalog активных chat-моделей, streaming, полный built-in t
 проверки. Это отдельный UI transport, а не публичный command/query API:
 Bearer token в браузер не передаётся. Ответы имеют `Cache-Control: no-store`,
 а публичные ошибки не содержат сырые upstream messages.
+
+## История и переименование сессий
+
+- В шапке панели показывается заголовок текущей сессии и доступная кнопка
+  «Переименовать сессию». История — нативный `<details>` под шапкой: она
+  загружается лениво только при раскрытии и кэшируется на 30 секунд. Кэш
+  сбрасывается после создания сессии, завершённого prompt и переименования;
+  если история раскрыта, она перезагружается сразу.
+- `GET /api/opencode/session` не принимает query-параметры. Gateway читает не
+  больше 4 страниц по `limit: 50`, останавливается по `next`/повторному cursor,
+  дедуплицирует ID, сортирует по `time.updated` desc с устойчивым tie-break по
+  ID и отдаёт максимум 30 записей. Наружу передаётся только whitelist
+  `{ id, title, updatedAt }`: `metadata`, `location`, `projectID`, стоимость,
+  токены, permissions, model, agent, outcome, `archived` и `subpath` не
+  попадают в JSON. Невалидные записи и чужие/архивные/child-сессии
+  отбрасываются.
+- `PATCH /api/opencode/session/{sessionID}` принимает строгий JSON-объект
+  ровно с одним строковым полем `title` (до 4 KiB). Gateway нормализует
+  пробелы, запрещает NUL/C0/C1 и принимает 1–100 code points. В upstream
+  уходит только `{ sessionID, title }`; `metadata` не заменяется. Ответ —
+  `{ id, title }` после проверки ownership.
+- Выбор записи выполняет guarded `GET` точной сессии. `404` удаляет только
+  недоступную запись из списка и не меняет текущую сессию или сохранённый ID;
+  `503` показывает «Не удалось открыть сессию» и кнопку повтора. Во время
+  prompt/rename/model switch записи истории заблокированы. Ошибки не раскрывают
+  upstream-текст.
+- Если сохранённая сессия исчезла после reload (`404`), очищается только
+  `localStorage` ID и показывается пустое состояние с кнопкой «Новая сессия»
+  без автоматического `POST`. Временный `503` сохраняет ID и текущую сессию.
+  Черновики других сессий при этом не изменяются.
+- `Enter` в поле переименования сохраняет, `Escape` закрывает форму и
+  возвращает фокус кнопке; `Escape` в раскрытой истории закрывает её и
+  возвращает фокус на summary. Обработчик не всплывает до закрытия всей панели.
 
 ## Вложения prompt
 
@@ -269,8 +304,9 @@ server. Поэтому повтор того же request внутри одно�
 - `packages/opencode/src/gateway.test.ts` — catalog whitelist/tools, ownership,
   pagination, stream readiness/finalizing/terminal/abort, canonical outcome,
   stable turnID/admitted alias, transient lookup retry, tool event mapping,
-  timings/input/output, v1 `callID`/`tool` identity, aborted→cancelled и inline
-  files.
+  timings/input/output, v1 `callID`/`tool` identity, aborted→cancelled, inline
+  files, bounded list/whitelist/cursor/dedupe/sort/cap, ownership и rename
+  validation/exact update.
 - `packages/opencode/src/gateway-service-version.test.ts` — Service version
   predicate: accept 2.x (2.2/2.3), reject 1.x/3.x и malformed.
 - `packages/opencode/src/tool-metadata.test.ts` — ordered deny/allow против
@@ -279,7 +315,8 @@ server. Поэтому повтор того же request внутри одно�
 - `apps/web/src/server/opencode-http.test.ts` — guard, validation вложений
   (Base64/UTF-8/сигнатуры/лимиты), публичные ошибки, finalizing passthrough,
   единственный terminal, pre-admission nonAdmission/retryable, invalid turnID,
-  `?turnID` status, NDJSON EOF и cancel.
+  `?turnID` status, NDJSON EOF, cancel, guards/query rejection для списка и
+  strict JSON/ошибки `PATCH` переименования.
 - `packages/opencode/src/ui.test.tsx` — StrictMode, streaming, model/session
   races, attachments, turn-статусы, rejected stream без retry, stable ID
   второго prompt, delta→error без потери текста, cancelled/empty/tool-only,
@@ -289,7 +326,11 @@ server. Поэтому повтор того же request внутри одно�
   tools, turn-scoped finish без чужого unconfirmed tool, nonAdmission без
   завершения и ручной status check в том же scope, drafts restore/send/retry,
   отсутствие base64 и истории в storage, заблокированный localStorage, copy
-  action и его failure.
+  action и его failure, lazy history/switch/draft, reload-404 empty state без
+  POST, 404/503 switch, busy, rename/Enter/Escape и stale-кэш после newChat.
+- `packages/opencode/src/session-history.test.tsx` — lazy load, 30-секундный
+  кэш и version invalidation, empty/error/retry, not-found removal, switch
+  unavailable/retry, busy, Escape-фокус и pending «Открываем…».
 - `packages/opencode/src/drafts.test.tsx` — valid/corrupt JSON, версия, формы
   записей, LRU по `updatedAt` и размеру, oversize, storage throw/blocked,
   необычные session ID, StrictMode и изоляция сессий.
@@ -314,4 +355,6 @@ server. Поэтому повтор того же request внутри одно�
   Copy/drafts-сценарии проверяют точный clipboard desktop/mobile, Enter/Space,
   понятную ошибку при отказе clipboard, изоляцию и reload черновиков, пустую
   новую сессию, очистку только своей сессии, повреждённый storage и отсутствие
-  base64/истории в `localStorage`.
+  base64/истории в `localStorage`. History-сценарии проверяют lazy desktop
+  list/switch/per-session draft, mobile reload-404 CTA без POST, rename
+  PATCH/Enter/Escape, blocked items во время prompt и 404/503 switch.
