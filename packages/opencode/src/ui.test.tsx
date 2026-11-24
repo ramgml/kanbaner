@@ -21,6 +21,7 @@ const catalog: OpenCodeCatalog = {
   providers: [
     { id: "provider-1", name: "Provider One", activation: "enabled" },
     { id: "provider-2", name: "Provider Two", activation: "enabled" },
+    { id: "provider-3", name: "Provider Three", activation: "enabled" },
   ],
   models: [
     {
@@ -31,6 +32,13 @@ const catalog: OpenCodeCatalog = {
       variants: ["low", "high"],
     },
     { id: "model-2", providerID: "provider-2", name: "Model Two", type: "chat", variants: ["max"] },
+    {
+      id: "model-3",
+      providerID: "provider-3",
+      name: "Model Three",
+      type: "chat",
+      variants: ["high"],
+    },
   ],
   agents: [{ id: "kanbaner", name: "Kanbaner", description: null }],
   tools: OPENCODE_CATALOG_TOOLS,
@@ -4227,7 +4235,7 @@ describe("OpenCode session history", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/prompt"))).toHaveLength(1);
   });
 
-  it("failed newChat сохраняет unconfirmed turn, draft и текущую сессию", async () => {
+  it("failed newChat сохраняет turn, draft, файл и контекст, а успешный их очищает", async () => {
     window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
     let creates = 0;
     const statusChecks = vi.fn(() => success({ session: session("ses-1"), outcome: "pending" }));
@@ -4237,7 +4245,7 @@ describe("OpenCode session history", () => {
       if (url === "/api/opencode/catalog") return success(catalog);
       if (url === "/api/opencode/session" && method === "POST") {
         creates += 1;
-        return failure(503);
+        return creates === 1 ? failure(503) : success({ ...session("ses-new"), title: "Свежая" });
       }
       if (url === "/api/opencode/session/ses-1" && method === "GET")
         return success(session("ses-1"));
@@ -4245,7 +4253,7 @@ describe("OpenCode session history", () => {
       if (url.startsWith("/api/opencode/session/ses-1?turnID=")) return statusChecks();
       throw new Error(`Unexpected fetch ${method} ${url}`);
     });
-    render(<OpenCodePanel />);
+    render(<OpenCodePanel search="?note=note-1" />);
     const message = await composer();
     fireEvent.change(message, { target: { value: "Вопрос" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
@@ -4254,6 +4262,16 @@ describe("OpenCode session history", () => {
 
     fireEvent.change(await composer(), { target: { value: "Не потерять черновик" } });
     expect(readDrafts().get("ses-1")).toBe("Не потерять черновик");
+    fireEvent.click(screen.getByRole("button", { name: "Прикрепить контекст" }));
+    expect(screen.getByRole("button", { name: "Убрать контекст" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.change(screen.getByLabelText("Файлы для OpenCode"), {
+      target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+
     fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Временно недоступно");
     expect(creates).toBe(1);
@@ -4264,15 +4282,34 @@ describe("OpenCode session history", () => {
     );
     expect(readDrafts().get("ses-1")).toBe("Не потерять черновик");
     expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(pendingFilesList()).toHaveTextContent("notes.txt");
+    expect(screen.getByRole("button", { name: "Убрать контекст" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
 
     const check = screen.getByRole("button", { name: "Проверить статус" });
     await waitFor(() => expect(check).toBeEnabled());
     fireEvent.click(check);
     await waitFor(() => expect(status).toHaveTextContent("Результат пока не подтверждён"));
     expect(statusChecks).toHaveBeenCalledOnce();
+
+    // Успешный create начинает новую generation и очищает вложения/контекст.
+    fireEvent.click(screen.getByRole("button", { name: "Новая сессия OpenCode" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Свежая"),
+    );
+    expect(creates).toBe(2);
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-new");
+    expect(pendingFilesList()).toBeNull();
+    expect(screen.queryByText("notes.txt")).toBeNull();
+    expect(screen.getByRole("button", { name: "Прикрепить контекст" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
   });
 
-  it("successful model switch не отменяет delayed canonical refresh после done", async () => {
+  it("model switch не откатывается delayed refresh, а свежий GET применяет canonical", async () => {
     window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
     let getCalls = 0;
     const refreshGate: { release: ((response: Response) => void) | null } = { release: null };
@@ -4292,9 +4329,18 @@ describe("OpenCode session history", () => {
       if (url === "/api/opencode/session/ses-1" && method === "GET") {
         getCalls += 1;
         if (getCalls === 1) return Promise.resolve(success(session("ses-1")));
-        return new Promise<Response>((resolve) => {
-          refreshGate.release = resolve;
-        });
+        if (getCalls === 2) {
+          return new Promise<Response>((resolve) => {
+            refreshGate.release = resolve;
+          });
+        }
+        return Promise.resolve(
+          success({
+            ...session("ses-1"),
+            model: { id: "model-3", providerID: "provider-3", variant: "high" },
+            messages: [{ id: "assistant:fresh", role: "assistant", text: "Свежий ответ" }],
+          }),
+        );
       }
       throw new Error(`Unexpected fetch ${method} ${url}`);
     });
@@ -4306,8 +4352,6 @@ describe("OpenCode session history", () => {
     await waitFor(() => expect(status).toHaveTextContent("Готово"));
     if (refreshGate.release === null) throw new Error("canonical refresh не был запущен");
 
-    // Успешная смена модели не начинает новую generation: уже летящий refresh
-    // остаётся валидным и применит canonical messages.
     expandModelControls();
     const provider = screen.getByRole("combobox", { name: "Провайдер OpenCode" });
     await waitFor(() => expect(provider).toBeEnabled());
@@ -4316,16 +4360,24 @@ describe("OpenCode session history", () => {
       expect(screen.getByRole("combobox", { name: "Модель OpenCode" })).toHaveValue("model-2"),
     );
 
+    // Delayed refresh стартовал до switch и возвращает старую model-1: messages
+    // применяются, но подтверждённая model-2 не откатывается.
     refreshGate.release(
       success({
         ...session("ses-1"),
-        model: { id: "model-2", providerID: "provider-2", variant: "max" },
+        model: { id: "model-1", providerID: "provider-1", variant: "high" },
         messages: [{ id: "assistant:canonical", role: "assistant", text: "Канонический ответ" }],
       }),
     );
     expect(await screen.findByText("Канонический ответ")).toBeVisible();
     expect(status).toHaveTextContent("Готово");
     expect(screen.getByRole("combobox", { name: "Модель OpenCode" })).toHaveValue("model-2");
+
+    // Следующий GET начат после switch и принимает более новую canonical model.
+    fireEvent.change(message, { target: { value: "Второй вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    expect(await screen.findByText("Свежий ответ")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Модель OpenCode" })).toHaveValue("model-3");
   });
 
   it("newChat применяет только последний create и игнорирует stale response", async () => {
@@ -4406,11 +4458,13 @@ describe("OpenCode session history", () => {
 
     openHistory();
     await waitFor(() => expect(list).toHaveBeenCalledOnce());
-    expect(
-      within(within(historyDetails()).getByRole("list", { name: "История сессий" })).getAllByRole(
-        "button",
-      ),
-    ).toHaveLength(1);
+    await waitFor(() =>
+      expect(
+        within(within(historyDetails()).getByRole("list", { name: "История сессий" })).getAllByRole(
+          "button",
+        ),
+      ).toHaveLength(1),
+    );
 
     // EOF-unconfirmed сам по себе не обновлял историю; ручной done обязан
     // сбросить 30-секундный кэш и запросить новый порядок/updatedAt.

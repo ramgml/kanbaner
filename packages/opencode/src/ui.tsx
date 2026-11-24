@@ -701,7 +701,16 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
    * overlay гасится. GET, начатый после rename, всегда доверяет canonical.
    */
   const titleOverridesRef = useRef(new Map<string, { title: string; confirmedSeq: number }>());
-  /** Монотонный маркер старта canonical GET: отделяет pre-rename refresh. */
+  /**
+   * Локально подтверждённая model успешного switch. Overlay действует только на
+   * canonical GET, стартовавшие до подтверждения: такой delayed refresh
+   * применяет canonical messages, но не откатывает выбранную модель. GET,
+   * начатый после switch, доверяет canonical и гасит overlay.
+   */
+  const modelOverridesRef = useRef(
+    new Map<string, { model: OpenCodeModelRefView; confirmedSeq: number }>(),
+  );
+  /** Монотонный маркер старта canonical GET: отделяет pre-rename/pre-switch refresh. */
   const canonicalRequestSeqRef = useRef(0);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -723,9 +732,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const beginOperation = useCallback(
     (scope: { readonly keepSwitch?: boolean; readonly keepRename?: boolean } = {}): number => {
       const generation = ++generationRef.current;
-      // Новая операция/switch/newChat начинает свою canonical-жизнь: старый
-      // title overlay не должен влиять на последующий GET.
+      // Новая операция/switch/newChat начинает свою canonical-жизнь: старые
+      // title/model overlay не должны влиять на последующий GET.
       titleOverridesRef.current.clear();
+      modelOverridesRef.current.clear();
       initializeAbortRef.current?.abort();
       modelSeqRef.current += 1;
       modelAbortRef.current?.abort();
@@ -771,6 +781,15 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         const startedBeforeRename =
           requestStartSeq !== undefined && requestStartSeq <= override.confirmedSeq;
         if (startedBeforeRename) canonical = { ...next, title: override.title };
+      }
+      const modelOverride = modelOverridesRef.current.get(next.id);
+      if (modelOverride !== undefined) {
+        // Pre-switch GET не должен откатить успешно выбранную модель; свежий GET
+        // после switch, наоборот, принимает canonical model как более новую.
+        modelOverridesRef.current.delete(next.id);
+        const startedBeforeSwitch =
+          requestStartSeq !== undefined && requestStartSeq <= modelOverride.confirmedSeq;
+        if (startedBeforeSwitch) canonical = { ...canonical, model: modelOverride.model };
       }
       setSession(canonical);
       setMessages(next.messages);
@@ -962,6 +981,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       ) {
         return;
       }
+      // Overlay ставится до возможного delayed refresh: canonical messages
+      // применяются, но уже подтверждённая model не откатывается. Свежий GET,
+      // начатый после switch, гасит overlay и доверяет canonical.
+      modelOverridesRef.current.set(sessionID, {
+        model,
+        confirmedSeq: canonicalRequestSeqRef.current,
+      });
       setSession((current) =>
         current === null || current.id !== sessionID ? current : { ...current, model },
       );
