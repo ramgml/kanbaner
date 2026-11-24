@@ -3487,7 +3487,7 @@ describe("OpenCode session history", () => {
       return success([summary("ses-1", listCalls === 1 ? "Kanbaner chat" : "Новое", 3_000)]);
     });
     const rename = vi.fn((body: unknown) => {
-      expect(body).toEqual({ title: "  Новое  " });
+      expect(body).toEqual({ title: "Новое" });
       return success({ id: "ses-1", title: "Новое" });
     });
     mockApi({ list, get: (sessionID) => success(session(sessionID)), rename });
@@ -3553,5 +3553,365 @@ describe("OpenCode session history", () => {
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expect(await within(historyDetails()).findByText("Свежая")).toBeVisible();
     expect(within(historyDetails()).getByText(/es-new/u)).toBeVisible();
+  });
+
+  it("rename success и 503 сохраняют unconfirmed turn и ручную проверку", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let renameCalls = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && method === "POST") return success(session("ses-1"));
+      if (url === "/api/opencode/session") {
+        return success([summary("ses-1", "Kanbaner chat")]);
+      }
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=")) {
+        return success({ session: session("ses-1"), outcome: "pending" });
+      }
+      if (url.endsWith("/prompt")) return stream([{ kind: "finalizing" }]);
+      if (url === "/api/opencode/session/ses-1" && method === "PATCH") {
+        renameCalls += 1;
+        return renameCalls === 1 ? success({ id: "ses-1", title: "Новое" }) : failure(503);
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return success(session("ses-1"));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Результат не подтверждён");
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    let input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: "Новое" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Новое"),
+    );
+    expect(renameCalls).toBe(1);
+    expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(screen.getByRole("button", { name: "Проверить статус" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: "Сломанное" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Временно недоступно");
+    expect(renameCalls).toBe(2);
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Новое");
+    expect(status).toHaveTextContent("Результат не подтверждён");
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("Результат пока не подтверждён"));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/prompt"))).toHaveLength(1);
+  });
+
+  it("switch 404 и 503 сохраняют unconfirmed turn и ручную проверку", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && method === "POST") return success(session("ses-1"));
+      if (url === "/api/opencode/session") {
+        return success([
+          summary("ses-1", "Kanbaner chat", 3_000),
+          summary("ses-2", "Удалённая", 2_000),
+          summary("ses-3", "Проблемная", 1_000),
+        ]);
+      }
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=")) {
+        return success({ session: session("ses-1"), outcome: "pending" });
+      }
+      if (url === "/api/opencode/session/ses-2" && method === "GET")
+        return failure(404, "NOT_FOUND");
+      if (url === "/api/opencode/session/ses-3" && method === "GET") return failure(503);
+      if (url.endsWith("/prompt")) return stream([{ kind: "finalizing" }]);
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return success(session("ses-1"));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Результат не подтверждён");
+
+    openHistory();
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Удалённая/u }));
+    await waitFor(() => expect(within(historyDetails()).queryByText("Удалённая")).toBeNull());
+    expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-1");
+
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Проблемная/u }));
+    expect(await within(historyDetails()).findByRole("alert")).toHaveTextContent(
+      "Не удалось открыть сессию",
+    );
+    expect(status).toHaveTextContent("Результат не подтверждён");
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() => expect(status).toHaveTextContent("Результат пока не подтверждён"));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/prompt"))).toHaveLength(1);
+  });
+
+  it("failed switch не отменяет delayed canonical refresh после done", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let getCalls = 0;
+    const refreshGate: { release: ((response: Response) => void) | null } = { release: null };
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "POST") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      if (url === "/api/opencode/session") {
+        return Promise.resolve(
+          success([summary("ses-1", "Kanbaner chat", 3_000), summary("ses-2", "Удалённая", 2_000)]),
+        );
+      }
+      if (url === "/api/opencode/session/ses-2" && method === "GET") {
+        return Promise.resolve(failure(404, "NOT_FOUND"));
+      }
+      if (url.endsWith("/prompt")) return Promise.resolve(stream([{ kind: "done" }]));
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        getCalls += 1;
+        if (getCalls === 1) return Promise.resolve(success(session("ses-1")));
+        return new Promise<Response>((resolve) => {
+          refreshGate.release = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    const status = await screen.findByTestId("opencode-turn-status");
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+    expect(refreshGate.release).not.toBeNull();
+
+    openHistory();
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Удалённая/u }));
+    await waitFor(() => expect(within(historyDetails()).queryByText("Удалённая")).toBeNull());
+    expect(status).toHaveTextContent("Готово");
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+
+    refreshGate.release?.(
+      success({
+        ...session("ses-1"),
+        messages: [{ id: "assistant:canonical", role: "assistant", text: "Канонический ответ" }],
+      }),
+    );
+    expect(await screen.findByText("Канонический ответ")).toBeVisible();
+    expect(status).toHaveTextContent("Готово");
+  });
+
+  it("delayed canonical refresh после rename не возвращает старый title", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let getCalls = 0;
+    const refreshGate: { release: ((response: Response) => void) | null } = { release: null };
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "POST") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      if (url === "/api/opencode/session") {
+        return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
+      }
+      if (url.endsWith("/prompt")) return Promise.resolve(stream([{ kind: "done" }]));
+      if (url === "/api/opencode/session/ses-1" && method === "PATCH") {
+        return Promise.resolve(success({ id: "ses-1", title: "Новое" }));
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        getCalls += 1;
+        if (getCalls === 1) return Promise.resolve(success(session("ses-1")));
+        return new Promise<Response>((resolve) => {
+          refreshGate.release = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(refreshGate.release).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    const input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: "Новое" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Новое"),
+    );
+
+    refreshGate.release?.(
+      success({
+        ...session("ses-1"),
+        title: "Kanbaner chat",
+        messages: [{ id: "assistant:canonical", role: "assistant", text: "Канонический ответ" }],
+      }),
+    );
+    expect(await screen.findByText("Канонический ответ")).toBeVisible();
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Новое");
+  });
+
+  it("successful switch отменяет старый generation и загружает target messages", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let getCalls = 0;
+    const staleGate: { release: ((response: Response) => void) | null } = { release: null };
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "POST") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      if (url === "/api/opencode/session") {
+        return Promise.resolve(
+          success([summary("ses-1", "Kanbaner chat", 3_000), summary("ses-2", "Вторая", 2_000)]),
+        );
+      }
+      if (url.endsWith("/prompt")) return Promise.resolve(stream([{ kind: "done" }]));
+      if (url === "/api/opencode/session/ses-2" && method === "GET") {
+        return Promise.resolve(
+          success({
+            ...session("ses-2"),
+            title: "Вторая",
+            messages: [{ id: "assistant:target", role: "assistant", text: "Целевое сообщение" }],
+          }),
+        );
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        getCalls += 1;
+        if (getCalls === 1) return Promise.resolve(success(session("ses-1")));
+        return new Promise<Response>((resolve) => {
+          staleGate.release = resolve;
+        });
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Вопрос" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
+    );
+    expect(staleGate.release).not.toBeNull();
+
+    openHistory();
+    fireEvent.click(await within(historyDetails()).findByRole("button", { name: /^Вторая/u }));
+    expect(await screen.findByText("Целевое сообщение")).toBeVisible();
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Вторая");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-2");
+
+    staleGate.release?.(
+      success({
+        ...session("ses-1"),
+        messages: [{ id: "assistant:stale", role: "assistant", text: "Старое каноническое" }],
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("Старое каноническое")).toBeNull();
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Вторая");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-2");
+  });
+
+  it("rename 404 очищает только ID, фокусирует CTA и не создаёт сессию", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let creates = 0;
+    mockApi({
+      get: (sessionID) => success(session(sessionID)),
+      create: () => {
+        creates += 1;
+        return success({ ...session("ses-new"), title: "Свежая" });
+      },
+      rename: () => failure(404, "NOT_FOUND"),
+    });
+    render(<OpenCodePanel />);
+    await composer();
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    const input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: "Новое" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByText("Сохранённая сессия не найдена.")).toBeVisible();
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBeNull();
+    const cta = screen.getByRole("button", { name: "Новая сессия" });
+    await waitFor(() => expect(cta).toHaveFocus());
+    expect(screen.queryByRole("textbox", { name: "Название сессии" })).toBeNull();
+    expect(creates).toBe(0);
+  });
+
+  it("rename 503 сохраняет сессию, заголовок и открытую форму", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    mockApi({
+      get: (sessionID) => success(session(sessionID)),
+      rename: () => failure(503),
+    });
+    render(<OpenCodePanel />);
+    await composer();
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    const input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: "Новое" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Временно недоступно");
+    expect(screen.getByRole("textbox", { name: "Название сессии" })).toHaveValue("Новое");
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Kanbaner chat");
+    expect(window.localStorage.getItem("kanbaner.opencode.sessionId")).toBe("ses-1");
+  });
+
+  it("принимает 100 emoji и отклоняет 101 без PATCH", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    const bodies: unknown[] = [];
+    mockApi({
+      get: (sessionID) => success(session(sessionID)),
+      rename: (body) => {
+        bodies.push(body);
+        return success({ id: "ses-1", title: (body as { title: string }).title });
+      },
+    });
+    render(<OpenCodePanel />);
+    await composer();
+
+    const hundred = "😀".repeat(100);
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    let input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: hundred } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent(hundred),
+    );
+    expect(bodies).toEqual([{ title: hundred }]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Переименовать сессию" }));
+    input = screen.getByRole("textbox", { name: "Название сессии" });
+    fireEvent.change(input, { target: { value: `${hundred}😀` } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Название сессии должно содержать от 1 до 100 символов",
+    );
+    expect(bodies).toHaveLength(1);
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent(hundred);
   });
 });

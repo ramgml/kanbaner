@@ -638,6 +638,22 @@ async function attachmentPayload(
   };
 }
 
+const SESSION_TITLE_MAX_POINTS = 100;
+const SESSION_TITLE_CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
+const SESSION_TITLE_WHITESPACE = /\s+/gu;
+
+/**
+ * Клиентская проверка повторяет gateway: trim, схлопывание пробелов и лимит
+ * 1–100 code points. HTML `maxLength` считает UTF-16 units, поэтому 100 emoji
+ * ошибочно не помещались бы; серверная валидация остаётся источником истины.
+ */
+function normalizedSessionTitle(value: string): string | null {
+  if (SESSION_TITLE_CONTROL.test(value)) return null;
+  const title = value.trim().replace(SESSION_TITLE_WHITESPACE, " ");
+  if (title.length === 0 || Array.from(title).length > SESSION_TITLE_MAX_POINTS) return null;
+  return title;
+}
+
 export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [catalog, setCatalog] = useState<OpenCodeCatalog | null>(null);
   const [session, setSession] = useState<OpenCodeSessionView | null>(null);
@@ -667,8 +683,20 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const promptAbortRef = useRef<AbortController | null>(null);
   const switchAbortRef = useRef<AbortController | null>(null);
   const renameAbortRef = useRef<AbortController | null>(null);
+  /**
+   * Отдельные request tokens для switch/rename: неуспешный switch или rename
+   * не меняет generation текущей сессии и не отменяет её canonical refresh.
+   */
+  const switchSeqRef = useRef(0);
+  const renameSeqRef = useRef(0);
+  /**
+   * Локально подтверждённый title переименованной сессии. Delayed canonical
+   * refresh применяет messages, но не возвращает старый title.
+   */
+  const titleOverridesRef = useRef(new Map<string, string>());
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameButtonRef = useRef<HTMLButtonElement | null>(null);
+  const emptyCtaRef = useRef<HTMLButtonElement | null>(null);
   /**
    * Tool identity текущего prompt-хода. Global `status === "running"` по всей
    * истории недопустим: unconfirmed tool предыдущего turn принадлежит другому
@@ -683,32 +711,48 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const busy = loading || creating || modelPending || promptPending || switching || renamePending;
   const chatScroll = useChatScroll({ sessionID: session?.id ?? null, messages });
 
-  const beginOperation = useCallback((): number => {
-    const generation = ++generationRef.current;
-    initializeAbortRef.current?.abort();
-    modelAbortRef.current?.abort();
-    promptAbortRef.current?.abort();
-    switchAbortRef.current?.abort();
-    renameAbortRef.current?.abort();
-    for (const controller of refreshControllersRef.current) controller.abort();
-    refreshControllersRef.current.clear();
-    initializeAbortRef.current = null;
-    modelAbortRef.current = null;
-    promptAbortRef.current = null;
-    switchAbortRef.current = null;
-    renameAbortRef.current = null;
-    setLoading(false);
-    setCreating(false);
-    setModelPending(false);
-    setPromptPending(false);
-    setSwitching(false);
-    setRenamePending(false);
-    return generation;
-  }, []);
+  const beginOperation = useCallback(
+    (scope: { readonly keepSwitch?: boolean; readonly keepRename?: boolean } = {}): number => {
+      const generation = ++generationRef.current;
+      initializeAbortRef.current?.abort();
+      modelAbortRef.current?.abort();
+      promptAbortRef.current?.abort();
+      if (scope.keepSwitch !== true) {
+        switchSeqRef.current += 1;
+        switchAbortRef.current?.abort();
+        switchAbortRef.current = null;
+        setSwitching(false);
+      }
+      if (scope.keepRename !== true) {
+        renameSeqRef.current += 1;
+        renameAbortRef.current?.abort();
+        renameAbortRef.current = null;
+        setRenamePending(false);
+      }
+      for (const controller of refreshControllersRef.current) controller.abort();
+      refreshControllersRef.current.clear();
+      initializeAbortRef.current = null;
+      modelAbortRef.current = null;
+      promptAbortRef.current = null;
+      setLoading(false);
+      setCreating(false);
+      setModelPending(false);
+      setPromptPending(false);
+      return generation;
+    },
+    [],
+  );
 
   const applySession = useCallback((next: OpenCodeSessionView, generation: number): boolean => {
     if (generation !== generationRef.current) return false;
-    setSession(next);
+    const override = titleOverridesRef.current.get(next.id);
+    if (override !== undefined && override === next.title) {
+      // Upstream уже отдаёт подтверждённый title: overlay больше не нужен.
+      titleOverridesRef.current.delete(next.id);
+    }
+    setSession(
+      override === undefined || override === next.title ? next : { ...next, title: override },
+    );
     setMessages(next.messages);
     storeSessionID(next.id);
     return true;
@@ -785,6 +829,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     return () => {
       window.cancelAnimationFrame(frame);
       generationRef.current += 1;
+      switchSeqRef.current += 1;
+      renameSeqRef.current += 1;
       initializeAbortRef.current?.abort();
       modelAbortRef.current?.abort();
       promptAbortRef.current?.abort();
@@ -896,12 +942,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   );
 
   /**
-   * Переключение — отдельная generation-операция. Ответ применяется только к
-   * своему поколению; 404/503 не меняют текущую сессию и сохранённый ID.
+   * Переключение — отдельный request token. Generation текущей сессии не
+   * меняется, пока target не загружен: failed switch (404/503) сохраняет
+   * visibleTurn, unconfirmed и canonical refresh. Глобальная generation
+   * начинается только после успешного GET и проверки, что switch всё ещё
+   * последний.
    */
   const switchSession = async (targetID: string): Promise<SessionSwitchResult> => {
     if (busy || session?.id === targetID) return { ok: false, reason: "cancelled" };
-    const generation = beginOperation();
+    const requestGeneration = generationRef.current;
+    const token = switchSeqRef.current + 1;
+    switchSeqRef.current = token;
     const controller = new AbortController();
     switchAbortRef.current = controller;
     setSwitching(true);
@@ -913,9 +964,15 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         `/api/opencode/session/${encodeURIComponent(targetID)}`,
         { signal: controller.signal },
       );
-      if (generation !== generationRef.current || !applySession(next, generation)) {
+      if (
+        token !== switchSeqRef.current ||
+        switchAbortRef.current !== controller ||
+        generationRef.current !== requestGeneration
+      ) {
         return { ok: false, reason: "cancelled" };
       }
+      const generation = beginOperation({ keepSwitch: true });
+      if (!applySession(next, generation)) return { ok: false, reason: "cancelled" };
       setTurn(null);
       setAttachedRef(null);
       setSelectionError(null);
@@ -927,7 +984,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       for (const local of transient) revokeObjectUrl(local.url);
       return { ok: true };
     } catch (reason) {
-      if (generation !== generationRef.current) return { ok: false, reason: "cancelled" };
+      if (token !== switchSeqRef.current || generationRef.current !== requestGeneration) {
+        return { ok: false, reason: "cancelled" };
+      }
       if (reason instanceof Error && reason.name === "AbortError") {
         return { ok: false, reason: "cancelled" };
       }
@@ -938,7 +997,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       return { ok: false, reason: "unavailable" };
     } finally {
       if (switchAbortRef.current === controller) switchAbortRef.current = null;
-      if (generation === generationRef.current) setSwitching(false);
+      if (switchSeqRef.current === token) setSwitching(false);
     }
   };
 
@@ -955,10 +1014,23 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     renameButtonRef.current?.focus();
   };
 
+  /**
+   * Rename не меняет generation и не отменяет canonical refresh. Успех и 503
+   * применяются только к захваченной generation/sessionID. Только 404
+   * переводит панель в empty state через beginOperation, чтобы старый refresh
+   * не воскресил удалённую сессию.
+   */
   const submitRename = async (): Promise<void> => {
     if (session === null || renamePending) return;
+    const title = normalizedSessionTitle(renameValue);
+    if (title === null) {
+      setRenameError("Название сессии должно содержать от 1 до 100 символов");
+      return;
+    }
     const sessionID = session.id;
-    const generation = beginOperation();
+    const requestGeneration = generationRef.current;
+    const token = renameSeqRef.current + 1;
+    renameSeqRef.current = token;
     const controller = new AbortController();
     renameAbortRef.current = controller;
     setRenamePending(true);
@@ -970,11 +1042,16 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ title: renameValue }),
+          body: JSON.stringify({ title }),
           signal: controller.signal,
         },
       );
-      if (generation !== generationRef.current) return;
+      if (token !== renameSeqRef.current || generationRef.current !== requestGeneration) {
+        return;
+      }
+      // Overlay ставится до возможного delayed refresh: canonical messages
+      // применяются, но старый title не возвращается.
+      titleOverridesRef.current.set(sessionID, result.title);
       setSession((current) =>
         current === null || current.id !== sessionID
           ? current
@@ -985,10 +1062,14 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       setHistoryVersion((current) => current + 1);
       renamed = true;
     } catch (reason) {
-      if (generation !== generationRef.current) return;
+      if (token !== renameSeqRef.current || generationRef.current !== requestGeneration) {
+        return;
+      }
       if (reason instanceof Error && reason.name === "AbortError") return;
       if (reason instanceof ApiError && reason.status === 404) {
         // Текущая сессия исчезла: только сохранённый ID и пустое состояние.
+        beginOperation();
+        titleOverridesRef.current.delete(sessionID);
         clearStoredSessionID();
         setSession(null);
         setMessages([]);
@@ -997,12 +1078,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         setRenameError(null);
         setPanelError(null);
         setHistoryVersion((current) => current + 1);
+        window.requestAnimationFrame(() => emptyCtaRef.current?.focus());
         return;
       }
       setRenameError(publicError(reason, "Не удалось переименовать сессию"));
     } finally {
       if (renameAbortRef.current === controller) renameAbortRef.current = null;
-      if (generation === generationRef.current) {
+      if (renameSeqRef.current === token) {
         setRenamePending(false);
         // Фокус ставим после снятия disabled, иначе браузер его игнорирует.
         if (renamed) {
@@ -1653,7 +1735,6 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
               ref={renameInputRef}
               autoFocus
               value={renameValue}
-              maxLength={100}
               disabled={busy}
               onChange={(event) => {
                 setRenameValue(event.target.value);
@@ -1828,6 +1909,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 <Sparkles aria-hidden="true" className="size-6" />
                 <p>Сохранённая сессия не найдена.</p>
                 <button
+                  ref={emptyCtaRef}
                   type="button"
                   disabled={busy}
                   onClick={() => void newChat()}

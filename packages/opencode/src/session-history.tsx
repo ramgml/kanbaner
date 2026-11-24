@@ -64,6 +64,7 @@ export function SessionHistory({
   const [switchError, setSwitchError] = useState<{ readonly target: string } | null>(null);
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const summaryRef = useRef<HTMLElement | null>(null);
+  const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const cacheRef = useRef<CacheEntry | null>(null);
   const loadingRef = useRef(false);
   const requestRef = useRef(0);
@@ -110,9 +111,13 @@ export function SessionHistory({
   useEffect(() => {
     if (versionRef.current === version) return;
     versionRef.current = version;
-    // Заголовок текущей сессии показывается из props, остальные данные
-    // обновятся при следующем открытии или сразу, если список уже раскрыт.
     cacheRef.current = null;
+    // Инвалидация версии отменяет in-flight list: его response уже устарел и
+    // не должен попасть в state или 30-секундный кэш.
+    requestRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    loadingRef.current = false;
     if (detailsRef.current?.open === true) void refresh(true);
   }, [refresh, version]);
 
@@ -147,6 +152,8 @@ export function SessionHistory({
       }
       if (result.reason === "not-found") {
         // Удаляется только недоступная запись; текущая сессия не меняется.
+        const index = items.findIndex((item) => item.id === sessionID);
+        const focusID = items[index + 1]?.id ?? items[index - 1]?.id ?? null;
         setItems((current) => current.filter((item) => item.id !== sessionID));
         if (cacheRef.current !== null) {
           cacheRef.current = {
@@ -154,6 +161,12 @@ export function SessionHistory({
             at: cacheRef.current.at,
           };
         }
+        // Кнопка удалена из DOM: переводим focus на следующую/предыдущую
+        // запись, иначе на summary, чтобы клавиатура не потерялась.
+        window.requestAnimationFrame(() => {
+          const target = focusID === null ? null : itemRefs.current.get(focusID);
+          (target ?? summaryRef.current)?.focus();
+        });
         return;
       }
       if (result.reason === "unavailable") setSwitchError({ target: sessionID });
@@ -220,6 +233,10 @@ export function SessionHistory({
               return (
                 <li key={item.id} className="min-w-0">
                   <button
+                    ref={(node) => {
+                      if (node === null) itemRefs.current.delete(item.id);
+                      else itemRefs.current.set(item.id, node);
+                    }}
                     type="button"
                     aria-current={item.id === currentID ? "true" : undefined}
                     disabled={busy || pendingTarget !== null}

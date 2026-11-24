@@ -126,6 +126,9 @@ describe("SessionHistory", () => {
       "true",
     );
     expect(onSelect).toHaveBeenCalledWith("ses-abcdef123456");
+    await waitFor(() =>
+      expect(within(history()).getByRole("button", { name: /^Без названия/ })).toHaveFocus(),
+    );
   });
 
   it("показывает switch-ошибку и повторяет выбор без потери списка", async () => {
@@ -187,5 +190,62 @@ describe("SessionHistory", () => {
     expect(within(history()).getByRole("button", { name: /^Без названия/ })).toBeDisabled();
     finish?.({ ok: false, reason: "unavailable" });
     await screen.findByRole("alert");
+  });
+
+  it("инвалидирует in-flight list и не кэширует устаревший ответ", async () => {
+    const stale = [{ id: "ses-old", title: "Старая", updatedAt: 1_000 }] as const;
+    const fresh = [{ id: "ses-new", title: "Свежая", updatedAt: 2_000 }] as const;
+    const gate: {
+      signal: AbortSignal | null;
+      resolve: ((value: readonly OpenCodeSessionSummary[]) => void) | null;
+    } = { signal: null, resolve: null };
+    const loadSessions = vi.fn((signal: AbortSignal) => {
+      if (loadSessions.mock.calls.length === 1) {
+        gate.signal = signal;
+        return new Promise<readonly OpenCodeSessionSummary[]>((resolve) => {
+          gate.resolve = resolve;
+        });
+      }
+      return Promise.resolve(fresh);
+    });
+    const { rerender } = render(
+      <SessionHistory
+        currentID="ses-1"
+        currentTitle="Текущая"
+        busy={false}
+        version={0}
+        loadSessions={loadSessions}
+        onSelect={async () => ({ ok: true })}
+      />,
+    );
+
+    open();
+    await waitFor(() => expect(loadSessions).toHaveBeenCalledOnce());
+    expect(gate.signal).not.toBeNull();
+
+    rerender(
+      <SessionHistory
+        currentID="ses-1"
+        currentTitle="Текущая"
+        busy={false}
+        version={1}
+        loadSessions={loadSessions}
+        onSelect={async () => ({ ok: true })}
+      />,
+    );
+    await waitFor(() => expect(loadSessions).toHaveBeenCalledTimes(2));
+    expect(gate.signal?.aborted).toBe(true);
+    expect(await screen.findByText("Свежая")).toBeVisible();
+
+    if (gate.resolve === null) throw new Error("stale list не был запущен");
+    gate.resolve(stale);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("Старая")).toBeNull();
+    expect(screen.getByText("Свежая")).toBeVisible();
+
+    // Устаревший ответ не попал в кэш: новый запрос не нужен.
+    history().open = false;
+    open();
+    expect(loadSessions).toHaveBeenCalledTimes(2);
   });
 });

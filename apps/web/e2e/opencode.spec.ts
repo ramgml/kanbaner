@@ -47,6 +47,8 @@ async function mockOpenCode(
     readonly sessionTitle?: (sessionID: string) => string;
     /** Ошибка конкретной сессии: удалённая запись или временная недоступность. */
     readonly sessionStatus?: (sessionID: string) => "not-found" | "unavailable" | undefined;
+    /** Ошибка только PATCH rename; не влияет на GET/восстановление. */
+    readonly renameStatus?: (sessionID: string) => "not-found" | "unavailable" | undefined;
     readonly statusOutcome?:
       | "done"
       | "error"
@@ -116,7 +118,7 @@ async function mockOpenCode(
       const body = request.postDataJSON() as { title?: unknown };
       state.renameBodies.push(body);
       const sessionID = renameMatch[1] as string;
-      const status = options?.sessionStatus?.(sessionID);
+      const status = options?.renameStatus?.(sessionID) ?? options?.sessionStatus?.(sessionID);
       if (status !== undefined) {
         await route.fulfill({
           status: status === "not-found" ? 404 : 503,
@@ -1948,7 +1950,7 @@ test("desktop rename: Enter, PATCH exact title, refresh истории и Escape
   await input.fill("  Новое   название  ");
   await input.press("Enter");
 
-  await expect.poll(() => mock.renameBodies).toEqual([{ title: "  Новое   название  " }]);
+  await expect.poll(() => mock.renameBodies).toEqual([{ title: "Новое название" }]);
   await expect(page.getByTestId("opencode-session-title")).toHaveText("Новое название");
   await expect(input).toHaveCount(0);
   await expect(rename).toBeFocused();
@@ -2010,6 +2012,8 @@ test("desktop history: 404 удаляет запись, 503 сохраняет �
   await history.getByText("История сессий").click();
   await history.getByRole("button", { name: /^Удалённая/u }).click();
   await expect(history.getByRole("button", { name: /^Удалённая/u })).toHaveCount(0);
+  // Удалённая кнопка исчезла из DOM: focus перешёл на следующую запись.
+  await expect(history.getByRole("button", { name: /^Проблемная/u })).toBeFocused();
   await expect(page.getByTestId("opencode-session-title")).toHaveText("Kanbaner chat");
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
@@ -2021,4 +2025,32 @@ test("desktop history: 404 удаляет запись, 503 сохраняет �
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
     .toBe("ses-1");
+});
+
+test("desktop rename 404: empty state, focus на CTA и без авто-POST", async ({ page }) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    listSessions: () => [{ id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 }],
+    renameStatus: (sessionID) => (sessionID === "ses-1" ? "not-found" : undefined),
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+  await expect(page.getByRole("textbox", { name: "Сообщение OpenCode" })).toBeEnabled();
+  expect(mock.createdSessions).toBe(1);
+
+  await page.getByRole("button", { name: "Переименовать сессию" }).click();
+  const input = page.getByRole("textbox", { name: "Название сессии" });
+  await input.fill("Новое название");
+  await input.press("Enter");
+
+  await expect(page.getByText("Сохранённая сессия не найдена.")).toBeVisible();
+  const cta = page.getByRole("button", { name: "Новая сессия", exact: true });
+  await expect(cta).toBeFocused();
+  await expect(input).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("kanbaner.opencode.sessionId")))
+    .toBeNull();
+  // Empty state не создаёт сессию автоматически.
+  expect(mock.createdSessions).toBe(1);
+  expect(mock.renameBodies).toEqual([{ title: "Новое название" }]);
 });
