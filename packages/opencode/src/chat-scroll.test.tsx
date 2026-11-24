@@ -231,6 +231,33 @@ describe("chat scroll geometry", () => {
     expect(formatChatUnread(4)).toBe("4");
     expect(formatChatUnread(100)).toBe("99+");
   });
+
+  it("не считает собственный user-turn новым unread, но не подавляет другие роли", () => {
+    // Optimistic и canonical identity одного prompt различаются, но role=user
+    // не увеличивает badge в локальной однопользовательской панели.
+    expect(
+      chatUnreadIDs(
+        [{ id: "user:optimistic:1", role: "user", text: "Вопрос" }],
+        [{ id: "user:msg_turn123", role: "user", text: "Вопрос" }],
+      ),
+    ).toEqual([]);
+    expect(
+      chatUnreadIDs(
+        [
+          { id: "tool:1", role: "tool", text: "old" },
+          { id: "assistant:old", role: "assistant", text: "old" },
+          { id: "system:1", role: "system", text: "old" },
+        ],
+        [
+          { id: "tool:1", role: "tool", text: "new" },
+          { id: "assistant:new", role: "assistant", text: "new" },
+          { id: "system:1", role: "system", text: "new" },
+        ],
+      ),
+    ).toEqual(["tool:1", "assistant:new", "system:1"]);
+    // Сообщение без role сохраняет прежнюю семантику (generic consumer).
+    expect(chatUnreadIDs([], [{ id: "plain", text: "x" }])).toEqual(["plain"]);
+  });
 });
 
 describe("useChatScroll", () => {
@@ -431,6 +458,49 @@ describe("useChatScroll", () => {
       <Harness
         sessionID="ses-1"
         messages={[...base, { id: "assistant:canonical", text: "Ответ" }]}
+      />,
+    );
+    expect(unread()).toBe(1);
+    expect(element.scrollTop).toBe(0);
+    expect(isFollowing()).toBe(false);
+    expect(screen.getByRole("button", { name: /К новому сообщению/u })).toBeVisible();
+  });
+
+  it("canonical user-turn и стабильный tool не добавляют unread к одному ответу", () => {
+    const base = chatMessages(4);
+    const tool = { id: "tool:1", role: "tool", text: "Выполняется" };
+    const { rerender } = render(<Harness sessionID="ses-1" messages={[...base, tool]} />);
+    const element = scrollElement();
+    controlledGeometry(element, { scrollHeight: 1000, clientHeight: 400 });
+    readAbove(element);
+    expect(isFollowing()).toBe(false);
+
+    // Реальный поток панели: optimistic prompt и streaming assistant. Свой
+    // user-turn не увеличивает badge, ответ — единственный unread.
+    rerender(
+      <Harness
+        sessionID="ses-1"
+        messages={[
+          ...base,
+          tool,
+          { id: "user:optimistic:1", role: "user", text: "Вопрос" },
+          { id: "streaming:assistant", role: "assistant", text: "Поток" },
+        ]}
+      />,
+    );
+    expect(unread()).toBe(1);
+
+    // Canonical даёт user-message с другой identity и финальный assistant; tool
+    // с той же identity/текстом не считается. Итог остаётся ровно один.
+    rerender(
+      <Harness
+        sessionID="ses-1"
+        messages={[
+          ...base,
+          { id: "user:msg_turn123", role: "user", text: "Вопрос" },
+          tool,
+          { id: "assistant:canonical", role: "assistant", text: "Ответ" },
+        ]}
       />,
     );
     expect(unread()).toBe(1);

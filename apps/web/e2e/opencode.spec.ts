@@ -429,6 +429,9 @@ test("desktop: streaming → canonical replacement даёт ровно один 
   }));
   const canonical = [
     ...history,
+    // Canonical identity собственного prompt отличается от optimistic
+    // `user:optimistic:*`; role=user не должен давать второй unread.
+    { id: "user:message-0", role: "user" as const, text: "Вопрос" },
     { id: "assistant:canonical", role: "assistant" as const, text: "Канонический ответ" },
   ];
   await mockOpenCode(

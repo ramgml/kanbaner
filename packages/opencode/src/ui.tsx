@@ -683,12 +683,17 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const promptAbortRef = useRef<AbortController | null>(null);
   const switchAbortRef = useRef<AbortController | null>(null);
   const renameAbortRef = useRef<AbortController | null>(null);
+  const createAbortRef = useRef<AbortController | null>(null);
   /**
-   * Отдельные request tokens для switch/rename: неуспешный switch или rename
-   * не меняет generation текущей сессии и не отменяет её canonical refresh.
+   * Отдельные request tokens для switch/rename/model/create: неуспешная
+   * побочная операция не меняет generation текущей сессии и не отменяет её
+   * canonical refresh. Pending операция применяет ответ только пока её token,
+   * generation и sessionID всё ещё актуальны.
    */
   const switchSeqRef = useRef(0);
   const renameSeqRef = useRef(0);
+  const modelSeqRef = useRef(0);
+  const createSeqRef = useRef(0);
   /**
    * Локально подтверждённый title переименованной сессии. Overlay действует
    * только на canonical GET, уже летевшие на момент подтверждения rename:
@@ -722,7 +727,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       // title overlay не должен влиять на последующий GET.
       titleOverridesRef.current.clear();
       initializeAbortRef.current?.abort();
+      modelSeqRef.current += 1;
       modelAbortRef.current?.abort();
+      createSeqRef.current += 1;
+      createAbortRef.current?.abort();
       promptAbortRef.current?.abort();
       if (scope.keepSwitch !== true) {
         switchSeqRef.current += 1;
@@ -741,6 +749,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       initializeAbortRef.current = null;
       modelAbortRef.current = null;
       promptAbortRef.current = null;
+      createAbortRef.current = null;
       setLoading(false);
       setCreating(false);
       setModelPending(false);
@@ -771,9 +780,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     [],
   );
 
-  const createSession = useCallback(
-    async (model: OpenCodeModelRefView | undefined, generation: number, signal: AbortSignal) => {
-      const created = await request<OpenCodeSessionView>("/api/opencode/session", {
+  const requestCreatedSession = useCallback(
+    async (model: OpenCodeModelRefView | undefined, signal: AbortSignal) =>
+      request<OpenCodeSessionView>("/api/opencode/session", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -781,10 +790,16 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           ...(model === undefined ? {} : { model }),
         }),
         signal,
-      });
+      }),
+    [],
+  );
+
+  const createSession = useCallback(
+    async (model: OpenCodeModelRefView | undefined, generation: number, signal: AbortSignal) => {
+      const created = await requestCreatedSession(model, signal);
       if (applySession(created, generation)) setHistoryVersion((current) => current + 1);
     },
-    [applySession],
+    [applySession, requestCreatedSession],
   );
 
   const initialize = useCallback(async () => {
@@ -845,11 +860,14 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       generationRef.current += 1;
       switchSeqRef.current += 1;
       renameSeqRef.current += 1;
+      modelSeqRef.current += 1;
+      createSeqRef.current += 1;
       initializeAbortRef.current?.abort();
       modelAbortRef.current?.abort();
       promptAbortRef.current?.abort();
       switchAbortRef.current?.abort();
       renameAbortRef.current?.abort();
+      createAbortRef.current?.abort();
       for (const controller of refreshControllers) controller.abort();
       refreshControllers.clear();
     };
@@ -912,10 +930,20 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     [applySession],
   );
 
+  /**
+   * Model switch — отдельный request token. Generation текущей сессии не
+   * меняется ни при успехе, ни при ошибке: unconfirmed turn, «Проверить статус»
+   * и начатый canonical refresh сохраняются. Ответ применяется только к той же
+   * generation/sessionID и пока token последний; новая операция/switch/newChat
+   * инвалидирует pending switch.
+   */
   const switchModel = async (model: OpenCodeModelRefView) => {
     if (session === null || busy) return;
     const sessionID = session.id;
-    const generation = beginOperation();
+    const requestGeneration = generationRef.current;
+    const token = modelSeqRef.current + 1;
+    modelSeqRef.current = token;
+    modelAbortRef.current?.abort();
     const controller = new AbortController();
     modelAbortRef.current = controller;
     setModelPending(true);
@@ -927,22 +955,29 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         body: JSON.stringify({ model }),
         signal: controller.signal,
       });
-      if (generation !== generationRef.current) return;
+      if (
+        token !== modelSeqRef.current ||
+        modelAbortRef.current !== controller ||
+        generationRef.current !== requestGeneration
+      ) {
+        return;
+      }
       setSession((current) =>
-        generation !== generationRef.current || current === null || current.id !== sessionID
-          ? current
-          : { ...current, model },
+        current === null || current.id !== sessionID ? current : { ...current, model },
       );
     } catch (reason) {
       if (
-        generation === generationRef.current &&
-        !(reason instanceof Error && reason.name === "AbortError")
+        token !== modelSeqRef.current ||
+        generationRef.current !== requestGeneration ||
+        modelAbortRef.current !== controller
       ) {
-        setPanelError(publicError(reason, "Не удалось сменить модель"));
+        return;
       }
+      if (reason instanceof Error && reason.name === "AbortError") return;
+      setPanelError(publicError(reason, "Не удалось сменить модель"));
     } finally {
       if (modelAbortRef.current === controller) modelAbortRef.current = null;
-      if (generation === generationRef.current) setModelPending(false);
+      if (modelSeqRef.current === token) setModelPending(false);
     }
   };
 
@@ -1644,6 +1679,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
             }
           : current,
       );
+      // Ручное подтверждение terminal outcome меняет updatedAt/порядок сессии.
+      // Инвалидация нужна и после EOF-unconfirmed, где автоматический refresh
+      // отсутствует: иначе 30-секундный кэш истории остаётся ложно свежим.
+      setHistoryVersion((current) => current + 1);
     } catch (reason) {
       if (generation !== generationRef.current) return;
       setTurn((current) =>
@@ -1664,29 +1703,46 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     }
   };
 
+  /**
+   * Новая сессия — отдельный create token. Generation, turn, canonical refresh и
+   * черновик текущей сессии меняются только после успешного POST, проверки, что
+   * операция последняя, и только затем через beginOperation. Ошибка 404/503 не
+   * скрывает unconfirmed и не отменяет refresh.
+   */
   const newChat = async () => {
     if (catalog === null || busy) return;
-    const generation = beginOperation();
+    const requestGeneration = generationRef.current;
+    const token = createSeqRef.current + 1;
+    createSeqRef.current = token;
+    createAbortRef.current?.abort();
     const controller = new AbortController();
-    initializeAbortRef.current = controller;
+    createAbortRef.current = controller;
     setCreating(true);
-    setAttachedRef(null);
-    clearFiles();
     setPanelError(null);
-    setRenameOpen(false);
-    setRenameError(null);
     try {
-      await createSession(selectedModel ?? undefined, generation, controller.signal);
-    } catch (reason) {
+      const created = await requestCreatedSession(selectedModel ?? undefined, controller.signal);
       if (
-        generation === generationRef.current &&
-        !(reason instanceof Error && reason.name === "AbortError")
+        token !== createSeqRef.current ||
+        createAbortRef.current !== controller ||
+        generationRef.current !== requestGeneration
       ) {
-        setPanelError(publicError(reason, "Не удалось создать сессию"));
+        // Service мог уже создать пустую сессию; stale response не применяем и
+        // сессию не удаляем.
+        return;
       }
+      const generation = beginOperation();
+      setAttachedRef(null);
+      clearFiles();
+      setRenameOpen(false);
+      setRenameError(null);
+      if (applySession(created, generation)) setHistoryVersion((current) => current + 1);
+    } catch (reason) {
+      if (token !== createSeqRef.current || generationRef.current !== requestGeneration) return;
+      if (reason instanceof Error && reason.name === "AbortError") return;
+      setPanelError(publicError(reason, "Не удалось создать сессию"));
     } finally {
-      if (initializeAbortRef.current === controller) initializeAbortRef.current = null;
-      if (generation === generationRef.current) setCreating(false);
+      if (createAbortRef.current === controller) createAbortRef.current = null;
+      if (createSeqRef.current === token) setCreating(false);
     }
   };
 
