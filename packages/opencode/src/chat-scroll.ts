@@ -26,6 +26,13 @@ export interface WritableChatScrollGeometry {
 export interface ChatScrollMessage {
   readonly id: string;
   readonly text: string;
+  /**
+   * Роль нужна только для unread. В локальной однопользовательской панели
+   * собственный prompt приходит и как optimistic `user:optimistic:*`, и как
+   * canonical `user:<turnID>`; смена identity не должна показывать его как
+   * новое сообщение. Assistant/tool/system считаются как раньше.
+   */
+  readonly role?: string;
 }
 
 export interface ChatScrollOptions {
@@ -80,6 +87,11 @@ export function scrollChatToBottom(geometry: WritableChatScrollGeometry): boolea
  * Identity новых или изменённых сообщений для unread. Чистое удаление истории и
  * canonical no-op с тем же текстом ничего не добавляют; streamed delta и
  * canonical replacement с другим текстом считаются изменением своего message ID.
+ *
+ * `role:"user"` намеренно не участвует: пользователь сам создал эти сообщения,
+ * а optimistic и canonical identity одного prompt различаются. Подавления
+ * assistant/tool/system здесь нет — любой их новый ID или изменённый текст
+ * по-прежнему увеличивает unread.
  */
 export function chatUnreadIDs(
   previous: readonly ChatScrollMessage[],
@@ -88,6 +100,7 @@ export function chatUnreadIDs(
   const previousText = new Map(previous.map((message) => [message.id, message.text]));
   const ids: string[] = [];
   for (const message of next) {
+    if (message.role === "user") continue;
     if (previousText.get(message.id) !== message.text) ids.push(message.id);
   }
   return ids;

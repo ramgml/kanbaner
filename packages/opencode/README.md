@@ -112,8 +112,10 @@ Bearer token в браузер не передаётся. Ответы имею�
 - В шапке панели показывается заголовок текущей сессии и доступная кнопка
   «Переименовать сессию». История — нативный `<details>` под шапкой: она
   загружается лениво только при раскрытии и кэшируется на 30 секунд. Кэш
-  сбрасывается после создания сессии, завершённого prompt и переименования;
-  если история раскрыта, она перезагружается сразу.
+  сбрасывается после создания сессии, завершённого prompt, переименования и
+  ручного terminal outcome (`done`/`error`/`cancelled`) из «Проверить статус»,
+  в том числе после EOF-unconfirmed; если история раскрыта, она перезагружается
+  сразу.
 - `GET /api/opencode/session` не принимает query-параметры. Gateway читает не
   больше 4 страниц по `limit: 50`, останавливается по `next`/повторному cursor,
   дедуплицирует ID, сортирует по `time.updated` desc с устойчивым tie-break по
@@ -135,6 +137,19 @@ Bearer token в браузер не передаётся. Ответы имею�
   отменяется. Generation меняется только после успешного GET и проверки, что
   switch всё ещё последний. Во время prompt/rename/model switch записи истории
   заблокированы. Ошибки не раскрывают upstream-текст.
+- Model switch — отдельная операция со своим request token: ни успех, ни ошибка
+  не меняют generation, поэтому unconfirmed turn, «Проверить статус» и начатый
+  canonical refresh сохраняются. Ответ применяется только к той же
+  generation/sessionID и пока token последний; failed switch оставляет прежнюю
+  модель. Подтверждённая model действует только на canonical GET, уже летевшие
+  на момент switch: такой delayed refresh применяет canonical messages, но
+  сохраняет новую модель, после чего overlay гасится. GET, начатый после
+  switch, доверяет canonical model (в том числе более новой из другой вкладки),
+  а switch/newChat/prompt generation очищают overlay. `newChat` применяет ответ
+  и меняет generation только после успешного `POST /api/opencode/session` и
+  проверки актуальности token; ошибка не скрывает unconfirmed, не сбрасывает
+  черновик, вложения, rename и canonical refresh, а успех очищает вложения и
+  attached context. Stale create response не применяется.
 - Переименование применяется к захваченным generation и sessionID, не меняя
   generation и не отменяя canonical refresh. Подтверждённый title действует
   только на GET, уже летевшие на момент rename: такой delayed refresh
@@ -236,8 +251,11 @@ IntersectionObserver или `scrollIntoView`.
 - При чтении выше `scrollTop` не меняется от streaming deltas, upsert tool call,
   canonical refresh той же сессии и tool status. Unread считается по identity:
   новые ID и сообщения с изменённым текстом; чистое удаление истории счётчик не
-  увеличивает. Если после изменения сообщений или resize геометрия сама привела
-  к нижней границе, follow и badge восстанавливаются без scroll event.
+  увеличивает. Собственный `role:"user"` (optimistic prompt и canonical
+  `user:<turnID>`) badge не увеличивает: identity одного сообщения меняется при
+  canonical refresh, а assistant/tool/system по-прежнему считаются. Если после
+  изменения сообщений или resize геометрия сама привела к нижней границе, follow
+  и badge восстанавливаются без scroll event.
 - Перед любой автоматической записью `scrollTop` текущий offset сверяется с
   сохранённой предыдущей нижней границей. Если пользователь уже ушёл выше, но
   scroll event ещё не доставлен, запись пропускается: follow выключается, кнопка
@@ -343,7 +361,11 @@ server. Поэтому повтор того же request внутри одно�
   завершения и ручной status check в том же scope, drafts restore/send/retry,
   отсутствие base64 и истории в storage, заблокированный localStorage, copy
   action и его failure, lazy history/switch/draft, reload-404 empty state без
-  POST, 404/503 switch, busy, rename/Enter/Escape и stale-кэш после newChat.
+  POST, 404/503 switch, busy, rename/Enter/Escape, stale-кэш после newChat,
+  сохранение unconfirmed при model switch и failed newChat с файлом/контекстом,
+  delayed canonical refresh со старой model и свежий canonical model после
+  model switch, очистку вложений успешным create, stale create и инвалидацию
+  истории ручным terminal outcome.
 - `packages/opencode/src/session-history.test.tsx` — lazy load, 30-секундный
   кэш и version invalidation, empty/error/retry, not-found removal, switch
   unavailable/retry, busy, Escape-фокус и pending «Открываем…».
@@ -355,7 +377,8 @@ server. Поэтому повтор того же request внутри одно�
 - `packages/opencode/src/code-block.test.tsx` — success/failure labels,
   keyboard, reset timer, StrictMode и unmount cleanup.
 - `packages/opencode/src/chat-scroll.test.tsx` — геометрия near-bottom,
-  threshold 48 px, follow/чтение выше, unread, возврат, canonical refresh,
+  threshold 48 px, follow/чтение выше, unread (включая user-turn и стабильный
+  tool в canonical), возврат, canonical refresh,
   сброс при смене сессии, `ResizeObserver`/window resize/`load`/`error`,
   StrictMode cleanup, passive listener и native keyboard/focus.
 - `packages/opencode/src/mcp-server.test.ts` — tool allowlist из 14, risk,
@@ -367,7 +390,8 @@ server. Поэтому повтор того же request внутри одно�
   timings после reload, streaming с mock OpenCode transport в production
   Chromium. Scroll-сценарии проверяют чтение выше во время streaming и
   canonical, tool disclosure, отложенную загрузку картинки, resize viewport,
-  Enter/Space-возврат, повторный follow и смену сессии на desktop и mobile 360.
+  Enter/Space-возврат, повторный follow, смену сессии на desktop и mobile 360 и
+  ровно один unread при canonical user-message.
   Copy/drafts-сценарии проверяют точный clipboard desktop/mobile, Enter/Space,
   понятную ошибку при отказе clipboard, изоляцию и reload черновиков, пустую
   новую сессию, очистку только своей сессии, повреждённый storage и отсутствие
