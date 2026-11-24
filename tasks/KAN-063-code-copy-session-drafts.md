@@ -1,13 +1,13 @@
 ---
 id: KAN-063
 title: Копирование кода и черновики по OpenCode-сессиям
-status: review
+status: done
 stage: 8
 priority: high
 owner: worker-kan-063
 blocked_by: []
-branch: feat/kan-063-code-copy-session-drafts
-worktree: .worktrees/kan-063-code-copy-session-drafts
+branch: dev
+worktree: .
 created: 2026-11-23
 updated: 2026-11-24
 specs:
@@ -32,11 +32,11 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить copy action для существующего Markdown renderer без raw HTML.
-- [ ] Спроектировать версионированный, ограниченный по размеру draft storage.
-- [ ] Сохранять/восстанавливать черновики по session ID с безопасным fallback.
-- [ ] Обработать clipboard denial, storage errors, StrictMode и stale async state.
-- [ ] Добавить unit/E2E и документацию.
+- [x] Добавить copy action для существующего Markdown renderer без raw HTML.
+- [x] Спроектировать версионированный, ограниченный по размеру draft storage.
+- [x] Сохранять/восстанавливать черновики по session ID с безопасным fallback.
+- [x] Обработать clipboard denial, storage errors, StrictMode и stale async state.
+- [x] Добавить unit/E2E и документацию.
 
 ## Владение файлами
 
@@ -71,12 +71,12 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Copy копирует именно код выбранного block и сообщает успех/ошибку.
-- [ ] Черновики изолированы по session ID и переживают reload.
-- [ ] Новая сессия получает пустой или собственный черновик, не чужой текст.
-- [ ] Недоступный/повреждённый storage не блокирует composer.
-- [ ] В localStorage не попадают base64 вложения и содержимое истории.
-- [ ] Unit/E2E и полный `pnpm check` зелёные.
+- [x] Copy копирует именно код выбранного block и сообщает успех/ошибку.
+- [x] Черновики изолированы по session ID и переживают reload.
+- [x] Новая сессия получает пустой или собственный черновик, не чужой текст.
+- [x] Недоступный/повреждённый storage не блокирует composer.
+- [x] В localStorage не попадают base64 вложения и содержимое истории.
+- [x] Unit/E2E и полный `pnpm check` зелёные.
 
 ## Проверки
 
@@ -104,7 +104,17 @@ specs:
 - 2026-11-24 — Worker закрыл замечания коммитом `fa64b919`; focused unit
   114/114, E2E 21/21, полный `pnpm check` — 143 files / 2005 tests. Статус
   `review` перед финальным независимым ревью.
+- 2026-11-24 — Финальное ревью не нашло blocker/high/medium/low. После rebase
+  коммиты `caaecff` и `e9fe71e` интегрированы merge-коммитом `c8b13bb`.
+  `pnpm check` на ветке и `dev` зелёный; OpenCode E2E на `dev` — 21/21,
+  imports и SQLite smoke зелёные. Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Пункт 4 roadmap реализован и смержен в `dev`. Code blocks получили доступное
+копирование точного plain text с clipboard fallback. Composer сохраняет
+ограниченные версионированные черновики отдельно для каждой OpenCode-сессии,
+восстанавливает их после reload и не переносит текст между сессиями. Base64,
+вложения и история в draft storage не записываются.
+
+Merge: `c8b13bb`. Feature-ветка и worktree удалены. Push не выполнялся.
