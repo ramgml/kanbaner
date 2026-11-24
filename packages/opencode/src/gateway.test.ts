@@ -2270,4 +2270,143 @@ describe("OpenCode gateway", () => {
       expect(update).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("ensureSessionTitle", () => {
+    function titleClient(
+      info: Record<string, unknown> = ownedInfo(),
+      page: unknown = { data: [], cursor: { next: null } },
+      overrides: {
+        readonly get?: () => Promise<unknown>;
+        readonly list?: () => Promise<unknown>;
+        readonly update?: () => Promise<unknown>;
+      } = {},
+    ) {
+      const get = vi.fn(overrides.get ?? (async () => info));
+      const list = vi.fn(overrides.list ?? (async () => page));
+      const update = vi.fn(overrides.update ?? (async () => undefined));
+      return {
+        get,
+        list,
+        update,
+        gateway: createOpenCodeGateway(asClient({ session: { get, update }, message: { list } })),
+      };
+    }
+
+    it("ставит короткое название только exact title/list/update payload", async () => {
+      const { gateway, get, list, update } = titleClient();
+
+      await expect(
+        gateway.ensureSessionTitle("ses-1", "## Обнови   задачу\n\nи проверь отчёт"),
+      ).resolves.toEqual({ id: "ses-1", title: "Обнови задачу и проверь отчёт" });
+
+      expect(get).toHaveBeenCalledWith({ sessionID: "ses-1" });
+      expect(list).toHaveBeenCalledWith({ sessionID: "ses-1", limit: 1 });
+      expect(update).toHaveBeenCalledWith({
+        sessionID: "ses-1",
+        title: "Обнови задачу и проверь отчёт",
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("не переименовывает manual/non-default title или непустую history", async () => {
+      for (const info of [
+        { ...ownedInfo(), title: "Мой чат" },
+        { ...ownedInfo(), title: "kanbaner chat" },
+        { ...ownedInfo(), title: "" },
+        { ...ownedInfo(), title: null },
+      ]) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+
+      const nonEmpty = titleClient(ownedInfo(), {
+        data: [{ id: "user-1", type: "user", text: "Уже есть" }],
+        cursor: { next: null },
+      });
+      await expect(
+        nonEmpty.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(nonEmpty.list).toHaveBeenCalledWith({ sessionID: "ses-1", limit: 1 });
+      expect(nonEmpty.update).not.toHaveBeenCalled();
+
+      const malformed = titleClient(ownedInfo(), { data: null });
+      await expect(
+        malformed.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(malformed.update).not.toHaveBeenCalled();
+    });
+
+    it("не делает preflight для пустого/шумного/default текста", async () => {
+      const { gateway, get, list, update } = titleClient();
+      for (const text of ["", "   ", "###", "```ts\n```", "Kanbaner chat"]) {
+        await expect(gateway.ensureSessionTitle("ses-1", text)).resolves.toBeNull();
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(list).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("не трогает чужую, child, wrong-project и не-owned сессию", async () => {
+      const cases = [
+        { ...ownedInfo(), metadata: { source: "other" } },
+        { ...ownedInfo(), parentID: "ses-parent" },
+        { ...ownedInfo(), location: { directory: path.resolve(process.cwd(), "..") } },
+        { ...ownedInfo(), agent: "build" },
+      ];
+      for (const info of cases) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("проглатывает 404/503 preflight и update, не бросая наружу", async () => {
+      const cases = [
+        titleClient(ownedInfo(), undefined, {
+          get: async () => {
+            throw { status: 404, _tag: "NotFound" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          list: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          update: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+      ];
+      for (const { gateway } of cases) {
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+      }
+      expect(cases[2]?.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("abort до update не превращается в успешную мутацию", async () => {
+      const aborted = new AbortController();
+      aborted.abort();
+      const early = titleClient();
+      await expect(
+        early.gateway.ensureSessionTitle("ses-1", "Задача", aborted.signal),
+      ).resolves.toBeNull();
+      expect(early.get).not.toHaveBeenCalled();
+
+      const controller = new AbortController();
+      const during = titleClient(ownedInfo(), undefined, {
+        list: async () => {
+          controller.abort();
+          return { data: [], cursor: { next: null } };
+        },
+      });
+      await expect(
+        during.gateway.ensureSessionTitle("ses-1", "Задача", controller.signal),
+      ).resolves.toBeNull();
+      expect(during.update).not.toHaveBeenCalled();
+    });
+  });
 });

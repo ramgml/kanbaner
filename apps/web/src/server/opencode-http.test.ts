@@ -67,6 +67,7 @@ function gateway(overrides: Partial<OpenCodeGateway> = {}): OpenCodeGateway {
       id: "ses-1",
       title: title.trim(),
     })),
+    ensureSessionTitle: vi.fn(async () => null),
     getSession: vi.fn(async () => session),
     getTurnStatus: vi.fn(async () => ({ session, outcome: "done" as const })),
     getAttachmentPreview: vi.fn(async () => ({
@@ -993,6 +994,160 @@ describe("OpenCode UI HTTP transport", () => {
     expect(JSON.stringify(await body(tooLarge))).toContain("слишком большое");
     expect(mock.prompt).not.toHaveBeenCalled();
   });
+  describe("auto session title", () => {
+    it("передаёт titleText до prompt и возвращает ASCII-encoded header", async () => {
+      const ensure = vi.fn(async () => ({ id: "ses-1", title: "Обнови задачу 🚀" }));
+      const prompt = vi.fn(async function* () {
+        yield event("session.execution.succeeded", { sessionID: "ses-1" });
+      });
+      const mock = gateway({ ensureSessionTitle: ensure, prompt });
+      setOpenCodeGatewayForTests(mock);
+
+      const response = await handleOpenCodePrompt(
+        "ses-1",
+        request("/api/opencode/session/ses-1/prompt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: "Контекст: kanbaner.notes:note:1\n\nОбнови задачу 🚀",
+            titleText: "Обнови задачу 🚀",
+            turnID: "msg_turn_12345678",
+          }),
+        }),
+      );
+
+      expect(ensure).toHaveBeenCalledWith("ses-1", "Обнови задачу 🚀", expect.any(AbortSignal));
+      expect(prompt).toHaveBeenCalledWith(
+        "ses-1",
+        "Контекст: kanbaner.notes:note:1\n\nОбнови задачу 🚀",
+        expect.any(AbortSignal),
+        [],
+        "msg_turn_12345678",
+      );
+      expect(ensure.mock.invocationCallOrder[0]).toBeLessThan(
+        prompt.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      );
+
+      const header = response.headers.get("x-kanbaner-session-title");
+      expect(header).not.toBeNull();
+      expect(header).toMatch(/^[\x20-\x7E]+$/u);
+      expect(decodeURIComponent(header ?? "")).toBe("Обнови задачу 🚀");
+      expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+      expect(
+        (await response.text())
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { kind: string }),
+      ).toEqual([{ kind: "done" }]);
+    });
+
+    it("без подтверждённого названия не добавляет header и не меняет NDJSON", async () => {
+      const mock = gateway({ ensureSessionTitle: vi.fn(async () => null) });
+      setOpenCodeGatewayForTests(mock);
+
+      const response = await handleOpenCodePrompt(
+        "ses-1",
+        request("/api/opencode/session/ses-1/prompt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "Вопрос", titleText: "Вопрос" }),
+        }),
+      );
+
+      expect(response.headers.get("x-kanbaner-session-title")).toBeNull();
+      expect(
+        (await response.text())
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { kind: string }),
+      ).toEqual([{ kind: "done" }]);
+    });
+
+    it("ошибка title preflight/update не отменяет prompt и не меняет outcome", async () => {
+      const ensure = vi.fn(async () => {
+        throw new Error("secret title failure");
+      });
+      const prompt = vi.fn(async function* () {
+        yield event("session.execution.finalizing", { sessionID: "ses-1" });
+        yield event("session.execution.failed", { sessionID: "ses-1" });
+      });
+      setOpenCodeGatewayForTests(gateway({ ensureSessionTitle: ensure, prompt }));
+
+      const response = await handleOpenCodePrompt(
+        "ses-1",
+        request("/api/opencode/session/ses-1/prompt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "Вопрос", titleText: "Вопрос" }),
+        }),
+      );
+      const text = await response.text();
+
+      expect(ensure).toHaveBeenCalledOnce();
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(response.headers.get("x-kanbaner-session-title")).toBeNull();
+      expect(
+        text
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { kind: string }),
+      ).toEqual([
+        { kind: "finalizing" },
+        { kind: "error", text: "Запрос OpenCode завершился с ошибкой" },
+      ]);
+      expect(text).not.toContain("secret title failure");
+    });
+
+    it("игнорирует невалидное/пустое title-поле, но принимает optional отсутствие", async () => {
+      for (const body of [
+        { text: "Вопрос" },
+        { text: "Вопрос", titleText: "" },
+        { text: "Вопрос", titleText: "   " },
+        { text: "Вопрос", titleText: 42 },
+        { text: "Вопрос", titleText: null },
+      ]) {
+        const ensure = vi.fn(async () => null);
+        const mock = gateway({ ensureSessionTitle: ensure });
+        setOpenCodeGatewayForTests(mock);
+        const response = await handleOpenCodePrompt(
+          "ses-1",
+          request("/api/opencode/session/ses-1/prompt", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+        );
+        expect(response.status).toBe(200);
+        expect(ensure).not.toHaveBeenCalled();
+        await response.text();
+      }
+    });
+
+    it("ограничивает длинный titleText по code points, не ломая prompt", async () => {
+      const ensure = vi.fn(async (sessionID: string, text: string) => {
+        void sessionID;
+        void text;
+        return null;
+      });
+      setOpenCodeGatewayForTests(gateway({ ensureSessionTitle: ensure }));
+
+      const response = await handleOpenCodePrompt(
+        "ses-1",
+        request("/api/opencode/session/ses-1/prompt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "Вопрос", titleText: "я".repeat(5_000) }),
+        }),
+      );
+
+      expect(ensure).toHaveBeenCalledOnce();
+      const titleText = ensure.mock.calls[0]?.[1] as string;
+      expect(Array.from(titleText)).toHaveLength(2_000);
+      expect(response.status).toBe(200);
+      await response.text();
+    });
+  });
+
   describe("listSessions", () => {
     it("требует uiGuard до обращения к gateway и отдаёт no-store envelope", async () => {
       const mock = gateway();

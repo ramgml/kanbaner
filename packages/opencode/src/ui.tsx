@@ -654,6 +654,26 @@ function normalizedSessionTitle(value: string): string | null {
   return title;
 }
 
+const PROMPT_TITLE_TEXT_MAX_POINTS = 2_000;
+
+/** В titleText уходит только display text запроса, без контекстной преамбулы. */
+function promptTitleText(displayText: string): string | undefined {
+  const points = Array.from(displayText);
+  if (points.length === 0) return undefined;
+  return points.slice(0, PROMPT_TITLE_TEXT_MAX_POINTS).join("");
+}
+
+/** Валидирует ASCII-encoded title из internal prompt response header. */
+function sessionTitleHeader(response: Response): string | null {
+  const encoded = response.headers.get("x-kanbaner-session-title");
+  if (encoded === null || encoded.length === 0) return null;
+  try {
+    return normalizedSessionTitle(decodeURIComponent(encoded));
+  } catch {
+    return null;
+  }
+}
+
 export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [catalog, setCatalog] = useState<OpenCodeCatalog | null>(null);
   const [session, setSession] = useState<OpenCodeSessionView | null>(null);
@@ -1392,6 +1412,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
 
       if (stale()) return;
       requestSent = true;
+      const titleText = promptTitleText(attempt.displayText);
       const response = await fetch(
         `/api/opencode/session/${encodeURIComponent(sessionID)}/prompt`,
         {
@@ -1403,6 +1424,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           },
           body: JSON.stringify({
             text: attempt.text,
+            ...(titleText === undefined ? {} : { titleText }),
             turnID,
             ...(payloads.length === 0 ? {} : { files: payloads }),
           }),
@@ -1417,6 +1439,21 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
           if (reason instanceof ApiError) throw reason;
           throw new ApiError("Запрос OpenCode отклонён", response.status, "INTERNAL_ERROR");
         }
+      }
+      // Title подтверждён до prompt сервером: применяем сразу, не дожидаясь
+      // terminal, чтобы шапка не показывала default во время streaming.
+      const announcedTitle = sessionTitleHeader(response);
+      if (announcedTitle !== null && currentGeneration()) {
+        titleOverridesRef.current.set(sessionID, {
+          title: announcedTitle,
+          confirmedSeq: canonicalRequestSeqRef.current,
+        });
+        setSession((current) =>
+          current === null || current.id !== sessionID
+            ? current
+            : { ...current, title: announcedTitle },
+        );
+        setHistoryVersion((current) => current + 1);
       }
       if (response.body === null) throw new Error("EMPTY_OPENCODE_STREAM");
 

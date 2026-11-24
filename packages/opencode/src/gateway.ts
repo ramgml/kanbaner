@@ -6,6 +6,7 @@ import { Service } from "@opencode/client/service";
 
 import { ATTACHMENT_LIMITS } from "./attachments.ts";
 import { OPENCODE_AGENT_ID } from "./metadata.ts";
+import { DEFAULT_SESSION_TITLE, deriveSessionTitle } from "./session-title.ts";
 import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
 import {
   isOpenCodeAdmittedTurnID,
@@ -877,7 +878,7 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
           throw new OpenCodeGatewayError("VALIDATION_ERROR", "Разрешён только агент kanbaner");
         }
         const created = await client.session.create({
-          title: "Kanbaner chat",
+          title: DEFAULT_SESSION_TITLE,
           agent: OPENCODE_AGENT_ID,
           location: LOCATION,
           metadata: { source: "kanbaner" },
@@ -943,6 +944,32 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
         await client.session.update({ sessionID, title: normalized });
         return { id: sessionID, title: normalized };
       }),
+
+    /**
+     * Best-effort автоназвание до prompt: default title + пустая canonical
+     * history у owned top-level сессии текущего проекта. Любая ошибка,
+     * ineligible-сессия и abort возвращают null и не влияют на prompt.
+     */
+    ensureSessionTitle: async (sessionID, text, signal) => {
+      const aborted = (): boolean => signal?.aborted === true;
+      try {
+        if (aborted()) return null;
+        const title = deriveSessionTitle(text);
+        if (title === null) return null;
+        const info = await ownedSession(client, sessionID);
+        if (aborted()) return null;
+        if (!isRecord(info)) return null;
+        if ((stringField(info.title) ?? null) !== DEFAULT_SESSION_TITLE) return null;
+        const page = await client.message.list({ sessionID, limit: 1 });
+        if (aborted()) return null;
+        if (!isRecord(page) || !Array.isArray(page.data) || page.data.length > 0) return null;
+        await client.session.update({ sessionID, title });
+        if (aborted()) return null;
+        return { id: sessionID, title };
+      } catch {
+        return null;
+      }
+    },
 
     getSession: (sessionID) =>
       translated(async () => {
