@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
 
@@ -19,10 +21,14 @@ function event(type: string, data: Record<string, unknown> = {}, created = 1): O
 function ownedInfo(id = "ses-1") {
   return {
     id,
+    parentID: null,
+    projectID: "project-1",
     title: "Kanbaner chat",
     agent: "kanbaner",
     model: { id: "model-1", providerID: "provider-1", variant: "high" },
     metadata: { source: "kanbaner" },
+    location: { directory: process.cwd() },
+    time: { created: 1_000, updated: 2_000 },
   };
 }
 
@@ -1995,5 +2001,273 @@ describe("OpenCode gateway", () => {
     expect(cancel).toHaveBeenCalledWith({ sessionID: "ses-1", inboxID: "inbox-admitted" });
     expect(interrupt).toHaveBeenCalledWith({ sessionID: "ses-1" });
     expect(stream.iterator.return).toHaveBeenCalledTimes(1);
+  });
+
+  describe("listSessions", () => {
+    function summaryInfo(id: string, overrides: Record<string, unknown> = {}) {
+      return {
+        ...ownedInfo(id),
+        ...overrides,
+      };
+    }
+
+    it("отправляет точный bounded list input и отдаёт только whitelist summary", async () => {
+      const pages = [
+        {
+          data: [
+            summaryInfo("ses-1", {
+              title: "First",
+              cost: 42,
+              tokens: { input: 1 },
+              permissions: [{ action: "shell", resource: "*", effect: "allow" }],
+              subpath: "secret/path",
+              outcome: "succeeded",
+            }),
+          ],
+          cursor: { next: "cursor-1" },
+        },
+        { data: [summaryInfo("ses-2", { title: undefined })], cursor: { next: null } },
+      ];
+      const list = vi.fn(async (input: unknown) => {
+        void input;
+        return pages.shift();
+      });
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { list, get }, message: { list: vi.fn() } }),
+      );
+
+      const result = await gateway.listSessions();
+
+      expect(list.mock.calls.map(([input]) => input)).toEqual([
+        {
+          directory: process.cwd(),
+          parentID: null,
+          archived: false,
+          order: "desc",
+          limit: 50,
+        },
+        { cursor: "cursor-1", limit: 50 },
+      ]);
+      expect(get).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        { id: "ses-1", title: "First", updatedAt: 2_000 },
+        { id: "ses-2", title: null, updatedAt: 2_000 },
+      ]);
+      const serialized = JSON.stringify(result);
+      for (const forbidden of [
+        "metadata",
+        "location",
+        "projectID",
+        "cost",
+        "tokens",
+        "permissions",
+        "agent",
+        "outcome",
+        "subpath",
+        "cursor",
+        '"archived"',
+      ]) {
+        expect(serialized).not.toContain(forbidden);
+      }
+      expect(Object.keys(result[0] ?? {})).toEqual(["id", "title", "updatedAt"]);
+    });
+
+    it("фильтрует child, чужие, archived, другой проект и невалидное время", async () => {
+      const valid = summaryInfo("valid", { title: "Valid" });
+      const emptyTitle = summaryInfo("empty-title", { title: "" });
+      const items = [
+        valid,
+        emptyTitle,
+        summaryInfo("child", { parentID: "ses-parent" }),
+        summaryInfo("foreign-source", { metadata: { source: "other" } }),
+        summaryInfo("foreign-agent", { agent: "build" }),
+        summaryInfo("archived", { time: { created: 1, updated: 2_000, archived: 3_000 } }),
+        summaryInfo("other-project", {
+          location: { directory: path.resolve(process.cwd(), "..") },
+        }),
+        summaryInfo("missing-location", { location: undefined }),
+        summaryInfo("bad-updated", { time: { created: 1, updated: Number.NaN } }),
+        summaryInfo("string-updated", { time: { created: 1, updated: "2000" } }),
+        summaryInfo("missing-time", { time: undefined }),
+        { id: "not-record-child" },
+        null,
+      ];
+      const list = vi.fn(async () => ({ data: items, cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+
+      expect(result).toEqual([
+        { id: "empty-title", title: null, updatedAt: 2_000 },
+        { id: "valid", title: "Valid", updatedAt: 2_000 },
+      ]);
+    });
+
+    it("дедуплицирует ID, сортирует updatedAt desc с устойчивым tie-break", async () => {
+      const pages = [
+        {
+          data: [
+            summaryInfo("b", { title: "B", time: { created: 1, updated: 100 } }),
+            summaryInfo("a", { title: "A", time: { created: 1, updated: 200 } }),
+          ],
+          cursor: { next: "next" },
+        },
+        {
+          data: [
+            summaryInfo("c", { title: "C", time: { created: 1, updated: 200 } }),
+            summaryInfo("a", { title: "duplicate", time: { created: 1, updated: 50 } }),
+          ],
+          cursor: { next: null },
+        },
+      ];
+      const list = vi.fn(async () => pages.shift());
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      expect(await gateway.listSessions()).toEqual([
+        { id: "a", title: "A", updatedAt: 200 },
+        { id: "c", title: "C", updatedAt: 200 },
+        { id: "b", title: "B", updatedAt: 100 },
+      ]);
+    });
+
+    it("ограничивает ответ 30 записями", async () => {
+      const data = Array.from({ length: 31 }, (_value, index) =>
+        summaryInfo(`ses-${String(index).padStart(2, "0")}`, {
+          time: { created: 1, updated: index + 1 },
+        }),
+      );
+      const list = vi.fn(async () => ({ data, cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+      expect(result).toHaveLength(30);
+      expect(result[0]?.id).toBe("ses-30");
+      expect(result[29]?.id).toBe("ses-01");
+    });
+
+    it("читает максимум 4 страницы по 50 и не зацикливается на повторном cursor", async () => {
+      const calls: unknown[] = [];
+      const list = vi.fn(async (input: unknown) => {
+        calls.push(input);
+        return {
+          data: [
+            summaryInfo(`ses-${calls.length}`, { time: { created: 1, updated: calls.length } }),
+          ],
+          cursor: { next: `cursor-${calls.length}` },
+        };
+      });
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+      expect(list).toHaveBeenCalledTimes(4);
+      expect(result.map((item) => item.id)).toEqual(["ses-4", "ses-3", "ses-2", "ses-1"]);
+
+      const repeated = vi.fn(async () => ({
+        data: [summaryInfo("only")],
+        cursor: { next: "same" },
+      }));
+      const repeatedGateway = createOpenCodeGateway(asClient({ session: { list: repeated } }));
+      expect(await repeatedGateway.listSessions()).toHaveLength(1);
+      expect(repeated).toHaveBeenCalledTimes(2);
+    });
+
+    it("переводит сетевую ошибку и невалидный cursor в безопасные gateway errors", async () => {
+      const network = createOpenCodeGateway(
+        asClient({
+          session: {
+            list: async () => {
+              throw new Error("secret upstream socket");
+            },
+          },
+        }),
+      );
+      await expect(network.listSessions()).rejects.toMatchObject({
+        code: "DEPENDENCY_UNAVAILABLE",
+      });
+
+      const badCursor = createOpenCodeGateway(
+        asClient({
+          session: {
+            list: async () => {
+              throw { status: 400, _tag: "InvalidRequest" };
+            },
+          },
+        }),
+      );
+      await expect(badCursor.listSessions()).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+      });
+    });
+  });
+
+  describe("renameSession", () => {
+    it("нормализует title и отправляет только sessionID/title", async () => {
+      const update = vi.fn(async () => undefined);
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(asClient({ session: { get, update } }));
+
+      await expect(gateway.renameSession("ses-1", "  Новое   название  ")).resolves.toEqual({
+        id: "ses-1",
+        title: "Новое название",
+      });
+      expect(update).toHaveBeenCalledWith({ sessionID: "ses-1", title: "Новое название" });
+    });
+
+    it("валидирует title до ownership и не вызывает update", async () => {
+      const update = vi.fn(async () => undefined);
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(asClient({ session: { get, update } }));
+
+      for (const title of [
+        "",
+        "   ",
+        "a".repeat(101),
+        "bad\u0000title",
+        "bad\nline",
+        "bad\u009ftitle",
+      ]) {
+        await expect(gateway.renameSession("ses-1", title)).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+        });
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+
+      await gateway.renameSession("ses-1", "😀".repeat(100));
+      expect(update).toHaveBeenCalledWith({ sessionID: "ses-1", title: "😀".repeat(100) });
+    });
+
+    it("не переименовывает чужую, child или сессию другого проекта", async () => {
+      const cases = [
+        { ...ownedInfo(), metadata: { source: "other" } },
+        { ...ownedInfo(), parentID: "ses-parent" },
+        { ...ownedInfo(), location: { directory: path.resolve(process.cwd(), "..") } },
+        { ...ownedInfo(), agent: "build" },
+      ];
+      for (const info of cases) {
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get: async () => info, update } }),
+        );
+        await expect(gateway.renameSession("ses-1", "Title")).rejects.toMatchObject({
+          code: "NOT_FOUND",
+        });
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("сохраняет 404 ownership при ошибке update", async () => {
+      const update = vi.fn(async () => {
+        throw { status: 404, _tag: "NotFound" };
+      });
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get: async () => ownedInfo(), update } }),
+      );
+      await expect(gateway.renameSession("ses-1", "Title")).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+    });
   });
 });

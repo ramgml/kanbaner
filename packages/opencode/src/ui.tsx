@@ -6,6 +6,7 @@ import {
   FileText,
   Loader2,
   Paperclip,
+  Pencil,
   Plus,
   RefreshCw,
   Send,
@@ -40,6 +41,8 @@ import {
   type OpenCodeChatMessage,
   type OpenCodeModelRefView,
   type OpenCodeModelView,
+  type OpenCodeSessionRename,
+  type OpenCodeSessionSummary,
   type OpenCodeSessionView,
   type OpenCodeStreamEvent,
   type OpenCodeToolView,
@@ -54,6 +57,7 @@ import {
   useSessionDraft,
 } from "./drafts.ts";
 import { opencodeToolSource } from "./tool-metadata.ts";
+import { SessionHistory, type SessionSwitchResult } from "./session-history.tsx";
 import {
   finishToolMessages,
   mergeToolMessage,
@@ -634,6 +638,22 @@ async function attachmentPayload(
   };
 }
 
+const SESSION_TITLE_MAX_POINTS = 100;
+const SESSION_TITLE_CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
+const SESSION_TITLE_WHITESPACE = /\s+/gu;
+
+/**
+ * Клиентская проверка повторяет gateway: trim, схлопывание пробелов и лимит
+ * 1–100 code points. HTML `maxLength` считает UTF-16 units, поэтому 100 emoji
+ * ошибочно не помещались бы; серверная валидация остаётся источником истины.
+ */
+function normalizedSessionTitle(value: string): string | null {
+  if (SESSION_TITLE_CONTROL.test(value)) return null;
+  const title = value.trim().replace(SESSION_TITLE_WHITESPACE, " ");
+  if (title.length === 0 || Array.from(title).length > SESSION_TITLE_MAX_POINTS) return null;
+  return title;
+}
+
 export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [catalog, setCatalog] = useState<OpenCodeCatalog | null>(null);
   const [session, setSession] = useState<OpenCodeSessionView | null>(null);
@@ -642,6 +662,12 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const [promptPending, setPromptPending] = useState(false);
   const [modelPending, setModelPending] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [renamePending, setRenamePending] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState<string | null>(null);
@@ -655,6 +681,26 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const initializeAbortRef = useRef<AbortController | null>(null);
   const modelAbortRef = useRef<AbortController | null>(null);
   const promptAbortRef = useRef<AbortController | null>(null);
+  const switchAbortRef = useRef<AbortController | null>(null);
+  const renameAbortRef = useRef<AbortController | null>(null);
+  /**
+   * Отдельные request tokens для switch/rename: неуспешный switch или rename
+   * не меняет generation текущей сессии и не отменяет её canonical refresh.
+   */
+  const switchSeqRef = useRef(0);
+  const renameSeqRef = useRef(0);
+  /**
+   * Локально подтверждённый title переименованной сессии. Overlay действует
+   * только на canonical GET, уже летевшие на момент подтверждения rename:
+   * такой delayed refresh применяет messages и подтверждённый title, после чего
+   * overlay гасится. GET, начатый после rename, всегда доверяет canonical.
+   */
+  const titleOverridesRef = useRef(new Map<string, { title: string; confirmedSeq: number }>());
+  /** Монотонный маркер старта canonical GET: отделяет pre-rename refresh. */
+  const canonicalRequestSeqRef = useRef(0);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const renameButtonRef = useRef<HTMLButtonElement | null>(null);
+  const emptyCtaRef = useRef<HTMLButtonElement | null>(null);
   /**
    * Tool identity текущего prompt-хода. Global `status === "running"` по всей
    * истории недопустим: unconfirmed tool предыдущего turn принадлежит другому
@@ -666,33 +712,64 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   } | null>(null);
   const refreshControllersRef = useRef(new Set<AbortController>());
   const currentRef = useMemo(() => contextRefFromSearch(search), [search]);
-  const busy = loading || creating || modelPending || promptPending;
+  const busy = loading || creating || modelPending || promptPending || switching || renamePending;
   const chatScroll = useChatScroll({ sessionID: session?.id ?? null, messages });
 
-  const beginOperation = useCallback((): number => {
-    const generation = ++generationRef.current;
-    initializeAbortRef.current?.abort();
-    modelAbortRef.current?.abort();
-    promptAbortRef.current?.abort();
-    for (const controller of refreshControllersRef.current) controller.abort();
-    refreshControllersRef.current.clear();
-    initializeAbortRef.current = null;
-    modelAbortRef.current = null;
-    promptAbortRef.current = null;
-    setLoading(false);
-    setCreating(false);
-    setModelPending(false);
-    setPromptPending(false);
-    return generation;
-  }, []);
+  const beginOperation = useCallback(
+    (scope: { readonly keepSwitch?: boolean; readonly keepRename?: boolean } = {}): number => {
+      const generation = ++generationRef.current;
+      // Новая операция/switch/newChat начинает свою canonical-жизнь: старый
+      // title overlay не должен влиять на последующий GET.
+      titleOverridesRef.current.clear();
+      initializeAbortRef.current?.abort();
+      modelAbortRef.current?.abort();
+      promptAbortRef.current?.abort();
+      if (scope.keepSwitch !== true) {
+        switchSeqRef.current += 1;
+        switchAbortRef.current?.abort();
+        switchAbortRef.current = null;
+        setSwitching(false);
+      }
+      if (scope.keepRename !== true) {
+        renameSeqRef.current += 1;
+        renameAbortRef.current?.abort();
+        renameAbortRef.current = null;
+        setRenamePending(false);
+      }
+      for (const controller of refreshControllersRef.current) controller.abort();
+      refreshControllersRef.current.clear();
+      initializeAbortRef.current = null;
+      modelAbortRef.current = null;
+      promptAbortRef.current = null;
+      setLoading(false);
+      setCreating(false);
+      setModelPending(false);
+      setPromptPending(false);
+      return generation;
+    },
+    [],
+  );
 
-  const applySession = useCallback((next: OpenCodeSessionView, generation: number): boolean => {
-    if (generation !== generationRef.current) return false;
-    setSession(next);
-    setMessages(next.messages);
-    storeSessionID(next.id);
-    return true;
-  }, []);
+  const applySession = useCallback(
+    (next: OpenCodeSessionView, generation: number, requestStartSeq?: number): boolean => {
+      if (generation !== generationRef.current) return false;
+      const override = titleOverridesRef.current.get(next.id);
+      let canonical = next;
+      if (override !== undefined) {
+        // Начатый после rename запрос доверяет canonical независимо от title;
+        // pre-rename delayed refresh получает подтверждённый title один раз.
+        titleOverridesRef.current.delete(next.id);
+        const startedBeforeRename =
+          requestStartSeq !== undefined && requestStartSeq <= override.confirmedSeq;
+        if (startedBeforeRename) canonical = { ...next, title: override.title };
+      }
+      setSession(canonical);
+      setMessages(next.messages);
+      storeSessionID(next.id);
+      return true;
+    },
+    [],
+  );
 
   const createSession = useCallback(
     async (model: OpenCodeModelRefView | undefined, generation: number, signal: AbortSignal) => {
@@ -705,7 +782,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         }),
         signal,
       });
-      applySession(created, generation);
+      if (applySession(created, generation)) setHistoryVersion((current) => current + 1);
     },
     [applySession],
   );
@@ -724,17 +801,24 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       setCatalog(nextCatalog);
       const stored = readStoredSessionID();
       if (stored !== null) {
+        const requestStartSeq = ++canonicalRequestSeqRef.current;
         try {
           const restored = await request<OpenCodeSessionView>(
             `/api/opencode/session/${encodeURIComponent(stored)}`,
             { signal: controller.signal },
           );
-          applySession(restored, generation);
+          applySession(restored, generation, requestStartSeq);
           return;
         } catch (reason) {
           if (generation !== generationRef.current) return;
           if (!(reason instanceof ApiError && reason.status === 404)) throw reason;
+          // Удалённая/чужая сессия: только сохранённый ID и пустое состояние,
+          // без автоматического создания новой сессии.
           clearStoredSessionID();
+          setSession(null);
+          setMessages([]);
+          setTurn(null);
+          return;
         }
       }
       await createSession(nextCatalog.defaultModel ?? undefined, generation, controller.signal);
@@ -759,9 +843,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     return () => {
       window.cancelAnimationFrame(frame);
       generationRef.current += 1;
+      switchSeqRef.current += 1;
+      renameSeqRef.current += 1;
       initializeAbortRef.current?.abort();
       modelAbortRef.current?.abort();
       promptAbortRef.current?.abort();
+      switchAbortRef.current?.abort();
+      renameAbortRef.current?.abort();
       for (const controller of refreshControllers) controller.abort();
       refreshControllers.clear();
     };
@@ -806,11 +894,12 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       const controller = new AbortController();
       refreshControllersRef.current.add(controller);
       const timeout = window.setTimeout(() => controller.abort(), 5000);
+      const requestStartSeq = ++canonicalRequestSeqRef.current;
       void request<OpenCodeSessionView>(`/api/opencode/session/${encodeURIComponent(sessionID)}`, {
         signal: controller.signal,
       })
         .then((restored) => {
-          applySession(restored, generation);
+          applySession(restored, generation, requestStartSeq);
         })
         .catch(() => {
           // Streaming result уже показан; временный сбой canonical refresh не скрываем как новый сбой prompt.
@@ -854,6 +943,176 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     } finally {
       if (modelAbortRef.current === controller) modelAbortRef.current = null;
       if (generation === generationRef.current) setModelPending(false);
+    }
+  };
+
+  const loadSessions = useCallback(
+    async (signal: AbortSignal): Promise<readonly OpenCodeSessionSummary[]> => {
+      const list = await request<readonly OpenCodeSessionSummary[]>("/api/opencode/session", {
+        signal,
+      });
+      return Array.isArray(list) ? list : [];
+    },
+    [],
+  );
+
+  /**
+   * Переключение — отдельный request token. Generation текущей сессии не
+   * меняется, пока target не загружен: failed switch (404/503) сохраняет
+   * visibleTurn, unconfirmed и canonical refresh. Глобальная generation
+   * начинается только после успешного GET и проверки, что switch всё ещё
+   * последний.
+   */
+  const switchSession = async (targetID: string): Promise<SessionSwitchResult> => {
+    if (busy || session?.id === targetID) return { ok: false, reason: "cancelled" };
+    const requestGeneration = generationRef.current;
+    const token = switchSeqRef.current + 1;
+    switchSeqRef.current = token;
+    const controller = new AbortController();
+    switchAbortRef.current = controller;
+    setSwitching(true);
+    setPanelError(null);
+    setRenameOpen(false);
+    setRenameError(null);
+    const requestStartSeq = ++canonicalRequestSeqRef.current;
+    try {
+      const next = await request<OpenCodeSessionView>(
+        `/api/opencode/session/${encodeURIComponent(targetID)}`,
+        { signal: controller.signal },
+      );
+      if (
+        token !== switchSeqRef.current ||
+        switchAbortRef.current !== controller ||
+        generationRef.current !== requestGeneration
+      ) {
+        return { ok: false, reason: "cancelled" };
+      }
+      const generation = beginOperation({ keepSwitch: true });
+      if (!applySession(next, generation, requestStartSeq)) {
+        return { ok: false, reason: "cancelled" };
+      }
+      setTurn(null);
+      setAttachedRef(null);
+      setSelectionError(null);
+      clearFiles();
+      // Локальные preview принадлежат прежней сессии; их URL освобождаются.
+      const transient = localImagesRef.current;
+      localImagesRef.current = [];
+      setLocalImages([]);
+      for (const local of transient) revokeObjectUrl(local.url);
+      return { ok: true };
+    } catch (reason) {
+      if (token !== switchSeqRef.current || generationRef.current !== requestGeneration) {
+        return { ok: false, reason: "cancelled" };
+      }
+      if (reason instanceof Error && reason.name === "AbortError") {
+        return { ok: false, reason: "cancelled" };
+      }
+      if (reason instanceof ApiError && reason.status === 404) {
+        if (readStoredSessionID() === targetID) clearStoredSessionID();
+        return { ok: false, reason: "not-found" };
+      }
+      return { ok: false, reason: "unavailable" };
+    } finally {
+      if (switchAbortRef.current === controller) switchAbortRef.current = null;
+      if (switchSeqRef.current === token) setSwitching(false);
+    }
+  };
+
+  const openRename = (): void => {
+    if (session === null || busy) return;
+    setRenameValue(session.title ?? "");
+    setRenameError(null);
+    setRenameOpen(true);
+  };
+
+  const closeRename = (): void => {
+    setRenameOpen(false);
+    setRenameError(null);
+    renameButtonRef.current?.focus();
+  };
+
+  /**
+   * Rename не меняет generation и не отменяет canonical refresh. Успех и 503
+   * применяются только к захваченной generation/sessionID. Только 404
+   * переводит панель в empty state через beginOperation, чтобы старый refresh
+   * не воскресил удалённую сессию.
+   */
+  const submitRename = async (): Promise<void> => {
+    if (session === null || renamePending) return;
+    const title = normalizedSessionTitle(renameValue);
+    if (title === null) {
+      setRenameError("Название сессии должно содержать от 1 до 100 символов");
+      return;
+    }
+    const sessionID = session.id;
+    const requestGeneration = generationRef.current;
+    const token = renameSeqRef.current + 1;
+    renameSeqRef.current = token;
+    const controller = new AbortController();
+    renameAbortRef.current = controller;
+    setRenamePending(true);
+    setRenameError(null);
+    let renamed = false;
+    try {
+      const result = await request<OpenCodeSessionRename>(
+        `/api/opencode/session/${encodeURIComponent(sessionID)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title }),
+          signal: controller.signal,
+        },
+      );
+      if (token !== renameSeqRef.current || generationRef.current !== requestGeneration) {
+        return;
+      }
+      // Overlay ставится до возможного delayed refresh: canonical messages
+      // применяются, но старый title не возвращается. Маркер фиксирует, какие
+      // GET уже летели на момент подтверждения.
+      titleOverridesRef.current.set(sessionID, {
+        title: result.title,
+        confirmedSeq: canonicalRequestSeqRef.current,
+      });
+      setSession((current) =>
+        current === null || current.id !== sessionID
+          ? current
+          : { ...current, title: result.title },
+      );
+      setRenameValue(result.title);
+      setRenameOpen(false);
+      setHistoryVersion((current) => current + 1);
+      renamed = true;
+    } catch (reason) {
+      if (token !== renameSeqRef.current || generationRef.current !== requestGeneration) {
+        return;
+      }
+      if (reason instanceof Error && reason.name === "AbortError") return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        // Текущая сессия исчезла: только сохранённый ID и пустое состояние.
+        beginOperation();
+        titleOverridesRef.current.delete(sessionID);
+        clearStoredSessionID();
+        setSession(null);
+        setMessages([]);
+        setTurn(null);
+        setRenameOpen(false);
+        setRenameError(null);
+        setPanelError(null);
+        setHistoryVersion((current) => current + 1);
+        window.requestAnimationFrame(() => emptyCtaRef.current?.focus());
+        return;
+      }
+      setRenameError(publicError(reason, "Не удалось переименовать сессию"));
+    } finally {
+      if (renameAbortRef.current === controller) renameAbortRef.current = null;
+      if (renameSeqRef.current === token) {
+        setRenamePending(false);
+        // Фокус ставим после снятия disabled, иначе браузер его игнорирует.
+        if (renamed) {
+          window.requestAnimationFrame(() => renameButtonRef.current?.focus());
+        }
+      }
     }
   };
 
@@ -1206,6 +1465,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         return;
       }
       if (currentGeneration()) {
+        // Список сессий устарел после любого terminal этого prompt.
+        setHistoryVersion((current) => current + 1);
         if (terminal === "done") {
           setAttachedRef(null);
           clearFiles();
@@ -1315,6 +1576,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const controller = new AbortController();
     refreshControllersRef.current.add(controller);
     const timeout = window.setTimeout(() => controller.abort(), 5000);
+    const requestStartSeq = ++canonicalRequestSeqRef.current;
     setTurn((current) =>
       current !== null && current.generation === generation
         ? { ...current, checking: true, statusNote: null }
@@ -1344,7 +1606,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       }
       if (status.outcome === "done") {
         // Полный terminal ответ: только здесь допустима canonical замена.
-        applySession(status.session, generation);
+        applySession(status.session, generation, requestStartSeq);
       } else {
         // Canonical cancelled/error подтверждён сервером: завершаем только
         // running tools этого же хода, чтобы таймер не рос после terminal, но
@@ -1411,6 +1673,8 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     setAttachedRef(null);
     clearFiles();
     setPanelError(null);
+    setRenameOpen(false);
+    setRenameError(null);
     try {
       await createSession(selectedModel ?? undefined, generation, controller.signal);
     } catch (reason) {
@@ -1437,22 +1701,111 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       data-testid="opencode-panel"
       className="flex min-h-0 flex-1 flex-col"
     >
-      <header className="flex items-center justify-between border-b px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <header className="flex min-w-0 items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <Bot aria-hidden="true" className="size-4 shrink-0" />
-          <h2 className="truncate text-sm font-semibold">OpenCode</h2>
+          <div className="flex min-w-0 flex-col">
+            <h2 className="truncate text-sm font-semibold">OpenCode</h2>
+            {session !== null ? (
+              <p
+                data-testid="opencode-session-title"
+                className="truncate text-xs text-muted-foreground"
+                title={session.title ?? "Без названия"}
+              >
+                {session.title ?? "Без названия"}
+              </p>
+            ) : null}
+          </div>
         </div>
-        <button
-          type="button"
-          aria-label="Новая сессия OpenCode"
-          title="Новая сессия"
-          onClick={() => void newChat()}
-          disabled={busy || catalog === null}
-          className={buttonClass}
-        >
-          <Plus aria-hidden="true" className="size-4" />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          {session !== null ? (
+            <button
+              ref={renameButtonRef}
+              type="button"
+              aria-label="Переименовать сессию"
+              title="Переименовать сессию"
+              onClick={openRename}
+              disabled={busy}
+              className={iconButtonClass}
+            >
+              <Pencil aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Новая сессия OpenCode"
+            title="Новая сессия"
+            onClick={() => void newChat()}
+            disabled={busy || catalog === null}
+            className={buttonClass}
+          >
+            <Plus aria-hidden="true" className="size-4" />
+          </button>
+        </div>
       </header>
+
+      {renameOpen && session !== null ? (
+        <form
+          className="flex min-w-0 flex-col gap-2 border-b px-3 py-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitRename();
+          }}
+        >
+          <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+            Название сессии
+            <input
+              ref={renameInputRef}
+              autoFocus
+              value={renameValue}
+              disabled={busy}
+              onChange={(event) => {
+                setRenameValue(event.target.value);
+                setRenameError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeRename();
+                }
+              }}
+              className={`${inputClass} block w-full min-w-0`}
+            />
+          </label>
+          {renameError !== null ? (
+            <p role="alert" className="text-xs text-destructive">
+              {renameError}
+            </p>
+          ) : null}
+          <div className="flex min-w-0 flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={busy || renameValue.trim().length === 0}
+              className={buttonClass}
+            >
+              Сохранить
+            </button>
+            <button
+              type="button"
+              disabled={renamePending}
+              onClick={closeRename}
+              className={buttonClass}
+            >
+              Отмена
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      <SessionHistory
+        currentID={session?.id ?? null}
+        currentTitle={session?.title ?? null}
+        busy={busy}
+        version={historyVersion}
+        loadSessions={loadSessions}
+        onSelect={switchSession}
+      />
 
       {catalog !== null ? <ToolCatalog tools={catalog.tools} /> : null}
 
@@ -1574,7 +1927,26 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
                 </div>
               </div>
             ) : null}
-            {!loading && !creating && messages.length === 0 && panelError === null ? (
+            {!loading && !creating && session === null && panelError === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <Sparkles aria-hidden="true" className="size-6" />
+                <p>Сохранённая сессия не найдена.</p>
+                <button
+                  ref={emptyCtaRef}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void newChat()}
+                  className={buttonClass}
+                >
+                  <Plus aria-hidden="true" className="size-3.5" /> Новая сессия
+                </button>
+              </div>
+            ) : null}
+            {!loading &&
+            !creating &&
+            session !== null &&
+            messages.length === 0 &&
+            panelError === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <Sparkles aria-hidden="true" className="size-6" />
                 <p>Спросите о задачах, заметках или попросите изменить их.</p>

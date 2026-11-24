@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ATTACHMENT_LIMITS,
@@ -20,6 +22,8 @@ import {
   handleOpenCodePrompt,
   handleOpenCodeSessionCreate,
   handleOpenCodeSessionGet,
+  handleOpenCodeSessionList,
+  handleOpenCodeSessionRename,
   resetOpenCodeGatewayForTests,
   setOpenCodeGatewayForTests,
 } from "./opencode-http.ts";
@@ -55,6 +59,14 @@ function gateway(overrides: Partial<OpenCodeGateway> = {}): OpenCodeGateway {
     status: vi.fn(async () => ({ available: true as const, version: "2.2.5" })),
     catalog: vi.fn(async () => catalog),
     createSession: vi.fn(async () => session),
+    listSessions: vi.fn(async () => [
+      { id: "ses-2", title: "Предыдущая", updatedAt: 2_000 },
+      { id: "ses-1", title: null, updatedAt: 1_000 },
+    ]),
+    renameSession: vi.fn(async (_sessionID: string, title: string) => ({
+      id: "ses-1",
+      title: title.trim(),
+    })),
     getSession: vi.fn(async () => session),
     getTurnStatus: vi.fn(async () => ({ session, outcome: "done" as const })),
     getAttachmentPreview: vi.fn(async () => ({
@@ -84,6 +96,28 @@ function request(url: string, init: RequestInit = {}): Request {
 
 async function body(response: Response): Promise<unknown> {
   return (await response.json()) as unknown;
+}
+
+/** Тот же project directory, что вычисляет gateway при запуске из apps/web. */
+function projectDirectory(): string {
+  const cwd = process.cwd();
+  return path.basename(cwd) === "web" && path.basename(path.dirname(cwd)) === "apps"
+    ? path.resolve(cwd, "../..")
+    : cwd;
+}
+
+function ownedSessionFixture() {
+  return {
+    id: "ses-1",
+    parentID: null,
+    projectID: "project-1",
+    title: "Kanbaner chat",
+    agent: "kanbaner",
+    model: { id: "model-1", providerID: "provider-1" },
+    metadata: { source: "kanbaner" },
+    location: { directory: projectDirectory() },
+    time: { created: 1_000, updated: 2_000 },
+  };
 }
 
 afterEach(() => {
@@ -681,13 +715,7 @@ describe("OpenCode UI HTTP transport", () => {
     const realGateway = createOpenCodeGateway(
       asClient({
         session: {
-          get: async () => ({
-            id: "ses-1",
-            title: "Kanbaner chat",
-            agent: "kanbaner",
-            model: { id: "model-1", providerID: "provider-1" },
-            metadata: { source: "kanbaner" },
-          }),
+          get: async () => ownedSessionFixture(),
           prompt,
           inbox: { cancel: vi.fn(async () => undefined) },
           interrupt: vi.fn(async () => ({ interrupted: true })),
@@ -748,13 +776,7 @@ describe("OpenCode UI HTTP transport", () => {
     const realGateway = createOpenCodeGateway(
       asClient({
         session: {
-          get: async () => ({
-            id: "ses-1",
-            title: "Kanbaner chat",
-            agent: "kanbaner",
-            model: { id: "model-1", providerID: "provider-1" },
-            metadata: { source: "kanbaner" },
-          }),
+          get: async () => ownedSessionFixture(),
           prompt: vi.fn(async () => {
             throw new Error("connection reset after possible admission");
           }),
@@ -970,5 +992,203 @@ describe("OpenCode UI HTTP transport", () => {
     expect(tooLarge.status).toBe(400);
     expect(JSON.stringify(await body(tooLarge))).toContain("слишком большое");
     expect(mock.prompt).not.toHaveBeenCalled();
+  });
+  describe("listSessions", () => {
+    it("требует uiGuard до обращения к gateway и отдаёт no-store envelope", async () => {
+      const mock = gateway();
+      setOpenCodeGatewayForTests(mock);
+
+      const denied = await handleOpenCodeSessionList(
+        new Request("http://localhost/api/opencode/session"),
+      );
+      expect(denied.status).toBe(403);
+      expect(denied.headers.get("cache-control")).toBe("no-store");
+      expect(mock.listSessions).not.toHaveBeenCalled();
+
+      const response = await handleOpenCodeSessionList(request("/api/opencode/session"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await body(response)).toEqual({
+        ok: true,
+        data: [
+          { id: "ses-2", title: "Предыдущая", updatedAt: 2_000 },
+          { id: "ses-1", title: null, updatedAt: 1_000 },
+        ],
+      });
+      expect(mock.listSessions).toHaveBeenCalledOnce();
+    });
+
+    it("отклоняет любые query-параметры без запуска Service", async () => {
+      const mock = gateway();
+      setOpenCodeGatewayForTests(mock);
+
+      for (const query of ["?cursor=abc", "?directory=/tmp", "?limit=5", "?archived=false"]) {
+        const response = await handleOpenCodeSessionList(request(`/api/opencode/session${query}`));
+        expect(response.status).toBe(400);
+        expect(JSON.stringify(await body(response))).toContain("не поддерживаются");
+      }
+      expect(mock.listSessions).not.toHaveBeenCalled();
+    });
+
+    it("маппит недоступность и скрывает upstream сообщение", async () => {
+      const unavailable = gateway({
+        listSessions: vi.fn(async () => {
+          throw new Error("secret upstream socket");
+        }),
+      });
+      setOpenCodeGatewayForTests(unavailable);
+
+      const response = await handleOpenCodeSessionList(request("/api/opencode/session"));
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const serialized = JSON.stringify(await body(response));
+      expect(serialized).not.toContain("secret upstream");
+    });
+  });
+
+  describe("renameSession", () => {
+    it("требует uiGuard до обращения к gateway", async () => {
+      const mock = gateway();
+      setOpenCodeGatewayForTests(mock);
+
+      const denied = await handleOpenCodeSessionRename(
+        "ses-1",
+        new Request("http://localhost/api/opencode/session/ses-1", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Новое" }),
+        }),
+      );
+      expect(denied.status).toBe(403);
+      expect(mock.renameSession).not.toHaveBeenCalled();
+    });
+
+    it("принимает только строгий JSON-объект с одним строковым title", async () => {
+      const mock = gateway();
+      setOpenCodeGatewayForTests(mock);
+
+      const cases: Array<{
+        init: { body: string; headers?: Record<string, string> };
+        message: string;
+      }> = [
+        { init: { body: "{broken" }, message: "корректный JSON" },
+        { init: { body: "[]" }, message: "JSON-объектом" },
+        { init: { body: "{}" }, message: "только title" },
+        {
+          init: { body: JSON.stringify({ title: "Новое", extra: true }) },
+          message: "только title",
+        },
+        {
+          init: { body: JSON.stringify({ title: 42 }) },
+          message: "только title",
+        },
+        {
+          init: {
+            body: JSON.stringify({ title: "Новое" }),
+            headers: { "content-type": "text/plain" },
+          },
+          message: "application/json",
+        },
+      ];
+      for (const testCase of cases) {
+        const response = await handleOpenCodeSessionRename(
+          "ses-1",
+          request("/api/opencode/session/ses-1", {
+            method: "PATCH",
+            headers: { "content-type": "application/json", ...testCase.init.headers },
+            body: testCase.init.body,
+          }),
+        );
+        expect(response.status).toBe(400);
+        expect(JSON.stringify(await body(response))).toContain(testCase.message);
+      }
+
+      const oversized = await handleOpenCodeSessionRename(
+        "ses-1",
+        request("/api/opencode/session/ses-1", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "a".repeat(5 * 1024) }),
+        }),
+      );
+      expect(oversized.status).toBe(400);
+      expect(JSON.stringify(await body(oversized))).toContain("слишком большое");
+      expect(mock.renameSession).not.toHaveBeenCalled();
+    });
+
+    it("передаёт точный title в gateway и отвечает no-store envelope", async () => {
+      const renameSession = vi.fn(async () => ({ id: "ses-1", title: "Новое название" }));
+      const mock = gateway({ renameSession });
+      setOpenCodeGatewayForTests(mock);
+
+      const response = await handleOpenCodeSessionRename(
+        "ses-1",
+        request("/api/opencode/session/ses-1", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "  Новое   название  " }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(renameSession).toHaveBeenCalledWith("ses-1", "  Новое   название  ");
+      expect(await body(response)).toEqual({
+        ok: true,
+        data: { id: "ses-1", title: "Новое название" },
+      });
+    });
+
+    it("маппит NOT_FOUND, validation и недоступность без upstream текста", async () => {
+      const notFound = gateway({
+        renameSession: vi.fn(async () => {
+          throw new OpenCodeGatewayError("NOT_FOUND", "Сессия OpenCode не найдена");
+        }),
+      });
+      setOpenCodeGatewayForTests(notFound);
+      const missing = await handleOpenCodeSessionRename(
+        "missing",
+        request("/api/opencode/session/missing", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Новое" }),
+        }),
+      );
+      expect(missing.status).toBe(404);
+
+      const invalid = gateway({
+        renameSession: vi.fn(async () => {
+          throw new OpenCodeGatewayError("VALIDATION_ERROR", "Некорректное название");
+        }),
+      });
+      setOpenCodeGatewayForTests(invalid);
+      const bad = await handleOpenCodeSessionRename(
+        "ses-1",
+        request("/api/opencode/session/ses-1", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "" }),
+        }),
+      );
+      expect(bad.status).toBe(400);
+
+      const unavailable = gateway({
+        renameSession: vi.fn(async () => {
+          throw new Error("secret upstream headers");
+        }),
+      });
+      setOpenCodeGatewayForTests(unavailable);
+      const failed = await handleOpenCodeSessionRename(
+        "ses-1",
+        request("/api/opencode/session/ses-1", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Новое" }),
+        }),
+      );
+      expect(failed.status).toBe(503);
+      expect(JSON.stringify(await body(failed))).not.toContain("secret upstream");
+    });
   });
 });
