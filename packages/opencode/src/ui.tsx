@@ -690,10 +690,14 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const switchSeqRef = useRef(0);
   const renameSeqRef = useRef(0);
   /**
-   * Локально подтверждённый title переименованной сессии. Delayed canonical
-   * refresh применяет messages, но не возвращает старый title.
+   * Локально подтверждённый title переименованной сессии. Overlay действует
+   * только на canonical GET, уже летевшие на момент подтверждения rename:
+   * такой delayed refresh применяет messages и подтверждённый title, после чего
+   * overlay гасится. GET, начатый после rename, всегда доверяет canonical.
    */
-  const titleOverridesRef = useRef(new Map<string, string>());
+  const titleOverridesRef = useRef(new Map<string, { title: string; confirmedSeq: number }>());
+  /** Монотонный маркер старта canonical GET: отделяет pre-rename refresh. */
+  const canonicalRequestSeqRef = useRef(0);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameButtonRef = useRef<HTMLButtonElement | null>(null);
   const emptyCtaRef = useRef<HTMLButtonElement | null>(null);
@@ -714,6 +718,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
   const beginOperation = useCallback(
     (scope: { readonly keepSwitch?: boolean; readonly keepRename?: boolean } = {}): number => {
       const generation = ++generationRef.current;
+      // Новая операция/switch/newChat начинает свою canonical-жизнь: старый
+      // title overlay не должен влиять на последующий GET.
+      titleOverridesRef.current.clear();
       initializeAbortRef.current?.abort();
       modelAbortRef.current?.abort();
       promptAbortRef.current?.abort();
@@ -743,20 +750,26 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     [],
   );
 
-  const applySession = useCallback((next: OpenCodeSessionView, generation: number): boolean => {
-    if (generation !== generationRef.current) return false;
-    const override = titleOverridesRef.current.get(next.id);
-    if (override !== undefined && override === next.title) {
-      // Upstream уже отдаёт подтверждённый title: overlay больше не нужен.
-      titleOverridesRef.current.delete(next.id);
-    }
-    setSession(
-      override === undefined || override === next.title ? next : { ...next, title: override },
-    );
-    setMessages(next.messages);
-    storeSessionID(next.id);
-    return true;
-  }, []);
+  const applySession = useCallback(
+    (next: OpenCodeSessionView, generation: number, requestStartSeq?: number): boolean => {
+      if (generation !== generationRef.current) return false;
+      const override = titleOverridesRef.current.get(next.id);
+      let canonical = next;
+      if (override !== undefined) {
+        // Начатый после rename запрос доверяет canonical независимо от title;
+        // pre-rename delayed refresh получает подтверждённый title один раз.
+        titleOverridesRef.current.delete(next.id);
+        const startedBeforeRename =
+          requestStartSeq !== undefined && requestStartSeq <= override.confirmedSeq;
+        if (startedBeforeRename) canonical = { ...next, title: override.title };
+      }
+      setSession(canonical);
+      setMessages(next.messages);
+      storeSessionID(next.id);
+      return true;
+    },
+    [],
+  );
 
   const createSession = useCallback(
     async (model: OpenCodeModelRefView | undefined, generation: number, signal: AbortSignal) => {
@@ -788,12 +801,13 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       setCatalog(nextCatalog);
       const stored = readStoredSessionID();
       if (stored !== null) {
+        const requestStartSeq = ++canonicalRequestSeqRef.current;
         try {
           const restored = await request<OpenCodeSessionView>(
             `/api/opencode/session/${encodeURIComponent(stored)}`,
             { signal: controller.signal },
           );
-          applySession(restored, generation);
+          applySession(restored, generation, requestStartSeq);
           return;
         } catch (reason) {
           if (generation !== generationRef.current) return;
@@ -880,11 +894,12 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       const controller = new AbortController();
       refreshControllersRef.current.add(controller);
       const timeout = window.setTimeout(() => controller.abort(), 5000);
+      const requestStartSeq = ++canonicalRequestSeqRef.current;
       void request<OpenCodeSessionView>(`/api/opencode/session/${encodeURIComponent(sessionID)}`, {
         signal: controller.signal,
       })
         .then((restored) => {
-          applySession(restored, generation);
+          applySession(restored, generation, requestStartSeq);
         })
         .catch(() => {
           // Streaming result уже показан; временный сбой canonical refresh не скрываем как новый сбой prompt.
@@ -959,6 +974,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     setPanelError(null);
     setRenameOpen(false);
     setRenameError(null);
+    const requestStartSeq = ++canonicalRequestSeqRef.current;
     try {
       const next = await request<OpenCodeSessionView>(
         `/api/opencode/session/${encodeURIComponent(targetID)}`,
@@ -972,7 +988,9 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         return { ok: false, reason: "cancelled" };
       }
       const generation = beginOperation({ keepSwitch: true });
-      if (!applySession(next, generation)) return { ok: false, reason: "cancelled" };
+      if (!applySession(next, generation, requestStartSeq)) {
+        return { ok: false, reason: "cancelled" };
+      }
       setTurn(null);
       setAttachedRef(null);
       setSelectionError(null);
@@ -1050,8 +1068,12 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
         return;
       }
       // Overlay ставится до возможного delayed refresh: canonical messages
-      // применяются, но старый title не возвращается.
-      titleOverridesRef.current.set(sessionID, result.title);
+      // применяются, но старый title не возвращается. Маркер фиксирует, какие
+      // GET уже летели на момент подтверждения.
+      titleOverridesRef.current.set(sessionID, {
+        title: result.title,
+        confirmedSeq: canonicalRequestSeqRef.current,
+      });
       setSession((current) =>
         current === null || current.id !== sessionID
           ? current
@@ -1554,6 +1576,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
     const controller = new AbortController();
     refreshControllersRef.current.add(controller);
     const timeout = window.setTimeout(() => controller.abort(), 5000);
+    const requestStartSeq = ++canonicalRequestSeqRef.current;
     setTurn((current) =>
       current !== null && current.generation === generation
         ? { ...current, checking: true, statusNote: null }
@@ -1583,7 +1606,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       }
       if (status.outcome === "done") {
         // Полный terminal ответ: только здесь допустима canonical замена.
-        applySession(status.session, generation);
+        applySession(status.session, generation, requestStartSeq);
       } else {
         // Canonical cancelled/error подтверждён сервером: завершаем только
         // running tools этого же хода, чтобы таймер не рос после terminal, но
