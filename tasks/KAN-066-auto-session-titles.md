@@ -1,7 +1,7 @@
 ---
 id: KAN-066
 title: Автоматические названия OpenCode-сессий из первого запроса
-status: in_progress
+status: review
 stage: 8
 priority: medium
 owner: worker-kan-066
@@ -115,6 +115,9 @@ specs:
 
 - 2026-11-24 — Задача создана по запросу пользователя; назначен
   `worker-kan-066`, статус `in_progress`.
+- 2026-11-24 — Worker реализовал auto title и немедленное обновление UI.
+  Коммит `d1ad061`; focused 217/217, OpenCode E2E 29/29, полный `pnpm check` —
+  145 files / 2085 tests. Live smoke остаётся оркестратору. Статус `review`.
 
 ## Итог
 
