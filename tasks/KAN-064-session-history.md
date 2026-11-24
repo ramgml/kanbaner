@@ -1,15 +1,15 @@
 ---
 id: KAN-064
 title: История и управление OpenCode-сессиями
-status: backlog
+status: in_progress
 stage: 8
 priority: high
-owner: unassigned
-blocked_by: [KAN-063]
-branch: null
-worktree: null
+owner: worker-kan-064
+blocked_by: []
+branch: feat/kan-064-session-history
+worktree: .worktrees/kan-064-session-history
 created: 2026-11-23
-updated: 2026-11-23
+updated: 2026-11-24
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -46,6 +46,7 @@ specs:
 Разрешено:
 
 - `packages/opencode/src/types.ts`, `gateway.ts`, `ui.tsx` и связанные тесты;
+- `packages/opencode/src/session-history.tsx` и связанные focused-тесты;
 - `packages/opencode/README.md`;
 - `apps/web/src/server/opencode-http.ts`, `opencode-http.test.ts`;
 - `apps/web/src/app/api/opencode/session/**`;
@@ -66,6 +67,17 @@ specs:
 - Источник истории — внешний OpenCode Service; Kanbaner хранит только last session ID
   и локальные черновики.
 - Доступ ограничен `metadata.source=kanbaner`, агентом `kanbaner` и текущим проектом.
+- Summary содержит только `id`, `title`, `updatedAt`. Допускается не более 4
+  страниц по 50 upstream-сессий и 30 записей в ответе; cursor и фильтры не
+  принимаются от браузера.
+- Переименование выполняется только для текущей сессии через отдельный PATCH с
+  единственным полем `title`; `metadata`, `permissions` и `archived` не
+  передаются. Автоматического rename по prompt нет.
+- Во время активного prompt переключение сессий блокируется до terminal/Stop;
+  stale list/switch response отбрасывается по generation.
+- При 404 сохранённый ID очищается без автосоздания сессии и показывается empty
+  state с явной CTA. Первичный bootstrap без сохранённого ID сохраняет прежнее
+  поведение; 503 не меняет сохранённый ID и текущую сессию.
 
 ## Критерии приёмки
 
@@ -90,7 +102,10 @@ specs:
 
 ## Журнал
 
-- 2026-11-23 — Задача создана по пункту 5 roadmap; ожидает KAN-063.
+- 2026-11-23 — Задача создана по пункту 5 roadmap; ожидала KAN-063.
+- 2026-11-24 — KAN-063 завершена. Назначен `worker-kan-064`, создана ветка и
+  worktree; статус `in_progress`. Зафиксированы bounded list, явный rename,
+  запрет delete, блокировка switching во время prompt и 404 без автосоздания.
 
 ## Итог
 
