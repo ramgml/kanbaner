@@ -1,7 +1,7 @@
 ---
 id: KAN-064
 title: История и управление OpenCode-сессиями
-status: review
+status: in_progress
 stage: 8
 priority: high
 owner: worker-kan-064
@@ -108,7 +108,11 @@ specs:
   запрет delete, блокировка switching во время prompt и 404 без автосоздания.
 - 2026-11-24 — Worker реализовал list/switch/rename. Коммит `1b1fad5`; focused
   179/179, E2E 26/26, полный `pnpm check` — 144 files / 2036 tests. Live smoke
-  остаётся оркестратору. Статус `review`.
+  остаётся оркестратору.
+- 2026-11-24 — Ревью нашло high: rename/failed switch обнуляли visible turn и
+  отменяли canonical refresh. Также требуются invalidation in-flight list,
+  code-point title validation и focus recovery после 404. Задача возвращена в
+  `in_progress`; merge запрещён до повторного ревью.
 
 ## Итог
 
