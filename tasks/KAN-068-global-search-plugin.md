@@ -1,7 +1,7 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: review
+status: in_progress
 stage: 5
 priority: high
 owner: worker-kan-068
@@ -146,7 +146,11 @@ Worker владеет всеми файлами, необходимыми для
   `in_progress`; merge запрещён до повторного ревью.
 - 2026-11-25 — Worker закрыл замечания коммитами `acdb252` и `2521f68`.
   Focused 883/883, полный Playwright 177/177, полный Vitest 151 files / 2138
-  tests, `pnpm check` зелёный. Статус `review`.
+  tests, `pnpm check` зелёный.
+- 2026-11-25 — Повторное ревью закрыло прежние high/medium, но нашло medium:
+  load-more offset считается по deduped hits вместо raw page size; low: на
+  границе 1000 возможен заведомо невалидный Next. Задача оставлена
+  `in_progress`; работа поставлена на паузу до следующего дня.
 
 ## Итог
 
