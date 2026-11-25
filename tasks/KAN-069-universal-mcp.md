@@ -150,6 +150,9 @@ moveMany и остальные не перечисленные operations ост
 - 2026-11-25 — Автономный пакет закоммичен `8f15e4b`: 65/65 unit, typecheck,
   build, eslint и stdio/CLI smoke зелёные. Integration, frozen lock и полные
   release-проверки остаются на этап B после merge KAN-068.
+- 2026-11-25 — Ревью этапа A нашло high в retryable non-idempotent mutation,
+  medium в redaction/abort/schema compatibility и три low. Исправления выполняются
+  до этапа B.
 
 ## Итог
 

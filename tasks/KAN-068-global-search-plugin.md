@@ -1,7 +1,7 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: review
+status: in_progress
 stage: 5
 priority: high
 owner: worker-kan-068
@@ -140,7 +140,10 @@ Worker владеет всеми файлами, необходимыми для
   `worker-kan-068`, статус `in_progress`.
 - 2026-11-25 — Worker реализовал SearchProvider Registry, search UI, domain
   providers, filters и lifecycle. Коммит `c00dc6a`; focused 502/502, полный
-  Playwright 176/176, `pnpm check` зелёный. Статус `review`.
+  Playwright 176/176, `pnpm check` зелёный.
+- 2026-11-25 — Ревью нашло high в activation/reindex lifecycle, medium в
+  validation/JSON parity и пробелы DoD-тестов. Задача возвращена в
+  `in_progress`; merge запрещён до повторного ревью.
 
 ## Итог
 
