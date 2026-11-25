@@ -1082,19 +1082,24 @@ export function createSearchIndexStore(
       for (const filter of query.filters ?? []) {
         const path = `$."${filter.field}"`;
 
+        // Семантика совпадает с in-memory provider: eq — только строковый
+        // scalar, contains — подстрока строки или точный строковый элемент
+        // массива. object/number/boolean/null не фильтруются.
         if (filter.operator === "eq") {
-          filterClauses.push("CAST(json_extract(d.metadata_json, ?) AS TEXT) = ?");
-          filterParams.push(path, filter.value);
+          filterClauses.push(
+            "(json_type(d.metadata_json, ?) = 'text' AND json_extract(d.metadata_json, ?) = ?)",
+          );
+          filterParams.push(path, path, filter.value);
           continue;
         }
 
         filterClauses.push(
-          `((json_type(d.metadata_json, ?) = 'array' AND EXISTS (
+          `((json_type(d.metadata_json, ?) = 'text'
+              AND instr(json_extract(d.metadata_json, ?), ?) > 0)
+            OR (json_type(d.metadata_json, ?) = 'array' AND EXISTS (
               SELECT 1 FROM json_each(d.metadata_json, ?) AS filter_value
-              WHERE CAST(filter_value.value AS TEXT) = ?
-            ))
-            OR (json_type(d.metadata_json, ?) IS NOT 'array'
-              AND instr(CAST(json_extract(d.metadata_json, ?) AS TEXT), ?) > 0))`,
+              WHERE filter_value.type = 'text' AND filter_value.value = ?
+            )))`,
         );
         filterParams.push(path, path, filter.value, path, path, filter.value);
       }

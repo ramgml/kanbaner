@@ -33,6 +33,34 @@ async function createTask(page: Page, taskTitle: string): Promise<string> {
   return new URL(page.url()).searchParams.get("task") ?? "";
 }
 
+async function createNote(page: Page, noteTitle: string, body: string): Promise<string> {
+  await page.goto("/view/notes");
+  await expect(page.getByTestId("notes-view")).toBeVisible();
+
+  const empty = page.getByTestId("note-create-empty");
+
+  if (await empty.isVisible()) {
+    await empty.click();
+  } else if (await page.getByRole("button", { name: "Создать заметку", exact: true }).isVisible()) {
+    await page.getByRole("button", { name: "Создать заметку", exact: true }).click();
+  } else {
+    await page.getByTestId("note-create-root").click();
+  }
+
+  await expect(page.getByTestId("note-title")).toBeVisible();
+  await page.getByTestId("note-title").fill(noteTitle);
+
+  const editor = page.getByRole("textbox", { name: "Содержимое заметки" });
+
+  await editor.click();
+  await editor.pressSequentially(body, { delay: 5 });
+  await expect(page.getByTestId("note-save-state")).toContainText("Сохранено", {
+    timeout: 15_000,
+  });
+
+  return new URL(page.url()).searchParams.get("note") ?? "";
+}
+
 async function openSearch(page: Page): Promise<void> {
   await page.goto("/view/search");
   await expect(page.getByTestId("search-view")).toBeVisible();
@@ -99,6 +127,33 @@ test.describe("kanbaner.search в production shell", () => {
     const url = new URL(page.url());
 
     expect(url.searchParams.get("task") ?? taskId).toBe(taskId);
+  });
+
+  test("находит заметку и открывает её", async ({ page }) => {
+    await page.setViewportSize(MOBILE);
+    const marker = title("Заметка поиска");
+    const noteId = await createNote(page, marker, "Текст заметки для поиска");
+    const noteRef = `kanbaner.notes:note:${noteId}`;
+
+    await openSearch(page);
+    await submitSearch(page, marker);
+
+    const hit = page.locator(`[data-search-hit='${noteRef}']`);
+
+    await expect(hit).toBeVisible();
+    await expect(hit).toContainText(marker);
+    await expect(page.getByTestId("search-warnings")).toHaveCount(0);
+    await expectNoOverflow(page);
+
+    await hit.focus();
+    await hit.press("Enter");
+
+    await expect(page).toHaveURL(/\/view\/notes/u);
+
+    // Generic resource-opener переходит по `?resource=<ref>`; notes-view
+    // разбирает ref и открывает выбранную заметку при начальной загрузке.
+    expect(new URL(page.url()).searchParams.get("resource")).toBe(noteRef);
+    await expect(page.getByTestId("note-title")).toHaveValue(marker);
   });
 
   test("показывает пустую выдачу и не создаёт overflow на мобильном", async ({ page }) => {

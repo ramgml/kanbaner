@@ -95,8 +95,12 @@ function validateProvider(pluginId: PluginId, provider: SearchProvider): void {
     throw denied();
   }
 
-  if (provider.kinds.length === 0) {
+  if (!Array.isArray(provider.kinds) || provider.kinds.length === 0) {
     throw invalid("Поисковый провайдер должен объявить хотя бы один тип");
+  }
+
+  if (!Array.isArray(provider.filterFields)) {
+    throw invalid("filterFields поискового провайдера должен быть массивом");
   }
 
   const kindIds = new Set<string>();
@@ -291,6 +295,11 @@ export class KernelSearchService implements SearchRegistrar {
 
   registerProvider(pluginId: PluginId, provider: SearchProvider): void {
     validateProvider(pluginId, provider);
+
+    if (this.#providers.has(pluginId)) {
+      throw invalid(`Поисковый провайдер ${pluginId} уже зарегистрирован`);
+    }
+
     this.#providers.set(pluginId, provider);
   }
 
@@ -326,10 +335,6 @@ export class KernelSearchService implements SearchRegistrar {
 
     const allProviders = [...this.#providers.values()];
 
-    if (allProviders.length === 0) {
-      return { hits: [], hasMore: false, warnings: [] };
-    }
-
     if (requestedKinds.length > 0) {
       const knownKinds = new Set(
         allProviders.flatMap((provider) => provider.kinds.map((kind) => kind.id)),
@@ -347,6 +352,10 @@ export class KernelSearchService implements SearchRegistrar {
       if (!declaredFilterFields.has(filter.field)) {
         throw invalid(`Неизвестный фильтр поиска: ${filter.field}`);
       }
+    }
+
+    if (allProviders.length === 0) {
+      return { hits: [], hasMore: false, warnings: [] };
     }
 
     const requestedKindSet = new Set(requestedKinds);

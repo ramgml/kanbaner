@@ -66,6 +66,23 @@ function createInvoker(
   return invoke;
 }
 
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   cleanup();
 });
@@ -149,6 +166,272 @@ describe("SearchView", () => {
     fireEvent.click(screen.getByRole("button", { name: /Маркерная задача/u }));
 
     expect(screen.getByTestId("search-open-error")).toHaveTextContent("Ресурс недоступен");
+  });
+
+  it("догружает следующую страницу с offset и дедуплицирует hits", async () => {
+    const firstPage: SearchQueryOutput = {
+      hits: [
+        {
+          ref: "kanbaner.tasks:task:task-1",
+          title: "Первая",
+          excerpt: "",
+          score: 2,
+          strategy: "full-text",
+          kind: "task",
+        },
+        {
+          ref: "kanbaner.tasks:task:task-2",
+          title: "Вторая",
+          excerpt: "",
+          score: 1,
+          strategy: "full-text",
+          kind: "task",
+        },
+      ],
+      hasMore: true,
+      warnings: [],
+    };
+    const secondPage: SearchQueryOutput = {
+      hits: [
+        {
+          ref: "kanbaner.tasks:task:task-2",
+          title: "Вторая",
+          excerpt: "",
+          score: 1,
+          strategy: "full-text",
+          kind: "task",
+        },
+        {
+          ref: "kanbaner.tasks:task:task-3",
+          title: "Третья",
+          excerpt: "",
+          score: 0.5,
+          strategy: "full-text",
+          kind: "task",
+        },
+      ],
+      hasMore: false,
+      warnings: [],
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: firstPage })
+      .mockResolvedValueOnce({ ok: true, data: secondPage });
+    const invoke = vi.fn(async (operationId: string, input: unknown) =>
+      operationId === SEARCH_QUERY_IDS.filters ? { ok: true, data: FILTERS } : query(input),
+    ) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "маркер" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Первая|Вторая/u })).toHaveLength(2);
+    });
+    expect(screen.getByTestId("search-count")).toHaveTextContent("(показаны не все)");
+
+    fireEvent.click(screen.getByTestId("search-load-more"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Третья")).toBeInTheDocument();
+    });
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenLastCalledWith({
+      text: "маркер",
+      offset: 2,
+    });
+    expect(screen.getByTestId("search-count")).toHaveTextContent("Найдено: 3");
+    expect(screen.queryByTestId("search-load-more")).not.toBeInTheDocument();
+  });
+
+  it("сбрасывает страницу при новом запросе", async () => {
+    const firstPage: SearchQueryOutput = {
+      hits: [
+        {
+          ref: "kanbaner.tasks:task:task-1",
+          title: "Старая",
+          excerpt: "",
+          score: 1,
+          strategy: "full-text",
+          kind: "task",
+        },
+      ],
+      hasMore: true,
+      warnings: [],
+    };
+    const nextPage: SearchQueryOutput = {
+      hits: [
+        {
+          ref: "kanbaner.tasks:task:task-9",
+          title: "Новая",
+          excerpt: "",
+          score: 1,
+          strategy: "full-text",
+          kind: "task",
+        },
+      ],
+      hasMore: false,
+      warnings: [],
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: firstPage })
+      .mockResolvedValueOnce({ ok: true, data: nextPage });
+    const invoke = vi.fn(async (operationId: string, input: unknown) =>
+      operationId === SEARCH_QUERY_IDS.filters ? { ok: true, data: FILTERS } : query(input),
+    ) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "первый" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Старая")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "второй" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Новая")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Старая")).not.toBeInTheDocument();
+    expect(query).toHaveBeenLastCalledWith({ text: "второй" });
+  });
+
+  it("игнорирует устаревший ответ, показывая последнюю выдачу", async () => {
+    const slow = deferred<SearchUiOperationResult>();
+    const fast = deferred<SearchUiOperationResult>();
+    const hit = (ref: string, title: string): SearchQueryOutput["hits"][number] => ({
+      ref,
+      title,
+      excerpt: "",
+      score: 1,
+      strategy: "full-text",
+      kind: "task",
+    });
+    const invoke = vi.fn(async (operationId: string, input: unknown) => {
+      if (operationId === SEARCH_QUERY_IDS.filters) {
+        return { ok: true, data: FILTERS };
+      }
+
+      const text = (input as { readonly text?: string }).text;
+
+      return text === "медленный" ? slow.promise : fast.promise;
+    }) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+    });
+
+    const form = screen.getByTestId("search-view").querySelector("form");
+    expect(form).not.toBeNull();
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "медленный" },
+    });
+    fireEvent.submit(form as HTMLFormElement);
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "быстрый" },
+    });
+    fireEvent.submit(form as HTMLFormElement);
+
+    fast.resolve({
+      ok: true,
+      data: { hits: [hit("kanbaner.tasks:task:fast", "Быстрая")], hasMore: false, warnings: [] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Быстрая")).toBeInTheDocument();
+    });
+
+    slow.resolve({
+      ok: true,
+      data: { hits: [hit("kanbaner.tasks:task:slow", "Медленная")], hasMore: false, warnings: [] },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Медленная")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Быстрая")).toBeInTheDocument();
+  });
+
+  it("показывает состояние загрузки и ошибку запроса", async () => {
+    const pending = deferred<SearchUiOperationResult>();
+    const invoke = vi.fn(async (operationId: string) =>
+      operationId === SEARCH_QUERY_IDS.filters ? { ok: true, data: FILTERS } : pending.promise,
+    ) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "маркер" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    expect(screen.getByTestId("search-loading")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ищу…" })).toBeDisabled();
+
+    pending.reject(new Error("Поиск недоступен"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-error")).toHaveTextContent("Поиск недоступен");
+    });
+    expect(screen.queryByTestId("search-loading")).not.toBeInTheDocument();
+  });
+
+  it("показывает ошибку фильтров и не блокирует поиск", async () => {
+    const invoke = vi.fn(async (operationId: string) => {
+      if (operationId === SEARCH_QUERY_IDS.filters) {
+        return {
+          ok: false,
+          error: { code: "INTERNAL_ERROR", message: "Фильтры недоступны", retryable: true },
+        };
+      }
+
+      return { ok: true, data: RESULT };
+    }) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-filters-error")).toHaveTextContent("Фильтры недоступны");
+    });
+    expect(screen.queryByTestId("search-filters-loading")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "маркер" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-results")).toBeInTheDocument();
+    });
   });
 
   it("показывает пустую выдачу без ошибки", async () => {

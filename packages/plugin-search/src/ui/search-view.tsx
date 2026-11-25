@@ -28,6 +28,29 @@ const EMPTY_FACETS: readonly SearchFacet[] = [];
 const EMPTY_KINDS: readonly SearchKind[] = [];
 const EMPTY_HITS: readonly SearchHitResult[] = [];
 
+interface ActiveQuery {
+  readonly input: Readonly<Record<string, JsonValue>>;
+}
+
+function mergeHits(
+  existing: readonly SearchHitResult[],
+  incoming: readonly SearchHitResult[],
+): SearchHitResult[] {
+  const seen = new Set(existing.map((hit) => hit.ref));
+  const merged = [...existing];
+
+  for (const hit of incoming) {
+    if (seen.has(hit.ref)) {
+      continue;
+    }
+
+    seen.add(hit.ref);
+    merged.push(hit);
+  }
+
+  return merged;
+}
+
 function facetValueLabel(facet: SearchFacet, value: string): string {
   return facet.values.find((candidate) => candidate.value === value)?.label ?? value;
 }
@@ -49,6 +72,7 @@ export function SearchView(props: SearchUiRendererProps) {
   const [filtersLoading, setFiltersLoading] = useState(true);
   const [filtersError, setFiltersError] = useState<string | null>(null);
   const [result, setResult] = useState<SearchQueryOutput | null>(null);
+  const [activeQuery, setActiveQuery] = useState<ActiveQuery | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
@@ -129,6 +153,10 @@ export function SearchView(props: SearchUiRendererProps) {
         input.filters = filtersToSend.map((filter) => ({ ...filter }));
       }
 
+      // Новый запрос всегда начинает первую страницу: накопленная выдача и
+      // offset прошлого запроса не переиспользуются.
+      setActiveQuery({ input });
+
       try {
         const data = await invokeSearch<SearchQueryOutput>(invoke, SEARCH_QUERY_IDS.query, input);
 
@@ -148,6 +176,41 @@ export function SearchView(props: SearchUiRendererProps) {
     },
     [buildFilters, invoke, kind, text],
   );
+
+  const loadMore = useCallback(async () => {
+    if (activeQuery === null || result === null || !result.hasMore || loading) {
+      return;
+    }
+
+    const generation = requestRef.current + 1;
+    const nextOffset = result.hits.length;
+    requestRef.current = generation;
+    setLoading(true);
+    setError(null);
+
+    const input: { [key: string]: JsonValue } = {
+      ...activeQuery.input,
+      offset: nextOffset,
+    };
+
+    try {
+      const data = await invokeSearch<SearchQueryOutput>(invoke, SEARCH_QUERY_IDS.query, input);
+
+      if (generation === requestRef.current) {
+        setResult((current) =>
+          current === null ? data : { ...data, hits: mergeHits(current.hits, data.hits) },
+        );
+      }
+    } catch (cause) {
+      if (generation === requestRef.current) {
+        setError(cause instanceof Error ? cause.message : "Поиск не удался");
+      }
+    } finally {
+      if (generation === requestRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [activeQuery, invoke, loading, result]);
 
   const openHit = useCallback(
     (hit: SearchHitResult) => {
@@ -344,6 +407,17 @@ export function SearchView(props: SearchUiRendererProps) {
               </li>
             ))}
           </ul>
+          {result?.hasMore === true ? (
+            <button
+              type="button"
+              className={`${buttonClass} self-start`}
+              data-testid="search-load-more"
+              onClick={() => void loadMore()}
+              disabled={loading}
+            >
+              {loading ? "Загружаю…" : "Показать ещё"}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </section>

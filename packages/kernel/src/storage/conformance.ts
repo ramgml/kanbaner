@@ -1059,6 +1059,73 @@ export function createStorageProviderConformanceSuite(
       },
     },
     {
+      name: "поиск: metadata-фильтры имеют одинаковую семантику для SQLite и in-memory",
+      async run(provider) {
+        const FILTER_REF = "acme.widgets:widget:01JWIDGET0000000000000003";
+
+        await provider.searchIndex.upsert([
+          {
+            ref: FILTER_REF,
+            pluginId: PLUGIN,
+            title: "Метаданные фильтра",
+            text: "Проверка семантики metadata",
+            kind: "widget",
+            metadata: {
+              name: "alpha",
+              number: 7,
+              flag: true,
+              nil: null,
+              object: { nested: "alpha" },
+              tags: ["alpha", "beta"],
+              mixed: ["alpha", 5, true, null],
+            },
+          },
+        ]);
+
+        const search = (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ) => provider.searchIndex.search({ text: "семантики", filters });
+
+        const expectMatch = async (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ): Promise<void> => {
+          const hits = await search(filters);
+          assert.deepEqual(
+            hits.map((hit) => hit.ref),
+            [FILTER_REF],
+          );
+        };
+        const expectNoMatch = async (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ): Promise<void> => {
+          assert.deepEqual(await search(filters), []);
+        };
+
+        // Строковый scalar: eq — точное совпадение, contains — подстрока.
+        await expectMatch([{ field: "name", operator: "eq", value: "alpha" }]);
+        await expectNoMatch([{ field: "name", operator: "eq", value: "alp" }]);
+        await expectMatch([{ field: "name", operator: "contains", value: "lph" }]);
+        await expectNoMatch([{ field: "name", operator: "contains", value: "zzz" }]);
+
+        // Массив: contains — точное совпадение строкового элемента, не подстрока.
+        await expectMatch([{ field: "tags", operator: "contains", value: "beta" }]);
+        await expectNoMatch([{ field: "tags", operator: "contains", value: "bet" }]);
+        await expectMatch([{ field: "mixed", operator: "contains", value: "alpha" }]);
+        await expectNoMatch([{ field: "mixed", operator: "contains", value: "5" }]);
+
+        // object, number, boolean и null не участвуют в фильтрах.
+        await expectNoMatch([{ field: "number", operator: "eq", value: "7" }]);
+        await expectNoMatch([{ field: "number", operator: "contains", value: "7" }]);
+        await expectNoMatch([{ field: "flag", operator: "eq", value: "true" }]);
+        await expectNoMatch([{ field: "flag", operator: "contains", value: "true" }]);
+        await expectNoMatch([{ field: "nil", operator: "eq", value: "null" }]);
+        await expectNoMatch([{ field: "nil", operator: "contains", value: "null" }]);
+        await expectNoMatch([{ field: "object", operator: "eq", value: "alpha" }]);
+        await expectNoMatch([{ field: "object", operator: "contains", value: "alpha" }]);
+        await expectNoMatch([{ field: "missing", operator: "eq", value: "alpha" }]);
+      },
+    },
+    {
       name: "Store-контракт создаётся в области провайдера и транзакции",
       async run(provider) {
         const contract = { id: "acme.widgets.store.v1", version: 1 } as const;

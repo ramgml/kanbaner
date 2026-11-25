@@ -84,8 +84,10 @@ export async function deleteNoteSearchDocuments(
 /**
  * Полная переиндексация заметок при активации.
  *
- * Читает все заметки домена и заменяет документы поиска. Сбой индекса не
- * отменяет активацию: поиск восстановится при следующем запуске.
+ * Всегда заменяет документы поиска своего namespace, включая пустой список:
+ * это удаляет stale-документы заметок, которых уже нет в домене, и не трогает
+ * tasks/fixture. Сбой пробрасывается, чтобы активация не оставила
+ * зарегистрированного провайдера со stale-индексом.
  */
 export async function reindexAllNotes(
   store: Pick<NotesStore, "listAllNotes">,
@@ -94,21 +96,15 @@ export async function reindexAllNotes(
 ): Promise<number> {
   const notes = await store.listAllNotes();
 
-  // Пустой домен нечего индексировать: не занимаем транзакцию поиска на старте.
-  // Заметок без плагина не возникает, поэтому stale-документов быть не может.
-  if (notes.length === 0) {
-    return 0;
-  }
-
   try {
     return await search.reindex(notes.map((note) => toNoteSearchDocument(note)));
   } catch (error) {
-    logger.warn("notes.search_reindex_failed", {
+    logger.error("notes.search_reindex_failed", {
       count: notes.length,
       errorName: safeErrorName(error),
     });
 
-    return 0;
+    throw error;
   }
 }
 

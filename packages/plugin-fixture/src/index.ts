@@ -434,6 +434,10 @@ export async function activate(context: FixtureActivationContext): Promise<void>
     },
   };
 
+  // Полная переиндексация awaited до регистрации провайдера: первая global
+  // query после runtime.start видит существующие fixture-элементы, а пустой
+  // список удаляет stale-документы. Сбой отменяет активацию.
+  await serializeSearchMutation(() => searchProvider.reindex());
   context.search.registerProvider(searchProvider);
 
   context.commands.register({
@@ -694,14 +698,6 @@ export async function activate(context: FixtureActivationContext): Promise<void>
       },
     },
   });
-
-  // Восстанавливаем индекс fixture при активации. Ошибка не отменяет
-  // активацию: команда reindex остаётся доступной явно.
-  try {
-    await serializeSearchMutation(() => searchProvider.reindex());
-  } catch {
-    // Поиск восстановится при следующей активации или явном reindex.
-  }
 
   // Подписка принадлежит activation tracker и снимается runtime-ом при stop.
   context.events.subscribe(FIXTURE_EVENT_CREATED, async (envelope) => {

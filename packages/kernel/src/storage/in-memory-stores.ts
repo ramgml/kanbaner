@@ -625,30 +625,33 @@ function assertSearchFilters(filters: readonly SearchFilter[] | undefined): void
   }
 }
 
+/**
+ * Семантика metadata-фильтров SearchProvider.
+ *
+ * - `eq` сравнивает только строковый scalar: точное совпадение.
+ * - `contains` для строки — подстрока, для массива — точное совпадение
+ *   строкового элемента.
+ * - object, number, boolean и null не участвуют в фильтрах и не матчатся.
+ *
+ * Та же семантика реализована SQLite-провайдером; расхождение закрыто
+ * Conformance Suite.
+ */
 function metadataMatches(document: SearchIndexDocument, filter: SearchFilter): boolean {
   const value = document.metadata?.[filter.field];
 
-  if (value === undefined) {
-    return false;
+  if (filter.operator === "eq") {
+    return typeof value === "string" && value === filter.value;
   }
 
-  if (filter.operator === "eq") {
-    if (Array.isArray(value) || (typeof value === "object" && value !== null)) {
-      return false;
-    }
-
-    return String(value) === filter.value;
+  if (typeof value === "string") {
+    return value.includes(filter.value);
   }
 
   if (Array.isArray(value)) {
-    return value.some((item) => String(item) === filter.value);
+    return value.some((item) => typeof item === "string" && item === filter.value);
   }
 
-  if (typeof value === "object" && value !== null) {
-    return false;
-  }
-
-  return String(value).includes(filter.value);
+  return false;
 }
 
 function matchScore(

@@ -25,7 +25,10 @@ const SEARCH_FILTERS = "kanbaner.search.filters";
 const PROJECT_CREATE = "kanbaner.tasks.project.create";
 const TASK_CREATE = "kanbaner.tasks.task.create";
 const TASK_DELETE = "kanbaner.tasks.task.delete";
+const TASK_UPDATE = "kanbaner.tasks.task.update";
 const NOTE_CREATE = "kanbaner.notes.note.create";
+const NOTE_UPDATE = "kanbaner.notes.note.update";
+const NOTE_DELETE = "kanbaner.notes.note.delete";
 const FIXTURE_CREATE = "kanbaner.fixture.item.create";
 const FIXTURE_REINDEX = "kanbaner.fixture.item.reindex";
 
@@ -326,9 +329,20 @@ describe("глобальный поиск в composition приложения", 
         }),
       );
 
-      // Команда reindex не экспортирована в UI/HTTP: это внутренняя операция
-      // восстановления индекса fixture. Integration-тест вызывает её через ту
-      // же шину, что и плагин, чтобы проверить публичный результат reindex.
+      const before = await search(harness, { text: marker });
+      const fixtureHit = before.hits.find((hit) => hit.ref.startsWith(`${FIXTURE_PLUGIN_ID}:`));
+
+      expect(fixtureHit).toBeDefined();
+
+      // Удаляем документ из индекса напрямую: fixture должен восстановить его
+      // полноценным reindex, а не no-op после create/upsert.
+      await harness.provider.searchIndex.delete(fixtureHit?.ref as ResourceRef);
+
+      const missing = await search(harness, { text: marker });
+
+      expect(refsOf(missing)).not.toContain(fixtureHit?.ref);
+      expect(refsOf(missing)).toContain(task.resource);
+
       const reindexed = expectData<{ readonly count: number }>(
         await harness.composition.operations.commands.execute(FIXTURE_REINDEX, {}),
       );
@@ -338,13 +352,82 @@ describe("глобальный поиск в composition приложения", 
       const result = await search(harness, { text: marker });
 
       expect(refsOf(result)).toEqual(
-        expect.arrayContaining([
-          task.resource,
-          expect.stringMatching(new RegExp(`^${FIXTURE_PLUGIN_ID}:item:`, "u")),
-        ]),
+        expect.arrayContaining([task.resource, fixtureHit?.ref as ResourceRef]),
       );
     },
   );
+
+  it("обновляет индекс задачи и заметки при update", { timeout: 30_000 }, async () => {
+    const harness = await startHarness([OPENCODE_PLUGIN_ID]);
+    const projectId = await createProject(harness, "Проект update");
+    const oldTaskMarker = `update-old-${globalThis.crypto.randomUUID()}`;
+    const newTaskMarker = `update-new-${globalThis.crypto.randomUUID()}`;
+    const task = await createTask(harness, { projectId, title: `${oldTaskMarker} задача` });
+
+    expect(refsOf(await search(harness, { text: oldTaskMarker }))).toContain(task.resource);
+
+    expectData(
+      await harness.composition.executeUiOperation(TASK_UPDATE, {
+        id: task.task.id,
+        expectedVersion: task.task.version,
+        title: `${newTaskMarker} задача`,
+      }),
+    );
+
+    expect(refsOf(await search(harness, { text: oldTaskMarker }))).not.toContain(task.resource);
+    expect(refsOf(await search(harness, { text: newTaskMarker }))).toContain(task.resource);
+
+    const oldNoteMarker = `note-old-${globalThis.crypto.randomUUID()}`;
+    const newNoteMarker = `note-new-${globalThis.crypto.randomUUID()}`;
+    const note = expectData<{
+      readonly view: { readonly note: { readonly id: string; readonly version: number } };
+    }>(
+      await harness.composition.executeUiOperation(NOTE_CREATE, {
+        title: `${oldNoteMarker} заметка`,
+        contentMarkdown: "Текст",
+      }),
+    );
+    const noteRef = `${NOTES_PLUGIN_ID}:note:${note.view.note.id}` as ResourceRef;
+
+    expect(refsOf(await search(harness, { text: oldNoteMarker }))).toContain(noteRef);
+
+    expectData(
+      await harness.composition.executeUiOperation(NOTE_UPDATE, {
+        id: note.view.note.id,
+        expectedVersion: note.view.note.version,
+        title: `${newNoteMarker} заметка`,
+      }),
+    );
+
+    expect(refsOf(await search(harness, { text: oldNoteMarker }))).not.toContain(noteRef);
+    expect(refsOf(await search(harness, { text: newNoteMarker }))).toContain(noteRef);
+  });
+
+  it("удаляет поисковый документ заметки при delete", { timeout: 30_000 }, async () => {
+    const harness = await startHarness([OPENCODE_PLUGIN_ID]);
+    const marker = `note-delete-${globalThis.crypto.randomUUID()}`;
+    const note = expectData<{
+      readonly view: { readonly note: { readonly id: string; readonly version: number } };
+    }>(
+      await harness.composition.executeUiOperation(NOTE_CREATE, {
+        title: `${marker} заметка`,
+        contentMarkdown: "Текст",
+      }),
+    );
+    const noteRef = `${NOTES_PLUGIN_ID}:note:${note.view.note.id}` as ResourceRef;
+
+    expect(refsOf(await search(harness, { text: marker }))).toContain(noteRef);
+
+    expectData(
+      await harness.composition.executeUiOperation(NOTE_DELETE, {
+        id: note.view.note.id,
+        expectedVersion: note.view.note.version,
+        confirm: true,
+      }),
+    );
+
+    expect(refsOf(await search(harness, { text: marker }))).not.toContain(noteRef);
+  });
 
   it("не вызывает провайдера отключённого плагина", { timeout: 30_000 }, async () => {
     const harness = await startHarness([OPENCODE_PLUGIN_ID, FIXTURE_PLUGIN_ID]);

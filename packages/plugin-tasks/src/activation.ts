@@ -1525,8 +1525,8 @@ const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({
  *
  * Использует только публичный контекст активации: bound registrars, storage,
  * search и events. Регистрирует все команды и запросы KAN-010, типы ресурсов
- * `project`/`task` и запускает best-effort переиндексацию задач. Мутации и
- * переиндексация сериализуются очередью этой активации.
+ * `project`/`task` и awaited-переиндексацию задач до регистрации провайдера.
+ * Мутации и переиндексация сериализуются очередью этой активации.
  */
 export async function activate(context: TasksActivationContext): Promise<void> {
   if (context.pluginId !== PLUGIN_ID) {
@@ -1550,6 +1550,12 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     logger,
   };
   const searchProvider = createTasksSearchProvider(store, context.search, logger);
+
+  // Полная переиндексация awaited до регистрации провайдера: первая global
+  // query сразу после runtime.start должна видеть уже существующие задачи,
+  // даже если их документ отсутствует в индексе. Сбой отменяет активацию,
+  // чтобы runtime не оставил зарегистрированного провайдера со stale-индексом.
+  await serialize(() => searchProvider.reindex());
   context.search.registerProvider(searchProvider);
 
   for (const metadata of TASKS_COMMAND_LIST) {
@@ -1646,13 +1652,5 @@ export async function activate(context: TasksActivationContext): Promise<void> {
 
       offset = page.nextOffset;
     }
-  });
-
-  // Переиндексация остаётся независимой best-effort: её ошибка не влияет ни
-  // на активацию, ни на уже выполненный backfill.
-  void serialize(() => searchProvider.reindex()).catch((error: unknown) => {
-    logger.warn("tasks.search_reindex_failed", {
-      errorName: error instanceof Error ? error.name : "UnknownError",
-    });
   });
 }
