@@ -147,6 +147,9 @@ moveMany и остальные не перечисленные operations ост
 
 - 2026-11-25 — Задача создана для закрытия MVP перед stable `0.1.0`; назначен
   `worker-kan-069`, этап A `in_progress`.
+- 2026-11-25 — Автономный пакет закоммичен `8f15e4b`: 65/65 unit, typecheck,
+  build, eslint и stdio/CLI smoke зелёные. Integration, frozen lock и полные
+  release-проверки остаются на этап B после merge KAN-068.
 
 ## Итог
 

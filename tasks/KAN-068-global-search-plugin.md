@@ -1,7 +1,7 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: in_progress
+status: review
 stage: 5
 priority: high
 owner: worker-kan-068
@@ -138,6 +138,9 @@ Worker владеет всеми файлами, необходимыми для
 
 - 2026-11-25 — Задача создана для закрытия MVP перед stable `0.1.0`; назначен
   `worker-kan-068`, статус `in_progress`.
+- 2026-11-25 — Worker реализовал SearchProvider Registry, search UI, domain
+  providers, filters и lifecycle. Коммит `c00dc6a`; focused 502/502, полный
+  Playwright 176/176, `pnpm check` зелёный. Статус `review`.
 
 ## Итог
 
