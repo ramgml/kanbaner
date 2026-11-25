@@ -1,13 +1,13 @@
 ---
 id: KAN-066
 title: Автоматические названия OpenCode-сессий из первого запроса
-status: review
+status: done
 stage: 8
 priority: medium
 owner: worker-kan-066
 blocked_by: []
-branch: feat/kan-066-auto-session-titles
-worktree: .worktrees/kan-066-auto-session-titles
+branch: dev
+worktree: .
 created: 2026-11-24
 updated: 2026-11-25
 specs:
@@ -34,15 +34,15 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить ограниченную нормализацию текста запроса в название длиной не
+- [x] Добавить ограниченную нормализацию текста запроса в название длиной не
   более 60 Unicode code points с понятным fallback.
-- [ ] Добавить server-side eligibility: owned current-project session, default
+- [x] Добавить server-side eligibility: owned current-project session, default
   title и пустая canonical history.
-- [ ] Передать в internal prompt transport только display text запроса без
+- [x] Передать в internal prompt transport только display text запроса без
   контекстной преамбулы, base64 и содержимого вложений.
-- [ ] Вернуть подтверждённое автоматическое название в internal UI response и
+- [x] Вернуть подтверждённое автоматическое название в internal UI response и
   интегрировать его с title overlay/history invalidation.
-- [ ] Добавить unit/integration/E2E regressions и обновить спецификации.
+- [x] Добавить unit/integration/E2E regressions и обновить спецификации.
 
 ## Владение файлами
 
@@ -81,17 +81,17 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] Обычный первый запрос создаёт короткое название без Markdown-шума и
+- [x] Обычный первый запрос создаёт короткое название без Markdown-шума и
   лишних пробелов; длинный/Unicode текст ограничен корректно.
-- [ ] Пустой или бессмысленный текст оставляет default title и не вызывает
+- [x] Пустой или бессмысленный текст оставляет default title и не вызывает
   лишних upstream-мутаций.
-- [ ] Manual/non-default title, чужая/child/wrong-project и непустая сессия не
+- [x] Manual/non-default title, чужая/child/wrong-project и непустая сессия не
   переименовываются.
-- [ ] Title при done/error/cancelled/unconfirmed/non-admission не нарушает prompt
+- [x] Title при done/error/cancelled/unconfirmed/non-admission не нарушает prompt
   outcome; retry не переименовывает повторно.
-- [ ] Header обновляет текущую шапку и историю; stale refresh сохраняет
+- [x] Header обновляет текущую шапку и историю; stale refresh сохраняет
   подтверждённое название, а последующий fresh canonical title принимается.
-- [ ] Полные проверки и OpenCode E2E зелёные.
+- [x] Полные проверки и OpenCode E2E зелёные.
 
 ## Проверки
 
@@ -134,8 +134,21 @@ specs:
   OpenCode E2E 29/29, полный `pnpm check` — 145 files / 2101 tests.
 - 2026-11-25 — Финальное ревью не нашло blocker/high/medium/low. Live smoke
   реального Service 2.2.5 подтвердил auto title, reload и сохранение ручного
-  названия после повторного prompt. Статус `review` перед merge.
+  названия после повторного prompt.
+- 2026-11-25 — После rebase коммиты `84e0b3c`, `194755b`, `af54420`
+  интегрированы merge-коммитом `3cc763f`. `pnpm check` на ветке и `dev`
+  зелёный; OpenCode E2E на `dev` — 29/29, imports и SQLite smoke зелёные.
+  Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Новые OpenCode-сессии автоматически получают короткое однострочное название из
+отображаемого текста первого запроса. Сервер разрешает rename только для owned
+пустой сессии со стандартным названием, поэтому ручные имена и существующая
+история не перезаписываются. Название сразу появляется в шапке и истории.
+
+Preflight ограничен общими 2 секундами включая очередь, реагирует на abort,
+сериализуется по session ID и не запускает новый update при неопределённом
+результате предыдущего. Ошибка названия не меняет исход prompt.
+
+Merge: `3cc763f`. Feature-ветка и worktree удалены. Push не выполнялся.
