@@ -566,6 +566,7 @@ describe("OpenCodePanel", () => {
     expect(status).toHaveTextContent("Проверить статус");
     expect(screen.queryByRole("button", { name: "Повторить запрос" })).toBeNull();
     expect(screen.queryByText("Canonical")).toBeNull();
+    expect(screen.queryByTestId("opencode-running-ellipsis")).toBeNull();
     expect(
       fetchMock.mock.calls.some(
         ([url, init]) =>
@@ -722,6 +723,7 @@ describe("OpenCodePanel", () => {
     expect(promptSignal?.aborted).toBe(true);
     expect(screen.queryByRole("button", { name: "Остановить OpenCode" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("opencode-running-ellipsis")).toBeNull();
   });
 
   it("показывает built-in и MCP инструменты отдельными группами с предупреждением", async () => {
@@ -1731,6 +1733,66 @@ describe("OpenCodePanel", () => {
     writer.enqueue(encode({ kind: "done" }));
     writer.close();
     await waitFor(() => expect(status).toHaveTextContent("Готово"));
+  });
+
+  it("анимирует ровно три декоративные точки только на стадии running", async () => {
+    let writer: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        writer = controller;
+      },
+    });
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/opencode/catalog") return success(catalog);
+      if (url === "/api/opencode/session" && init?.method === "POST") return success(session());
+      if (url === "/api/opencode/session/ses-1") return success(session());
+      if (url.endsWith("/prompt")) return new Response(body);
+      throw new Error(`Unexpected fetch ${url}`);
+    });
+    render(<OpenCodePanel />);
+
+    const message = await screen.findByRole("textbox", { name: "Сообщение OpenCode" });
+    await waitFor(() => expect(message).toBeEnabled());
+    fireEvent.change(message, { target: { value: "Анимация" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    const status = await screen.findByTestId("opencode-turn-status");
+    expect(status).toHaveTextContent("Подключаемся");
+    expect(screen.queryByTestId("opencode-running-ellipsis")).toBeNull();
+
+    const encode = (event: unknown): Uint8Array =>
+      new TextEncoder().encode(`${JSON.stringify(event)}\n`);
+    if (writer === undefined) throw new Error("stream controller is missing");
+    writer.enqueue(encode({ kind: "delta", id: "message-1:0", text: "Ответ" }));
+
+    await waitFor(() => expect(status).toHaveTextContent("Выполняется"));
+    // Текст статуса не содержит статического «…»: точки рисуются отдельно.
+    expect(status.textContent).toBe("Выполняется");
+    const ellipsis = screen.getByTestId("opencode-running-ellipsis");
+    expect(ellipsis).toHaveAttribute("aria-hidden", "true");
+    expect(ellipsis.className).toMatch(/\binline-flex\b/u);
+    expect(ellipsis.className).toMatch(/\bw-4\b/u);
+    expect(ellipsis.children).toHaveLength(3);
+    const dots = Array.from(ellipsis.children);
+    expect(dots.map((dot) => dot.className.match(/\[animation-delay:(\d+ms)\]/u)?.[1])).toEqual([
+      "0ms",
+      "150ms",
+      "300ms",
+    ]);
+    for (const dot of dots) {
+      expect(dot.className).toMatch(/\banimate-pulse\b/u);
+      expect(dot.className).toMatch(/\bmotion-reduce:animate-none\b/u);
+    }
+
+    writer.enqueue(encode({ kind: "finalizing" }));
+    await waitFor(() => expect(status).toHaveTextContent("Завершаем"));
+    expect(screen.queryByTestId("opencode-running-ellipsis")).toBeNull();
+
+    writer.enqueue(encode({ kind: "done" }));
+    writer.close();
+    await waitFor(() => expect(status).toHaveTextContent("Готово"));
+    expect(screen.queryByTestId("opencode-running-ellipsis")).toBeNull();
   });
 
   it("ручная проверка второго prompt использует его stable ID, а не ordinal", async () => {

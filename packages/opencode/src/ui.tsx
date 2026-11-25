@@ -544,7 +544,7 @@ function turnPhaseLabel(turn: TurnState): string {
     case "connecting":
       return "Подключаемся…";
     case "running":
-      return "Выполняется…";
+      return "Выполняется";
     case "finalizing":
       return "Завершаем…";
     case "done":
@@ -554,6 +554,34 @@ function turnPhaseLabel(turn: TurnState): string {
     case "error":
       return turn.reason === "unconfirmed" ? "Результат не подтверждён" : "Ошибка запроса";
   }
+}
+
+const RUNNING_DOT_DELAYS = [
+  "[animation-delay:0ms]",
+  "[animation-delay:150ms]",
+  "[animation-delay:300ms]",
+] as const;
+
+/**
+ * Декоративное троеточие стадии running: три заранее отрисованные точки в
+ * контейнере фиксированной ширины, поэтому layout не прыгает, а live region
+ * не объявляет кадры анимации.
+ */
+function RunningEllipsis() {
+  return (
+    <span
+      aria-hidden="true"
+      data-testid="opencode-running-ellipsis"
+      className="ml-1 inline-flex w-4 items-center justify-between align-middle"
+    >
+      {RUNNING_DOT_DELAYS.map((delay) => (
+        <span
+          key={delay}
+          className={`size-1 shrink-0 rounded-full bg-current animate-pulse motion-reduce:animate-none ${delay}`}
+        />
+      ))}
+    </span>
+  );
 }
 
 /**
@@ -2178,6 +2206,7 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
               {visibleTurn.phase === "error" && visibleTurn.errorText !== null
                 ? `${turnPhaseLabel(visibleTurn)}: ${visibleTurn.errorText}`
                 : turnPhaseLabel(visibleTurn)}
+              {visibleTurn.phase === "running" ? <RunningEllipsis /> : null}
             </span>
             {visibleTurn.retryable || visibleTurn.reason === "unconfirmed" ? (
               <div className="flex shrink-0 items-center gap-1">
