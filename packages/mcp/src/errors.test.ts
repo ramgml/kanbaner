@@ -23,6 +23,57 @@ describe("errors", () => {
     expect(redactText("обычный текст")).toBe("обычный текст");
   });
 
+  it("редактирует токен до ограничения длины", () => {
+    const boundary = `${"x".repeat(495)}${TOKEN}`;
+    const longSecret = "s".repeat(600);
+    const boundaryText = redactText(boundary, TOKEN);
+    const longText = redactText(`a ${longSecret} b`, longSecret);
+
+    expect(boundaryText).not.toContain(TOKEN);
+    expect(boundaryText).toHaveLength(500);
+    expect(longText).toBe(`a ${REDACTED} b`);
+    expect(longText).not.toContain(longSecret);
+  });
+
+  it("рекурсивно редактирует строковые ключи и значения details", () => {
+    const failure = createFailure("VALIDATION_ERROR", "ошибка", {
+      secret: TOKEN,
+      details: {
+        [TOKEN]: `ключ ${TOKEN}`,
+        nested: {
+          [`prefix-${TOKEN}`]: [TOKEN, { path: "/id", params: { value: TOKEN } }],
+        },
+        long: `${"y".repeat(495)}${TOKEN}`,
+      },
+    });
+    const serialized = JSON.stringify(failure.details ?? {});
+
+    expect(serialized).not.toContain(TOKEN);
+    expect(serialized).not.toContain('"params"');
+    expect(failure.details).toMatchObject({
+      nested: { "prefix-[REDACTED]": ["[REDACTED]", { path: "/id" }] },
+      long: expect.stringMatching(/^y{495}\[REDA/u),
+    });
+  });
+
+  it("делает details JSON-safe и отбрасывает небезопасные ключи", () => {
+    const cyclic: Record<string, unknown> = { name: TOKEN, bigint: 10n, nan: NaN };
+    const proto = JSON.parse('{"__proto__":{"polluted":true},"safe":1}') as Record<string, unknown>;
+
+    cyclic["self"] = cyclic;
+
+    const cyclicFailure = createFailure("VALIDATION_ERROR", "цикл", {
+      details: cyclic,
+      secret: TOKEN,
+    });
+    const protoFailure = createFailure("VALIDATION_ERROR", "прототип", { details: proto });
+
+    expect(() => JSON.stringify(cyclicFailure)).not.toThrow();
+    expect(JSON.stringify(cyclicFailure)).not.toContain(TOKEN);
+    expect(protoFailure.details).toEqual({ safe: 1 });
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+
   it("оставляет details только для безопасных кодов", () => {
     const safe = createFailure("VALIDATION_ERROR", "ошибка", {
       details: { issues: [{ path: "/id" }] },

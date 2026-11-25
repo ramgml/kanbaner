@@ -129,8 +129,9 @@ export function createOperationInvoker(options: OperationInvokerOptions): Operat
             ? { idempotencyKey: idempotencyKeyFor(operation.id, input, identity) }
             : {}),
           // Mutation без поддержки идемпотентности нельзя безопасно повторять
-          // после таймаута: ключа, который защитил бы от дубля, нет.
-          retryableOnTimeout: !mutation || idempotentMutation,
+          // после любого неопределённого post-dispatch сбоя: ключа, который
+          // защитил бы от дубля, нет.
+          retryableOnTransportFailure: !mutation || idempotentMutation,
         });
 
         return parsePayload(tool, payload, config.apiToken);

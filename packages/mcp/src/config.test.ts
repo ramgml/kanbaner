@@ -30,12 +30,19 @@ describe("config", () => {
 
   it("срезает префикс KANBANER_API_TOKEN=", () => {
     expect(normalizeApiToken(`KANBANER_API_TOKEN=${TOKEN}`)).toBe(TOKEN);
+    expect(normalizeApiToken("KANBANER_API_TOKEN=")).toBeUndefined();
+    expect(normalizeApiToken("KANBANER_API_TOKEN=   ")).toBeUndefined();
     expect(normalizeApiToken("   ")).toBeUndefined();
     expect(normalizeApiToken(undefined)).toBeUndefined();
   });
 
   it("требует токен и не печатает его значение", () => {
-    for (const env of [{}, { KANBANER_API_TOKEN: "   " }]) {
+    for (const env of [
+      {},
+      { KANBANER_API_TOKEN: "   " },
+      { KANBANER_API_TOKEN: "KANBANER_API_TOKEN=" },
+      { KANBANER_API_TOKEN: "KANBANER_API_TOKEN=   " },
+    ]) {
       let error: unknown;
 
       try {

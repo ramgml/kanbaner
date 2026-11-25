@@ -2,6 +2,7 @@ import {
   ERROR_RETRYABLE,
   PLUGIN_ERROR_CODES,
   type JsonObject,
+  type JsonValue,
   type PluginErrorCode,
 } from "@kanbaner/plugin-sdk";
 
@@ -27,6 +28,21 @@ const SAFE_DETAIL_CODES: ReadonlySet<McpFailureCode> = new Set([
 export const REDACTED = "[REDACTED]";
 
 const MAX_MESSAGE_LENGTH = 500;
+const MAX_DETAIL_DEPTH = 8;
+const MAX_DETAIL_NODES = 200;
+const MAX_DETAIL_ARRAY_ITEMS = 50;
+
+/**
+ * Ключи, которые не копируются в клиентские details.
+ *
+ * `params` содержит внутренние данные Ajv и не должен раскрывать входные
+ * значения. Служебные ключи прототипа отбрасываются для JSON-безопасности.
+ */
+const UNSAFE_DETAIL_KEYS = new Set(["__proto__", "constructor", "prototype", "params"]);
+
+interface SanitizeState {
+  nodes: number;
+}
 
 export interface McpFailure {
   readonly code: McpFailureCode;
@@ -51,22 +67,104 @@ export function retryableForCode(code: McpFailureCode): boolean {
 }
 
 /**
- * Убирает управляющие символы, ограничивает длину и заменяет секрет.
+ * Убирает токен из полного текста, затем управляющие символы и длину.
  *
- * Токен и тело ответа никогда не должны попадать в сообщение об ошибке,
- * но защита применяется повторно, чтобы вызовы с чужим текстом не утекли.
+ * Порядок важен: если сначала обрезать сообщение, токен на границе 500
+ * символов или токен длиннее лимита мог бы остаться частично видимым.
  */
 export function redactText(text: string, secret?: string): string {
-  const bounded = text
+  const replaced =
+    secret === undefined || secret.length === 0 ? text : text.split(secret).join(REDACTED);
+
+  return replaced
     .replace(/[\u0000-\u001f\u007f]+/gu, " ")
     .trim()
     .slice(0, MAX_MESSAGE_LENGTH);
+}
 
-  if (secret === undefined || secret.length === 0) {
-    return bounded;
+/**
+ * Рекурсивно приводит details к безопасному JSON.
+ *
+ * Строки и ключи редактируются до ограничения длины, обход ограничен по
+ * глубине, числу узлов и длине массивов. Неподдерживаемые JSON значения
+ * (undefined, bigint, function, symbol, Date, NaN) отбрасываются.
+ */
+function sanitizeDetailValue(
+  value: unknown,
+  secret: string | undefined,
+  state: SanitizeState,
+  depth: number,
+): JsonValue | undefined {
+  if (state.nodes >= MAX_DETAIL_NODES) {
+    return undefined;
   }
 
-  return bounded.split(secret).join(REDACTED);
+  state.nodes += 1;
+
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (typeof value === "string") {
+    return redactText(value, secret);
+  }
+
+  if (depth >= MAX_DETAIL_DEPTH) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    const items: JsonValue[] = [];
+
+    for (const item of value.slice(0, MAX_DETAIL_ARRAY_ITEMS)) {
+      const sanitized = sanitizeDetailValue(item, secret, state, depth + 1);
+
+      if (sanitized !== undefined) {
+        items.push(sanitized);
+      }
+    }
+
+    return items;
+  }
+
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+
+  const result: Record<string, JsonValue> = {};
+
+  for (const [rawKey, item] of Object.entries(value)) {
+    if (UNSAFE_DETAIL_KEYS.has(rawKey)) {
+      continue;
+    }
+
+    const key = redactText(rawKey, secret);
+
+    if (key.length === 0) {
+      continue;
+    }
+
+    const sanitized = sanitizeDetailValue(item, secret, state, depth + 1);
+
+    if (sanitized !== undefined) {
+      result[key] = sanitized;
+    }
+  }
+
+  return result;
+}
+
+function sanitizeDetails(
+  details: Readonly<Record<string, unknown>>,
+  secret: string | undefined,
+): JsonObject | undefined {
+  const sanitized = sanitizeDetailValue(details, secret, { nodes: 0 }, 0);
+
+  return sanitized === undefined ? undefined : (sanitized as JsonObject);
 }
 
 export interface FailureOptions {
@@ -82,7 +180,7 @@ export function createFailure(
 ): McpFailure {
   const safeDetails =
     options.details !== undefined && SAFE_DETAIL_CODES.has(code) && isPlainObject(options.details)
-      ? (options.details as JsonObject)
+      ? sanitizeDetails(options.details, options.secret)
       : undefined;
 
   return {

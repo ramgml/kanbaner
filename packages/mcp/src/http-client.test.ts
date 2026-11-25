@@ -284,6 +284,128 @@ describe("HTTP operation client", () => {
     });
   });
 
+  it("делает rejected fetch non-retryable для mutation none", async () => {
+    const rejectedFetch: FetchLike = async () => {
+      throw new Error(`network ${TEST_TOKEN}`);
+    };
+    const queryOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.list" }),
+      {},
+      { fetchImpl: rejectedFetch },
+    );
+    const noneOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.touch", kind: "mutation", idempotency: "none" }),
+      {},
+      { fetchImpl: rejectedFetch },
+    );
+    const supportedOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.create", kind: "mutation", idempotency: "supported" }),
+      {},
+      { fetchImpl: rejectedFetch },
+    );
+
+    expect(queryOutcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: true },
+    });
+    expect(noneOutcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: false },
+    });
+    expect(supportedOutcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: true },
+    });
+    expect(JSON.stringify([queryOutcome, noneOutcome, supportedOutcome])).not.toContain(TEST_TOKEN);
+  });
+
+  it("делает ошибку чтения тела non-retryable для mutation none", async () => {
+    const unreadableFetch: FetchLike = async () => {
+      const response = new Response(null, { status: 200 });
+
+      Object.defineProperty(response, "text", {
+        value: async () => {
+          throw new Error(`read ${TEST_TOKEN}`);
+        },
+      });
+
+      return response;
+    };
+    const queryOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.list" }),
+      {},
+      { fetchImpl: unreadableFetch },
+    );
+    const noneOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.touch", kind: "mutation", idempotency: "none" }),
+      {},
+      { fetchImpl: unreadableFetch },
+    );
+
+    expect(queryOutcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: true },
+    });
+    expect(noneOutcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: false },
+    });
+  });
+
+  it("делает non-JSON 504 non-retryable для mutation none", async () => {
+    const gatewayFetch: FetchLike = async () => new Response("gateway", { status: 504 });
+    const queryOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.list" }),
+      {},
+      { fetchImpl: gatewayFetch },
+    );
+    const noneOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.touch", kind: "mutation", idempotency: "none" }),
+      {},
+      { fetchImpl: gatewayFetch },
+    );
+    const supportedOutcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.create", kind: "mutation", idempotency: "supported" }),
+      {},
+      { fetchImpl: gatewayFetch },
+    );
+
+    expect(queryOutcome).toMatchObject({ ok: false, error: { code: "TIMEOUT", retryable: true } });
+    expect(noneOutcome).toMatchObject({
+      ok: false,
+      error: { code: "TIMEOUT", retryable: false },
+    });
+    expect(supportedOutcome).toMatchObject({
+      ok: false,
+      error: { code: "TIMEOUT", retryable: true },
+    });
+  });
+
+  it("не переписывает retryable валидного серверного конверта", async () => {
+    const envelopeFetch: FetchLike = async () =>
+      Response.json(
+        {
+          ok: false,
+          error: {
+            code: "DEPENDENCY_UNAVAILABLE",
+            message: "Сервис временно недоступен",
+            retryable: true,
+          },
+        },
+        { status: 503 },
+      );
+    const outcome = await invoke(
+      toolFor({ id: "kanbaner.tasks.task.touch", kind: "mutation", idempotency: "none" }),
+      {},
+      { fetchImpl: envelopeFetch },
+    );
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_UNAVAILABLE", retryable: true },
+    });
+  });
+
   it("возвращает CANCELLED при отмене вызывающей стороной", async () => {
     const controller = new AbortController();
     const fetchImpl: FetchLike = (_input, init) =>

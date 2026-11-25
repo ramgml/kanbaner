@@ -1,5 +1,11 @@
 import type { UniversalMcpConfig } from "./config.ts";
-import { createFailure, failureForStatus, McpFailureError, readUpstreamFailure } from "./errors.ts";
+import {
+  createFailure,
+  failureForStatus,
+  McpFailureError,
+  readUpstreamFailure,
+  type McpFailure,
+} from "./errors.ts";
 
 /** Минимальная поверхность `fetch`, достаточная адаптеру и тестам. */
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -13,8 +19,20 @@ export interface JsonRequestOptions {
   readonly body?: unknown;
   readonly signal?: AbortSignal | undefined;
   readonly idempotencyKey?: string | undefined;
-  /** `false` для mutation без поддержки идемпотентности. */
-  readonly retryableOnTimeout?: boolean;
+  /**
+   * Разрешено ли считать транспортный сбой повторяемым.
+   *
+   * Для mutation без Idempotency-Key неопределённый исход после отправки
+   * нельзя повторять: `false` делает non-retryable rejected fetch, ошибку
+   * чтения тела, fallback по HTTP-статусу и таймаут. Валидный серверный
+   * `OperationEnvelope` остаётся authoritative и это значение не переопределяет.
+   */
+  readonly retryableOnTransportFailure?: boolean;
+}
+
+/** Делает транспортную ошибку non-retryable, сохраняя безопасный контракт. */
+function nonRetryable(failure: McpFailure): McpFailure {
+  return failure.retryable ? { ...failure, retryable: false } : failure;
 }
 
 type ParsedJson = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
@@ -29,6 +47,7 @@ function parseJson(text: string): ParsedJson {
 
 function transportFailure(options: JsonRequestOptions, timedOut: boolean) {
   const secret = options.config.apiToken;
+  const retryable = options.retryableOnTransportFailure ?? true;
 
   if (options.signal?.aborted === true) {
     return createFailure("CANCELLED", "Вызов Kanbaner отменён клиентом", { secret });
@@ -36,12 +55,15 @@ function transportFailure(options: JsonRequestOptions, timedOut: boolean) {
 
   if (timedOut) {
     return createFailure("TIMEOUT", "Превышено время ожидания Kanbaner API", {
-      retryable: options.retryableOnTimeout ?? true,
+      retryable,
       secret,
     });
   }
 
-  return createFailure("DEPENDENCY_UNAVAILABLE", "Kanbaner API недоступен", { secret });
+  return createFailure("DEPENDENCY_UNAVAILABLE", "Kanbaner API недоступен", {
+    retryable,
+    secret,
+  });
 }
 
 /**
@@ -97,7 +119,15 @@ export async function requestJson(options: JsonRequestOptions): Promise<unknown>
   if (!response.ok) {
     const upstream = parsed.ok ? readUpstreamFailure(parsed.value, config.apiToken) : null;
 
-    throw new McpFailureError(upstream ?? failureForStatus(response.status, config.apiToken));
+    if (upstream !== null) {
+      throw new McpFailureError(upstream);
+    }
+
+    const fallback = failureForStatus(response.status, config.apiToken);
+
+    throw new McpFailureError(
+      options.retryableOnTransportFailure === false ? nonRetryable(fallback) : fallback,
+    );
   }
 
   if (!parsed.ok) {

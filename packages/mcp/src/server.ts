@@ -6,6 +6,7 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
+  ToolSchema,
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -47,6 +48,33 @@ function toProtocolTool(tool: UniversalTool): Tool {
       ? {}
       : { outputSchema: tool.outputSchema as unknown as NonNullable<Tool["outputSchema"]> }),
   };
+}
+
+interface PublishedTool {
+  readonly tool: UniversalTool;
+  readonly descriptor: Tool;
+}
+
+/**
+ * Проверяет готовый protocol descriptor установленной MCP SDK.
+ *
+ * Discovery JSON Schema может компилироваться Ajv, но не соответствовать
+ * `ToolSchema` (например, boolean subschema в `properties`). Такой tool
+ * отбрасывается целиком, не ломая остальной список.
+ */
+function publishTool(
+  tool: UniversalTool,
+  diagnostic: (message: string) => void,
+): PublishedTool | null {
+  const parsed = ToolSchema.safeParse(toProtocolTool(tool));
+
+  if (!parsed.success) {
+    diagnostic(`MCP: tool ${tool.name} пропущен: descriptor не соответствует MCP ToolSchema`);
+
+    return null;
+  }
+
+  return { tool, descriptor: parsed.data as Tool };
 }
 
 function failureToolResult(failure: McpFailure): CallToolResult {
@@ -102,13 +130,23 @@ export function createUniversalMcpServer(options: UniversalMcpServerOptions): {
     options.fetchImpl === undefined ? { config } : { config, fetchImpl: options.fetchImpl };
   const invoker = createOperationInvoker(invokerOptions);
 
-  async function loadCatalog(signal?: AbortSignal): Promise<readonly UniversalTool[]> {
+  async function loadCatalog(signal?: AbortSignal): Promise<readonly PublishedTool[]> {
     const operations = await discovery.load(signal === undefined ? {} : { signal });
-
-    return buildToolCatalog(operations, {
+    const tools = buildToolCatalog(operations, {
       allowDestructive: config.allowDestructive,
       onDiagnostic: diagnostic,
     });
+    const published: PublishedTool[] = [];
+
+    for (const tool of tools) {
+      const candidate = publishTool(tool, diagnostic);
+
+      if (candidate !== null) {
+        published.push(candidate);
+      }
+    }
+
+    return published;
   }
 
   const server = new Server(
@@ -116,11 +154,11 @@ export function createUniversalMcpServer(options: UniversalMcpServerOptions): {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
     try {
-      const tools = await loadCatalog();
+      const tools = await loadCatalog(extra.signal);
 
-      return { tools: tools.map(toProtocolTool) };
+      return { tools: tools.map(({ descriptor }) => descriptor) };
     } catch (error) {
       throw protocolFailure(error, config.apiToken);
     }
@@ -129,7 +167,7 @@ export function createUniversalMcpServer(options: UniversalMcpServerOptions): {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name;
 
-    let tools: readonly UniversalTool[];
+    let tools: readonly PublishedTool[];
 
     try {
       tools = await loadCatalog(extra.signal);
@@ -137,15 +175,17 @@ export function createUniversalMcpServer(options: UniversalMcpServerOptions): {
       return failureToolResult(failureFromError(error, config.apiToken));
     }
 
-    const tool = tools.find((candidate) => candidate.name === name);
+    const published = tools.find((candidate) => candidate.tool.name === name);
 
-    if (tool === undefined) {
+    if (published === undefined) {
       const failure = createFailure("UNKNOWN_TOOL", "Неизвестный MCP tool", {
         secret: config.apiToken,
       });
 
       throw new McpError(ErrorCode.InvalidParams, failure.message, protocolErrorData(failure));
     }
+
+    const tool = published.tool;
 
     const input = request.params.arguments ?? {};
     const validation = createSchemaValidator(

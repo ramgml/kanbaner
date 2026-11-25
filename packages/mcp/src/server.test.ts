@@ -7,6 +7,7 @@ import { ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { UniversalMcpConfig } from "./config.ts";
+import type { FetchLike } from "./http.ts";
 import { createUniversalMcpServer } from "./server.ts";
 import {
   ARRAY_OUTPUT_SCHEMA,
@@ -165,7 +166,11 @@ describe("universal MCP server", () => {
         TASK_LIST,
         TASK_CREATE,
         TASK_DELETE,
-        rawOperation({ id: "kanbaner.tasks.task.moveMany", kind: "mutation" }),
+        rawOperation({
+          id: "kanbaner.tasks.task.moveMany",
+          kind: "mutation",
+          exposure: { ui: true, http: true, mcp: false },
+        }),
         rawOperation({
           id: "kanbaner.private.operation",
           exposure: { ui: true, http: true, mcp: false },
@@ -179,7 +184,7 @@ describe("universal MCP server", () => {
     expect(names).toContain("kanbaner_tasks_task_create");
     expect(names).not.toContain("kanbaner_tasks_task_delete");
     expect(names).not.toContain("kanbaner_private_operation");
-    expect(names).not.toContain("kanbaner_tasks_task_move_many");
+    expect(names).not.toContain("kanbaner_tasks_task_movemany");
 
     const listTool = tools.find((tool) => tool.name === "kanbaner_tasks_task_list");
 
@@ -264,6 +269,7 @@ describe("universal MCP server", () => {
     expect(result.isError).toBe(true);
     expect(payload.ok).toBe(false);
     expect(payload.error?.code).toBe("VALIDATION_ERROR");
+    expect(JSON.stringify(payload.error?.details)).not.toContain('"params"');
     expect(
       http.harness.requests.filter((request) => request.url.includes("/api/v1/commands/")),
     ).toHaveLength(0);
@@ -391,6 +397,82 @@ describe("universal MCP server", () => {
 
     expect(http.harness.requests.at(-1)?.body).toEqual({ title: "Заметка" });
     expect(http.harness.requests.at(-1)?.headers.get("idempotency-key")).toMatch(/^kanbaner-mcp-/u);
+  });
+
+  it("отбрасывает tool, не проходящий MCP ToolSchema, не ломая остальные", async () => {
+    const invalidDescriptor = rawOperation({
+      id: "kanbaner.tasks.task.invalid",
+      inputSchema: {
+        type: "object",
+        properties: { flag: true },
+        additionalProperties: false,
+      },
+    });
+    const { client } = await harness({ operations: [invalidDescriptor, TASK_LIST] });
+    const { tools } = await client.listTools();
+
+    expect(tools.map((tool) => tool.name)).toEqual(["kanbaner_tasks_task_list"]);
+    await expect(
+      client.callTool({ name: "kanbaner_tasks_task_invalid", arguments: {} }),
+    ).rejects.toMatchObject({ data: { code: "UNKNOWN_TOOL" } });
+  });
+
+  it("передаёт abort tools/list в fetch signal", async () => {
+    let fetchSignal: AbortSignal | undefined;
+    let markStarted: () => void = () => undefined;
+    let markAborted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      markAborted = resolve;
+    });
+    const fetchImpl: FetchLike = (_input, init) => {
+      fetchSignal = init?.signal ?? undefined;
+      markStarted();
+
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => {
+          markAborted();
+          reject(new Error("aborted"));
+        };
+
+        if (init?.signal?.aborted === true) {
+          abort();
+          return;
+        }
+
+        init?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    };
+    const { server } = createUniversalMcpServer({
+      config: TEST_CONFIG,
+      fetchImpl,
+      onDiagnostic: () => undefined,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "mcp-test", version: "1.0.0" });
+
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    open.push({ client, server, http: { harness: { fetchImpl, requests: [] }, operations: [] } });
+
+    const controller = new AbortController();
+    const pending = client.listTools(undefined, { signal: controller.signal }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    await started;
+    controller.abort();
+    await Promise.race([
+      aborted,
+      new Promise<void>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("abort не дошёл до fetch")), 1_000);
+      }),
+    ]);
+
+    expect(await pending).toBeDefined();
+    expect(fetchSignal?.aborted).toBe(true);
   });
 
   it("не раскрывает токен и исходный ответ в ошибках", async () => {

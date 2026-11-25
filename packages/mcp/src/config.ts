@@ -32,9 +32,11 @@ export function normalizeApiToken(value: string | undefined): string | undefined
     return undefined;
   }
 
-  return trimmed.startsWith(TOKEN_ENV_PREFIX)
+  const normalized = trimmed.startsWith(TOKEN_ENV_PREFIX)
     ? trimmed.slice(TOKEN_ENV_PREFIX.length).trim()
     : trimmed;
+
+  return normalized.length === 0 ? undefined : normalized;
 }
 
 /**

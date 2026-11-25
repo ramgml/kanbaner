@@ -20,6 +20,12 @@ describe("tool naming", () => {
     expect(toolNameForOperation("__leading__and__trailing__")).toBe("leading__and__trailing");
   });
 
+  it("нормализует camelCase как lowercase без вставки разделителей", () => {
+    expect(toolNameForOperation("kanbaner.tasks.task.moveMany")).toBe(
+      "kanbaner_tasks_task_movemany",
+    );
+  });
+
   it("отклоняет пустые и слишком длинные имена", () => {
     expect(toolNameForOperation("...")).toBeNull();
     expect(toolNameForOperation("a".repeat(MAX_TOOL_NAME_LENGTH + 1))).toBeNull();
