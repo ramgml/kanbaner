@@ -33,11 +33,8 @@ import {
 } from "./activation/idempotency.ts";
 import { runMapped } from "./activation/errors.ts";
 import { createSerialQueue } from "./activation/serial-queue.ts";
-import {
-  deleteSearchDocuments,
-  reindexAllTasks,
-  upsertTaskSearchDocuments,
-} from "./activation/search-index.ts";
+import { deleteSearchDocuments, upsertTaskSearchDocuments } from "./activation/search-index.ts";
+import { createTasksSearchProvider } from "./activation/search-provider.ts";
 import {
   createdColumns,
   shiftedColumns,
@@ -1552,6 +1549,8 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     idFactory,
     logger,
   };
+  const searchProvider = createTasksSearchProvider(store, context.search, logger);
+  context.search.registerProvider(searchProvider);
 
   for (const metadata of TASKS_COMMAND_LIST) {
     const handler = COMMAND_HANDLERS[metadata.id];
@@ -1651,7 +1650,7 @@ export async function activate(context: TasksActivationContext): Promise<void> {
 
   // Переиндексация остаётся независимой best-effort: её ошибка не влияет ни
   // на активацию, ни на уже выполненный backfill.
-  void serialize(() => reindexAllTasks(store, context.search, logger)).catch((error: unknown) => {
+  void serialize(() => searchProvider.reindex()).catch((error: unknown) => {
     logger.warn("tasks.search_reindex_failed", {
       errorName: error instanceof Error ? error.name : "UnknownError",
     });

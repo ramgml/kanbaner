@@ -1,4 +1,4 @@
-import { Flag, FolderKanban, NotebookTabs, type LucideIcon } from "lucide-react";
+import { Flag, FolderKanban, NotebookTabs, Search, type LucideIcon } from "lucide-react";
 
 export interface ShellNavItem {
   readonly href: string;
@@ -15,6 +15,7 @@ export interface ShellNavItem {
 const PLUGIN_NAV_ICONS: ReadonlyMap<string, LucideIcon> = new Map([
   ["folder-kanban", FolderKanban],
   ["notebook-tabs", NotebookTabs],
+  ["search", Search],
 ]);
 
 /** Иконка плагина без `icon` или с неизвестным идентификатором. */

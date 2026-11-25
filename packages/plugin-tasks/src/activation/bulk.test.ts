@@ -162,6 +162,18 @@ async function startHarness(variant: Variant): Promise<Harness> {
     async reindex(): Promise<number> {
       return 0;
     },
+    registerProvider(): void {
+      // Provider не требуется в unit-тесте эффектов.
+    },
+    unregisterProviders(): void {
+      // Provider не зарегистрирован.
+    },
+    async aggregate() {
+      return { hits: [], hasMore: false, warnings: [] };
+    },
+    async listFacets() {
+      return { kinds: [], facets: [], warnings: [] };
+    },
   };
 
   const commands = {

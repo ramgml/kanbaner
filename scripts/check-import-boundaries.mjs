@@ -31,6 +31,8 @@ const PROJECTS_PACKAGE = "@kanbaner/plugin-projects";
 const PROJECTS_UI_ENTRYPOINT = "@kanbaner/plugin-projects/ui";
 const NOTES_PACKAGE = "@kanbaner/plugin-notes";
 const NOTES_UI_ENTRYPOINT = "@kanbaner/plugin-notes/ui";
+const SEARCH_PACKAGE = "@kanbaner/plugin-search";
+const SEARCH_UI_ENTRYPOINT = "@kanbaner/plugin-search/ui";
 const BUILTIN_UI_COMPOSITION = "apps/web/src/ui/builtin-ui-plugins.ts";
 const ALLOWED_TASK_UI_DEPENDENCIES = new Set([
   "react",
@@ -78,6 +80,17 @@ const NOTES_SERVER_ENTRYPOINT = "index.ts";
 const NOTES_CONTRACT_ENTRYPOINT = "contract.ts";
 const NOTES_UI_ENTRYPOINT_FILE = "ui.tsx";
 const NOTES_UI_PACKAGE_PREFIXES = ["@blocknote/core", "@blocknote/react", "@blocknote/shadcn"];
+const ALLOWED_SEARCH_DEPENDENCIES = new Set([
+  "react",
+  "react-dom",
+  "react/jsx-runtime",
+  "@kanbaner/plugin-sdk",
+  "@sinclair/typebox",
+  "lucide-react",
+]);
+const SEARCH_SERVER_ENTRYPOINT = "index.ts";
+const SEARCH_CONTRACT_ENTRYPOINT = "contract.ts";
+const SEARCH_UI_ENTRYPOINT_FILE = "ui.tsx";
 const ALLOWED_CLI_DEPENDENCIES = new Set([
   "node:fs/promises",
   "node:util",
@@ -824,6 +837,110 @@ function analyzeNotesSources(root, violations) {
   }
 }
 
+function analyzeSearchSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "plugin-search");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(packageRoot) || !statSync(packageRoot).isDirectory()) {
+    violations.push({
+      file: relative(root, packageRoot),
+      rule: "plugin-search package is missing",
+    });
+
+    return;
+  }
+
+  const serverGraph = entryGraph(sourceRoot, SEARCH_SERVER_ENTRYPOINT);
+  const contractGraph = entryGraph(sourceRoot, SEARCH_CONTRACT_ENTRYPOINT);
+  const uiGraph = entryGraph(sourceRoot, SEARCH_UI_ENTRYPOINT_FILE);
+  const serverOnly = new Set([SEARCH_SERVER_ENTRYPOINT, "activation.ts", "operations.ts"]);
+
+  for (const file of sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file))) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const relativeFile = path.relative(sourceRoot, file).replaceAll(path.sep, "/");
+    const inServer = serverGraph.has(file);
+    const inContract = contractGraph.has(file);
+    const inUi = uiGraph.has(file);
+
+    if (inContract && serverOnly.has(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: "search client-safe contract не должен достигать server modules",
+      });
+    }
+
+    if (inUi && serverOnly.has(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: "search UI entrypoint не должен достигать server entrypoint",
+      });
+    }
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `search relative import escapes package (${kind})`,
+          });
+        }
+
+        continue;
+      }
+
+      if (specifier.startsWith("node:")) {
+        violations.push({
+          file: fileLabel,
+          rule: `search builtin import запрещён (${kind}): ${specifier}`,
+        });
+        continue;
+      }
+
+      const forbidden = forbiddenPluginUiImport(specifier);
+
+      if (forbidden !== null) {
+        violations.push({
+          file: fileLabel,
+          rule: `search запрещённый импорт (${kind}): ${specifier} [${forbidden}]`,
+        });
+        continue;
+      }
+
+      if (
+        inServer &&
+        (specifier === "react" ||
+          specifier === "react-dom" ||
+          specifier.startsWith("react/") ||
+          specifier === "lucide-react")
+      ) {
+        violations.push({
+          file: fileLabel,
+          rule: `search server graph не должен импортировать UI (${kind}): ${specifier}`,
+        });
+        continue;
+      }
+
+      if (!ALLOWED_SEARCH_DEPENDENCIES.has(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `search не должен импортировать (${kind}): ${specifier}`,
+        });
+      }
+    }
+
+    for (const rule of SYNC_PATTERNS) {
+      if (rule.pattern.test(source)) {
+        violations.push({ file: fileLabel, rule: `synchronous storage call: ${rule.label}` });
+      }
+    }
+  }
+}
+
 function isTasksServerOnlyRelative(relativeFile) {
   return (
     TASKS_SERVER_ONLY_FILES.has(relativeFile) ||
@@ -1034,6 +1151,34 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
             rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
           });
         }
+
+        const isSearchUiEntrypoint =
+          specifier === SEARCH_UI_ENTRYPOINT ||
+          specifier === `${SEARCH_PACKAGE}/ui` ||
+          specifier.startsWith(`${SEARCH_PACKAGE}/ui/`) ||
+          (resolved !== null &&
+            isInside(path.join(root, "packages", "plugin-search", "src"), resolved) &&
+            /(?:^|\/)ui(?:\.tsx?|\/)/u.test(
+              relative(path.join(root, "packages", "plugin-search", "src"), resolved),
+            ));
+
+        if (isSearchUiEntrypoint && !isBuiltinComposition) {
+          violations.push({
+            file: fileLabel,
+            rule: `UI-entrypoint плагина разрешён только из ${BUILTIN_UI_COMPOSITION} (${kind}): ${specifier}`,
+          });
+        }
+
+        if (
+          (specifier === SEARCH_PACKAGE || specifier.startsWith(`${SEARCH_PACKAGE}/`)) &&
+          specifier !== SEARCH_UI_ENTRYPOINT &&
+          specifier !== `${SEARCH_PACKAGE}/ui`
+        ) {
+          violations.push({
+            file: fileLabel,
+            rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
+          });
+        }
       }
 
       // Ссылка в строке ловит случаи, которые не являются import-выражением
@@ -1111,6 +1256,11 @@ function analyzeManifests(root, violations) {
         "@blocknote/shadcn",
         MARKDOWN_UI_PACKAGE,
       ]),
+    },
+    {
+      file: "packages/plugin-search/package.json",
+      name: SEARCH_PACKAGE,
+      allowed: new Set([ALLOWED_FIXTURE_DEPENDENCY, "@sinclair/typebox", "lucide-react"]),
     },
     {
       file: "packages/task-ui/package.json",
@@ -1209,6 +1359,8 @@ export function analyzeImportBoundaries(root = ROOT) {
   analyzeMarkdownUiSources(root, violations);
 
   analyzeNotesSources(root, violations);
+
+  analyzeSearchSources(root, violations);
 
   analyzeCliSources(root, violations);
 

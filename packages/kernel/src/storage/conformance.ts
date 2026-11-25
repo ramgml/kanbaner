@@ -970,6 +970,11 @@ export function createStorageProviderConformanceSuite(
             text: "Первый виджет для доски",
             kind: "widget",
             updatedAt: "2026-11-06T12:00:00.000Z",
+            metadata: {
+              projectId: "project-1",
+              status: "todo",
+              tags: ["ui", "search"],
+            },
           },
           {
             ref: TARGET,
@@ -978,6 +983,11 @@ export function createStorageProviderConformanceSuite(
             text: "Второй гаджет",
             kind: "gadget",
             updatedAt: "2026-11-06T12:00:00.000Z",
+            metadata: {
+              projectId: "project-2",
+              status: "done",
+              tags: ["backend"],
+            },
           },
         ]);
 
@@ -985,6 +995,42 @@ export function createStorageProviderConformanceSuite(
         assert.equal(hits.length, 1);
         assert.equal(hits[0]?.ref, SOURCE);
         assert.equal(hits[0]?.strategy, expectedStrategy);
+        assert.equal(hits[0]?.kind, "widget");
+        assert.deepEqual(hits[0]?.metadata, {
+          projectId: "project-1",
+          status: "todo",
+          tags: ["ui", "search"],
+        });
+
+        const byProject = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "projectId", operator: "eq", value: "project-1" }],
+        });
+        assert.deepEqual(
+          byProject.map((hit) => hit.ref),
+          [SOURCE],
+        );
+
+        const byTag = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "tags", operator: "contains", value: "search" }],
+        });
+        assert.deepEqual(
+          byTag.map((hit) => hit.ref),
+          [SOURCE],
+        );
+
+        const wrongProject = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "projectId", operator: "eq", value: "project-2" }],
+        });
+        assert.deepEqual(wrongProject, []);
+
+        const wrongTag = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "tags", operator: "contains", value: "back" }],
+        });
+        assert.deepEqual(wrongTag, []);
 
         const filtered = await provider.searchIndex.search({
           text: "гаджет",

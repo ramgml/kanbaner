@@ -28,6 +28,10 @@ import {
   type ResourceLink,
   type ResourceRef,
   type ResourceService,
+  type SearchAggregateResult,
+  type SearchFacetSet,
+  type SearchProvider,
+  type SearchProviderQuery,
   type SearchRegistrar,
   type StorageCapabilities,
   type StorageProvider,
@@ -211,6 +215,18 @@ function createUnavailableSearchRegistrar(): SearchRegistrar {
     list: closed,
     search: closed,
     reindex: closed,
+    registerProvider(_pluginId: PluginId, _provider: SearchProvider): void {
+      throw unavailableError("Реестр поисковых провайдеров не подключён к runtime");
+    },
+    unregisterProviders(_pluginId: PluginId): void {
+      // Нет зарегистрированных провайдеров.
+    },
+    aggregate(_query: SearchProviderQuery): Promise<SearchAggregateResult> {
+      return closed();
+    },
+    listFacets(): Promise<SearchFacetSet> {
+      return closed();
+    },
   };
 }
 
@@ -427,6 +443,7 @@ class BoundServices implements BoundPluginServices {
     this.#unregisterResources();
     this.#unregisterUi();
     this.#unsubscribe();
+    this.search.unregisterProviders();
   }
 }
 

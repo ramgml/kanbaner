@@ -36,8 +36,8 @@ import {
   saveIdempotency,
 } from "./activation/idempotency.ts";
 import {
+  createNotesSearchProvider,
   deleteNoteSearchDocuments,
-  reindexAllNotes,
   upsertNoteSearchDocuments,
 } from "./activation/search-index.ts";
 import { createSerialQueue } from "./activation/serial-queue.ts";
@@ -871,6 +871,8 @@ export async function activate(context: NotesActivationContext): Promise<void> {
     idFactory,
     logger,
   };
+  const searchProvider = createNotesSearchProvider(store, context.search, logger);
+  context.search.registerProvider(searchProvider);
 
   for (const metadata of NOTES_COMMAND_LIST) {
     const handler = COMMAND_HANDLERS[metadata.id];
@@ -938,7 +940,7 @@ export async function activate(context: NotesActivationContext): Promise<void> {
   // старта поиск не должен зависеть от гонки с фоновой задачей. Ошибка
   // индекса логируется и не отменяет активацию.
   try {
-    await serialize(() => reindexAllNotes(store, context.search, logger));
+    await serialize(() => searchProvider.reindex());
   } catch (error) {
     logger.warn("notes.search_reindex_failed", {
       errorName: error instanceof Error ? error.name : "UnknownError",

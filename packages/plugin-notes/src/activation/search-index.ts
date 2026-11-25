@@ -3,6 +3,9 @@ import {
   type PluginSearchService,
   type ResourceRef,
   type SearchDocumentInput,
+  type SearchProvider,
+  type SearchProviderFacet,
+  type SearchHit,
 } from "@kanbaner/plugin-sdk";
 
 import { NOTE_RESOURCE_TYPE, NOTES_PLUGIN_ID } from "../constants.ts";
@@ -107,4 +110,40 @@ export async function reindexAllNotes(
 
     return 0;
   }
+}
+
+/**
+ * SearchProvider домена заметок.
+ *
+ * Заметки не объявляют project/status/tags facet-ов: при таком фильтре
+ * реестр исключает провайдера и не читает заметки вовсе.
+ */
+export function createNotesSearchProvider(
+  store: Pick<NotesStore, "listAllNotes">,
+  search: PluginSearchService,
+  logger: PluginLogger,
+): SearchProvider {
+  return {
+    id: NOTES_PLUGIN_ID,
+    kinds: [{ id: NOTE_RESOURCE_TYPE, title: "Заметки" }],
+    filterFields: [],
+
+    listFacets(): Promise<readonly SearchProviderFacet[]> {
+      return Promise.resolve([]);
+    },
+
+    search(query): Promise<readonly SearchHit[]> {
+      return search.search({
+        text: query.text,
+        kind: NOTE_RESOURCE_TYPE,
+        ...(query.filters === undefined ? {} : { filters: query.filters }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.offset === undefined ? {} : { offset: query.offset }),
+      });
+    },
+
+    reindex(): Promise<number> {
+      return reindexAllNotes(store, search, logger);
+    },
+  };
 }
