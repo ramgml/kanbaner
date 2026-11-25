@@ -159,6 +159,16 @@ export interface OpenCodeGateway {
   createSession(input?: OpenCodeSessionCreate): Promise<OpenCodeSessionView>;
   listSessions(): Promise<readonly OpenCodeSessionSummary[]>;
   renameSession(sessionID: string, title: string): Promise<OpenCodeSessionRename>;
+  /**
+   * Best-effort автоназвание новой сессии из текста первого запроса. Возвращает
+   * подтверждённое `{id,title}` или null, если текст непригоден/сессия
+   * неeligible/ошибка/abort. Никогда не бросает ошибку наружу.
+   */
+  ensureSessionTitle(
+    sessionID: string,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<OpenCodeSessionRename | null>;
   getSession(sessionID: string): Promise<OpenCodeSessionView>;
   getTurnStatus(sessionID: string, turnID: string): Promise<OpenCodeTurnStatus>;
   getAttachmentPreview(

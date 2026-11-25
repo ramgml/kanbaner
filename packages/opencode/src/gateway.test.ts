@@ -2270,4 +2270,563 @@ describe("OpenCode gateway", () => {
       expect(update).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("ensureSessionTitle", () => {
+    function titleClient(
+      info: Record<string, unknown> = ownedInfo(),
+      page: unknown = { data: [], cursor: { next: null } },
+      overrides: {
+        readonly get?: () => Promise<unknown>;
+        readonly list?: () => Promise<unknown>;
+        readonly update?: () => Promise<unknown>;
+      } = {},
+    ) {
+      const get = vi.fn(overrides.get ?? (async () => info));
+      const list = vi.fn(overrides.list ?? (async () => page));
+      const update = vi.fn(overrides.update ?? (async () => undefined));
+      return {
+        get,
+        list,
+        update,
+        gateway: createOpenCodeGateway(asClient({ session: { get, update }, message: { list } })),
+      };
+    }
+
+    it("ставит короткое название только exact title/list/update payload", async () => {
+      const { gateway, get, list, update } = titleClient();
+
+      await expect(
+        gateway.ensureSessionTitle("ses-1", "## Обнови   задачу\n\nи проверь отчёт"),
+      ).resolves.toEqual({ id: "ses-1", title: "Обнови задачу и проверь отчёт" });
+
+      expect(get).toHaveBeenCalledWith({ sessionID: "ses-1" }, { signal: expect.any(AbortSignal) });
+      expect(list).toHaveBeenCalledWith(
+        { sessionID: "ses-1", limit: 1 },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(update).toHaveBeenCalledWith(
+        { sessionID: "ses-1", title: "Обнови задачу и проверь отчёт" },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("не переименовывает manual/non-default title или непустую history", async () => {
+      for (const info of [
+        { ...ownedInfo(), title: "Мой чат" },
+        { ...ownedInfo(), title: "kanbaner chat" },
+        { ...ownedInfo(), title: "" },
+        { ...ownedInfo(), title: null },
+      ]) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+
+      const nonEmpty = titleClient(ownedInfo(), {
+        data: [{ id: "user-1", type: "user", text: "Уже есть" }],
+        cursor: { next: null },
+      });
+      await expect(
+        nonEmpty.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(nonEmpty.list).toHaveBeenCalledWith(
+        { sessionID: "ses-1", limit: 1 },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(nonEmpty.update).not.toHaveBeenCalled();
+
+      const malformed = titleClient(ownedInfo(), { data: null });
+      await expect(
+        malformed.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(malformed.update).not.toHaveBeenCalled();
+    });
+
+    it("не делает preflight для пустого/шумного/default текста", async () => {
+      const { gateway, get, list, update } = titleClient();
+      for (const text of ["", "   ", "###", "```ts\n```", "Kanbaner chat"]) {
+        await expect(gateway.ensureSessionTitle("ses-1", text)).resolves.toBeNull();
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(list).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("не трогает чужую, child, wrong-project и не-owned сессию", async () => {
+      const cases = [
+        { ...ownedInfo(), metadata: { source: "other" } },
+        { ...ownedInfo(), parentID: "ses-parent" },
+        { ...ownedInfo(), location: { directory: path.resolve(process.cwd(), "..") } },
+        { ...ownedInfo(), agent: "build" },
+      ];
+      for (const info of cases) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("проглатывает 404/503 preflight и update, не бросая наружу", async () => {
+      const cases = [
+        titleClient(ownedInfo(), undefined, {
+          get: async () => {
+            throw { status: 404, _tag: "NotFound" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          list: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          update: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+      ];
+      for (const { gateway } of cases) {
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+      }
+      expect(cases[2]?.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("abort до update не превращается в успешную мутацию", async () => {
+      const aborted = new AbortController();
+      aborted.abort();
+      const early = titleClient();
+      await expect(
+        early.gateway.ensureSessionTitle("ses-1", "Задача", aborted.signal),
+      ).resolves.toBeNull();
+      expect(early.get).not.toHaveBeenCalled();
+
+      const controller = new AbortController();
+      const during = titleClient(ownedInfo(), undefined, {
+        list: async () => {
+          controller.abort();
+          return { data: [], cursor: { next: null } };
+        },
+      });
+      await expect(
+        during.gateway.ensureSessionTitle("ses-1", "Задача", controller.signal),
+      ).resolves.toBeNull();
+      expect(during.update).not.toHaveBeenCalled();
+    });
+
+    it("не ждёт зависший get и не делает поздний list/update после deadline", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveGet!: (value: unknown) => void;
+        const get = vi.fn(
+          () =>
+            new Promise<unknown>((resolve) => {
+              resolveGet = resolve;
+            }),
+        );
+        const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get, update }, message: { list } }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+
+        // Поздний ответ SDK не должен продолжить уже истёкший preflight.
+        resolveGet(ownedInfo());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("не делает update после позднего list и не отменяет caller signal", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveList!: (value: unknown) => void;
+        const list = vi.fn(
+          () =>
+            new Promise<unknown>((resolve) => {
+              resolveList = resolve;
+            }),
+        );
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get: async () => ownedInfo(), update },
+            message: { list },
+          }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+
+        resolveList({ data: [], cursor: { next: null } });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ограничивает зависший update и отменяет только внутренний signal", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveUpdate!: (value: unknown) => void;
+        const update = vi.fn((input: unknown, options?: { signal?: AbortSignal }) => {
+          void input;
+          void options;
+          return new Promise<unknown>((resolve) => {
+            resolveUpdate = resolve;
+          });
+        });
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get: async () => ownedInfo(), update },
+            message: { list: async () => ({ data: [], cursor: { next: null } }) },
+          }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+        expect(update).toHaveBeenCalledTimes(1);
+        // Физическая отмена уже отправленной mutation зависит от SDK/Service,
+        // но внутренний signal обязан быть aborted.
+        const updateSignal = update.mock.calls[0]?.[1]?.signal;
+        expect(updateSignal?.aborted).toBe(true);
+
+        resolveUpdate(undefined);
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abort caller освобождает preflight и не делает update", async () => {
+      let getStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        getStarted = resolve;
+      });
+      let internalSignal: AbortSignal | undefined;
+      const get = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) => {
+        internalSignal = options?.signal;
+        getStarted();
+        return new Promise<unknown>(() => undefined);
+      });
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({
+          session: { get, update },
+          message: { list: async () => ({ data: [], cursor: { next: null } }) },
+        }),
+      );
+      const caller = new AbortController();
+      const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+      await started;
+      caller.abort();
+
+      await expect(pending).resolves.toBeNull();
+      expect(internalSignal?.aborted).toBe(true);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("не блокирует prompt, пока preflight ждёт SDK", async () => {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      // Preflight идёт с внутренним signal, prompt — без options.
+      const get = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) =>
+        options?.signal === undefined
+          ? Promise.resolve(ownedInfo())
+          : new Promise<unknown>(() => undefined),
+      );
+      const gateway = createOpenCodeGateway(
+        promptClient(stream, async () => canonicalTurn("inbox-1", completedAssistant()), {
+          get,
+          prompt: async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" }),
+        }),
+      );
+
+      const preflight = gateway.ensureSessionTitle("ses-1", "Новая задача");
+      const received = await collect(
+        gateway.prompt("ses-1", "Новая задача", new AbortController().signal),
+      );
+      expect(streamEvent(last(received))).toEqual({ kind: "done" });
+      await expect(preflight).resolves.toBeNull();
+    });
+
+    it("сериализует preflight одной сессии: второй видит уже сохранённое название", async () => {
+      let title = "Kanbaner chat";
+      let messages: unknown[] = [];
+      let releaseList!: () => void;
+      const listGate = new Promise<void>((resolve) => {
+        releaseList = resolve;
+      });
+      let listCalls = 0;
+      const get = vi.fn(async () => ({ ...ownedInfo(), title }));
+      const list = vi.fn(async () => {
+        listCalls += 1;
+        if (listCalls === 1) await listGate;
+        return { data: messages, cursor: { next: null } };
+      });
+      const update = vi.fn(async ({ title: next }: { title: string }) => {
+        title = next;
+        messages = [{ id: "user-1", type: "user", text: "Новая задача" }];
+      });
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+      releaseList();
+
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+      await expect(second).resolves.toBeNull();
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("не сериализует preflight разных сессий", async () => {
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const get = vi.fn(async ({ sessionID }: { sessionID: string }) => ownedInfo(sessionID));
+      const list = vi.fn(async ({ sessionID }: { sessionID: string }) => {
+        if (sessionID === "ses-1") await firstGate;
+        return { data: [], cursor: { next: null } };
+      });
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      const second = gateway.ensureSessionTitle("ses-2", "Вторая задача");
+
+      await expect(second).resolves.toEqual({ id: "ses-2", title: "Вторая задача" });
+      expect(update).toHaveBeenCalledTimes(1);
+      releaseFirst();
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+    });
+
+    it("после timeout той же сессии следующий preflight выполняется, а не ждёт вечно", async () => {
+      vi.useFakeTimers();
+      try {
+        let getCalls = 0;
+        const get = vi.fn(() => {
+          getCalls += 1;
+          return getCalls === 1
+            ? new Promise<unknown>(() => undefined)
+            : Promise.resolve(ownedInfo());
+        });
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get, update },
+            message: { list: async () => ({ data: [], cursor: { next: null } }) },
+          }),
+        );
+
+        const timedOut = gateway.ensureSessionTitle("ses-1", "Первая задача");
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(timedOut).resolves.toBeNull();
+        expect(update).not.toHaveBeenCalled();
+
+        const next = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(next).resolves.toEqual({ id: "ses-1", title: "Вторая задача" });
+        expect(update).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abort queued caller завершает ensure сразу, а поздний queued entry не вызывает SDK", async () => {
+      let releaseGet!: (value: unknown) => void;
+      const get = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            releaseGet = resolve;
+          }),
+      );
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+
+      const caller = new AbortController();
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача", caller.signal);
+      caller.abort();
+      // Без ожидания чужого preflight и без advance таймеров.
+      await expect(second).resolves.toBeNull();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(update).not.toHaveBeenCalled();
+
+      // После разблокировки первого отменённый queued entry — no-op.
+      releaseGet(ownedInfo());
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(
+        { sessionID: "ses-1", title: "Первая задача" },
+        { signal: expect.any(AbortSignal) },
+      );
+    });
+
+    it("общий deadline queued вызова включает ожидание очереди", async () => {
+      vi.useFakeTimers();
+      try {
+        let getCalls = 0;
+        const get = vi.fn(() => {
+          getCalls += 1;
+          return new Promise<unknown>(() => undefined);
+        });
+        const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get, update }, message: { list } }),
+        );
+        const firstCaller = new AbortController();
+
+        const first = gateway.ensureSessionTitle("ses-1", "Первая задача", firstCaller.signal);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getCalls).toBe(1);
+
+        const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+        let secondSettled = false;
+        void second.then(() => {
+          secondSettled = true;
+        });
+
+        // Второй уже потратил 1.5 s из своего бюджета на очередь.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(secondSettled).toBe(false);
+        expect(getCalls).toBe(1);
+
+        // Освобождаем очередь; второй получает только остаток бюджета.
+        firstCaller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(first).resolves.toBeNull();
+        expect(getCalls).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(499);
+        expect(secondSettled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(second).resolves.toBeNull();
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("не запускает новый auto update, пока предыдущая mutation не settled", async () => {
+      vi.useFakeTimers();
+      try {
+        for (const settle of ["resolve", "reject"] as const) {
+          const settlements: Array<(value: unknown) => void> = [];
+          const rejections: Array<(reason: unknown) => void> = [];
+          const update = vi.fn(
+            () =>
+              new Promise<unknown>((resolve, reject) => {
+                settlements.push(resolve);
+                rejections.push(reject);
+              }),
+          );
+          const get = vi.fn(async () => ownedInfo());
+          const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+          const gateway = createOpenCodeGateway(
+            asClient({ session: { get, update }, message: { list } }),
+          );
+
+          const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+          await vi.advanceTimersByTimeAsync(2_000);
+          await expect(first).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+
+          const getCalls = get.mock.calls.length;
+          const listCalls = list.mock.calls.length;
+          const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(second).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+          expect(get).toHaveBeenCalledTimes(getCalls);
+          expect(list).toHaveBeenCalledTimes(listCalls);
+
+          if (settle === "resolve") settlements[0]?.(undefined);
+          else rejections[0]?.({ status: 503, _tag: "Unavailable" });
+          await vi.advanceTimersByTimeAsync(0);
+
+          // После фактического settle eligibility проверяется заново.
+          const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(update).toHaveBeenCalledTimes(2);
+          settlements[1]?.(undefined);
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("caller abort во время update оставляет mutation uncertain", async () => {
+      const settlements: Array<(value: unknown) => void> = [];
+      const update = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            settlements.push(resolve);
+          }),
+      );
+      const get = vi.fn(async () => ownedInfo());
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+      const caller = new AbortController();
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача", caller.signal);
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+      caller.abort();
+      await expect(first).resolves.toBeNull();
+
+      const getCalls = get.mock.calls.length;
+      const listCalls = list.mock.calls.length;
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+      await expect(second).resolves.toBeNull();
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(get).toHaveBeenCalledTimes(getCalls);
+      expect(list).toHaveBeenCalledTimes(listCalls);
+
+      settlements[0]?.(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+      settlements[1]?.(undefined);
+      await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+    });
+  });
 });

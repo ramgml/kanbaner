@@ -45,6 +45,15 @@ async function mockOpenCode(
     readonly listSessions?: () => readonly unknown[];
     /** Заголовок конкретной сессии в GET/PATCH. */
     readonly sessionTitle?: (sessionID: string) => string;
+    /**
+     * Эмуляция server-side auto title: вызывается на prompt POST и задаёт
+     * заголовок, который сервер сохранил бы до старта stream.
+     */
+    readonly autoTitle?: (
+      call: number,
+      body: { text?: string; titleText?: string },
+      currentTitle: string,
+    ) => string | undefined;
     /** Ошибка конкретной сессии: удалённая запись или временная недоступность. */
     readonly sessionStatus?: (sessionID: string) => "not-found" | "unavailable" | undefined;
     /** Ошибка только PATCH rename; не влияет на GET/восстановление. */
@@ -71,9 +80,12 @@ async function mockOpenCode(
     statusQueries: [] as string[],
     promptBodies: [] as Array<{
       text?: string;
+      titleText?: string;
       turnID?: string;
       files?: Array<{ name: string; mime: string; base64: string }>;
     }>,
+    /** Server-side auto title, persisted before the prompt stream starts. */
+    titles: new Map<string, string>(),
   };
 
   await page.route("**/api/opencode/**", async (route) => {
@@ -108,7 +120,11 @@ async function mockOpenCode(
       state.listCalls += 1;
       await json(
         options?.listSessions?.() ?? [
-          { id: "ses-1", title: "Kanbaner chat", updatedAt: 1_700_000_000_000 },
+          {
+            id: "ses-1",
+            title: state.titles.get("ses-1") ?? "Kanbaner chat",
+            updatedAt: 1_700_000_000_000,
+          },
         ],
       );
       return;
@@ -137,7 +153,8 @@ async function mockOpenCode(
       const title =
         typeof body.title === "string"
           ? body.title.trim().replace(/\s+/gu, " ")
-          : (options?.sessionTitle?.(sessionID) ?? "Kanbaner chat");
+          : (state.titles.get(sessionID) ?? options?.sessionTitle?.(sessionID) ?? "Kanbaner chat");
+      state.titles.set(sessionID, title);
       await json({ id: sessionID, title });
       return;
     }
@@ -150,10 +167,26 @@ async function mockOpenCode(
       state.promptBodies.push(
         request.postDataJSON() as {
           text?: string;
+          titleText?: string;
           turnID?: string;
           files?: Array<{ name: string; mime: string; base64: string }>;
         },
       );
+      const promptSessionID = /\/session\/(ses-\d+)\/prompt$/u.exec(path)?.[1];
+      const promptBody = state.promptBodies.at(-1) ?? {};
+      const currentTitle =
+        promptSessionID === undefined
+          ? "Kanbaner chat"
+          : (state.titles.get(promptSessionID) ??
+            options?.sessionTitle?.(promptSessionID) ??
+            "Kanbaner chat");
+      const autoTitle =
+        promptSessionID === undefined
+          ? undefined
+          : options?.autoTitle?.(state.promptBodies.length, promptBody, currentTitle);
+      if (promptSessionID !== undefined && autoTitle !== undefined) {
+        state.titles.set(promptSessionID, autoTitle);
+      }
       // Задержка ответа даёт тесту уйти читать выше до прихода streaming-событий.
       if (options?.promptDelayMs !== undefined) {
         await new Promise((resolve) => setTimeout(resolve, options.promptDelayMs));
@@ -185,6 +218,9 @@ async function mockOpenCode(
         status: 200,
         contentType: "application/x-ndjson",
         body: events.map((event) => `${JSON.stringify(event)}\n`).join(""),
+        ...(autoTitle === undefined
+          ? {}
+          : { headers: { "x-kanbaner-session-title": encodeURIComponent(autoTitle) } }),
       });
       return;
     }
@@ -250,7 +286,7 @@ async function mockOpenCode(
         ];
       const body = {
         id: sessionID,
-        title: options?.sessionTitle?.(sessionID) ?? "Kanbaner chat",
+        title: state.titles.get(sessionID) ?? options?.sessionTitle?.(sessionID) ?? "Kanbaner chat",
         agent: "kanbaner",
         model: catalog.defaultModel,
         messages: sessionMessages,
@@ -1965,6 +2001,77 @@ test("desktop rename: Enter, PATCH exact title, refresh истории и Escape
   await reopened.press("Escape");
   await expect(reopened).toHaveCount(0);
   await expect(rename).toBeFocused();
+});
+
+test("desktop: auto title из первого prompt обновляет шапку, историю и reload", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    autoTitle: (_call, body, currentTitle) =>
+      currentTitle === "Kanbaner chat" && body.titleText !== undefined ? body.titleText : undefined,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Разобрать логи");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+  await expect(page.getByTestId("opencode-turn-status")).toContainText("Готово");
+  expect(mock.promptBodies[0]).toMatchObject({
+    text: "Разобрать логи",
+    titleText: "Разобрать логи",
+  });
+  expect(mock.titles.get("ses-1")).toBe("Разобрать логи");
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Разобрать логи");
+
+  const history = page.getByTestId("opencode-session-history");
+  await history.getByText("История сессий").click();
+  await expect(history.getByRole("button", { name: /^Разобрать логи/u })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Разобрать логи");
+});
+
+test("desktop: ручной rename после auto title не перезаписывается повторным prompt", async ({
+  page,
+}) => {
+  const mock = await mockOpenCode(page, undefined, undefined, {
+    autoTitle: (_call, body, currentTitle) =>
+      currentTitle === "Kanbaner chat" && body.titleText !== undefined ? body.titleText : undefined,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await page.getByTestId("opencode-open").click();
+
+  const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+  await expect(message).toBeEnabled();
+  await message.fill("Первый вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(page.getByTestId("opencode-turn-status")).toContainText("Готово");
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Первый вопрос");
+
+  const rename = page.getByRole("button", { name: "Переименовать сессию" });
+  await rename.click();
+  const input = page.getByRole("textbox", { name: "Название сессии" });
+  await input.fill("Новое название");
+  await input.press("Enter");
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Новое название");
+
+  await message.fill("Второй вопрос");
+  await page.getByRole("button", { name: "Отправить", exact: true }).click();
+  await expect(page.getByTestId("opencode-turn-status")).toContainText("Готово");
+  expect(mock.promptBodies[1]).toMatchObject({
+    text: "Второй вопрос",
+    titleText: "Второй вопрос",
+  });
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Новое название");
+  expect(mock.titles.get("ses-1")).toBe("Новое название");
+
+  await page.reload();
+  await expect(page.getByTestId("opencode-session-title")).toHaveText("Новое название");
 });
 
 test("desktop prompt-busy: записи истории заблокированы до завершения хода", async ({ page }) => {

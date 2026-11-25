@@ -321,12 +321,31 @@ function ndjson(value: unknown): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
 }
 
+const TITLE_TEXT_MAX_POINTS = 2_000;
+const TITLE_TEXT_MAX_UNITS = 8_192;
+
+/**
+ * Необязательный источник автоназвания: только bounded display text запроса.
+ * Невалидное/пустое/слишком длинное поле не ломает prompt; длинное значение
+ * безопасно обрезается по code points.
+ */
+function titleTextInput(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const points = Array.from(
+    value.length > TITLE_TEXT_MAX_UNITS ? value.slice(0, TITLE_TEXT_MAX_UNITS) : value,
+  );
+  if (points.length === 0) return undefined;
+  return points.slice(0, TITLE_TEXT_MAX_POINTS).join("");
+}
+
 export async function handleOpenCodePrompt(sessionID: string, request: Request): Promise<Response> {
   const denied = uiGuard(request);
   if (denied !== null) return denied;
   let gateway: OpenCodeGateway;
   let text: string;
   let turnID: string | undefined;
+  let titleText: string | undefined;
+  let sessionTitle: string | null = null;
   let attachments: readonly OpenCodePromptAttachment[] = [];
   const abortController = new AbortController();
   const signal = abortController.signal;
@@ -337,6 +356,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   try {
     const body = await jsonBody(request, ATTACHMENT_LIMITS.maxRequestBytes);
     text = typeof body.text === "string" ? body.text.trim() : "";
+    titleText = titleTextInput(body.titleText);
     attachments = parsePromptAttachments(body.files);
     if (text.length === 0) {
       throw new PublicHttpError("VALIDATION_ERROR", "Текст запроса не должен быть пустым");
@@ -353,6 +373,17 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
     }
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
     gateway = await getOpenCodeGateway();
+    if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
+    // Название — best-effort до prompt: контракт метода не бросает, но даже
+    // нарушение контракта не должно отменить сам prompt.
+    if (titleText !== undefined && titleText.trim().length > 0) {
+      try {
+        const ensured = await gateway.ensureSessionTitle(sessionID, titleText, signal);
+        if (ensured !== null && !signal.aborted) sessionTitle = ensured.title;
+      } catch {
+        sessionTitle = null;
+      }
+    }
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
   } catch (error) {
     request.signal.removeEventListener("abort", onAbort);
@@ -459,6 +490,9 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
       "content-type": "application/x-ndjson; charset=utf-8",
       "x-accel-buffering": "no",
       "x-content-type-options": "nosniff",
+      ...(sessionTitle === null
+        ? {}
+        : { "x-kanbaner-session-title": encodeURIComponent(sessionTitle) }),
     },
   });
 }

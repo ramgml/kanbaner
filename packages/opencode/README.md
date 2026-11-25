@@ -129,6 +129,37 @@ Bearer token в браузер не передаётся. Ответы имею�
   пробелы, запрещает NUL/C0/C1 и принимает 1–100 code points. В upstream
   уходит только `{ sessionID, title }`; `metadata` не заменяется. Ответ —
   `{ id, title }` после проверки ownership.
+- Первый prompt новой сессии автоматически получает короткое название из
+  отображаемого текста запроса. `session-title.ts` детерминированно убирает
+  Markdown/HTML-шум, схлопывает пробелы и ограничивает результат 60 Unicode
+  code points (с `…` на границе слова), не вызывая модель. UI отправляет в
+  internal prompt transport отдельное optional-поле `titleText` (display text
+  без контекстной преамбулы, base64 и вложений); сервер ограничивает его 2000
+  code points. До старта prompt gateway перепроверяет ownership, root-сессию,
+  `metadata.source=kanbaner`, текущий project directory, title ровно
+  `Kanbaner chat` и пустую canonical history, после чего best-effort вызывает
+  `session.update` только с `title`. Ошибка/недоступность не меняет исход
+  prompt. Общий caller-visible бюджет 2 s стартует до постановки в
+  per-session очередь и покрывает queue wait + get/list/update: второй вызов
+  не получает новые 2 s после ожидания. Caller signal связывается с внутренним
+  controller, поэтому abort/deadline возвращает `null` и не отменяет prompt, а
+  отменённый queued entry позже доходит до очереди как no-op без SDK-вызовов.
+  Preflight одной сессии сериализуется, чтобы два первых prompt не сделали
+  A/B update: второй перечитывает canonical title/history после первого;
+  разные session ID выполняются параллельно. После запуска `session.update`
+  gateway держит per-session uncertain/in-flight guard до фактического settle
+  upstream Promise: deadline/abort его не снимает, и новый auto update во время
+  uncertainty не отправляется. Состояние очищается при success/error, после
+  чего eligibility проверяется заново. Уже отправленная mutation физически
+  отменяется только если SDK/Service это поддерживает: поздний A может
+  перезаписать B, но новый auto update во время uncertainty запрещён.
+  Подтверждённый title возвращается ASCII-encoded header
+  `x-kanbaner-session-title`; панель сразу применяет его к текущей
+  generation/сессии и инвалидирует историю. Первый canonical GET после header
+  получает grace: он мог быть собран до server-side update, поэтому применяет
+  canonical messages, сохраняет auto title и гасит overlay; следующий GET
+  доверяет canonical. Ручной non-default title и непустая сессия не
+  переименовываются.
 - Выбор записи выполняет guarded `GET` точной сессии. `404` удаляет только
   недоступную запись из списка и не меняет текущую сессию или сохранённый ID;
   `503` показывает «Не удалось открыть сессию» и кнопку повтора. Неуспешный
