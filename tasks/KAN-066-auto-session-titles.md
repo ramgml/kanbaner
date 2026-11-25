@@ -131,8 +131,10 @@ specs:
   `in_progress`.
 - 2026-11-25 — Worker ограничил общий 2-секундный budget включая очередь и
   добавил uncertain mutation guard коммитом `b53fbbe`. Focused 233/233,
-  OpenCode E2E 29/29, полный `pnpm check` — 145 files / 2101 tests. Статус
-  `review`.
+  OpenCode E2E 29/29, полный `pnpm check` — 145 files / 2101 tests.
+- 2026-11-25 — Финальное ревью не нашло blocker/high/medium/low. Live smoke
+  реального Service 2.2.5 подтвердил auto title, reload и сохранение ручного
+  названия после повторного prompt. Статус `review` перед merge.
 
 ## Итог
 
