@@ -1,7 +1,7 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: in_progress
+status: review
 stage: 5
 priority: high
 owner: worker-kan-068
@@ -144,6 +144,9 @@ Worker владеет всеми файлами, необходимыми для
 - 2026-11-25 — Ревью нашло high в activation/reindex lifecycle, medium в
   validation/JSON parity и пробелы DoD-тестов. Задача возвращена в
   `in_progress`; merge запрещён до повторного ревью.
+- 2026-11-25 — Worker закрыл замечания коммитами `acdb252` и `2521f68`.
+  Focused 883/883, полный Playwright 177/177, полный Vitest 151 files / 2138
+  tests, `pnpm check` зелёный. Статус `review`.
 
 ## Итог
 

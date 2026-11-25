@@ -153,6 +153,9 @@ moveMany и остальные не перечисленные operations ост
 - 2026-11-25 — Ревью этапа A нашло high в retryable non-idempotent mutation,
   medium в redaction/abort/schema compatibility и три low. Исправления выполняются
   до этапа B.
+- 2026-11-25 — Worker закрыл замечания коммитом `6626d60`; 75/75 unit,
+  typecheck/build/eslint/stdio smoke зелёные. Повторное ревью этапа A не нашло
+  blocker/high/medium/low.
 
 ## Итог
 
