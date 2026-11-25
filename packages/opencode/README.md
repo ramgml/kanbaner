@@ -43,6 +43,11 @@ catalog активных chat-моделей, streaming, полный built-in t
   NDJSON transport передаёт клиенту без terminal-семантики. UI показывает
   стадии `connecting/running/finalizing/done/cancelled/error`; terminal-статус
   не исчезает после завершения запроса.
+- На стадии `running` рядом с «Выполняется» показаны три заранее отрисованные
+  декоративные точки с последовательным `animate-pulse` и
+  `motion-reduce:animate-none`: контейнер `aria-hidden`, ширина стабильна, live
+  region не объявляет кадры анимации, а при reduced motion статус остаётся
+  текстовым.
 - Если canonical outcome не подтверждён, UI показывает «Результат не подтверждён»
   и кнопку «Проверить статус». Проверка использует существующий
   `GET /api/opencode/session/{sessionID}?turnID={turnID}` и возвращает

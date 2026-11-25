@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createServer } from "node:http";
 import { OPENCODE_CATALOG_TOOLS } from "@kanbaner/opencode";
 
 const catalog = {
@@ -1322,6 +1323,80 @@ test("prompt success: Enter, один POST и сохранённый стату�
     () => document.documentElement.scrollWidth - window.innerWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("running ellipsis: staggered pulse, reduced motion и доступный статус", async ({ page }) => {
+  await mockOpenCode(page);
+  const releaseGate: { release: (() => void) | null } = { release: null };
+  const release = new Promise<void>((resolve) => {
+    releaseGate.release = resolve;
+  });
+  const stub = createServer((_request, response) => {
+    response.writeHead(200, {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    response.write(`${JSON.stringify({ kind: "delta", id: "message-1:0", text: "Ждём" })}\n`);
+    void release.then(() => {
+      response.write(`${JSON.stringify({ kind: "finalizing" })}\n`);
+      response.end(`${JSON.stringify({ kind: "done" })}\n`);
+    });
+  });
+  await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  const address = stub.address();
+  if (address === null || typeof address === "string") throw new Error("stub address is missing");
+
+  try {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    // mockOpenCode отвечает одним куском; streaming stub держит running открытым,
+    // пока тест читает computed style точек.
+    await page.route("**/api/opencode/session/ses-1/prompt", async (route) => {
+      await route.continue({ url: `http://127.0.0.1:${address.port}/prompt` });
+    });
+    await page.setViewportSize({ width: 360, height: 740 });
+    await page.goto("/");
+    await page.getByTestId("opencode-open").click();
+
+    const message = page.getByRole("textbox", { name: "Сообщение OpenCode" });
+    await expect(message).toBeEnabled();
+    await message.fill("Анимация");
+    await page.getByRole("button", { name: "Отправить", exact: true }).click();
+
+    const turnStatus = page.getByTestId("opencode-turn-status");
+    await expect(turnStatus).toContainText("Выполняется");
+    const ellipsis = page.getByTestId("opencode-running-ellipsis");
+    await expect(ellipsis).toHaveAttribute("aria-hidden", "true");
+    const dots = ellipsis.locator("span");
+    await expect(dots).toHaveCount(3);
+
+    const styles = await dots.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const computed = getComputedStyle(node);
+        return { name: computed.animationName, delay: computed.animationDelay };
+      }),
+    );
+    expect(styles.every((style) => style.name !== "none")).toBe(true);
+    expect(new Set(styles.map((style) => style.delay)).size).toBe(3);
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect
+      .poll(() =>
+        dots.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).animationName)),
+      )
+      .toEqual(["none", "none", "none"]);
+    await expect(turnStatus).toHaveAttribute("role", "status");
+    await expect(turnStatus).toContainText("Выполняется");
+
+    releaseGate.release?.();
+    await expect(turnStatus).toContainText("Готово");
+    await expect(page.getByTestId("opencode-running-ellipsis")).toHaveCount(0);
+  } finally {
+    releaseGate.release?.();
+    await new Promise<void>((resolve, reject) => {
+      stub.close((error) => (error === undefined ? resolve() : reject(error)));
+    });
+  }
 });
 
 test("unconfirmed: нет авто-GET, Проверить статус делает один GET без нового prompt", async ({
