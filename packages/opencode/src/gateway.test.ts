@@ -2659,5 +2659,174 @@ describe("OpenCode gateway", () => {
         vi.useRealTimers();
       }
     });
+
+    it("abort queued caller завершает ensure сразу, а поздний queued entry не вызывает SDK", async () => {
+      let releaseGet!: (value: unknown) => void;
+      const get = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            releaseGet = resolve;
+          }),
+      );
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+
+      const caller = new AbortController();
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача", caller.signal);
+      caller.abort();
+      // Без ожидания чужого preflight и без advance таймеров.
+      await expect(second).resolves.toBeNull();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(update).not.toHaveBeenCalled();
+
+      // После разблокировки первого отменённый queued entry — no-op.
+      releaseGet(ownedInfo());
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(
+        { sessionID: "ses-1", title: "Первая задача" },
+        { signal: expect.any(AbortSignal) },
+      );
+    });
+
+    it("общий deadline queued вызова включает ожидание очереди", async () => {
+      vi.useFakeTimers();
+      try {
+        let getCalls = 0;
+        const get = vi.fn(() => {
+          getCalls += 1;
+          return new Promise<unknown>(() => undefined);
+        });
+        const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get, update }, message: { list } }),
+        );
+        const firstCaller = new AbortController();
+
+        const first = gateway.ensureSessionTitle("ses-1", "Первая задача", firstCaller.signal);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getCalls).toBe(1);
+
+        const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+        let secondSettled = false;
+        void second.then(() => {
+          secondSettled = true;
+        });
+
+        // Второй уже потратил 1.5 s из своего бюджета на очередь.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(secondSettled).toBe(false);
+        expect(getCalls).toBe(1);
+
+        // Освобождаем очередь; второй получает только остаток бюджета.
+        firstCaller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(first).resolves.toBeNull();
+        expect(getCalls).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(499);
+        expect(secondSettled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(second).resolves.toBeNull();
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("не запускает новый auto update, пока предыдущая mutation не settled", async () => {
+      vi.useFakeTimers();
+      try {
+        for (const settle of ["resolve", "reject"] as const) {
+          const settlements: Array<(value: unknown) => void> = [];
+          const rejections: Array<(reason: unknown) => void> = [];
+          const update = vi.fn(
+            () =>
+              new Promise<unknown>((resolve, reject) => {
+                settlements.push(resolve);
+                rejections.push(reject);
+              }),
+          );
+          const get = vi.fn(async () => ownedInfo());
+          const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+          const gateway = createOpenCodeGateway(
+            asClient({ session: { get, update }, message: { list } }),
+          );
+
+          const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+          await vi.advanceTimersByTimeAsync(2_000);
+          await expect(first).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+
+          const getCalls = get.mock.calls.length;
+          const listCalls = list.mock.calls.length;
+          const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(second).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+          expect(get).toHaveBeenCalledTimes(getCalls);
+          expect(list).toHaveBeenCalledTimes(listCalls);
+
+          if (settle === "resolve") settlements[0]?.(undefined);
+          else rejections[0]?.({ status: 503, _tag: "Unavailable" });
+          await vi.advanceTimersByTimeAsync(0);
+
+          // После фактического settle eligibility проверяется заново.
+          const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(update).toHaveBeenCalledTimes(2);
+          settlements[1]?.(undefined);
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("caller abort во время update оставляет mutation uncertain", async () => {
+      const settlements: Array<(value: unknown) => void> = [];
+      const update = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            settlements.push(resolve);
+          }),
+      );
+      const get = vi.fn(async () => ownedInfo());
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+      const caller = new AbortController();
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача", caller.signal);
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+      caller.abort();
+      await expect(first).resolves.toBeNull();
+
+      const getCalls = get.mock.calls.length;
+      const listCalls = list.mock.calls.length;
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+      await expect(second).resolves.toBeNull();
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(get).toHaveBeenCalledTimes(getCalls);
+      expect(list).toHaveBeenCalledTimes(listCalls);
+
+      settlements[0]?.(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+      settlements[1]?.(undefined);
+      await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+    });
   });
 });

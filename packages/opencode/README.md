@@ -139,15 +139,20 @@ Bearer token в браузер не передаётся. Ответы имею�
   `metadata.source=kanbaner`, текущий project directory, title ровно
   `Kanbaner chat` и пустую canonical history, после чего best-effort вызывает
   `session.update` только с `title`. Ошибка/недоступность не меняет исход
-  prompt. Preflight ограничен внутренним deadline 2 s: даже если SDK
-  игнорирует `AbortSignal`, prompt не ждёт get/list/update дольше; caller
-  signal связывается с внутренним controller, поэтому истечение preflight
-  возвращает `null` и не отменяет prompt. Preflight одной сессии
-  сериализуется, чтобы два первых prompt не сделали A/B update: второй
-  перечитывает canonical title/history после первого; разные session ID
-  выполняются параллельно. Уже отправленная mutation физически отменяется
-  только если SDK/Service это поддерживает — gateway лишь abort-ит внутренний
-  signal и никогда не делает поздний update после истёкшего deadline.
+  prompt. Общий caller-visible бюджет 2 s стартует до постановки в
+  per-session очередь и покрывает queue wait + get/list/update: второй вызов
+  не получает новые 2 s после ожидания. Caller signal связывается с внутренним
+  controller, поэтому abort/deadline возвращает `null` и не отменяет prompt, а
+  отменённый queued entry позже доходит до очереди как no-op без SDK-вызовов.
+  Preflight одной сессии сериализуется, чтобы два первых prompt не сделали
+  A/B update: второй перечитывает canonical title/history после первого;
+  разные session ID выполняются параллельно. После запуска `session.update`
+  gateway держит per-session uncertain/in-flight guard до фактического settle
+  upstream Promise: deadline/abort его не снимает, и новый auto update во время
+  uncertainty не отправляется. Состояние очищается при success/error, после
+  чего eligibility проверяется заново. Уже отправленная mutation физически
+  отменяется только если SDK/Service это поддерживает: поздний A может
+  перезаписать B, но новый auto update во время uncertainty запрещён.
   Подтверждённый title возвращается ASCII-encoded header
   `x-kanbaner-session-title`; панель сразу применяет его к текущей
   generation/сессии и инвалидирует историю. Первый canonical GET после header
