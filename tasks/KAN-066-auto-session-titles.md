@@ -1,7 +1,7 @@
 ---
 id: KAN-066
 title: Автоматические названия OpenCode-сессий из первого запроса
-status: in_progress
+status: review
 stage: 8
 priority: medium
 owner: worker-kan-066
@@ -129,6 +129,10 @@ specs:
   входило в deadline и не реагировало на caller abort; medium: после timeout
   незавершённого update допускался второй auto-update. Задача возвращена в
   `in_progress`.
+- 2026-11-25 — Worker ограничил общий 2-секундный budget включая очередь и
+  добавил uncertain mutation guard коммитом `b53fbbe`. Focused 233/233,
+  OpenCode E2E 29/29, полный `pnpm check` — 145 files / 2101 tests. Статус
+  `review`.
 
 ## Итог
 
