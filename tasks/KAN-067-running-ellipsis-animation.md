@@ -1,7 +1,7 @@
 ---
 id: KAN-067
 title: Анимация троеточия статуса «Выполняется»
-status: in_progress
+status: review
 stage: 8
 priority: low
 owner: worker-kan-067
@@ -90,6 +90,9 @@ specs:
 
 - 2026-11-25 — Задача создана по запросу пользователя; назначен
   `worker-kan-067`, статус `in_progress`.
+- 2026-11-25 — Worker добавил staggered pulse и reduced-motion regression.
+  Коммит `0967e58`; focused UI 110/110, OpenCode E2E 30/30, полный
+  `pnpm check` зелёный. Статус `review`.
 
 ## Итог
 
