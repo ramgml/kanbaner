@@ -1,13 +1,13 @@
 ---
 id: KAN-067
 title: Анимация троеточия статуса «Выполняется»
-status: review
+status: done
 stage: 8
 priority: low
 owner: worker-kan-067
 blocked_by: []
-branch: feat/kan-067-running-ellipsis-animation
-worktree: .worktrees/kan-067-running-ellipsis-animation
+branch: dev
+worktree: .
 created: 2026-11-25
 updated: 2026-11-25
 specs:
@@ -33,12 +33,12 @@ specs:
 
 ## Объём работ
 
-- [ ] Отделить визуальные точки от текстового статуса только для `running`.
-- [ ] Добавить последовательную анимацию существующими Tailwind/CSS средствами
+- [x] Отделить визуальные точки от текстового статуса только для `running`.
+- [x] Добавить последовательную анимацию существующими Tailwind/CSS средствами
   без новых зависимостей.
-- [ ] Добавить focused regression для трёх точек, aria-hidden, stable status и
+- [x] Добавить focused regression для трёх точек, aria-hidden, stable status и
   reduced-motion классов; при необходимости Playwright computed style.
-- [ ] Обновить краткую UI-документацию и создать отчёт.
+- [x] Обновить краткую UI-документацию и создать отчёт.
 
 ## Владение файлами
 
@@ -67,11 +67,11 @@ specs:
 
 ## Критерии приёмки
 
-- [ ] `running` содержит «Выполняется» и ровно три декоративные точки.
-- [ ] Точки имеют последовательные задержки и reduced-motion отключение.
-- [ ] `connecting`, `finalizing`, `done`, `cancelled`, `error`, retry и ручная
+- [x] `running` содержит «Выполняется» и ровно три декоративные точки.
+- [x] Точки имеют последовательные задержки и reduced-motion отключение.
+- [x] `connecting`, `finalizing`, `done`, `cancelled`, `error`, retry и ручная
   проверка статуса не изменились.
-- [ ] Focused tests, OpenCode E2E и полный `pnpm check` зелёные.
+- [x] Focused tests, OpenCode E2E и полный `pnpm check` зелёные.
 
 ## Проверки
 
@@ -92,8 +92,17 @@ specs:
   `worker-kan-067`, статус `in_progress`.
 - 2026-11-25 — Worker добавил staggered pulse и reduced-motion regression.
   Коммит `0967e58`; focused UI 110/110, OpenCode E2E 30/30, полный
-  `pnpm check` зелёный. Статус `review`.
+  `pnpm check` зелёный.
+- 2026-11-25 — Независимое ревью не нашло blocker/high/medium/low. После
+  rebase коммит `15417f6` интегрирован merge-коммитом `97f7297`. Проверки на
+  ветке и `dev` зелёные; OpenCode E2E на `dev` — 30/30, imports и SQLite smoke
+  зелёные. Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Статус `Выполняется` получил три последовательно пульсирующие точки с
+фиксированной шириной. Анимация не меняет DOM по таймеру, скрыта от screen
+reader и отключается при reduced motion. Другие стадии и prompt-контракты не
+изменились.
+
+Merge: `97f7297`. Feature-ветка и worktree удалены. Push не выполнялся.
