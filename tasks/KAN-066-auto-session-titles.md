@@ -1,7 +1,7 @@
 ---
 id: KAN-066
 title: Автоматические названия OpenCode-сессий из первого запроса
-status: review
+status: in_progress
 stage: 8
 priority: medium
 owner: worker-kan-066
@@ -124,7 +124,11 @@ specs:
   Задача возвращена в `in_progress`.
 - 2026-11-25 — Worker добавил bounded abortable preflight, per-session queue и
   UI grace regressions коммитом `bcdb252`. Focused 229/229, OpenCode E2E 29/29,
-  полный `pnpm check` — 145 files / 2097 tests. Статус `review`.
+  полный `pnpm check` — 145 files / 2097 tests.
+- 2026-11-25 — Повторное ревью нашло high: ожидание per-session queue не
+  входило в deadline и не реагировало на caller abort; medium: после timeout
+  незавершённого update допускался второй auto-update. Задача возвращена в
+  `in_progress`.
 
 ## Итог
 
