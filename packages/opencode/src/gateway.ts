@@ -70,6 +70,11 @@ const ADMITTED_TYPE = "kanbaner.turn.admitted";
 const CANONICAL_ATTEMPTS = 3;
 const CANONICAL_DELAY_MS = 50;
 const CANONICAL_DEADLINE_MS = 600;
+/**
+ * Верхняя граница title preflight. Даже если SDK/Service игнорирует
+ * AbortSignal, prompt не должен ждать get/list/update дольше этого времени.
+ */
+const SESSION_TITLE_PREFLIGHT_TIMEOUT_MS = 2_000;
 
 function dataField(data: unknown, key: string): unknown {
   return isRecord(data) && key in data ? data[key] : undefined;
@@ -567,8 +572,16 @@ async function translated<T>(operation: () => Promise<T>): Promise<T> {
  * `metadata.source=kanbaner` в текущем проекте. Чужая, child или сессия
  * другого проекта неотличима от отсутствующей.
  */
-async function ownedSession(client: OpenCodeClient, sessionID: string): Promise<unknown> {
-  const info = await translated(() => client.session.get({ sessionID }));
+async function ownedSession(
+  client: OpenCodeClient,
+  sessionID: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const info = await translated(() =>
+    signal === undefined
+      ? client.session.get({ sessionID })
+      : client.session.get({ sessionID }, { signal }),
+  );
   if (
     !isRecord(info) ||
     !isRecord(info.metadata) ||
@@ -606,6 +619,72 @@ async function allMessages(
     if (next === undefined || cursors.has(next)) return messages;
     cursors.add(next);
     cursor = next;
+  }
+}
+
+/**
+ * Один title preflight с собственным deadline. Caller signal только связывается
+ * с внутренним controller: истечение/отмена preflight возвращает null и не
+ * отменяет основной prompt. Never-resolving SDK не блокирует вызов: deadline
+ * выигрывает гонку, а продолжение цепочки после abort не доходит до update.
+ */
+async function preflightSessionTitle(
+  client: OpenCodeClient,
+  sessionID: string,
+  text: string,
+  callerSignal: AbortSignal | undefined,
+): Promise<OpenCodeSessionRename | null> {
+  if (callerSignal?.aborted === true) return null;
+  const title = deriveSessionTitle(text);
+  if (title === null) return null;
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      // Просим SDK прервать уже отправленный get/list/update; физическая
+      // отмена mutation зависит от SDK/Service и не гарантируется.
+      controller.abort();
+      resolve(null);
+    }, SESSION_TITLE_PREFLIGHT_TIMEOUT_MS);
+  });
+  const callerAborted = new Promise<null>((resolve) => {
+    if (callerSignal === undefined) return;
+    onCallerAbort = () => {
+      controller.abort();
+      resolve(null);
+    };
+    callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+  });
+
+  const operation = (async (): Promise<OpenCodeSessionRename | null> => {
+    const info = await ownedSession(client, sessionID, controller.signal);
+    // После каждого await: preflight, истёкший по deadline, не продолжает
+    // цепочку и не начинает update.
+    if (controller.signal.aborted) return null;
+    if (!isRecord(info)) return null;
+    if ((stringField(info.title) ?? null) !== DEFAULT_SESSION_TITLE) return null;
+    const page = await translated(() =>
+      client.message.list({ sessionID, limit: 1 }, { signal: controller.signal }),
+    );
+    if (controller.signal.aborted) return null;
+    if (!isRecord(page) || !Array.isArray(page.data) || page.data.length > 0) return null;
+    if (controller.signal.aborted) return null;
+    await translated(() =>
+      client.session.update({ sessionID, title }, { signal: controller.signal }),
+    );
+    return { id: sessionID, title };
+  })().catch(() => null);
+
+  try {
+    return await Promise.race([operation, deadline, callerAborted]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (callerSignal !== undefined && onCallerAbort !== undefined) {
+      callerSignal.removeEventListener("abort", onCallerAbort);
+    }
   }
 }
 
@@ -813,6 +892,37 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
    * Размер ограничен, чтобы карта не росла бесконечно.
    */
   const turnAliases = new Map<string, string>();
+  /**
+   * Per-session очередь title preflight. Два параллельных первых prompt не
+   * должны оба увидеть default+empty и сделать A/B update: второй начинает
+   * eligibility только после завершения/timeout первого и перечитывает
+   * canonical title/history. Разные session ID не блокируют друг друга.
+   */
+  const titlePreflights = new Map<string, Promise<void>>();
+  const serializedTitlePreflight = async (
+    sessionID: string,
+    operation: () => Promise<OpenCodeSessionRename | null>,
+  ): Promise<OpenCodeSessionRename | null> => {
+    const previous = titlePreflights.get(sessionID) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Tail резолвится только после release и никогда не reject: следующий
+    // preflight не наследует ошибку/abort предыдущего.
+    const tail = previous.then(
+      () => gate,
+      () => gate,
+    );
+    titlePreflights.set(sessionID, tail);
+    try {
+      await previous.catch(() => undefined);
+      return await operation();
+    } finally {
+      release();
+      if (titlePreflights.get(sessionID) === tail) titlePreflights.delete(sessionID);
+    }
+  };
   const turnKey = (sessionID: string, turnID: string): string => `${sessionID}\u0000${turnID}`;
   const rememberTurnAlias = (sessionID: string, requested: string, admitted: string): void => {
     if (requested === admitted) return;
@@ -950,25 +1060,13 @@ export function createOpenCodeGateway(client: OpenCodeClient): OpenCodeGateway {
      * history у owned top-level сессии текущего проекта. Любая ошибка,
      * ineligible-сессия и abort возвращают null и не влияют на prompt.
      */
-    ensureSessionTitle: async (sessionID, text, signal) => {
-      const aborted = (): boolean => signal?.aborted === true;
-      try {
-        if (aborted()) return null;
-        const title = deriveSessionTitle(text);
-        if (title === null) return null;
-        const info = await ownedSession(client, sessionID);
-        if (aborted()) return null;
-        if (!isRecord(info)) return null;
-        if ((stringField(info.title) ?? null) !== DEFAULT_SESSION_TITLE) return null;
-        const page = await client.message.list({ sessionID, limit: 1 });
-        if (aborted()) return null;
-        if (!isRecord(page) || !Array.isArray(page.data) || page.data.length > 0) return null;
-        await client.session.update({ sessionID, title });
-        if (aborted()) return null;
-        return { id: sessionID, title };
-      } catch {
-        return null;
-      }
+    ensureSessionTitle: (sessionID, text, signal) => {
+      // Быстрый отказ до постановки в очередь: отменённый prompt не ждёт
+      // чужой preflight ради собственного null.
+      if (signal?.aborted === true) return Promise.resolve(null);
+      return serializedTitlePreflight(sessionID, () =>
+        preflightSessionTitle(client, sessionID, text, signal),
+      );
     },
 
     getSession: (sessionID) =>

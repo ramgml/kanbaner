@@ -4565,19 +4565,10 @@ describe("OpenCode session history", () => {
     expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Разобрать логи");
   });
 
-  it("stale refresh не откатывает auto title, а свежий canonical GET принимается", async () => {
+  it("grace первого canonical GET сохраняет auto title, применяет messages и гасит overlay", async () => {
     window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
     let getCalls = 0;
-    let promptCalls = 0;
     const refreshGate: { release: ((response: Response) => void) | null } = { release: null };
-    const streamGate: { controller: ReadableStreamDefaultController<Uint8Array> | null } = {
-      controller: null,
-    };
-    const secondBody = new ReadableStream<Uint8Array>({
-      start(controller) {
-        streamGate.controller = controller;
-      },
-    });
     fetchMock.mockImplementation((input, init) => {
       const url = String(input);
       const method = init?.method ?? "GET";
@@ -4586,14 +4577,9 @@ describe("OpenCode session history", () => {
         return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
       }
       if (url === "/api/opencode/session/ses-1/prompt") {
-        promptCalls += 1;
-        if (promptCalls === 1) return Promise.resolve(stream([{ kind: "done" }]));
         return Promise.resolve(
-          new Response(secondBody, {
-            headers: {
-              "content-type": "application/x-ndjson",
-              "x-kanbaner-session-title": encodeURIComponent("Логи"),
-            },
+          stream([{ kind: "done" }], {
+            "x-kanbaner-session-title": encodeURIComponent("Логи"),
           }),
         );
       }
@@ -4605,52 +4591,224 @@ describe("OpenCode session history", () => {
             refreshGate.release = resolve;
           });
         }
-        return Promise.resolve(
-          success({
-            ...session("ses-1"),
-            title: "Серверное",
-            messages: [{ id: "assistant:fresh", role: "assistant", text: "Свежий" }],
-          }),
-        );
       }
       throw new Error(`Unexpected fetch ${method} ${url}`);
     });
     render(<OpenCodePanel />);
     const message = await composer();
-    fireEvent.change(message, { target: { value: "Первый вопрос" } });
+    fireEvent.change(message, { target: { value: "Разобрать логи" } });
     fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Готово"),
     );
     expect(refreshGate.release).not.toBeNull();
 
-    // Второй prompt получает title header, пока pre-header refresh ещё летит.
-    fireEvent.change(message, { target: { value: "Второй вопрос" } });
-    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
-    );
-
-    // Stale GET относится к прошлому generation: его title и messages не
-    // применяются и не откатывают подтверждённое auto title.
+    // Grace — это не «GET начался до header»: единственный done-refresh уже
+    // стартовал после header, но мог быть собран до server-side update.
+    // Поэтому первый canonical GET применяет messages, сохраняет auto title
+    // и гасит overlay; следующий GET уже доверяет canonical.
     refreshGate.release?.(
       success({
         ...session("ses-1"),
         title: "Kanbaner chat",
-        messages: [{ id: "assistant:canonical", role: "assistant", text: "Старый canonical" }],
+        messages: [{ id: "assistant:canonical", role: "assistant", text: "Канонические данные" }],
       }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.queryByText("Старый canonical")).toBeNull();
+    expect(await screen.findByText("Канонические данные")).toBeVisible();
+    expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи");
+  });
+
+  it("после grace следующий canonical GET принимает серверный title без смены generation", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let checkCalls = 0;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "GET") {
+        return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
+      }
+      if (url === "/api/opencode/session/ses-1/prompt") {
+        return Promise.resolve(
+          stream([{ kind: "finalizing" }], {
+            "x-kanbaner-session-title": encodeURIComponent("Логи"),
+          }),
+        );
+      }
+      if (url.startsWith("/api/opencode/session/ses-1?turnID=")) {
+        checkCalls += 1;
+        // Pending GET не применяет canonical, но расходует grace.
+        if (checkCalls === 1) {
+          return Promise.resolve(success({ session: session("ses-1"), outcome: "pending" }));
+        }
+        return Promise.resolve(
+          success({
+            session: {
+              ...session("ses-1"),
+              title: "Серверное",
+              messages: [{ id: "assistant:fresh", role: "assistant", text: "Свежие данные" }],
+            },
+            outcome: "done",
+          }),
+        );
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Разобрать логи" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent(
+        "Результат не подтверждён",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent(
+        "Результат пока не подтверждён",
+      ),
+    );
     expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи");
 
-    // Свежий canonical refresh после done уже доверяет серверному title.
-    streamGate.controller?.enqueue(
-      new TextEncoder().encode(`${JSON.stringify({ kind: "done" })}\n`),
-    );
-    streamGate.controller?.close();
-    expect(await screen.findByText("Свежий")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Проверить статус" }));
+    expect(await screen.findByText("Свежие данные")).toBeVisible();
     expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Серверное");
+    expect(checkCalls).toBe(2);
+  });
+
+  it("auto header применяется при cancelled и не меняет outcome", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let promptCalls = 0;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "GET") {
+        return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
+      }
+      if (url === "/api/opencode/session/ses-1/prompt") {
+        promptCalls += 1;
+        return Promise.resolve(
+          stream([{ kind: "cancelled", text: "Запрос остановлен" }], {
+            "x-kanbaner-session-title": encodeURIComponent("Логи"),
+          }),
+        );
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Разобрать логи" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Остановлено"),
+    );
+    expect(promptCalls).toBe(1);
+  });
+
+  it("auto header применяется при unconfirmed и не меняет outcome", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let promptCalls = 0;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "GET") {
+        return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
+      }
+      if (url === "/api/opencode/session/ses-1/prompt") {
+        promptCalls += 1;
+        return Promise.resolve(
+          stream([{ kind: "finalizing" }], {
+            "x-kanbaner-session-title": encodeURIComponent("Логи"),
+          }),
+        );
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Разобрать логи" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent(
+        "Результат не подтверждён",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Проверить статус" })).toBeVisible();
+    expect(promptCalls).toBe(1);
+  });
+
+  it("auto header применяется при NDJSON nonAdmission и не меняет outcome", async () => {
+    window.localStorage.setItem("kanbaner.opencode.sessionId", "ses-1");
+    let promptCalls = 0;
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/opencode/catalog") return Promise.resolve(success(catalog));
+      if (url === "/api/opencode/session" && method === "GET") {
+        return Promise.resolve(success([summary("ses-1", "Kanbaner chat", 3_000)]));
+      }
+      if (url === "/api/opencode/session/ses-1/prompt") {
+        promptCalls += 1;
+        return Promise.resolve(
+          stream(
+            [
+              {
+                kind: "error",
+                text: "Prompt не принят",
+                nonAdmission: true,
+                retryable: true,
+              },
+            ],
+            { "x-kanbaner-session-title": encodeURIComponent("Логи") },
+          ),
+        );
+      }
+      if (url === "/api/opencode/session/ses-1" && method === "GET") {
+        return Promise.resolve(success(session("ses-1")));
+      }
+      throw new Error(`Unexpected fetch ${method} ${url}`);
+    });
+    render(<OpenCodePanel />);
+    const message = await composer();
+    fireEvent.change(message, { target: { value: "Разобрать логи" } });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-session-title")).toHaveTextContent("Логи"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("opencode-turn-status")).toHaveTextContent("Ошибка запроса"),
+    );
+    expect(screen.getByRole("button", { name: "Повторить запрос" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Проверить статус" })).toBeNull();
+    expect(promptCalls).toBe(1);
   });
 
   it("ручной rename после auto title остаётся и попадает в историю", async () => {

@@ -1446,7 +1446,10 @@ export function OpenCodePanel({ search }: OpenCodePanelProps) {
       if (announcedTitle !== null && currentGeneration()) {
         titleOverridesRef.current.set(sessionID, {
           title: announcedTitle,
-          confirmedSeq: canonicalRequestSeqRef.current,
+          // Первый post-header canonical GET мог стартовать до server-side
+          // update и вернуть старый default. Даём подтверждённому title grace
+          // на этот один refresh; следующий свежий GET доверяет canonical.
+          confirmedSeq: canonicalRequestSeqRef.current + 1,
         });
         setSession((current) =>
           current === null || current.id !== sessionID

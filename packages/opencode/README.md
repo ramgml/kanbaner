@@ -139,10 +139,22 @@ Bearer token в браузер не передаётся. Ответы имею�
   `metadata.source=kanbaner`, текущий project directory, title ровно
   `Kanbaner chat` и пустую canonical history, после чего best-effort вызывает
   `session.update` только с `title`. Ошибка/недоступность не меняет исход
-  prompt. Подтверждённый title возвращается ASCII-encoded header
+  prompt. Preflight ограничен внутренним deadline 2 s: даже если SDK
+  игнорирует `AbortSignal`, prompt не ждёт get/list/update дольше; caller
+  signal связывается с внутренним controller, поэтому истечение preflight
+  возвращает `null` и не отменяет prompt. Preflight одной сессии
+  сериализуется, чтобы два первых prompt не сделали A/B update: второй
+  перечитывает canonical title/history после первого; разные session ID
+  выполняются параллельно. Уже отправленная mutation физически отменяется
+  только если SDK/Service это поддерживает — gateway лишь abort-ит внутренний
+  signal и никогда не делает поздний update после истёкшего deadline.
+  Подтверждённый title возвращается ASCII-encoded header
   `x-kanbaner-session-title`; панель сразу применяет его к текущей
-  generation/сессии и инвалидирует историю. Ручной non-default title и
-  непустая сессия не переименовываются.
+  generation/сессии и инвалидирует историю. Первый canonical GET после header
+  получает grace: он мог быть собран до server-side update, поэтому применяет
+  canonical messages, сохраняет auto title и гасит overlay; следующий GET
+  доверяет canonical. Ручной non-default title и непустая сессия не
+  переименовываются.
 - Выбор записи выполняет guarded `GET` точной сессии. `404` удаляет только
   недоступную запись из списка и не меняет текущую сессию или сохранённый ID;
   `503` показывает «Не удалось открыть сессию» и кнопку повтора. Неуспешный
