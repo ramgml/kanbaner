@@ -307,6 +307,47 @@ describe("KernelSearchService", () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it("не выставляет hasMore за границей MAX_AGGREGATE_PAGE", async () => {
+    const provider = new InMemoryStorageProvider({
+      backendId: `memory-search-${globalThis.crypto.randomUUID()}`,
+    });
+    providers.push(provider);
+    const service = createSearchService(provider);
+    // Провайдер намеренно игнорирует limit: агрегатор сам режет страницу и
+    // обязан не обещать продолжение за пределами окна выдачи.
+    const hits = Array.from({ length: 1200 }, (_, index) =>
+      hit(ref("kanbaner.alpha", `r${String(index).padStart(4, "0")}`), 1),
+    );
+
+    await provider.open();
+    service.registerProvider(
+      "kanbaner.alpha",
+      providerById("kanbaner.alpha", {
+        search: async () => hits,
+      }),
+    );
+
+    const lastPage = await service.aggregate({ text: "anything", limit: 20, offset: 980 });
+
+    expect(lastPage.hits).toHaveLength(20);
+    expect(lastPage.hits[0]?.ref).toBe(ref("kanbaner.alpha", "r0980"));
+    expect(lastPage.hasMore).toBe(false);
+
+    const penultimate = await service.aggregate({ text: "anything", limit: 20, offset: 970 });
+
+    expect(penultimate.hits).toHaveLength(20);
+    expect(penultimate.hasMore).toBe(true);
+
+    const tailPage = await service.aggregate({ text: "anything", limit: 10, offset: 990 });
+
+    expect(tailPage.hits).toHaveLength(10);
+    expect(tailPage.hasMore).toBe(false);
+
+    await expect(service.aggregate({ text: "anything", limit: 20, offset: 990 })).rejects.toThrow(
+      "offset + limit",
+    );
+  });
+
   it("сохраняет выдачу с warning provider_failed при отказе одного провайдера", async () => {
     const provider = new InMemoryStorageProvider({
       backendId: `memory-search-${globalThis.crypto.randomUUID()}`,

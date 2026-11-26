@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import type { JsonValue } from "@kanbaner/plugin-sdk";
 
-import { SEARCH_QUERY_IDS } from "../constants.ts";
+import { SEARCH_DEFAULT_LIMIT, SEARCH_MAX_OFFSET, SEARCH_QUERY_IDS } from "../constants.ts";
 import type {
   SearchFacet,
   SearchFilterInput,
@@ -55,6 +55,14 @@ function facetValueLabel(facet: SearchFacet, value: string): string {
   return facet.values.find((candidate) => candidate.value === value)?.label ?? value;
 }
 
+/**
+ * Размер страницы для текущей позиции. На последней допустимой странице
+ * окно урезается, чтобы offset + limit не выходил за SEARCH_MAX_OFFSET.
+ */
+function pageLimitAt(offset: number): number {
+  return Math.min(SEARCH_DEFAULT_LIMIT, SEARCH_MAX_OFFSET - offset);
+}
+
 function warningText(code: string, providerId: string): string {
   if (code === "provider_failed") {
     return `Провайдер ${providerId} временно недоступен`;
@@ -76,6 +84,7 @@ export function SearchView(props: SearchUiRendererProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [pageCursor, setPageCursor] = useState(0);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -142,8 +151,15 @@ export function SearchView(props: SearchUiRendererProps) {
       setLoading(true);
       setError(null);
       setOpenError(null);
+      // Новый запрос всегда начинает первую страницу: курсор прошлой выдачи
+      // сбрасывается до получения ответа.
+      setPageCursor(0);
 
-      const input: { [key: string]: JsonValue } = { text: trimmed };
+      const input: { [key: string]: JsonValue } = {
+        text: trimmed,
+        limit: SEARCH_DEFAULT_LIMIT,
+        offset: 0,
+      };
 
       if (kind.length > 0) {
         input.kinds = [kind];
@@ -161,6 +177,9 @@ export function SearchView(props: SearchUiRendererProps) {
         const data = await invokeSearch<SearchQueryOutput>(invoke, SEARCH_QUERY_IDS.query, input);
 
         if (generation === requestRef.current) {
+          // Курсор считается по сырым hits ответа, а не по дедуплицированному
+          // React-списку: иначе полностью повторная страница не сдвинет offset.
+          setPageCursor(data.hits.length);
           setResult(data);
         }
       } catch (cause) {
@@ -182,21 +201,29 @@ export function SearchView(props: SearchUiRendererProps) {
       return;
     }
 
+    const offset = pageCursor;
+    const limit = pageLimitAt(offset);
+
+    if (limit < 1 || offset + limit > SEARCH_MAX_OFFSET) {
+      return;
+    }
+
     const generation = requestRef.current + 1;
-    const nextOffset = result.hits.length;
     requestRef.current = generation;
     setLoading(true);
     setError(null);
 
     const input: { [key: string]: JsonValue } = {
       ...activeQuery.input,
-      offset: nextOffset,
+      offset,
+      limit,
     };
 
     try {
       const data = await invokeSearch<SearchQueryOutput>(invoke, SEARCH_QUERY_IDS.query, input);
 
       if (generation === requestRef.current) {
+        setPageCursor(offset + data.hits.length);
         setResult((current) =>
           current === null ? data : { ...data, hits: mergeHits(current.hits, data.hits) },
         );
@@ -210,7 +237,7 @@ export function SearchView(props: SearchUiRendererProps) {
         setLoading(false);
       }
     }
-  }, [activeQuery, invoke, loading, result]);
+  }, [activeQuery, invoke, loading, pageCursor, result]);
 
   const openHit = useCallback(
     (hit: SearchHitResult) => {
@@ -231,6 +258,8 @@ export function SearchView(props: SearchUiRendererProps) {
   );
 
   const hits = result?.hits ?? EMPTY_HITS;
+  const canLoadMore =
+    result?.hasMore === true && pageCursor < SEARCH_MAX_OFFSET && pageLimitAt(pageCursor) > 0;
   const warnings = useMemo(() => {
     const all = [...(filters?.warnings ?? []), ...(result?.warnings ?? [])];
     const seen = new Set<string>();
@@ -407,7 +436,7 @@ export function SearchView(props: SearchUiRendererProps) {
               </li>
             ))}
           </ul>
-          {result?.hasMore === true ? (
+          {canLoadMore ? (
             <button
               type="button"
               className={`${buttonClass} self-start`}

@@ -436,7 +436,10 @@ export class KernelSearchService implements SearchRegistrar {
 
     return {
       hits: merged.slice(offset, offset + limit),
-      hasMore: merged.length > offset + limit,
+      // Следующая страница должна начинаться внутри окна выдачи: при
+      // offset + limit === MAX_AGGREGATE_PAGE продолжение уже недоступно,
+      // иначе UI запросил бы недопустимый offset + limit > MAX_AGGREGATE_PAGE.
+      hasMore: merged.length > offset + limit && offset + limit < MAX_AGGREGATE_PAGE,
       warnings,
     };
   }

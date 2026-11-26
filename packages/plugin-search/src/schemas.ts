@@ -1,7 +1,12 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { createJsonObjectSchema, DRAFT_2020_12 } from "@kanbaner/plugin-sdk";
 
-import { SEARCH_MAX_FILTERS, SEARCH_MAX_LIMIT, SEARCH_MAX_TEXT_LENGTH } from "./constants.ts";
+import {
+  SEARCH_MAX_FILTERS,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MAX_OFFSET,
+  SEARCH_MAX_TEXT_LENGTH,
+} from "./constants.ts";
 
 const INPUT_SCHEMA = { ...DRAFT_2020_12, additionalProperties: false } as const;
 
@@ -26,7 +31,7 @@ export const SearchQueryInputSchema = Type.Object(
     ),
     filters: Type.Optional(Type.Array(SearchFilterSchema, { maxItems: SEARCH_MAX_FILTERS })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: SEARCH_MAX_LIMIT })),
-    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000 })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: SEARCH_MAX_OFFSET })),
   },
   INPUT_SCHEMA,
 );

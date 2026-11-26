@@ -123,6 +123,8 @@ describe("SearchView", () => {
         { field: "projectId", operator: "eq", value: "project-1" },
         { field: "tags", operator: "contains", value: "search" },
       ],
+      limit: 20,
+      offset: 0,
     });
 
     const hit = screen.getByRole("button", { name: /Маркерная задача/u });
@@ -247,8 +249,89 @@ describe("SearchView", () => {
     expect(query).toHaveBeenLastCalledWith({
       text: "маркер",
       offset: 2,
+      limit: 20,
     });
     expect(screen.getByTestId("search-count")).toHaveTextContent("Найдено: 3");
+    expect(screen.queryByTestId("search-load-more")).not.toBeInTheDocument();
+  });
+
+  it("сдвигает offset по сырым hits, даже если страница полностью дублирует предыдущую", async () => {
+    const hit = (id: string, title: string): SearchQueryOutput["hits"][number] => ({
+      ref: `kanbaner.tasks:task:${id}`,
+      title,
+      excerpt: "",
+      score: 1,
+      strategy: "full-text",
+      kind: "task",
+    });
+    const pageOne: SearchQueryOutput = {
+      hits: [hit("a", "A"), hit("b", "B")],
+      hasMore: true,
+      warnings: [],
+    };
+    // Вторая страница целиком повторяет первую: дедуплицированный список не
+    // растёт, но курсор обязан сдвинуться на сырые hits ответа.
+    const pageTwo: SearchQueryOutput = {
+      hits: [hit("a", "A"), hit("b", "B")],
+      hasMore: true,
+      warnings: [],
+    };
+    const pageThree: SearchQueryOutput = {
+      hits: [hit("c", "C"), hit("d", "D")],
+      hasMore: false,
+      warnings: [],
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: pageOne })
+      .mockResolvedValueOnce({ ok: true, data: pageTwo })
+      .mockResolvedValueOnce({ ok: true, data: pageThree });
+    const invoke = vi.fn(async (operationId: string, input: unknown) =>
+      operationId === SEARCH_QUERY_IDS.filters ? { ok: true, data: FILTERS } : query(input),
+    ) as unknown as Invoker;
+
+    render(<SearchView invoke={invoke} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId("search-input"), {
+      target: { value: "маркер" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Найти" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/^[AB]$/u)).toHaveLength(2);
+    });
+
+    fireEvent.click(screen.getByTestId("search-load-more"));
+
+    await waitFor(() => {
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("search-load-more")).toBeEnabled();
+    });
+
+    // После дублирующей страницы список остаётся A, B, но кнопка доступна.
+    expect(screen.getAllByText(/^[AB]$/u)).toHaveLength(2);
+    expect(screen.getByTestId("search-load-more")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("search-load-more"));
+
+    await waitFor(() => {
+      expect(screen.getByText("C")).toBeInTheDocument();
+    });
+
+    const offsets = query.mock.calls.map((call) => {
+      const input = call[0] as { offset?: number };
+
+      return input.offset;
+    });
+
+    expect(offsets).toEqual([0, 2, 4]);
+    expect(offsets.filter((offset) => offset === 2)).toHaveLength(1);
+    expect(screen.getAllByText(/^[ABCD]$/u)).toHaveLength(4);
+    expect(screen.getByTestId("search-count")).toHaveTextContent("Найдено: 4");
     expect(screen.queryByTestId("search-load-more")).not.toBeInTheDocument();
   });
 
@@ -314,7 +397,7 @@ describe("SearchView", () => {
     });
 
     expect(screen.queryByText("Старая")).not.toBeInTheDocument();
-    expect(query).toHaveBeenLastCalledWith({ text: "второй" });
+    expect(query).toHaveBeenLastCalledWith({ text: "второй", limit: 20, offset: 0 });
   });
 
   it("игнорирует устаревший ответ, показывая последнюю выдачу", async () => {

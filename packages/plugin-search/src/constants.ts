@@ -11,5 +11,7 @@ export const SEARCH_QUERY_IDS = Object.freeze({
 
 export const SEARCH_DEFAULT_LIMIT = 20;
 export const SEARCH_MAX_LIMIT = 100;
+/** Максимальная граница окна выдачи поиска: offset + limit ≤ SEARCH_MAX_OFFSET. */
+export const SEARCH_MAX_OFFSET = 1000;
 export const SEARCH_MAX_FILTERS = 10;
 export const SEARCH_MAX_TEXT_LENGTH = 500;
