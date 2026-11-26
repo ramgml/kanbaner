@@ -87,7 +87,8 @@ Kanbaner строится как **модульный монолит с plugin-�
 └────────┬─────────┘                   └───────────────┘
          │ stdio
 ┌────────▼─────────┐
-│ kanbaner-mcp     │
+│ kanbaner-mcp-    │
+│ universal        │
 │ внешний адаптер  │
 └──────────────────┘
 ```
@@ -129,7 +130,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 | `kanbaner.projects` | Рабочее пространство проектов: sidebar, доска, список, переключатель представлений | `kanbaner.tasks` | `kanbaner.projects.ui.v1` |
 | `kanbaner.notes` | Заметки и Markdown-редактор | Нет | `kanbaner.notes.commands.v1`, `kanbaner.notes.queries.v1`, `kanbaner.notes.events.v1` |
 | `kanbaner.search` | Полнотекстовый поиск и агрегация провайдеров | Нет | `kanbaner.search.queries.v1`, UI-вклад |
-| `kanbaner.mcp` | Необязательный stdio-адаптер MCP | HTTP API | Не загружается в ядро |
+| `kanbaner.mcp` | Необязательный универсальный discovery-driven stdio-адаптер MCP | HTTP API | Не загружается в ядро |
 | `kanbaner.opencode` | Глобальная панель чата, catalog/session gateway, полный built-in toolset внешнего агента и ограниченный MCP | Внешний OpenCode Service и HTTP API | `kanbaner.opencode.ui.v1`; не владеет доменными данными |
 
 `kanbaner.notes` не зависит от `kanbaner.tasks`. Связь заметки с задачей выражается через `ResourceRef`.
@@ -162,6 +163,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 - `task-ui` — общая клиентская библиотека компонентов, а не плагин: она может зависеть от `plugin-sdk` и `@kanbaner/plugin-tasks/contract`, но не от корневого `@kanbaner/plugin-tasks`, `kernel`, storage, серверных модулей или `apps/web`;
 - UI-entrypoint плагина импортируется только composition-модулем `apps/web/src/ui/builtin-ui-plugins.ts`; shell и слоты работают с metadata из реестра;
 - `cli` является внешним HTTP-клиентом: он может использовать `@kanbaner/plugin-sdk` и client-safe `/contract` entrypoint-ы, но не ядро, Storage Provider или server-активацию плагинов;
+- `mcp` является внешним универсальным stdio-адаптером: он может использовать `@kanbaner/plugin-sdk`, MCP SDK, `zod` и `node:crypto`, но не ядро, Storage Provider, доменные плагины или `apps/web`; доменные вызовы идут только через `/api/v1`;
 - `opencode` зависит только от Plugin SDK и публичного OpenCode client, не импортирует kernel, Storage Provider или доменные плагины; доменные вызовы выполняет отдельный MCP-процесс через `/api/v1`;
 - нарушение правил импорта проверяется автоматическим тестом.
 
@@ -675,8 +677,8 @@ opener не объявляет.
 
 ### 10.2. Экспорт поиска
 
-- `kanbaner.search.query` — `ui: true`, `http: true`, `mcp: true` для будущего
-  универсального discovery-driven MCP.
+- `kanbaner.search.query` — `ui: true`, `http: true`, `mcp: true`; публикуется
+  универсальным discovery-driven MCP.
 - `kanbaner.search.filters` — `ui: true`, `http: true`, `mcp: false`.
 - Ручной OpenCode allowlist не расширяется: `exposure.mcp` не строит его и не
   добавляет операций в `@kanbaner/opencode`.
@@ -701,8 +703,10 @@ GET  /api/v1/resources/{encodedResourceRef}
 ### Правила
 
 - Все ответы используют единый конверт из Plugin Contract.
+- `/api/v1/discovery` аддитивно отдаёт `exposure {ui,http,mcp}` для каждой операции; клиенты игнорируют неизвестные поля.
 - `Authorization: Bearer <token>` обязателен для всего, кроме `/health`.
 - `X-Request-Id` принимается от клиента или генерируется ядром.
+- `x-kanbaner-client: mcp` помечает вызов универсального MCP: audit source становится `{type: "mcp", id: "mcp"}`, остальные запросы получают `{type: "http", id: "api"}`. Заголовок не ослабляет Bearer-проверку.
 - `Idempotency-Key` передаётся для поддерживающих его команд.
 - Тело запроса валидируется по JSON Schema.
 - Ошибки валидации возвращаются до вызова плагина.
@@ -776,28 +780,67 @@ Tool call в истории и stream публикуется как `{ name, sta
 
 ## 12. MCP
 
-`kanbaner-mcp` — необязательный внешний процесс.
+В репозитории два независимых MCP-адаптера:
+
+- `@kanbaner/mcp` — универсальный discovery-driven процесс с executable
+  `kanbaner-mcp-universal`;
+- ручной ограниченный `kanbaner-mcp` внутри `@kanbaner/opencode`.
+
+Оба работают как внешние stdio-процессы и не подключаются к базе.
 
 ```text
 MCP client
     │ stdio
-kanbaner-mcp
+kanbaner-mcp-universal
     │ HTTP + Bearer token
 Kanbaner API
 ```
+
+### Универсальный `@kanbaner/mcp`
 
 Правила:
 
 - адаптер не подключается к базе данных;
 - адаптер не содержит логики задач и заметок;
-- инструменты строятся по метаданным команд с `exposure.mcp = true`;
-- вход и выход валидируются по схемам;
+- discovery перечитывается на каждый `tools/list` и `tools/call`;
+- инструменты строятся из метаданных операций с `exposure.http = true` и
+  `exposure.mcp = true`;
+- вход и выход валидируются по схемам; object output дополнительно отдаётся как
+  `structuredContent`, non-object схемы не публикуются как MCP `outputSchema`;
 - названия инструментов детерминированно преобразуются из command ID с проверкой коллизий;
-- разрушительные команды экспортируются только при явном разрешении и помечаются как опасные;
+- разрушительные команды экспортируются только при явном
+  `KANBANER_MCP_ALLOW_DESTRUCTIVE=true` и помечаются как опасные;
+- mutation с `idempotency = "supported"` получает ключ из operation, input,
+  JSON-RPC request ID, session ID, instance ID и process ID; mutation без
+  поддержки не повторяется после неопределённого post-dispatch сбоя;
+- `expectedVersion` не подставляется: адаптер требует его только если поле
+  обязательно во входной схеме операции;
+- вызовы идут с `x-kanbaner-client: mcp`, поэтому audit source равен
+  `{type: "mcp", id: "mcp"}`;
+- токен вырезается из сообщений до ограничения длины, `details` санитизируются
+  рекурсивно; bearer token не попадает в stdout, stderr и JSON-RPC;
 - при недоступном API MCP возвращает структурированную ошибку;
 - MCP не влияет на запуск и работу веб-интерфейса.
 
-Текущий executable `kanbaner-mcp` входит в `@kanbaner/opencode` и предоставляет явно перечисленный ограниченный набор: `project_list/get/create/update`, `task_list/get/create/update/complete/move`, `note_list/get/create/update`. Он не является ещё универсальным discovery-driven адаптером `@kanbaner/mcp` из этапа 7. Delete MCP tools отсутствуют. Все операции идут через Bearer-защищённый `/api/v1`; update содержит `expectedVersion`, mutation — ключ идемпотентности из `operationId`, input, идентичности MCP request/session и UUID экземпляра MCP server. Ограниченность этого MCP не ограничивает отдельно разрешённые built-in tools OpenCode: `shell` и `edit` могут изменять локальные файлы, но не получают доступа к базе Kanbaner иначе как через HTTP API.
+Текущий доменный срез универсального адаптера: `project.list/get`,
+`column.list`, `task.list/get`, `project.create/update`,
+`task.create/update/complete/move`. Delete, bulk, summary и
+create/update/move/delete колонок закрыты. Заметки сохраняют существующий
+`exposure.mcp`, `kanbaner.search.query` опубликован, `kanbaner.search.filters` —
+нет.
+
+### Ручной `kanbaner-mcp` в `@kanbaner/opencode`
+
+Executable предоставляет явно перечисленный ограниченный набор:
+`project_list/get/create/update`, `task_list/get/create/update/complete/move`,
+`note_list/get/create/update`. Он не строится из `exposure.mcp`, не расширяется
+автоматически и не переиспользуется универсальным адаптером. Delete MCP tools
+отсутствуют. Все операции идут через Bearer-защищённый `/api/v1`; update
+содержит `expectedVersion`, mutation — ключ идемпотентности из `operationId`,
+input, идентичности MCP request/session и UUID экземпляра MCP server.
+Ограниченность этого MCP не ограничивает отдельно разрешённые built-in tools
+OpenCode: `shell` и `edit` могут изменять локальные файлы, но не получают
+доступа к базе Kanbaner иначе как через HTTP API.
 
 ## 13. Модель доверия и безопасность
 

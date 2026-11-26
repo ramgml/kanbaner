@@ -328,7 +328,21 @@ async function waitFor<Value>(
 }
 
 describe("активация kanbaner.tasks", heavyPluginSuite, () => {
-  it("регистрирует все команды и запросы с UI/HTTP exposure и выключенным MCP", async () => {
+  const MCP_OPERATION_IDS = new Set<string>([
+    TASKS_QUERY_IDS.projectList,
+    TASKS_QUERY_IDS.projectGet,
+    TASKS_QUERY_IDS.columnList,
+    TASKS_QUERY_IDS.taskList,
+    TASKS_QUERY_IDS.taskGet,
+    TASKS_COMMAND_IDS.projectCreate,
+    TASKS_COMMAND_IDS.projectUpdate,
+    TASKS_COMMAND_IDS.taskCreate,
+    TASKS_COMMAND_IDS.taskUpdate,
+    TASKS_COMMAND_IDS.taskComplete,
+    TASKS_COMMAND_IDS.taskMove,
+  ]);
+
+  it("регистрирует все команды и запросы с UI/HTTP exposure и явным MCP allowlist", async () => {
     const harness = await startHarness();
 
     const commands = harness.composition.operations.registry.commands
@@ -344,7 +358,25 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     expect(queryIds).toEqual(Object.values(TASKS_QUERY_IDS).sort());
 
     for (const descriptor of [...commands, ...queries]) {
-      expect(descriptor.exposure).toEqual({ ui: true, http: true, mcp: false });
+      expect(descriptor.exposure).toEqual({
+        ui: true,
+        http: true,
+        mcp: MCP_OPERATION_IDS.has(descriptor.id),
+      });
+    }
+
+    for (const id of [
+      TASKS_COMMAND_IDS.projectDelete,
+      TASKS_COMMAND_IDS.columnCreate,
+      TASKS_COMMAND_IDS.columnUpdate,
+      TASKS_COMMAND_IDS.columnMove,
+      TASKS_COMMAND_IDS.columnDelete,
+      TASKS_COMMAND_IDS.taskDelete,
+      TASKS_COMMAND_IDS.taskDeleteMany,
+      TASKS_COMMAND_IDS.taskMoveMany,
+      TASKS_QUERY_IDS.projectSummary,
+    ]) {
+      expect(harness.composition.operations.registry.get(id)?.exposure.mcp).toBe(false);
     }
 
     expect(
