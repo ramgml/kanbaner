@@ -4,9 +4,13 @@ import {
   type PluginId,
   type PluginSearchService,
   type ResourceRef,
+  type SearchAggregateResult,
   type SearchDocumentInput,
+  type SearchFacetSet,
   type SearchHit,
   type SearchIndexDocument,
+  type SearchProvider,
+  type SearchProviderQuery,
   type SearchQuery,
   type SearchRegistrar,
 } from "@kanbaner/plugin-sdk";
@@ -41,6 +45,7 @@ function normalizeDocuments(
  *
  * Bound-фасад не принимает `pluginId`: подстановка выполняется здесь, а
  * ResourceRef каждого документа проверяется на принадлежность плагину.
+ * SearchProvider регистрируется только под собственным ID плагина.
  */
 export function bindPluginSearch(search: SearchRegistrar, pluginId: PluginId): PluginSearchService {
   return {
@@ -62,6 +67,22 @@ export function bindPluginSearch(search: SearchRegistrar, pluginId: PluginId): P
     },
     async reindex(documents: readonly SearchDocumentInput[]): Promise<number> {
       return search.reindex(pluginId, normalizeDocuments(pluginId, documents));
+    },
+    registerProvider(provider: SearchProvider): void {
+      if (provider.id !== pluginId) {
+        throw denied();
+      }
+
+      search.registerProvider(pluginId, provider);
+    },
+    unregisterProviders(): void {
+      search.unregisterProviders(pluginId);
+    },
+    aggregate(query: SearchProviderQuery): Promise<SearchAggregateResult> {
+      return search.aggregate(query);
+    },
+    listFacets(): Promise<SearchFacetSet> {
+      return search.listFacets();
     },
   };
 }

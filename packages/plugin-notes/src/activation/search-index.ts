@@ -3,6 +3,9 @@ import {
   type PluginSearchService,
   type ResourceRef,
   type SearchDocumentInput,
+  type SearchProvider,
+  type SearchProviderFacet,
+  type SearchHit,
 } from "@kanbaner/plugin-sdk";
 
 import { NOTE_RESOURCE_TYPE, NOTES_PLUGIN_ID } from "../constants.ts";
@@ -81,8 +84,10 @@ export async function deleteNoteSearchDocuments(
 /**
  * Полная переиндексация заметок при активации.
  *
- * Читает все заметки домена и заменяет документы поиска. Сбой индекса не
- * отменяет активацию: поиск восстановится при следующем запуске.
+ * Всегда заменяет документы поиска своего namespace, включая пустой список:
+ * это удаляет stale-документы заметок, которых уже нет в домене, и не трогает
+ * tasks/fixture. Сбой пробрасывается, чтобы активация не оставила
+ * зарегистрированного провайдера со stale-индексом.
  */
 export async function reindexAllNotes(
   store: Pick<NotesStore, "listAllNotes">,
@@ -91,20 +96,50 @@ export async function reindexAllNotes(
 ): Promise<number> {
   const notes = await store.listAllNotes();
 
-  // Пустой домен нечего индексировать: не занимаем транзакцию поиска на старте.
-  // Заметок без плагина не возникает, поэтому stale-документов быть не может.
-  if (notes.length === 0) {
-    return 0;
-  }
-
   try {
     return await search.reindex(notes.map((note) => toNoteSearchDocument(note)));
   } catch (error) {
-    logger.warn("notes.search_reindex_failed", {
+    logger.error("notes.search_reindex_failed", {
       count: notes.length,
       errorName: safeErrorName(error),
     });
 
-    return 0;
+    throw error;
   }
+}
+
+/**
+ * SearchProvider домена заметок.
+ *
+ * Заметки не объявляют project/status/tags facet-ов: при таком фильтре
+ * реестр исключает провайдера и не читает заметки вовсе.
+ */
+export function createNotesSearchProvider(
+  store: Pick<NotesStore, "listAllNotes">,
+  search: PluginSearchService,
+  logger: PluginLogger,
+): SearchProvider {
+  return {
+    id: NOTES_PLUGIN_ID,
+    kinds: [{ id: NOTE_RESOURCE_TYPE, title: "Заметки" }],
+    filterFields: [],
+
+    listFacets(): Promise<readonly SearchProviderFacet[]> {
+      return Promise.resolve([]);
+    },
+
+    search(query): Promise<readonly SearchHit[]> {
+      return search.search({
+        text: query.text,
+        kind: NOTE_RESOURCE_TYPE,
+        ...(query.filters === undefined ? {} : { filters: query.filters }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.offset === undefined ? {} : { offset: query.offset }),
+      });
+    },
+
+    reindex(): Promise<number> {
+      return reindexAllNotes(store, search, logger);
+    },
+  };
 }

@@ -1274,14 +1274,14 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     expect(second.task.id).not.toBe(first.task.id);
   });
 
-  it("не теряет задачу, созданную во время переиндексации второй активации", async () => {
+  it("не активирует tasks до завершения переиндексации второй активации", async () => {
     const gate = createReindexGate();
     const first = await startHarness();
     const dataDirectory = first.dataDirectory;
     const project = await createProject(first, "Reindex gate");
     await first.close(false);
 
-    const second = await startHarness({
+    const startPromise = startHarness({
       dataDirectory,
       removeOnClose: false,
       decorateProvider: gate.decorate,
@@ -1290,11 +1290,10 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     try {
       await gate.entered;
 
-      const createPromise = createTask(second, project.project.id, {
-        title: "Во время reindex",
-      });
+      // Активация awaited reindex: runtime.start не завершается, пока индекс
+      // не заменён, поэтому команды tasks ещё не зарегистрированы.
       let settled = false;
-      void createPromise.then(
+      void startPromise.then(
         () => {
           settled = true;
         },
@@ -1309,7 +1308,10 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
       expect(settled).toBe(false);
 
       gate.release();
-      const created = await createPromise;
+      const second = await startPromise;
+      const created = await createTask(second, project.project.id, {
+        title: "После reindex",
+      });
 
       await waitFor(async () => {
         const documents = await second.composition.search.list(PLUGIN_ID);
@@ -1320,7 +1322,7 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
       const documents = await second.composition.search.list(PLUGIN_ID);
       expect(documents).toHaveLength(1);
       expect(documents[0]?.ref).toBe(formatTaskRef(created.task.id));
-      expect(documents[0]?.text).toContain("Во время reindex");
+      expect(documents[0]?.text).toContain("После reindex");
     } finally {
       gate.release();
     }

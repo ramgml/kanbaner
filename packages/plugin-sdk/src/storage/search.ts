@@ -24,12 +24,29 @@ export interface SearchIndexDocument {
   readonly metadata?: JsonObject;
 }
 
+/**
+ * Оператор фильтра публичных метаданных поискового документа.
+ *
+ * `eq` сравнивает скалярное значение, `contains` ищет подстроку в строке или
+ * точное значение в массиве. Секреты и служебные поля в metadata запрещены
+ * контрактом доменного плагина.
+ */
+export type SearchFilterOperator = "eq" | "contains";
+
+/** Фильтр по публичным метаданным поискового документа. */
+export interface SearchFilter {
+  readonly field: string;
+  readonly operator: SearchFilterOperator;
+  readonly value: string;
+}
+
 export interface SearchQuery {
   readonly text: string;
   readonly pluginId?: PluginId;
   readonly kind?: string;
   readonly limit?: number;
   readonly offset?: number;
+  readonly filters?: readonly SearchFilter[];
 }
 
 export interface SearchHit {
@@ -38,6 +55,10 @@ export interface SearchHit {
   readonly excerpt: string;
   readonly score: number;
   readonly strategy: SearchIndexStrategy;
+  /** Тип ресурса, если домен его индексирует. */
+  readonly kind?: string;
+  /** Публичные атрибуты для фильтрации и отображения без чтения домена. */
+  readonly metadata?: JsonObject;
 }
 
 /**

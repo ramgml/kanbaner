@@ -32,6 +32,7 @@ export type {
   ResourceLink,
   ResourceRef,
   SearchHit,
+  SearchFilter,
   SearchIndexDocument,
   SearchIndexStore,
   SearchIndexStrategy,

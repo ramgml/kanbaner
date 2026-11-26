@@ -16,6 +16,9 @@ import {
   type ResourceDescriptor,
   type ResourceRef,
   type SearchDocumentInput,
+  type SearchHit,
+  type SearchProvider,
+  type SearchProviderFacet,
   type UiContribution,
 } from "@kanbaner/plugin-sdk";
 
@@ -405,6 +408,37 @@ export async function activate(context: FixtureActivationContext): Promise<void>
   // create/delete/reindex сериализуются в рамках активации: reindex не должен
   // прочитать исходники до параллельного create и заменить индекс без него.
   const serializeSearchMutation = createSerialQueue();
+  const searchProvider: SearchProvider = {
+    id: FIXTURE_PLUGIN_ID,
+    kinds: [{ id: FIXTURE_ITEM_TYPE, title: "Fixture-элементы" }],
+    filterFields: [],
+
+    listFacets(): Promise<readonly SearchProviderFacet[]> {
+      return Promise.resolve([]);
+    },
+
+    search(query): Promise<readonly SearchHit[]> {
+      return context.search.search({
+        text: query.text,
+        kind: FIXTURE_ITEM_TYPE,
+        ...(query.filters === undefined ? {} : { filters: query.filters }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.offset === undefined ? {} : { offset: query.offset }),
+      });
+    },
+
+    async reindex(): Promise<number> {
+      const documents = await storage.documents.list(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION);
+
+      return context.search.reindex(documents.map(itemView).map(searchDocumentOf));
+    },
+  };
+
+  // Полная переиндексация awaited до регистрации провайдера: первая global
+  // query после runtime.start видит существующие fixture-элементы, а пустой
+  // список удаляет stale-документы. Сбой отменяет активацию.
+  await serializeSearchMutation(() => searchProvider.reindex());
+  context.search.registerProvider(searchProvider);
 
   context.commands.register({
     metadata: commandMetadata(
@@ -569,8 +603,7 @@ export async function activate(context: FixtureActivationContext): Promise<void>
     ),
     async handler() {
       return serializeSearchMutation(async () => {
-        const documents = await storage.documents.list(FIXTURE_PLUGIN_ID, FIXTURE_COLLECTION);
-        const count = await context.search.reindex(documents.map(itemView).map(searchDocumentOf));
+        const count = await searchProvider.reindex();
 
         return { count };
       });

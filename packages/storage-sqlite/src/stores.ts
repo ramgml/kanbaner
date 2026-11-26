@@ -14,6 +14,7 @@ import type {
   PluginStateRecord,
   PluginStateStore,
   ResourceLink,
+  SearchFilter,
   SearchHit,
   SearchIndexDocument,
   SearchIndexStore,
@@ -196,6 +197,80 @@ function rowToSearchDocument(row: SearchDocumentRow): SearchIndexDocument {
   }
 
   return document;
+}
+
+function rowToSearchHit(
+  row: SearchHitRow,
+  excerpt: string,
+  strategy: SearchIndexStrategy,
+): SearchHit {
+  const hit: {
+    ref: string;
+    title: string;
+    excerpt: string;
+    score: number;
+    strategy: SearchIndexStrategy;
+    kind?: string;
+    metadata?: JsonObject;
+  } = {
+    ref: row.ref,
+    title: row.title,
+    excerpt,
+    score: -row.rank,
+    strategy,
+  };
+
+  if (row.kind !== null) {
+    hit.kind = row.kind;
+  }
+
+  if (row.metadata_json !== null) {
+    hit.metadata = parseJson<JsonObject>(row.metadata_json);
+  }
+
+  return hit;
+}
+
+const SEARCH_FILTER_FIELD_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/u;
+const MAX_SEARCH_FILTERS = 10;
+const MAX_SEARCH_FILTER_VALUE_LENGTH = 200;
+
+function assertSearchFilters(filters: readonly SearchFilter[] | undefined): void {
+  if (filters === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(filters) || filters.length > MAX_SEARCH_FILTERS) {
+    throw sqliteError(
+      "INVALID_ARGUMENT",
+      `Количество фильтров поиска не может превышать ${String(MAX_SEARCH_FILTERS)}`,
+    );
+  }
+
+  for (const filter of filters) {
+    if (
+      typeof filter.field !== "string" ||
+      !SEARCH_FILTER_FIELD_PATTERN.test(filter.field) ||
+      filter.field.length > 64
+    ) {
+      throw sqliteError("INVALID_ARGUMENT", "Поле фильтра поиска имеет недопустимый формат");
+    }
+
+    if (filter.operator !== "eq" && filter.operator !== "contains") {
+      throw sqliteError("INVALID_ARGUMENT", "Оператор фильтра поиска должен быть eq или contains");
+    }
+
+    if (
+      typeof filter.value !== "string" ||
+      filter.value.length === 0 ||
+      filter.value.length > MAX_SEARCH_FILTER_VALUE_LENGTH
+    ) {
+      throw sqliteError(
+        "INVALID_ARGUMENT",
+        `Значение фильтра поиска должно быть строкой длиной до ${String(MAX_SEARCH_FILTER_VALUE_LENGTH)}`,
+      );
+    }
+  }
 }
 
 function compareDocuments(left: PluginDocument, right: PluginDocument): number {
@@ -991,6 +1066,7 @@ export function createSearchIndexStore(
         throw sqliteError("INVALID_ARGUMENT", "kind поискового запроса должен быть строкой");
       }
 
+      assertSearchFilters(query.filters);
       assertPageSize(query.limit, "limit");
       assertPageNumber(query.offset ?? 0, "offset");
 
@@ -999,6 +1075,36 @@ export function createSearchIndexStore(
       if (normalized === null) {
         throw sqliteError("INVALID_ARGUMENT", "Поисковый запрос не содержит терминов");
       }
+
+      const filterClauses: string[] = [];
+      const filterParams: string[] = [];
+
+      for (const filter of query.filters ?? []) {
+        const path = `$."${filter.field}"`;
+
+        // Семантика совпадает с in-memory provider: eq — только строковый
+        // scalar, contains — подстрока строки или точный строковый элемент
+        // массива. object/number/boolean/null не фильтруются.
+        if (filter.operator === "eq") {
+          filterClauses.push(
+            "(json_type(d.metadata_json, ?) = 'text' AND json_extract(d.metadata_json, ?) = ?)",
+          );
+          filterParams.push(path, path, filter.value);
+          continue;
+        }
+
+        filterClauses.push(
+          `((json_type(d.metadata_json, ?) = 'text'
+              AND instr(json_extract(d.metadata_json, ?), ?) > 0)
+            OR (json_type(d.metadata_json, ?) = 'array' AND EXISTS (
+              SELECT 1 FROM json_each(d.metadata_json, ?) AS filter_value
+              WHERE filter_value.type = 'text' AND filter_value.value = ?
+            )))`,
+        );
+        filterParams.push(path, path, filter.value, path, path, filter.value);
+      }
+
+      const filterSql = filterClauses.length === 0 ? "" : ` AND ${filterClauses.join(" AND ")}`;
 
       return run.read(() => {
         const db = database();
@@ -1015,19 +1121,24 @@ export function createSearchIndexStore(
              JOIN core_search_documents d ON d.ref = core_search_fts.ref
              WHERE core_search_fts MATCH ?
                AND (? IS NULL OR d.plugin_id = ?)
-               AND (? IS NULL OR d.kind = ?)
+               AND (? IS NULL OR d.kind = ?)${filterSql}
              ORDER BY rank ASC, d.ref ASC
              LIMIT ? OFFSET ?`,
           )
-          .all(match, pluginId, pluginId, kind, kind, limit, offset) as SearchHitRow[];
+          .all(
+            match,
+            pluginId,
+            pluginId,
+            kind,
+            kind,
+            ...filterParams,
+            limit,
+            offset,
+          ) as SearchHitRow[];
 
-        return rows.map((row): SearchHit => ({
-          ref: row.ref,
-          title: row.title,
-          excerpt: buildSearchExcerpt(row.title, row.body, normalized.terms),
-          score: -row.rank,
-          strategy,
-        }));
+        return rows.map((row) =>
+          rowToSearchHit(row, buildSearchExcerpt(row.title, row.body, normalized.terms), strategy),
+        );
       });
     },
 
