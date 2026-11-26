@@ -1447,12 +1447,33 @@ const taskList: QueryFn = async (input, dependencies) => {
 /* Активация                                                                  */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * Явный MCP allowlist домена задач.
+ *
+ * Только перечисленные операции получают `exposure.mcp = true`. Остальные,
+ * включая delete/deleteMany/moveMany и project.summary, остаются закрытыми;
+ * автоматическое включение всех неразрушительных операций запрещено.
+ */
+const TASKS_MCP_OPERATION_IDS: ReadonlySet<string> = new Set([
+  TASKS_QUERY_IDS.projectList,
+  TASKS_QUERY_IDS.projectGet,
+  TASKS_QUERY_IDS.columnList,
+  TASKS_QUERY_IDS.taskList,
+  TASKS_QUERY_IDS.taskGet,
+  TASKS_COMMAND_IDS.projectCreate,
+  TASKS_COMMAND_IDS.projectUpdate,
+  TASKS_COMMAND_IDS.taskCreate,
+  TASKS_COMMAND_IDS.taskUpdate,
+  TASKS_COMMAND_IDS.taskComplete,
+  TASKS_COMMAND_IDS.taskMove,
+]);
+
 function withTaskExposure<Metadata extends CommandMetadata | QueryMetadata>(
   metadata: Metadata,
 ): Metadata {
   return {
     ...metadata,
-    exposure: { ui: true, http: true, mcp: false },
+    exposure: { ui: true, http: true, mcp: TASKS_MCP_OPERATION_IDS.has(metadata.id) },
   };
 }
 

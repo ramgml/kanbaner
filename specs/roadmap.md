@@ -224,6 +224,18 @@
 - OpenCode panel работает на desktop/mobile, stream завершается и отменяется, catalog и ошибки не раскрывают секреты;
 - ограниченный MCP создаёт и обновляет ресурсы через HTTP API без доступа к базе.
 
+### Состояние реализации
+
+KAN-069 этап B добавил в workspace `@kanbaner/mcp` с executable
+`kanbaner-mcp-universal`, discovery с точным `exposure {ui,http,mcp}`, audit
+source `{type: "mcp"}`, явный tasks MCP allowlist и integration-тест поверх
+реальной HTTP composition. `packages/mcp` собирается в `build:packages` и не
+подключается в web runtime. Ручной OpenCode allowlist остаётся 14 tools и не
+строится из `exposure.mcp`. Разрушительные операции требуют явного opt-in,
+mutation поддерживает `Idempotency-Key`, ошибки проходят redaction. Windows и
+реальный stdio smoke в этой ветке не выполнялись; их проверяет оркестратор до
+релиза.
+
 ## Этап 8. Плагин-менеджер и стабилизация
 
 **Цель:** сделать plugin-модель пригодной для повседневной эксплуатации.

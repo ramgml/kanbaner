@@ -1,0 +1,32 @@
+{
+  "name": "@kanbaner/mcp",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "description": "Универсальный discovery-driven MCP-адаптер Kanbaner поверх HTTP API.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "kanbaner-mcp-universal": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  }
+}

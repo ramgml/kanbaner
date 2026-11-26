@@ -167,6 +167,11 @@ describe("HTTP API", () => {
         readonly apiVersion: number;
         readonly operations: readonly {
           readonly id: string;
+          readonly exposure: {
+            readonly ui: boolean;
+            readonly http: boolean;
+            readonly mcp: boolean;
+          };
           readonly inputSchema: Readonly<Record<string, unknown>>;
         }[];
       }>(response),
@@ -178,6 +183,63 @@ describe("HTTP API", () => {
     expect(
       discovery.operations.find((operation) => operation.id === PROJECT_CREATE)?.inputSchema,
     ).toMatchObject({ type: "object" });
+    expect(
+      discovery.operations.find((operation) => operation.id === PROJECT_CREATE)?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: true });
+    expect(
+      discovery.operations.find((operation) => operation.id === SEARCH_QUERY)?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: true });
+    expect(
+      discovery.operations.find((operation) => operation.id === "kanbaner.tasks.project.summary")
+        ?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: false });
+    for (const operation of discovery.operations) {
+      expect(Object.keys(operation.exposure).sort()).toEqual(["http", "mcp", "ui"]);
+      expect(Object.values(operation.exposure).every((value) => typeof value === "boolean")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("помечает source mcp только по точному x-kanbaner-client", async () => {
+    const sources: unknown[] = [];
+    const api = createHttpApi(
+      {
+        getState: async () => {
+          throw new Error("not used");
+        },
+        listHttpOperations: async () => [],
+        executeHttpOperation: async (_operationId, _input, options) => {
+          sources.push(options.source);
+
+          return { ok: true, data: {} };
+        },
+        resolveHttpResource: async () => {
+          throw new Error("not used");
+        },
+      },
+      { getToken: () => TOKEN },
+    );
+
+    for (const header of ["mcp", "mcp-extra", undefined]) {
+      const response = await api.query(
+        operationRequest(
+          "queries",
+          PROJECT_LIST,
+          {},
+          header === undefined ? {} : { headers: { "x-kanbaner-client": header } },
+        ),
+        PROJECT_LIST,
+      );
+
+      expect(response.status).toBe(200);
+    }
+
+    expect(sources).toEqual([
+      { type: "mcp", id: "mcp" },
+      { type: "http", id: "api" },
+      { type: "http", id: "api" },
+    ]);
   });
 
   it(

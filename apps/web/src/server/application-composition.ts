@@ -24,6 +24,7 @@ import {
   type EventSubscription,
   type JsonValue,
   type OperationResult,
+  type OperationSource,
   type PluginHostServices,
   type PluginId,
   type PluginLogger,
@@ -136,6 +137,12 @@ export interface HttpOperationInvokeOptions {
   readonly requestId: string;
   readonly idempotencyKey?: string;
   readonly signal?: AbortSignal;
+  /**
+   * Audit-источник вызова. HTTP transport передаёт `mcp` только для точного
+   * `x-kanbaner-client: mcp`; отсутствие поля сохраняет прежнее поведение
+   * обычного HTTP-клиента.
+   */
+  readonly source?: OperationSource;
 }
 
 /**
@@ -333,7 +340,7 @@ export function createApplicationPluginComposition(
       const idempotencyKey =
         options.expectedKind === "mutation" ? options.idempotencyKey : undefined;
       const executionOptions: ExecutionOptions = {
-        source: { type: "http", id: "api" },
+        source: options.source ?? { type: "http", id: "api" },
         requestId: options.requestId,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),

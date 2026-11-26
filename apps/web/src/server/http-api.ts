@@ -9,6 +9,7 @@ import {
   toSuccessResult,
   type JsonValue,
   type OperationResult,
+  type OperationSource,
   type PluginErrorCode,
   type ResourceDescriptor,
   type ResourceRef,
@@ -144,6 +145,14 @@ function discoveryData(operations: readonly OperationDescriptor[]) {
       contract: descriptor.metadata.contract,
       version: descriptor.metadata.version,
       risk: descriptor.metadata.risk,
+      // Additive contract field: старые clients, которые его не знают,
+      // продолжают работать, а universal MCP требует точное значение всех
+      // трёх каналов.
+      exposure: {
+        ui: descriptor.exposure.ui,
+        http: descriptor.exposure.http,
+        mcp: descriptor.exposure.mcp,
+      },
       ...(descriptor.metadata.kind === "mutation"
         ? { idempotency: descriptor.metadata.idempotency }
         : {}),
@@ -220,9 +229,17 @@ export function createHttpApi(backend: HttpApiBackend, options: HttpApiOptions =
 
     try {
       const idempotencyKey = request.headers.get("idempotency-key")?.trim();
+      // Источник влияет только на audit metadata и не заменяет Bearer token.
+      // Точное значение заголовка отделяет universal MCP от остальных
+      // HTTP-клиентов; самописный клиент не может стать MCP по подстроке.
+      const source: OperationSource =
+        request.headers.get("x-kanbaner-client") === "mcp"
+          ? { type: "mcp", id: "mcp" }
+          : { type: "http", id: "api" };
       const result = await backend.executeHttpOperation(operationId, input, {
         expectedKind,
         requestId: id,
+        source,
         signal: request.signal,
         ...(idempotencyKey === undefined || idempotencyKey.length === 0 ? {} : { idempotencyKey }),
       });
