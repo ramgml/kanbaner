@@ -1,0 +1,164 @@
+"use client";
+
+import type { TaskColumn } from "@kanbaner/plugin-tasks/contract";
+import { ModalDialog } from "@kanbaner/task-ui";
+
+import { isLastColumnOfType } from "./board-state.ts";
+
+export interface KanbanDeleteColumnDialogProps {
+  readonly column: TaskColumn;
+  readonly columns: readonly TaskColumn[];
+  /** Точное число задач из `task.list{columnId}` без tag-фильтра. */
+  readonly taskCount: number | null;
+  readonly taskCountError: string | null;
+  readonly targetColumnId: string;
+  readonly error: string | null;
+  readonly submitting: boolean;
+  readonly onTargetChange: (columnId: string) => void;
+  readonly onSubmit: () => void;
+  readonly onCancel: () => void;
+}
+
+/**
+ * Разрушительное подтверждение удаления колонки.
+ *
+ * Явно показывает, сколько задач будет перенесено и в какую колонку. Целевой
+ * список строится только из колонок текущего проекта и всегда исключает
+ * удаляемую, поэтому self-target и чужой проект недостижимы из UI.
+ */
+export function KanbanDeleteColumnDialog({
+  column,
+  columns,
+  taskCount,
+  taskCountError,
+  targetColumnId,
+  error,
+  submitting,
+  onTargetChange,
+  onSubmit,
+  onCancel,
+}: KanbanDeleteColumnDialogProps) {
+  const targets = columns.filter((candidate) => candidate.id !== column.id);
+  const target = targets.find((candidate) => candidate.id === targetColumnId) ?? null;
+  const lastOfType = isLastColumnOfType(columns, column.id);
+
+  return (
+    <ModalDialog
+      open
+      label={`Удалить колонку «${column.title}»`}
+      testId="kanban-column-delete-dialog"
+      onClose={onCancel}
+      className="m-auto w-[calc(100vw-2rem)] max-w-[30rem] rounded-xl border border-border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-black/45"
+    >
+      <div className="flex flex-col gap-3 p-4">
+        <div className="flex flex-col gap-1">
+          <h2 className="m-0 text-base font-semibold">Удалить колонку «{column.title}»?</h2>
+          <p className="m-0 text-xs text-muted-foreground">
+            Колонка удаляется безвозвратно. Действие нельзя отменить.
+          </p>
+        </div>
+
+        <div
+          data-testid="kanban-column-delete-consequences"
+          className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs"
+        >
+          {taskCountError !== null ? (
+            <p
+              role="alert"
+              data-testid="kanban-column-delete-count-error"
+              className="m-0 font-medium text-destructive"
+            >
+              Не удалось получить точное число задач: {taskCountError}
+            </p>
+          ) : (
+            <p className="m-0 font-medium text-destructive">
+              Будет перенесено задач:{" "}
+              <span data-testid="kanban-column-delete-moved-count">
+                {taskCount === null ? "…" : taskCount}
+              </span>
+            </p>
+          )}
+        </div>
+
+        {lastOfType ? (
+          <p
+            role="alert"
+            data-testid="kanban-column-delete-last"
+            className="m-0 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+          >
+            Нельзя удалить последнюю {column.status === "done" ? "Done" : "открытую"} колонку
+            проекта. Сначала добавьте или переименуйте другую колонку этого типа.
+          </p>
+        ) : (
+          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+            Перенести задачи в колонку
+            <select
+              data-testid="kanban-column-delete-target"
+              aria-label="Колонка для переноса задач"
+              value={targetColumnId}
+              disabled={submitting}
+              onChange={(event) => {
+                onTargetChange(event.target.value);
+              }}
+              className="h-10 rounded-md border border-border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 xl:h-8"
+            >
+              {targets.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.title}
+                  {candidate.status === "done" ? " (Done)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {target === null ? null : (
+          <p className="m-0 text-xs text-muted-foreground">
+            Задачи из «{column.title}» перейдут в «{target.title}»
+            {target.status === "done"
+              ? " и получат дату завершения."
+              : "; дата завершения будет снята."}
+          </p>
+        )}
+
+        {error === null ? null : (
+          <p
+            role="alert"
+            data-testid="kanban-column-delete-error"
+            className="m-0 text-xs text-destructive"
+          >
+            {error}
+          </p>
+        )}
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            data-testid="kanban-column-delete-cancel"
+            disabled={submitting}
+            onClick={onCancel}
+            className="inline-flex min-h-10 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 xl:min-h-8"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            data-testid="kanban-column-delete-confirm"
+            disabled={
+              submitting ||
+              lastOfType ||
+              target === null ||
+              taskCount === null ||
+              taskCountError !== null
+            }
+            aria-busy={submitting}
+            onClick={onSubmit}
+            className="inline-flex min-h-10 items-center rounded-md bg-destructive px-3 text-sm font-medium text-white hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:opacity-50 xl:min-h-8"
+          >
+            {submitting ? "Удаление…" : "Удалить колонку"}
+          </button>
+        </div>
+      </div>
+    </ModalDialog>
+  );
+}

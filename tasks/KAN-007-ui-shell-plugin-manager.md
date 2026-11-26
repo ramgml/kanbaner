@@ -1,0 +1,124 @@
+---
+id: KAN-007
+title: UI shell и plugin manager
+status: done
+stage: 1
+priority: high
+owner: worker-kan-007
+blocked_by: []
+branch: feat/kan-007-ui-shell-plugin-manager
+worktree: .worktrees/kan-007-ui-shell-plugin-manager
+created: 2026-11-06
+updated: 2026-11-07
+specs:
+  - specs/product-mvp.md
+  - specs/technology-stack.md
+  - specs/architecture.md
+  - specs/plugin-contract.md
+---
+
+# KAN-007 — UI shell и plugin manager
+
+## Цель
+
+Создать адаптивный каркас интерфейса с базовыми слотами и экраном управления плагинами, не добавляя доменной логики.
+
+## Результат
+
+Пользователь видит пустой shell, навигацию, состояние плагинов, ошибки активации и может отключить проблемный плагин.
+
+## Объём работ
+
+- [x] Реализовать адаптивный app shell на Next.js 16 App Router.
+- [x] Подключить Tailwind CSS 4 и shadcn/ui с Radix UI preset.
+- [x] Использовать Lucide React как единый набор иконок.
+- [x] Реализовать слоты `app.sidebar`, `app.main`, `app.details`, `app.settings`, `app.overlays`.
+- [x] Реализовать клиентский реестр UI-вкладов.
+- [x] Реализовать маршрутизацию представлений плагинов.
+- [x] Добавить границы ошибок для UI-плагинов.
+- [x] Реализовать экран plugin manager.
+- [x] Показать версии, зависимости, состояние и последние ошибки.
+- [x] Реализовать включение и отключение плагина.
+- [x] Реализовать отображение safe mode.
+- [x] Обеспечить клавиатурную навигацию.
+- [x] Обеспечить мобильную раскладку от 360 px.
+- [x] Добавить component- и integration-тесты shell.
+
+## Владение файлами
+
+Разрешено:
+
+- `apps/web/**`;
+- тесты UI внутри `apps/web/**`.
+
+Запрещено:
+
+- `packages/kernel/**`, кроме публичного API, уже предоставленного KAN-003;
+- `packages/plugin-sdk/**`;
+- `specs/**`;
+- `tasks/**`, кроме собственного отчёта;
+- реализации задач, заметок, канбана и поиска.
+
+Общие файлы:
+
+- Корневой `package.json` и конфигурация UI-инструментов изменяются по координации с оркестратором.
+- API plugin manager должно использовать публичный интерфейс ядра, а не импортировать его внутренности.
+
+## Контракты и зависимости
+
+- Использует UI-метаданные и Plugin SDK из KAN-002.
+- Использует состояние плагинов из KAN-003.
+- Использует Tailwind CSS 4, shadcn/ui и Radix UI согласно `specs/technology-stack.md`.
+- Не добавляет вторую component library и не создаёт собственный design system.
+- Не реализует собственные доменные представления.
+- Не обходит lifecycle и не активирует плагин в обход ядра.
+
+## Критерии приёмки
+
+- [x] Shell открывается без активных доменных плагинов.
+- [x] Плагин регистрирует тестовый UI-вклад через публичный API.
+- [x] Ошибка рендера вклада показывается локально и не роняет shell.
+- [x] Plugin manager показывает актуальное состояние плагинов.
+- [x] Отключение плагина отражается без перезагрузки всей страницы или объясняет необходимость перезагрузки.
+- [x] Safe mode объясняет причину и показывает проблемные плагины.
+- [x] Навигация доступна с клавиатуры.
+- [x] На ширине 360 px основные действия доступны.
+- [x] В shell нет импортов доменных плагинов.
+- [x] В интерфейсе нет встроенного ИИ или AI-настроек.
+- [x] В `apps/web` нет второй component library помимо shadcn/ui.
+
+## Проверки
+
+- [x] Typecheck.
+- [x] Линтер.
+- [x] Component-тесты слотов и границ ошибок на Vitest 5 и Testing Library React.
+- [x] Integration-тест plugin manager.
+- [x] Проверка мобильной раскладки.
+- [x] Проверка клавиатурной навигации.
+- [x] Production build.
+
+## Риски
+
+- UI-контракт зафиксируется слишком жёстко. Реализовать только слоты Contract v1.
+- Plugin manager начнёт напрямую управлять внутренним состоянием. Использовать публичный API ядра.
+- Ошибка одного плагина сломает страницу. Обязательные error boundaries на каждый вклад.
+
+## Журнал
+
+- 2026-11-07 — KAN-007 влита в `dev` merge-коммитом `36fb4101bdb7cb11f0113e77462e2e83acb4d9b2`; merge queue со strict install, полным check и Playwright зелёный на ветке и `dev`, финальное ревью разрешило интеграцию. Feature-ветка и worktree удалены, задача переведена в done.
+- 2026-11-06 — Worker коммитом `5c075be` запретил повторную активацию после неуспешной деактивации: refresh не очищает blocked IDs и возвращает `PROCESS_RESTART_REQUIRED`. 57 focused-тестов, 340 workspace-тестов и 3 Playwright-теста зелёные. Задача оставлена в review до повторного независимого ревью и интеграции при возобновлении.
+- 2026-11-06 — Повторное ревью закрыло 9 из 10 замечаний, но нашло повторную активацию через refresh после неуспешной деактивации. Worker должен сохранять blocked IDs в disabled-наборе и запрещать reactivation до подтверждённой очистки/перезапуска процесса.
+- 2026-11-06 — Worker коммитом `660795b` устранил все 10 findings и заменил beta на стабильный `@playwright/test@1.65.0`; 56 focused-тестов, 339 тестов workspace и 3 реальных Chromium E2E на 360px зелёные. Задача повторно в review.
+- 2026-11-06 — Для замены случайно выбранной beta-версии оркестратор разрешил точное `@playwright/test@1.65.0` и добавление этой стабильной версии в `minimumReleaseAgeExclude` корневого `pnpm-workspace.yaml` из-за публикации внутри minimumReleaseAge cutoff. Другие supply-chain правила не ослабляются.
+- 2026-11-06 — Ревью нашло blocker потери deactivation errors, неатомарную UI-регистрацию, fail-open вклады, неподдерживаемые маршруты, обработку Server Actions и формальные mobile/keyboard checks. Задача возвращена worker-у. Для реального browser-теста разрешено добавить `@playwright/test` 1.65.x в `apps/web/package.json` и lock-файл согласно стеку.
+- 2026-11-06 — Worker завершил UI коммитами `ee5e153` и `9764a94`; 38 focused-тестов и 321 тест workspace, strict install, production build и smoke `/`, `/plugins`, `/settings`, `/view/test-ui` зелёные. Создан отчёт, задача переведена в review.
+- 2026-11-06 — Зависимости KAN-001/KAN-002/KAN-003 завершены, публичный kernel API подключён. Оркестратор назначил worker-kan-007, ветку `feat/kan-007-ui-shell-plugin-manager` и worktree `.worktrees/kan-007-ui-shell-plugin-manager`; разрешено обновление `apps/web/package.json` и lock-файла только для shadcn/Radix через CLI, корневой package.json запрещён.
+- 2026-11-06 — Задача создана.
+- 2026-11-06 — UI-стек привязан к `specs/technology-stack.md`.
+
+## Итог
+
+- Коммит: merge `36fb4101bdb7cb11f0113e77462e2e83acb4d9b2`; feature-коммиты `d3a39ba`, `1bf5141`, `f104bbe`, `f6ba9ba`.
+- Ветка: `feat/kan-007-ui-shell-plugin-manager` влита в `dev`; ветка и worktree удалены после успеха.
+- Проверки: strict frozen install, полный `pnpm check`, 7 focused test files / 57 tests и 31 workspace test file / 340 tests, production build и 3 Playwright-теста Chromium 360×740 зелёные на ветке и `dev`; финальное ревью разрешило интеграцию.
+- Остаточные риски: после неуспешной деактивации требуется перезапуск процесса; disabled-набор пока не персистится; Windows не проверен; ESM cache и предупреждение Turbopack задокументированы; production fixture UI подключается только в тестах.

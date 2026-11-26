@@ -1,0 +1,2832 @@
+// @vitest-environment node
+
+import path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
+
+import { createOpenCodeGateway, streamEvent } from "./gateway.ts";
+import { ATTACHMENT_LIMITS } from "./attachments.ts";
+import { OPENCODE_CATALOG_TOOLS } from "./tool-metadata.ts";
+import { OpenCodeGatewayError } from "./types.ts";
+
+function asClient(value: unknown): OpenCodeClient {
+  return value as OpenCodeClient;
+}
+
+function event(type: string, data: Record<string, unknown> = {}, created = 1): OpenCodeEvent {
+  return { id: `event-${type}`, created, type, data } as OpenCodeEvent;
+}
+
+function ownedInfo(id = "ses-1") {
+  return {
+    id,
+    parentID: null,
+    projectID: "project-1",
+    title: "Kanbaner chat",
+    agent: "kanbaner",
+    model: { id: "model-1", providerID: "provider-1", variant: "high" },
+    metadata: { source: "kanbaner" },
+    location: { directory: process.cwd() },
+    time: { created: 1_000, updated: 2_000 },
+  };
+}
+
+function subscription(events: readonly OpenCodeEvent[]) {
+  let index = 0;
+  const iterator = {
+    next: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => {
+      const value = events[index];
+      index += 1;
+      return value === undefined ? { done: true, value: undefined } : { done: false, value };
+    }),
+    return: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => ({
+      done: true,
+      value: undefined,
+    })),
+  };
+  return {
+    iterator,
+    value: { [Symbol.asyncIterator]: () => iterator },
+  };
+}
+
+function completedAssistant(id = "assistant-1") {
+  return {
+    id,
+    type: "assistant",
+    time: { created: 1, completed: 2 },
+    finish: "stop",
+    content: [{ id: "text-1", type: "text", text: "Ответ" }],
+  };
+}
+
+function assistantMessage(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    type: "assistant",
+    time: { created: 1, completed: 2 },
+    finish: "stop",
+    content: [],
+    ...overrides,
+  };
+}
+
+function failedAssistant(id = "assistant-1", error: unknown = { type: "unknown" }) {
+  return {
+    id,
+    type: "assistant",
+    time: { created: 1, completed: 2 },
+    finish: "error",
+    error,
+    content: [],
+  };
+}
+
+function canonicalTurn(inboxID: string, assistant?: unknown) {
+  return {
+    data: [
+      { id: inboxID, type: "user", text: "Вопрос" },
+      ...(assistant === undefined ? [] : [assistant]),
+    ],
+    cursor: { next: null },
+  };
+}
+
+function canonicalHistory(inboxID: string, messages: readonly unknown[]) {
+  return {
+    data: [{ id: inboxID, type: "user", text: "Вопрос" }, ...messages],
+    cursor: { next: null },
+  };
+}
+
+function idleMessage(outcome: string, overrides: Record<string, unknown> = {}) {
+  return { id: `idle-${outcome}`, type: "idle", outcome, ...overrides };
+}
+
+function promptClient(
+  stream: { value: AsyncIterable<OpenCodeEvent> },
+  list: unknown,
+  session: Record<string, unknown> = {},
+) {
+  return asClient({
+    session: {
+      get: async () => ownedInfo(),
+      prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+      ...session,
+    },
+    message: { list },
+    event: { subscribe: () => stream.value },
+  });
+}
+
+function rejectingSubscription(events: readonly OpenCodeEvent[], reason: Error) {
+  let index = 0;
+  const iterator = {
+    next: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => {
+      const value = events[index];
+      index += 1;
+      if (value === undefined) throw reason;
+      return { done: false, value };
+    }),
+    return: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => ({
+      done: true,
+      value: undefined,
+    })),
+  };
+  return {
+    iterator,
+    value: { [Symbol.asyncIterator]: () => iterator },
+  };
+}
+
+async function collect(iterable: AsyncIterable<OpenCodeEvent>): Promise<OpenCodeEvent[]> {
+  const events: OpenCodeEvent[] = [];
+  for await (const item of iterable) events.push(item);
+  return events;
+}
+
+function last(events: readonly OpenCodeEvent[]): OpenCodeEvent {
+  const event = events[events.length - 1];
+  if (event === undefined) throw new Error("Ожидалось хотя бы одно событие");
+  return event;
+}
+
+function at(events: readonly OpenCodeEvent[], index: number): OpenCodeEvent {
+  const event = events[index];
+  if (event === undefined) throw new Error(`Ожидалось событие с индексом ${index}`);
+  return event;
+}
+
+describe("OpenCode gateway", () => {
+  it("возвращает whitelist catalog и один location без provider settings", async () => {
+    const location = { directory: process.cwd() };
+    const providerList = vi.fn(async () => ({
+      data: [
+        {
+          id: "provider-1",
+          name: "Provider One",
+          activation: "enabled",
+          settings: { apiKey: "secret" },
+        },
+        { id: "empty", name: "Empty", activation: "auto", headers: { authorization: "secret" } },
+      ],
+    }));
+    const modelList = vi.fn(async () => ({
+      data: [
+        {
+          modelID: "model-1",
+          providerID: "provider-1",
+          name: "Model One",
+          type: "chat",
+          enabled: true,
+          status: "active",
+          variants: [{ id: "low" }, { id: "high" }],
+          settings: { apiKey: "secret" },
+        },
+        {
+          modelID: "disabled",
+          providerID: "provider-1",
+          name: "Disabled",
+          enabled: false,
+          status: "active",
+          variants: [],
+        },
+      ],
+    }));
+    const agentList = vi.fn(async () => ({
+      data: [
+        {
+          id: "kanbaner",
+          name: "Kanbaner",
+          description: "Restricted",
+          hidden: false,
+          mode: "primary",
+        },
+        { id: "build", name: "Build", hidden: false, mode: "primary" },
+      ],
+    }));
+    const modelDefault = vi.fn(async () => ({
+      data: { id: "provider-1/model-1", modelID: "model-1", providerID: "provider-1" },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        provider: { list: providerList },
+        model: { list: modelList, default: modelDefault },
+        agent: { list: agentList },
+      }),
+    );
+
+    const catalog = await gateway.catalog();
+
+    expect(catalog).toEqual({
+      providers: [{ id: "provider-1", name: "Provider One", activation: "enabled" }],
+      models: [
+        {
+          id: "model-1",
+          providerID: "provider-1",
+          name: "Model One",
+          type: "chat",
+          variants: ["low", "high"],
+        },
+      ],
+      agents: [{ id: "kanbaner", name: "Kanbaner", description: "Restricted" }],
+      tools: OPENCODE_CATALOG_TOOLS,
+      defaultModel: { id: "model-1", providerID: "provider-1" },
+    });
+    expect(JSON.stringify(catalog)).not.toContain("secret");
+    for (const call of [providerList, modelList, agentList, modelDefault]) {
+      expect(call).toHaveBeenCalledWith(expect.objectContaining({ location }));
+    }
+    expect(modelList).toHaveBeenCalledWith({ location, types: ["chat"] });
+  });
+
+  it("создаёт только ограниченную сессию и скрывает чужие session ID", async () => {
+    const create = vi.fn(async () => ownedInfo());
+    const get = vi.fn(async () => ({ ...ownedInfo(), agent: "build" }));
+    const list = vi.fn();
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { create, get }, message: { list } }),
+    );
+
+    await expect(gateway.createSession({ agent: "build" })).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(create).not.toHaveBeenCalled();
+
+    const created = await gateway.createSession({
+      model: { id: "model-1", providerID: "provider-1" },
+    });
+    expect(created.id).toBe("ses-1");
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "kanbaner",
+        metadata: { source: "kanbaner" },
+        location: { directory: process.cwd() },
+      }),
+    );
+
+    await expect(gateway.getSession("foreign")).rejects.toEqual(
+      new OpenCodeGatewayError("NOT_FOUND", "Сессия OpenCode не найдена"),
+    );
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("загружает всю history с pagination и сохраняет статусы tools/compaction", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: "user-1",
+            type: "user",
+            text: "Вопрос",
+            files: [
+              {
+                name: "notes.txt",
+                mime: "text/plain",
+                data: "c2VjcmV0IGZpbGUgY29udGVudA==",
+                source: { type: "inline" },
+              },
+            ],
+          },
+        ],
+        cursor: { next: "cursor-2" },
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: "assistant-1",
+            type: "assistant",
+            content: [
+              { id: "text-1", type: "text", text: "Ответ" },
+              {
+                id: "call-1",
+                type: "tool",
+                name: "task_update",
+                state: { status: "running", input: { id: "task-1" } },
+                time: { created: 1000, ran: 1200 },
+              },
+            ],
+          },
+          { id: "compact-1", type: "compaction", status: "completed", summary: "Сводка" },
+        ],
+        cursor: { next: null },
+      });
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(list).toHaveBeenNthCalledWith(1, { sessionID: "ses-1", order: "asc", limit: 200 });
+    expect(list).toHaveBeenNthCalledWith(2, {
+      sessionID: "ses-1",
+      limit: 200,
+      cursor: "cursor-2",
+    });
+    expect(session.messages).toEqual([
+      {
+        id: "user:user-1",
+        role: "user",
+        text: "Вопрос",
+        attachments: [{ name: "notes.txt", mime: "text/plain" }],
+      },
+      { id: "assistant:assistant-1:text-1", role: "assistant", text: "Ответ" },
+      {
+        id: "tool:assistant-1:call-1",
+        role: "tool",
+        name: "task_update",
+        status: "running",
+        text: '{"id":"task-1"}',
+        startedAt: 1200,
+        input: '{"id":"task-1"}',
+      },
+      { id: "system:compact-1", role: "system", text: "Сводка" },
+    ]);
+    expect(JSON.stringify(session)).not.toContain("c2VjcmV0");
+    expect(JSON.stringify(session)).not.toContain("base64");
+  });
+
+  it("маппит completed/error/cancelled и v1 timestamps, не раскрывая metadata и upstream error", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        {
+          id: "assistant-tools",
+          type: "assistant",
+          content: [
+            {
+              id: "call-completed",
+              type: "tool",
+              name: "task_update",
+              state: {
+                status: "completed",
+                input: { id: "task-1", expectedVersion: 2 },
+                content: [{ type: "text", text: "Обновлено" }],
+                metadata: { secret: "metadata-secret" },
+              },
+              native: { secret: "native-secret" },
+              time: { created: 1000, ran: 1100, completed: 3600 },
+            },
+            {
+              id: "call-error",
+              type: "tool",
+              name: "task_get",
+              state: {
+                status: "error",
+                input: { id: "task-2" },
+                error: {
+                  type: "tool_error",
+                  message: "secret upstream response",
+                  response: { body: "secret response body" },
+                },
+              },
+              time: { created: 4000, ran: 4200, completed: 4400 },
+            },
+            {
+              id: "call-aborted",
+              type: "tool",
+              name: "shell",
+              state: { status: "error", input: { command: "sleep 1" }, error: { type: "aborted" } },
+              time: { created: 5000, ran: 5100 },
+            },
+            {
+              id: "part-v1-completed",
+              callID: "call-v1",
+              type: "tool",
+              tool: "task_list",
+              state: {
+                status: "completed",
+                input: { limit: 10 },
+                output: "legacy output",
+                time: { start: 7000, end: 9500 },
+              },
+            },
+            {
+              id: "part-v1-error",
+              callID: "call-v1-error",
+              type: "tool",
+              tool: "task_delete",
+              state: {
+                status: "error",
+                input: { id: "task-3" },
+                error: "secret v1 upstream error",
+                time: { start: 10_000, end: 10_500 },
+              },
+            },
+            {
+              id: "call-invalid",
+              type: "tool",
+              name: "grep",
+              state: { status: "running", input: { pattern: "x" } },
+              time: { created: 1000, completed: 900 },
+            },
+          ],
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+    const tools = session.messages.filter((message) => message.role === "tool");
+
+    expect(tools[0]).toEqual({
+      id: "tool:assistant-tools:call-completed",
+      role: "tool",
+      name: "task_update",
+      status: "completed",
+      text: "Обновлено",
+      startedAt: 1100,
+      endedAt: 3600,
+      input: '{"id":"task-1","expectedVersion":2}',
+      output: "Обновлено",
+    });
+    expect(tools[1]).toEqual({
+      id: "tool:assistant-tools:call-error",
+      role: "tool",
+      name: "task_get",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      startedAt: 4200,
+      endedAt: 4400,
+      input: '{"id":"task-2"}',
+      output: "Инструмент завершился с ошибкой",
+    });
+    expect(tools[2]).toMatchObject({
+      status: "cancelled",
+      startedAt: 5100,
+      input: '{"command":"sleep 1"}',
+    });
+    expect(tools[2]).not.toHaveProperty("endedAt");
+    expect(tools[3]).toEqual({
+      id: "tool:assistant-tools:call-v1",
+      role: "tool",
+      name: "task_list",
+      status: "completed",
+      text: '{"limit":10}',
+      startedAt: 7000,
+      endedAt: 9500,
+      input: '{"limit":10}',
+      output: "legacy output",
+    });
+    expect(tools[4]).toEqual({
+      id: "tool:assistant-tools:call-v1-error",
+      role: "tool",
+      name: "task_delete",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      startedAt: 10_000,
+      endedAt: 10_500,
+      input: '{"id":"task-3"}',
+      output: "Инструмент завершился с ошибкой",
+    });
+    expect(tools[5]).toMatchObject({ status: "running", startedAt: 1000 });
+    expect(tools[5]).not.toHaveProperty("endedAt");
+    const serializedSession = JSON.stringify(session);
+    expect(serializedSession).not.toContain("metadata-secret");
+    expect(serializedSession).not.toContain("native-secret");
+    expect(serializedSession).not.toContain("secret upstream response");
+    expect(serializedSession).not.toContain("secret response body");
+    expect(serializedSession).not.toContain("secret v1 upstream error");
+  });
+
+  it("не воскрешает старый system error после нового успешного turn", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "user-1", type: "user", text: "Старый вопрос" },
+        failedAssistant("assistant-old", { type: "unknown", message: "secret upstream response" }),
+        { id: "user-2", type: "user", text: "Новый вопрос" },
+        completedAssistant("assistant-current"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(session.messages.some((message) => message.role === "system")).toBe(false);
+    expect(session.messages.some((message) => message.id === "error:assistant-old")).toBe(false);
+    expect(JSON.stringify(session)).not.toContain("secret");
+  });
+
+  it("сохраняет system error только для последнего assistant последнего turn", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "user-1", type: "user", text: "Первый" },
+        failedAssistant("assistant-old", { type: "unknown" }),
+        { id: "user-2", type: "user", text: "Второй" },
+        failedAssistant("assistant-current", { type: "unknown" }),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(session.messages.filter((message) => message.role === "system")).toEqual([
+      {
+        id: "error:assistant-current",
+        role: "system",
+        text: "Ответ OpenCode завершился с ошибкой",
+      },
+    ]);
+  });
+
+  it("не воскрешает старый idle error перед новым user и успешным turn", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "user-1", type: "user", text: "Старый вопрос" },
+        failedAssistant("assistant-old", { type: "unknown" }),
+        { id: "idle-old", type: "idle", error: { type: "provider", message: "secret" } },
+        { id: "user-2", type: "user", text: "Новый вопрос" },
+        completedAssistant("assistant-current"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(session.messages.some((message) => message.role === "system")).toBe(false);
+    expect(session.messages.some((message) => message.id === "error:idle-old")).toBe(false);
+    expect(JSON.stringify(session)).not.toContain("secret");
+  });
+
+  it("не воскрешает idle error, если позже был успешный assistant", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "user-1", type: "user", text: "Вопрос" },
+        { id: "idle-old", type: "idle", error: { type: "provider" } },
+        completedAssistant("assistant-current"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(session.messages.some((message) => message.role === "system")).toBe(false);
+  });
+
+  it("сохраняет idle error текущего turn", async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "user-1", type: "user", text: "Вопрос" },
+        completedAssistant("assistant-current"),
+        { id: "idle-current", type: "idle", error: { type: "provider" } },
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({ session: { get: async () => ownedInfo() }, message: { list } }),
+    );
+
+    const session = await gateway.getSession("ses-1");
+
+    expect(session.messages.filter((message) => message.role === "system")).toEqual([
+      {
+        id: "error:idle-current",
+        role: "system",
+        text: "Сессия OpenCode завершилась с ошибкой",
+      },
+    ]);
+  });
+
+  it("отдаёт binary preview только из exact inline image canonical message", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+    const encoded = png.toString("base64");
+    const get = vi.fn(async () => ownedInfo());
+    const list = vi.fn(async () => ({
+      data: [
+        {
+          id: "user-1",
+          type: "user",
+          text: "Картинка",
+          files: [
+            {
+              name: "pixel.png",
+              mime: "image/png",
+              data: encoded,
+              source: { type: "inline" },
+            },
+            {
+              name: "notes.txt",
+              mime: "text/plain",
+              data: "aGVsbG8=",
+              source: { type: "inline" },
+            },
+          ],
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(asClient({ session: { get }, message: { list } }));
+
+    const preview = await gateway.getAttachmentPreview("ses-1", "user-1", 0);
+
+    expect(preview.mime).toBe("image/png");
+    expect(preview.name).toBe("pixel.png");
+    expect(Buffer.from(preview.bytes).equals(png)).toBe(true);
+    expect(get).toHaveBeenCalledWith({ sessionID: "ses-1" });
+    expect(list).toHaveBeenCalledWith({ sessionID: "ses-1", order: "asc", limit: 200 });
+
+    const history = await gateway.getSession("ses-1");
+    expect(history.messages[0]).toEqual({
+      id: "user:user-1",
+      role: "user",
+      text: "Картинка",
+      attachments: [
+        { name: "pixel.png", mime: "image/png" },
+        { name: "notes.txt", mime: "text/plain" },
+      ],
+    });
+    expect(JSON.stringify(history)).not.toContain(encoded);
+    expect(JSON.stringify(history)).not.toContain("data:image");
+  });
+
+  it("скрывает missing, media-ref, non-image, invalid inline Base64 и подмену data URI", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const encoded = png.toString("base64");
+    const files: readonly unknown[] = [
+      { name: "pixel.png", mime: "image/png", data: encoded, source: { type: "inline" } },
+      {
+        name: "notes.txt",
+        mime: "text/plain",
+        data: "aGVsbG8=",
+        source: { type: "inline" },
+      },
+      {
+        name: "media.png",
+        mime: "image/png",
+        data: encoded,
+        source: { type: "uri", uri: "media:0123456789abcdef" },
+      },
+      {
+        name: "file.png",
+        mime: "image/png",
+        data: encoded,
+        source: { type: "uri", uri: "file:///etc/passwd" },
+      },
+      {
+        name: "remote.png",
+        mime: "image/png",
+        data: encoded,
+        source: { type: "uri", uri: `https://attacker.invalid/${encoded}` },
+      },
+      { name: "broken.png", mime: "image/png", data: "not-base64", source: { type: "inline" } },
+      { name: "fake.png", mime: "image/png", data: "aGVsbG8=", source: { type: "inline" } },
+      { name: "mime.png", mime: "image/jpeg", data: encoded, source: { type: "inline" } },
+      {
+        name: "data-uri.png",
+        mime: "image/png",
+        data: `data:image/png;base64,${encoded}`,
+        source: { type: "inline" },
+      },
+      {
+        name: "newline.png",
+        mime: "image/png",
+        data: `${encoded}\n`,
+        source: { type: "inline" },
+      },
+      {
+        name: "data-uri-newline.png",
+        mime: "image/png",
+        data: `data:image/png;base64,${encoded}\n`,
+        source: { type: "inline" },
+      },
+      { name: "no-source.png", mime: "image/png", data: encoded },
+      {
+        name: "legacy-uri.png",
+        mime: "image/png",
+        uri: `data:image/png;base64,${encoded}`,
+        source: { type: "inline" },
+      },
+    ];
+    const get = vi.fn(async () => ownedInfo());
+    const list = vi.fn(async () => ({
+      data: [{ id: "user-1", type: "user", files }],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(asClient({ session: { get }, message: { list } }));
+
+    for (const [messageID, index] of [
+      ["missing", 0],
+      ["user-1", 1],
+      ["user-1", 2],
+      ["user-1", 3],
+      ["user-1", 4],
+      ["user-1", 5],
+      ["user-1", 6],
+      ["user-1", 7],
+      ["user-1", 8],
+      ["user-1", 9],
+      ["user-1", 10],
+      ["user-1", 11],
+      ["user-1", 12],
+    ] as const) {
+      await expect(gateway.getAttachmentPreview("ses-1", messageID, index)).rejects.toEqual(
+        new OpenCodeGatewayError("NOT_FOUND", "Вложение OpenCode не найдено"),
+      );
+    }
+
+    await expect(gateway.getAttachmentPreview("ses-1", "user-1", -1)).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    await expect(gateway.getAttachmentPreview("ses-1", "user-1", 1.5)).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(list).toHaveBeenCalled();
+  });
+
+  it("не читает сообщения и preview для чужой session", async () => {
+    const get = vi.fn(async () => ({ ...ownedInfo(), agent: "build" }));
+    const list = vi.fn();
+    const gateway = createOpenCodeGateway(asClient({ session: { get }, message: { list } }));
+
+    await expect(gateway.getAttachmentPreview("foreign", "user-1", 0)).rejects.toEqual(
+      new OpenCodeGatewayError("NOT_FOUND", "Сессия OpenCode не найдена"),
+    );
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("отклоняет preview больше maxMediaBytes", async () => {
+    const oversized = Buffer.alloc(ATTACHMENT_LIMITS.maxMediaBytes + 1, 0x89);
+    const encoded = oversized.toString("base64");
+    const get = vi.fn(async () => ownedInfo());
+    const list = vi.fn(async () => ({
+      data: [
+        {
+          id: "user-1",
+          type: "user",
+          files: [
+            {
+              name: "huge.png",
+              mime: "image/png",
+              data: encoded,
+              source: { type: "inline" },
+            },
+          ],
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(asClient({ session: { get }, message: { list } }));
+
+    await expect(gateway.getAttachmentPreview("ses-1", "user-1", 0)).rejects.toEqual(
+      new OpenCodeGatewayError("NOT_FOUND", "Вложение OpenCode не найдено"),
+    );
+  });
+
+  it("маппит tool identity и не раскрывает upstream execution error", () => {
+    const started = streamEvent(
+      event(
+        "session.tool.input.started",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          name: "task_update",
+        },
+        1000,
+      ),
+    );
+    const called = streamEvent(
+      event(
+        "session.tool.called",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          input: { id: "task-1", expectedVersion: 2 },
+        },
+        1100,
+      ),
+    );
+    const success = streamEvent(
+      event(
+        "session.tool.success",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          content: [{ type: "text", text: "Готово" }],
+        },
+        2300,
+      ),
+    );
+    const failure = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          error: { type: "tool_error", message: "secret upstream response" },
+          metadata: { secret: "metadata-secret" },
+          native: { secret: "native-secret" },
+        },
+        2400,
+      ),
+    );
+    const failed = streamEvent(
+      event("session.execution.failed", {
+        sessionID: "ses-1",
+        error: { message: "secret upstream response" },
+      }),
+    );
+
+    expect(started).toMatchObject({
+      id: "message-1:call-1",
+      name: "task_update",
+      status: "running",
+      startedAt: 1000,
+    });
+    expect(called).toMatchObject({
+      id: "message-1:call-1",
+      text: '{"id":"task-1","expectedVersion":2}',
+      input: '{"id":"task-1","expectedVersion":2}',
+      startedAt: 1100,
+    });
+    expect(success).toMatchObject({
+      id: "message-1:call-1",
+      status: "completed",
+      text: "Готово",
+      output: "Готово",
+      endedAt: 2300,
+    });
+    expect(failure).toMatchObject({
+      id: "message-1:call-1",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      output: "Инструмент завершился с ошибкой",
+      endedAt: 2400,
+    });
+    expect(JSON.stringify(failure)).not.toContain("secret");
+    expect(failed).toEqual({ kind: "error", text: "Запрос OpenCode завершился с ошибкой" });
+    expect(JSON.stringify(failed)).not.toContain("secret");
+    expect(streamEvent(event("session.execution.interrupted", { sessionID: "ses-1" }))).toEqual({
+      kind: "cancelled",
+      text: "Запрос остановлен",
+    });
+  });
+
+  it("нормализует streaming aborted tool в cancelled без generic error-подписи", () => {
+    const aborted = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-1",
+          error: { type: "aborted", message: "secret upstream response" },
+        },
+        1500,
+      ),
+    );
+    expect(aborted).toMatchObject({
+      id: "message-1:call-1",
+      status: "cancelled",
+      text: "",
+      endedAt: 1500,
+    });
+    expect(aborted).not.toHaveProperty("output");
+    expect(JSON.stringify(aborted)).not.toContain("secret");
+
+    // Обычная ошибка инструмента остаётся error с generic-подписью.
+    const failed = streamEvent(
+      event(
+        "session.tool.failed",
+        {
+          sessionID: "ses-1",
+          assistantMessageID: "message-1",
+          id: "call-2",
+          error: { type: "tool_error", message: "secret upstream response" },
+        },
+        1600,
+      ),
+    );
+    expect(failed).toMatchObject({
+      id: "message-1:call-2",
+      status: "error",
+      text: "Инструмент завершился с ошибкой",
+      output: "Инструмент завершился с ошибкой",
+      endedAt: 1600,
+    });
+    expect(JSON.stringify(failed)).not.toContain("secret");
+  });
+
+  it("ждёт server.connected, фильтрует сессии и завершается на terminal event", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+      event("session.text.delta", { sessionID: "other", delta: "Чужое" }),
+      event("session.text.delta", { sessionID: "ses-1", delta: "Предыдущее" }),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.text.delta", {
+        sessionID: "ses-1",
+        assistantMessageID: "message-1",
+        ordinal: 0,
+        delta: "Ответ",
+      }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+      event("session.text.delta", { sessionID: "ses-1", delta: "Позднее" }),
+    ]);
+    const prompt = vi.fn(async () => {
+      expect(stream.iterator.next).toHaveBeenCalledTimes(1);
+      return { id: "inbox-1", sessionID: "ses-1", delivery: "queue" };
+    });
+    const list = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received: OpenCodeEvent[] = [];
+    for await (const item of gateway.prompt("ses-1", "Вопрос", new AbortController().signal)) {
+      received.push(item);
+    }
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.text.delta",
+      "session.execution.finalizing",
+      "session.execution.succeeded",
+    ]);
+    expect(streamEvent(at(received, 2))).toEqual({ kind: "finalizing" });
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID: "ses-1",
+        id: expect.stringMatching(/^msg_/u),
+        text: "Вопрос",
+        delivery: "queue",
+        metadata: { source: "kanbaner" },
+      }),
+    );
+    const promptInput = (prompt.mock.calls as unknown as [[Record<string, unknown>]])[0]?.[0];
+    expect(promptInput).not.toHaveProperty("files");
+    expect(stream.iterator.return).toHaveBeenCalledTimes(1);
+  });
+
+  it("выпускает finalizing ровно один раз и только один terminal", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+      event("session.execution.failed", { sessionID: "ses-1" }),
+    ]);
+    const list = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const gateway = createOpenCodeGateway(promptClient(stream, list));
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(
+      received.filter((item) => (item.type as string) === "session.execution.finalizing"),
+    ).toHaveLength(1);
+    expect(
+      received.filter((item) => (item.type as string) === "session.execution.failed"),
+    ).toHaveLength(0);
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.succeeded",
+    ]);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("повторяет canonical lookup после временного сбоя", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const list = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient lookup failure"))
+      .mockResolvedValueOnce(canonicalTurn("inbox-1", completedAssistant()));
+    const gateway = createOpenCodeGateway(promptClient(stream, list));
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.succeeded",
+    ]);
+    expect(streamEvent(last(received))).toEqual({ kind: "done" });
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("передаёт только inline data URL в prompt выбранной модели", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({
+      id: "inbox-1",
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const list = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received: OpenCodeEvent[] = [];
+    for await (const item of gateway.prompt("ses-1", "Что в файле?", new AbortController().signal, [
+      { name: "notes.txt", dataUri: "data:text/plain;base64,aGVsbG8=" },
+      { name: "screen.png", dataUri: "data:image/png;base64,iVBORw0KGgo=" },
+    ])) {
+      received.push(item);
+    }
+
+    expect(received.map((item) => item.type)).toContain("session.execution.succeeded");
+    expect(prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Что в файле?",
+        files: [
+          {
+            uri: "data:text/plain;base64,aGVsbG8=",
+            source: { type: "inline" },
+            name: "notes.txt",
+          },
+          {
+            uri: "data:image/png;base64,iVBORw0KGgo=",
+            source: { type: "inline" },
+            name: "screen.png",
+          },
+        ],
+      }),
+    );
+  });
+
+  it("использует client turnID и не выпускает admitted, если Service сохранил ID", async () => {
+    const turnID = "msg_client0001";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: turnID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({ id: turnID, sessionID: "ses-1", delivery: "queue" }));
+    const list = vi.fn(async () => canonicalTurn(turnID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ id: turnID }));
+    expect(received.map((item) => item.type)).not.toContain("kanbaner.turn.admitted");
+    expect(streamEvent(last(received))).toEqual({ kind: "done" });
+  });
+
+  it("явно связывает admitted ID, если Service подменил client turnID", async () => {
+    const turnID = "msg_client0002";
+    const admittedID = "msg_server0002";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: admittedID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({
+      id: admittedID,
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const list = vi.fn(async () => canonicalTurn(admittedID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    const admitted = received.find((item) => (item.type as string) === "kanbaner.turn.admitted");
+
+    expect(admitted).toBeDefined();
+    expect(streamEvent(admitted as OpenCodeEvent)).toEqual({ kind: "admitted", id: admittedID });
+    const status = await gateway.getTurnStatus("ses-1", turnID);
+    expect(status.outcome).toBe("done");
+  });
+
+  it("getTurnStatus принимает admitted ID вне client pattern напрямую и через alias", async () => {
+    const turnID = "msg_client0004";
+    const admittedID = "inbox-admitted";
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: admittedID }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const prompt = vi.fn(async () => ({
+      id: admittedID,
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const list = vi.fn(async () => canonicalTurn(admittedID, completedAssistant()));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    expect(received.map((item) => streamEvent(item))).toContainEqual({
+      kind: "admitted",
+      id: admittedID,
+    });
+
+    expect((await gateway.getTurnStatus("ses-1", turnID)).outcome).toBe("done");
+    expect((await gateway.getTurnStatus("ses-1", admittedID)).outcome).toBe("done");
+
+    // Прямой admitted ID не зависит от alias-map: новый gateway после
+    // restart/eviction тоже находит точный turn.
+    const restarted = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+    expect((await restarted.getTurnStatus("ses-1", admittedID)).outcome).toBe("done");
+    await expect(gateway.getTurnStatus("ses-1", "bad id")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+  });
+
+  it("getTurnStatus вычисляет outcome ровно по переданному turn ID", async () => {
+    const doneID = "msg_done000001";
+    const errorID = "msg_error00001";
+    const list = vi.fn(async () => ({
+      data: [
+        { id: doneID, type: "user", text: "Вопрос" },
+        completedAssistant("assistant-done"),
+        { id: errorID, type: "user", text: "Второй" },
+        failedAssistant("assistant-error"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+
+    expect((await gateway.getTurnStatus("ses-1", doneID)).outcome).toBe("done");
+    expect((await gateway.getTurnStatus("ses-1", errorID)).outcome).toBe("error");
+    expect((await gateway.getTurnStatus("ses-1", "msg_missing0001")).outcome).toBe("missing");
+    await expect(gateway.getTurnStatus("ses-1", "bad id")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejected session.prompt после начала вызова даёт unconfirmed без non-admission", async () => {
+    const turnID = "msg_client0003";
+    const stream = subscription([event("server.connected")]);
+    const prompt = vi.fn(async () => {
+      throw new OpenCodeGatewayError(
+        "DEPENDENCY_UNAVAILABLE",
+        "secret prompt failure after possible admission",
+      );
+    });
+    const list = vi.fn(async () => canonicalTurn(turnID));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const cancel = vi.fn(async () => undefined);
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { prompt, interrupt, inbox: { cancel } }),
+    );
+
+    const received = await collect(
+      gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+    );
+    const events = received.map((item) => streamEvent(item));
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ id: turnID }));
+    expect(events).toContainEqual({ kind: "finalizing" });
+    expect(last(received)).toEqual(
+      expect.objectContaining({
+        type: "session.execution.failed",
+        data: expect.objectContaining({ kanbanerUnconfirmed: true }),
+      }),
+    );
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(JSON.stringify(received)).not.toContain("secret");
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("rejected session.prompt подтверждает только exact canonical outcome", async () => {
+    const cases = [
+      ["done", completedAssistant(), { kind: "done" }],
+      [
+        "error",
+        failedAssistant("assistant-failed"),
+        { kind: "error", text: "Запрос OpenCode завершился с ошибкой" },
+      ],
+    ] as const;
+
+    for (const [name, assistant, expected] of cases) {
+      const turnID = `msg_client${name}0001`;
+      const stream = subscription([event("server.connected")]);
+      const prompt = vi.fn(async () => {
+        throw new Error("connection reset after possible admission");
+      });
+      const list = vi.fn(async () => canonicalTurn(turnID, assistant));
+      const gateway = createOpenCodeGateway(promptClient(stream, list, { prompt }));
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal, [], turnID),
+      );
+
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(streamEvent(last(received))).toEqual(expected);
+      expect(JSON.stringify(received)).not.toContain("connection reset");
+    }
+  });
+
+  it("находит второй prompt по stable ID, если первый отсутствует в canonical history", async () => {
+    const firstID = "msg_first000001";
+    const secondID = "msg_second00001";
+    const list = vi.fn(async () => ({
+      data: [
+        { id: secondID, type: "user", text: "Второй вопрос" },
+        completedAssistant("assistant-second"),
+      ],
+      cursor: { next: null },
+    }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt: vi.fn() },
+        message: { list },
+        event: { subscribe: () => subscription([]).value },
+      }),
+    );
+
+    expect((await gateway.getTurnStatus("ses-1", firstID)).outcome).toBe("missing");
+    expect((await gateway.getTurnStatus("ses-1", secondID)).outcome).toBe("done");
+  });
+
+  it("принимает stale failed/interrupted как done, если canonical assistant завершён", async () => {
+    for (const type of ["session.execution.failed", "session.execution.interrupted"]) {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event(type, { sessionID: "ses-1" }),
+      ]);
+      const list = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+      const gateway = createOpenCodeGateway(
+        asClient({
+          session: {
+            get: async () => ownedInfo(),
+            prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+          },
+          message: { list },
+          event: { subscribe: () => stream.value },
+        }),
+      );
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(received.map((item) => item.type)).toEqual([
+        "server.connected",
+        "session.execution.finalizing",
+        "session.execution.succeeded",
+      ]);
+      expect(streamEvent(last(received))).toEqual({ kind: "done" });
+    }
+  });
+
+  it("trailing idle перекрывает completed assistant в stream", async () => {
+    const cases = [
+      ["failed", {}, { kind: "error", text: "Запрос OpenCode завершился с ошибкой" }],
+      [
+        "failed",
+        { error: { type: "aborted", message: "secret upstream response" } },
+        { kind: "cancelled", text: "Запрос остановлен" },
+      ],
+      ["interrupted", {}, { kind: "cancelled", text: "Запрос остановлен" }],
+    ] as const;
+
+    for (const [outcome, overrides, expected] of cases) {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      const list = vi.fn(async () =>
+        canonicalHistory("inbox-1", [completedAssistant(), idleMessage(outcome, overrides)]),
+      );
+      const gateway = createOpenCodeGateway(promptClient(stream, list));
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(streamEvent(last(received))).toEqual(expected);
+      expect(JSON.stringify(received)).not.toContain("secret");
+    }
+  });
+
+  it("trailing idle перекрывает completed assistant после transport error", async () => {
+    const cases = [
+      ["failed", { kind: "error", text: "Запрос OpenCode завершился с ошибкой" }],
+      ["interrupted", { kind: "cancelled", text: "Запрос остановлен" }],
+    ] as const;
+
+    for (const [outcome, expected] of cases) {
+      const stream = rejectingSubscription(
+        [
+          event("server.connected"),
+          event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        ],
+        new Error("transport failed: secret upstream response"),
+      );
+      const list = vi.fn(async () =>
+        canonicalHistory("inbox-1", [completedAssistant(), idleMessage(outcome)]),
+      );
+      const interrupt = vi.fn(async () => ({ interrupted: true }));
+      const cancel = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        promptClient(stream, list, { interrupt, inbox: { cancel } }),
+      );
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(streamEvent(last(received))).toEqual(expected);
+      expect(interrupt).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(JSON.stringify(received)).not.toContain("secret");
+    }
+  });
+
+  it("trailing idle succeeded не подтверждает done без завершённого assistant", async () => {
+    const histories = [
+      [idleMessage("succeeded")],
+      [
+        completedAssistant("assistant-1"),
+        assistantMessage("assistant-2", { finish: "tool-calls" }),
+        idleMessage("succeeded"),
+      ],
+    ];
+
+    for (const history of histories) {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      const list = vi.fn(async () => canonicalHistory("inbox-1", history));
+      const gateway = createOpenCodeGateway(promptClient(stream, list));
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(streamEvent(last(received))).toEqual({
+        kind: "error",
+        text: "Не удалось подтвердить результат OpenCode",
+        reason: "unconfirmed",
+      });
+      expect(list).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it("trailing idle succeeded без assistant остаётся pending после transport error", async () => {
+    const stream = rejectingSubscription(
+      [
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      ],
+      new Error("transport failed: secret upstream response"),
+    );
+    const list = vi.fn(async () => canonicalHistory("inbox-1", [idleMessage("succeeded")]));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(JSON.stringify(received)).not.toContain("secret");
+  });
+
+  it("stale idle до нового assistant не перекрывает его done", async () => {
+    for (const outcome of ["failed", "interrupted", "succeeded"] as const) {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      const list = vi.fn(async () =>
+        canonicalHistory("inbox-1", [
+          completedAssistant("assistant-1"),
+          idleMessage(outcome),
+          completedAssistant("assistant-2"),
+        ]),
+      );
+      const gateway = createOpenCodeGateway(promptClient(stream, list));
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(streamEvent(last(received))).toEqual({ kind: "done" });
+    }
+  });
+
+  it("idle failed/interrupted без assistant даёт error/cancelled после transport error", async () => {
+    const cases = [
+      ["failed", { kind: "error", text: "Запрос OpenCode завершился с ошибкой" }],
+      ["interrupted", { kind: "cancelled", text: "Запрос остановлен" }],
+    ] as const;
+
+    for (const [outcome, expected] of cases) {
+      const stream = rejectingSubscription(
+        [
+          event("server.connected"),
+          event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        ],
+        new Error("transport failed: secret upstream response"),
+      );
+      const list = vi.fn(async () => canonicalHistory("inbox-1", [idleMessage(outcome)]));
+      const interrupt = vi.fn(async () => ({ interrupted: true }));
+      const cancel = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        promptClient(stream, list, { interrupt, inbox: { cancel } }),
+      );
+
+      const received = await collect(
+        gateway.prompt("ses-1", "Вопрос", new AbortController().signal),
+      );
+
+      expect(streamEvent(last(received))).toEqual(expected);
+      expect(interrupt).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(JSON.stringify(received)).not.toContain("secret");
+    }
+  });
+
+  it("оставляет canonical error текущего prompt при stale succeeded", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const list = vi.fn(async () =>
+      canonicalTurn(
+        "inbox-1",
+        failedAssistant("assistant-1", { type: "provider", message: "secret upstream response" }),
+      ),
+    );
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: {
+          get: async () => ownedInfo(),
+          prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+        },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.failed",
+    ]);
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Запрос OpenCode завершился с ошибкой",
+    });
+    expect(JSON.stringify(received)).not.toContain("secret");
+  });
+
+  it("после transport error не прерывает execution и возвращает canonical done", async () => {
+    const iterator = {
+      next: vi
+        .fn<() => Promise<IteratorResult<OpenCodeEvent>>>()
+        .mockResolvedValueOnce({ done: false, value: event("server.connected") })
+        .mockResolvedValueOnce({
+          done: false,
+          value: event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        })
+        .mockRejectedValue(new Error("transport failed: secret upstream response")),
+      return: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => ({
+        done: true,
+        value: undefined,
+      })),
+    };
+    const list = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const cancel = vi.fn(async () => undefined);
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: {
+          get: async () => ownedInfo(),
+          prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+          interrupt,
+          inbox: { cancel },
+        },
+        message: { list },
+        event: { subscribe: () => ({ [Symbol.asyncIterator]: () => iterator }) },
+      }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.succeeded",
+    ]);
+    expect(streamEvent(last(received))).toEqual({ kind: "done" });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(iterator.return).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(received)).not.toContain("secret");
+  });
+
+  it("не выдаёт терминал и не висит, если canonical outcome ещё pending", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const list = vi.fn(async () => canonicalTurn("inbox-1"));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: {
+          get: async () => ownedInfo(),
+          prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+          interrupt,
+          inbox: { cancel: vi.fn(async () => undefined) },
+        },
+        message: { list },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.failed",
+    ]);
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it("не подтверждает done, если следующий assistant ещё tool-calls", async () => {
+    const stream = rejectingSubscription(
+      [
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      ],
+      new Error("transport failed: secret upstream response"),
+    );
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "inbox-1", type: "user", text: "Вопрос" },
+        completedAssistant("assistant-1"),
+        assistantMessage("assistant-2", { finish: "tool-calls" }),
+      ],
+      cursor: { next: null },
+    }));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.failed",
+    ]);
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(JSON.stringify(received)).not.toContain("secret");
+  });
+
+  it("не подтверждает done по finish без numeric time.completed", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "inbox-1", type: "user", text: "Вопрос" },
+        assistantMessage("assistant-1", { time: { created: 1 }, finish: "stop" }),
+      ],
+      cursor: { next: null },
+    }));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it("держит pending, если у failed assistant запланирован retry", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.failed", { sessionID: "ses-1" }),
+    ]);
+    const secret = "secret upstream response";
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "inbox-1", type: "user", text: "Вопрос" },
+        assistantMessage("assistant-1", {
+          finish: "error",
+          error: { type: "provider", message: secret },
+          retry: { attempt: 1, at: 3, error: { type: "provider", message: secret } },
+        }),
+      ],
+      cursor: { next: null },
+    }));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Не удалось подтвердить результат OpenCode",
+      reason: "unconfirmed",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(JSON.stringify(received)).not.toContain("secret");
+  });
+
+  it("оставляет error для finish=error без error", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const list = vi.fn(async () => ({
+      data: [
+        { id: "inbox-1", type: "user", text: "Вопрос" },
+        assistantMessage("assistant-1", { finish: "error" }),
+      ],
+      cursor: { next: null },
+    }));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+    );
+
+    const received = await collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(received.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.execution.finalizing",
+      "session.execution.failed",
+    ]);
+    expect(streamEvent(last(received))).toEqual({
+      kind: "error",
+      text: "Запрос OpenCode завершился с ошибкой",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it("прекращает canonical lookup по общему deadline и не прерывает execution", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      let lookupSignal: AbortSignal | undefined;
+      const list = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) => {
+        lookupSignal = options?.signal;
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      });
+      const interrupt = vi.fn(async () => ({ interrupted: true }));
+      const gateway = createOpenCodeGateway(
+        promptClient(stream, list, { interrupt, inbox: { cancel: vi.fn(async () => undefined) } }),
+      );
+
+      const consuming = collect(gateway.prompt("ses-1", "Вопрос", new AbortController().signal));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const received = await consuming;
+
+      expect(streamEvent(last(received))).toEqual({
+        kind: "error",
+        text: "Не удалось подтвердить результат OpenCode",
+        reason: "unconfirmed",
+      });
+      expect(lookupSignal?.aborted).toBe(true);
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abort во время canonical lookup отменяет fetch и вызывает prompt cancel", async () => {
+    const stream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    let lookupSignal: AbortSignal | undefined;
+    let startedLookup!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      startedLookup = resolve;
+    });
+    const list = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) => {
+      lookupSignal = options?.signal;
+      startedLookup();
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      });
+    });
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const cancel = vi.fn(async () => undefined);
+    const gateway = createOpenCodeGateway(
+      promptClient(stream, list, { interrupt, inbox: { cancel } }),
+    );
+    const controller = new AbortController();
+
+    const consuming = collect(gateway.prompt("ses-1", "Вопрос", controller.signal));
+    await lookupStarted;
+    controller.abort();
+    await consuming;
+
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(cancel).toHaveBeenCalledWith({ sessionID: "ses-1", inboxID: "inbox-1" });
+    expect(interrupt).toHaveBeenCalledWith({ sessionID: "ses-1" });
+  });
+
+  it("игнорирует чужой inbox.cancelled после delivered и сохраняет свою отмену", async () => {
+    const foreignStream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.inbox.cancelled", { sessionID: "ses-1", inboxID: "inbox-other" }),
+      event("session.text.delta", {
+        sessionID: "ses-1",
+        assistantMessageID: "message-1",
+        ordinal: 0,
+        delta: "Ответ",
+      }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const foreignList = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const foreign = createOpenCodeGateway(
+      asClient({
+        session: {
+          get: async () => ownedInfo(),
+          prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+        },
+        message: { list: foreignList },
+        event: { subscribe: () => foreignStream.value },
+      }),
+    );
+
+    const foreignReceived = await collect(
+      foreign.prompt("ses-1", "Вопрос", new AbortController().signal),
+    );
+
+    expect(foreignReceived.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.text.delta",
+      "session.execution.finalizing",
+      "session.execution.succeeded",
+    ]);
+
+    const ownStream = subscription([
+      event("server.connected"),
+      event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.inbox.cancelled", { sessionID: "ses-1", inboxID: "inbox-1" }),
+      event("session.execution.succeeded", { sessionID: "ses-1" }),
+    ]);
+    const ownList = vi.fn(async () => canonicalTurn("inbox-1", completedAssistant()));
+    const own = createOpenCodeGateway(
+      asClient({
+        session: {
+          get: async () => ownedInfo(),
+          prompt: vi.fn(async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" })),
+        },
+        message: { list: ownList },
+        event: { subscribe: () => ownStream.value },
+      }),
+    );
+
+    const ownReceived = await collect(own.prompt("ses-1", "Вопрос", new AbortController().signal));
+
+    expect(ownReceived.map((item) => item.type)).toEqual([
+      "server.connected",
+      "session.inbox.cancelled",
+    ]);
+    expect(streamEvent(last(ownReceived))).toEqual({
+      kind: "cancelled",
+      text: "Запрос остановлен",
+    });
+    expect(ownList).not.toHaveBeenCalled();
+  });
+
+  it("маппит 413 и 415 upstream в публичную validation error", async () => {
+    for (const status of [413, 415]) {
+      const gateway = createOpenCodeGateway(
+        asClient({
+          server: {
+            info: vi.fn(async () => {
+              throw { status };
+            }),
+          },
+        }),
+      );
+      await expect(gateway.status()).rejects.toEqual(
+        new OpenCodeGatewayError("VALIDATION_ERROR", "OpenCode отклонил аргументы запроса"),
+      );
+    }
+  });
+
+  it("abort прерывает ожидание события и вызывает session.interrupt", async () => {
+    const pending = new Promise<IteratorResult<OpenCodeEvent>>(() => undefined);
+    const iterator = {
+      next: vi
+        .fn<() => Promise<IteratorResult<OpenCodeEvent>>>()
+        .mockResolvedValueOnce({ done: false, value: event("server.connected") })
+        .mockReturnValue(pending),
+      return: vi.fn(async (): Promise<IteratorResult<OpenCodeEvent>> => ({
+        done: true,
+        value: undefined,
+      })),
+    };
+    const prompt = vi.fn(async () => ({
+      id: "inbox-1",
+      sessionID: "ses-1",
+      delivery: "queue",
+    }));
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const cancel = vi.fn(async () => undefined);
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt, interrupt, inbox: { cancel } },
+        event: { subscribe: () => ({ [Symbol.asyncIterator]: () => iterator }) },
+      }),
+    );
+    const controller = new AbortController();
+
+    const consuming = (async () => {
+      for await (const item of gateway.prompt("ses-1", "Вопрос", controller.signal)) {
+        void item;
+        // Ждём abort после server.connected.
+      }
+    })();
+    await vi.waitFor(() => expect(iterator.next).toHaveBeenCalledTimes(2));
+    controller.abort();
+    await consuming;
+
+    expect(cancel).toHaveBeenCalledWith({ sessionID: "ses-1", inboxID: "inbox-1" });
+    expect(interrupt).toHaveBeenCalledWith({ sessionID: "ses-1" });
+    expect(iterator.return).toHaveBeenCalledTimes(1);
+  });
+
+  it("abort во время admission ждёт inbox ID и только затем отменяет input", async () => {
+    const stream = subscription([event("server.connected")]);
+    let admit!: (value: { id: string }) => void;
+    const admission = new Promise<{ id: string }>((resolve) => {
+      admit = resolve;
+    });
+    const prompt = vi.fn(() => admission);
+    const cancel = vi.fn(async () => undefined);
+    const interrupt = vi.fn(async () => ({ interrupted: true }));
+    const gateway = createOpenCodeGateway(
+      asClient({
+        session: { get: async () => ownedInfo(), prompt, interrupt, inbox: { cancel } },
+        event: { subscribe: () => stream.value },
+      }),
+    );
+    const controller = new AbortController();
+
+    const consuming = (async () => {
+      for await (const item of gateway.prompt("ses-1", "Вопрос", controller.signal)) {
+        void item;
+        // Admission ещё не завершён.
+      }
+    })();
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalled());
+    controller.abort();
+    await Promise.resolve();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(interrupt).not.toHaveBeenCalled();
+
+    admit({ id: "inbox-admitted" });
+    await consuming;
+
+    expect(cancel).toHaveBeenCalledWith({ sessionID: "ses-1", inboxID: "inbox-admitted" });
+    expect(interrupt).toHaveBeenCalledWith({ sessionID: "ses-1" });
+    expect(stream.iterator.return).toHaveBeenCalledTimes(1);
+  });
+
+  describe("listSessions", () => {
+    function summaryInfo(id: string, overrides: Record<string, unknown> = {}) {
+      return {
+        ...ownedInfo(id),
+        ...overrides,
+      };
+    }
+
+    it("отправляет точный bounded list input и отдаёт только whitelist summary", async () => {
+      const pages = [
+        {
+          data: [
+            summaryInfo("ses-1", {
+              title: "First",
+              cost: 42,
+              tokens: { input: 1 },
+              permissions: [{ action: "shell", resource: "*", effect: "allow" }],
+              subpath: "secret/path",
+              outcome: "succeeded",
+            }),
+          ],
+          cursor: { next: "cursor-1" },
+        },
+        { data: [summaryInfo("ses-2", { title: undefined })], cursor: { next: null } },
+      ];
+      const list = vi.fn(async (input: unknown) => {
+        void input;
+        return pages.shift();
+      });
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { list, get }, message: { list: vi.fn() } }),
+      );
+
+      const result = await gateway.listSessions();
+
+      expect(list.mock.calls.map(([input]) => input)).toEqual([
+        {
+          directory: process.cwd(),
+          parentID: null,
+          archived: false,
+          order: "desc",
+          limit: 50,
+        },
+        { cursor: "cursor-1", limit: 50 },
+      ]);
+      expect(get).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        { id: "ses-1", title: "First", updatedAt: 2_000 },
+        { id: "ses-2", title: null, updatedAt: 2_000 },
+      ]);
+      const serialized = JSON.stringify(result);
+      for (const forbidden of [
+        "metadata",
+        "location",
+        "projectID",
+        "cost",
+        "tokens",
+        "permissions",
+        "agent",
+        "outcome",
+        "subpath",
+        "cursor",
+        '"archived"',
+      ]) {
+        expect(serialized).not.toContain(forbidden);
+      }
+      expect(Object.keys(result[0] ?? {})).toEqual(["id", "title", "updatedAt"]);
+    });
+
+    it("фильтрует child, чужие, archived, другой проект и невалидное время", async () => {
+      const valid = summaryInfo("valid", { title: "Valid" });
+      const emptyTitle = summaryInfo("empty-title", { title: "" });
+      const items = [
+        valid,
+        emptyTitle,
+        summaryInfo("child", { parentID: "ses-parent" }),
+        summaryInfo("foreign-source", { metadata: { source: "other" } }),
+        summaryInfo("foreign-agent", { agent: "build" }),
+        summaryInfo("archived", { time: { created: 1, updated: 2_000, archived: 3_000 } }),
+        summaryInfo("other-project", {
+          location: { directory: path.resolve(process.cwd(), "..") },
+        }),
+        summaryInfo("missing-location", { location: undefined }),
+        summaryInfo("bad-updated", { time: { created: 1, updated: Number.NaN } }),
+        summaryInfo("string-updated", { time: { created: 1, updated: "2000" } }),
+        summaryInfo("missing-time", { time: undefined }),
+        { id: "not-record-child" },
+        null,
+      ];
+      const list = vi.fn(async () => ({ data: items, cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+
+      expect(result).toEqual([
+        { id: "empty-title", title: null, updatedAt: 2_000 },
+        { id: "valid", title: "Valid", updatedAt: 2_000 },
+      ]);
+    });
+
+    it("дедуплицирует ID, сортирует updatedAt desc с устойчивым tie-break", async () => {
+      const pages = [
+        {
+          data: [
+            summaryInfo("b", { title: "B", time: { created: 1, updated: 100 } }),
+            summaryInfo("a", { title: "A", time: { created: 1, updated: 200 } }),
+          ],
+          cursor: { next: "next" },
+        },
+        {
+          data: [
+            summaryInfo("c", { title: "C", time: { created: 1, updated: 200 } }),
+            summaryInfo("a", { title: "duplicate", time: { created: 1, updated: 50 } }),
+          ],
+          cursor: { next: null },
+        },
+      ];
+      const list = vi.fn(async () => pages.shift());
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      expect(await gateway.listSessions()).toEqual([
+        { id: "a", title: "A", updatedAt: 200 },
+        { id: "c", title: "C", updatedAt: 200 },
+        { id: "b", title: "B", updatedAt: 100 },
+      ]);
+    });
+
+    it("ограничивает ответ 30 записями", async () => {
+      const data = Array.from({ length: 31 }, (_value, index) =>
+        summaryInfo(`ses-${String(index).padStart(2, "0")}`, {
+          time: { created: 1, updated: index + 1 },
+        }),
+      );
+      const list = vi.fn(async () => ({ data, cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+      expect(result).toHaveLength(30);
+      expect(result[0]?.id).toBe("ses-30");
+      expect(result[29]?.id).toBe("ses-01");
+    });
+
+    it("читает максимум 4 страницы по 50 и не зацикливается на повторном cursor", async () => {
+      const calls: unknown[] = [];
+      const list = vi.fn(async (input: unknown) => {
+        calls.push(input);
+        return {
+          data: [
+            summaryInfo(`ses-${calls.length}`, { time: { created: 1, updated: calls.length } }),
+          ],
+          cursor: { next: `cursor-${calls.length}` },
+        };
+      });
+      const gateway = createOpenCodeGateway(asClient({ session: { list } }));
+
+      const result = await gateway.listSessions();
+      expect(list).toHaveBeenCalledTimes(4);
+      expect(result.map((item) => item.id)).toEqual(["ses-4", "ses-3", "ses-2", "ses-1"]);
+
+      const repeated = vi.fn(async () => ({
+        data: [summaryInfo("only")],
+        cursor: { next: "same" },
+      }));
+      const repeatedGateway = createOpenCodeGateway(asClient({ session: { list: repeated } }));
+      expect(await repeatedGateway.listSessions()).toHaveLength(1);
+      expect(repeated).toHaveBeenCalledTimes(2);
+    });
+
+    it("переводит сетевую ошибку и невалидный cursor в безопасные gateway errors", async () => {
+      const network = createOpenCodeGateway(
+        asClient({
+          session: {
+            list: async () => {
+              throw new Error("secret upstream socket");
+            },
+          },
+        }),
+      );
+      await expect(network.listSessions()).rejects.toMatchObject({
+        code: "DEPENDENCY_UNAVAILABLE",
+      });
+
+      const badCursor = createOpenCodeGateway(
+        asClient({
+          session: {
+            list: async () => {
+              throw { status: 400, _tag: "InvalidRequest" };
+            },
+          },
+        }),
+      );
+      await expect(badCursor.listSessions()).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+      });
+    });
+  });
+
+  describe("renameSession", () => {
+    it("нормализует title и отправляет только sessionID/title", async () => {
+      const update = vi.fn(async () => undefined);
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(asClient({ session: { get, update } }));
+
+      await expect(gateway.renameSession("ses-1", "  Новое   название  ")).resolves.toEqual({
+        id: "ses-1",
+        title: "Новое название",
+      });
+      expect(update).toHaveBeenCalledWith({ sessionID: "ses-1", title: "Новое название" });
+    });
+
+    it("валидирует title до ownership и не вызывает update", async () => {
+      const update = vi.fn(async () => undefined);
+      const get = vi.fn(async () => ownedInfo());
+      const gateway = createOpenCodeGateway(asClient({ session: { get, update } }));
+
+      for (const title of [
+        "",
+        "   ",
+        "a".repeat(101),
+        "bad\u0000title",
+        "bad\nline",
+        "bad\u009ftitle",
+      ]) {
+        await expect(gateway.renameSession("ses-1", title)).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+        });
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+
+      await gateway.renameSession("ses-1", "😀".repeat(100));
+      expect(update).toHaveBeenCalledWith({ sessionID: "ses-1", title: "😀".repeat(100) });
+    });
+
+    it("не переименовывает чужую, child или сессию другого проекта", async () => {
+      const cases = [
+        { ...ownedInfo(), metadata: { source: "other" } },
+        { ...ownedInfo(), parentID: "ses-parent" },
+        { ...ownedInfo(), location: { directory: path.resolve(process.cwd(), "..") } },
+        { ...ownedInfo(), agent: "build" },
+      ];
+      for (const info of cases) {
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get: async () => info, update } }),
+        );
+        await expect(gateway.renameSession("ses-1", "Title")).rejects.toMatchObject({
+          code: "NOT_FOUND",
+        });
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("сохраняет 404 ownership при ошибке update", async () => {
+      const update = vi.fn(async () => {
+        throw { status: 404, _tag: "NotFound" };
+      });
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get: async () => ownedInfo(), update } }),
+      );
+      await expect(gateway.renameSession("ses-1", "Title")).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("ensureSessionTitle", () => {
+    function titleClient(
+      info: Record<string, unknown> = ownedInfo(),
+      page: unknown = { data: [], cursor: { next: null } },
+      overrides: {
+        readonly get?: () => Promise<unknown>;
+        readonly list?: () => Promise<unknown>;
+        readonly update?: () => Promise<unknown>;
+      } = {},
+    ) {
+      const get = vi.fn(overrides.get ?? (async () => info));
+      const list = vi.fn(overrides.list ?? (async () => page));
+      const update = vi.fn(overrides.update ?? (async () => undefined));
+      return {
+        get,
+        list,
+        update,
+        gateway: createOpenCodeGateway(asClient({ session: { get, update }, message: { list } })),
+      };
+    }
+
+    it("ставит короткое название только exact title/list/update payload", async () => {
+      const { gateway, get, list, update } = titleClient();
+
+      await expect(
+        gateway.ensureSessionTitle("ses-1", "## Обнови   задачу\n\nи проверь отчёт"),
+      ).resolves.toEqual({ id: "ses-1", title: "Обнови задачу и проверь отчёт" });
+
+      expect(get).toHaveBeenCalledWith({ sessionID: "ses-1" }, { signal: expect.any(AbortSignal) });
+      expect(list).toHaveBeenCalledWith(
+        { sessionID: "ses-1", limit: 1 },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(update).toHaveBeenCalledWith(
+        { sessionID: "ses-1", title: "Обнови задачу и проверь отчёт" },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("не переименовывает manual/non-default title или непустую history", async () => {
+      for (const info of [
+        { ...ownedInfo(), title: "Мой чат" },
+        { ...ownedInfo(), title: "kanbaner chat" },
+        { ...ownedInfo(), title: "" },
+        { ...ownedInfo(), title: null },
+      ]) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+
+      const nonEmpty = titleClient(ownedInfo(), {
+        data: [{ id: "user-1", type: "user", text: "Уже есть" }],
+        cursor: { next: null },
+      });
+      await expect(
+        nonEmpty.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(nonEmpty.list).toHaveBeenCalledWith(
+        { sessionID: "ses-1", limit: 1 },
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(nonEmpty.update).not.toHaveBeenCalled();
+
+      const malformed = titleClient(ownedInfo(), { data: null });
+      await expect(
+        malformed.gateway.ensureSessionTitle("ses-1", "Новая задача"),
+      ).resolves.toBeNull();
+      expect(malformed.update).not.toHaveBeenCalled();
+    });
+
+    it("не делает preflight для пустого/шумного/default текста", async () => {
+      const { gateway, get, list, update } = titleClient();
+      for (const text of ["", "   ", "###", "```ts\n```", "Kanbaner chat"]) {
+        await expect(gateway.ensureSessionTitle("ses-1", text)).resolves.toBeNull();
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(list).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("не трогает чужую, child, wrong-project и не-owned сессию", async () => {
+      const cases = [
+        { ...ownedInfo(), metadata: { source: "other" } },
+        { ...ownedInfo(), parentID: "ses-parent" },
+        { ...ownedInfo(), location: { directory: path.resolve(process.cwd(), "..") } },
+        { ...ownedInfo(), agent: "build" },
+      ];
+      for (const info of cases) {
+        const { gateway, list, update } = titleClient(info);
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("проглатывает 404/503 preflight и update, не бросая наружу", async () => {
+      const cases = [
+        titleClient(ownedInfo(), undefined, {
+          get: async () => {
+            throw { status: 404, _tag: "NotFound" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          list: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+        titleClient(ownedInfo(), undefined, {
+          update: async () => {
+            throw { status: 503, _tag: "Unavailable" };
+          },
+        }),
+      ];
+      for (const { gateway } of cases) {
+        await expect(gateway.ensureSessionTitle("ses-1", "Новая задача")).resolves.toBeNull();
+      }
+      expect(cases[2]?.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("abort до update не превращается в успешную мутацию", async () => {
+      const aborted = new AbortController();
+      aborted.abort();
+      const early = titleClient();
+      await expect(
+        early.gateway.ensureSessionTitle("ses-1", "Задача", aborted.signal),
+      ).resolves.toBeNull();
+      expect(early.get).not.toHaveBeenCalled();
+
+      const controller = new AbortController();
+      const during = titleClient(ownedInfo(), undefined, {
+        list: async () => {
+          controller.abort();
+          return { data: [], cursor: { next: null } };
+        },
+      });
+      await expect(
+        during.gateway.ensureSessionTitle("ses-1", "Задача", controller.signal),
+      ).resolves.toBeNull();
+      expect(during.update).not.toHaveBeenCalled();
+    });
+
+    it("не ждёт зависший get и не делает поздний list/update после deadline", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveGet!: (value: unknown) => void;
+        const get = vi.fn(
+          () =>
+            new Promise<unknown>((resolve) => {
+              resolveGet = resolve;
+            }),
+        );
+        const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get, update }, message: { list } }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+
+        // Поздний ответ SDK не должен продолжить уже истёкший preflight.
+        resolveGet(ownedInfo());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(list).not.toHaveBeenCalled();
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("не делает update после позднего list и не отменяет caller signal", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveList!: (value: unknown) => void;
+        const list = vi.fn(
+          () =>
+            new Promise<unknown>((resolve) => {
+              resolveList = resolve;
+            }),
+        );
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get: async () => ownedInfo(), update },
+            message: { list },
+          }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+
+        resolveList({ data: [], cursor: { next: null } });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ограничивает зависший update и отменяет только внутренний signal", async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveUpdate!: (value: unknown) => void;
+        const update = vi.fn((input: unknown, options?: { signal?: AbortSignal }) => {
+          void input;
+          void options;
+          return new Promise<unknown>((resolve) => {
+            resolveUpdate = resolve;
+          });
+        });
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get: async () => ownedInfo(), update },
+            message: { list: async () => ({ data: [], cursor: { next: null } }) },
+          }),
+        );
+        const caller = new AbortController();
+
+        const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toBeNull();
+        expect(caller.signal.aborted).toBe(false);
+        expect(update).toHaveBeenCalledTimes(1);
+        // Физическая отмена уже отправленной mutation зависит от SDK/Service,
+        // но внутренний signal обязан быть aborted.
+        const updateSignal = update.mock.calls[0]?.[1]?.signal;
+        expect(updateSignal?.aborted).toBe(true);
+
+        resolveUpdate(undefined);
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abort caller освобождает preflight и не делает update", async () => {
+      let getStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        getStarted = resolve;
+      });
+      let internalSignal: AbortSignal | undefined;
+      const get = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) => {
+        internalSignal = options?.signal;
+        getStarted();
+        return new Promise<unknown>(() => undefined);
+      });
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({
+          session: { get, update },
+          message: { list: async () => ({ data: [], cursor: { next: null } }) },
+        }),
+      );
+      const caller = new AbortController();
+      const pending = gateway.ensureSessionTitle("ses-1", "Новая задача", caller.signal);
+      await started;
+      caller.abort();
+
+      await expect(pending).resolves.toBeNull();
+      expect(internalSignal?.aborted).toBe(true);
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("не блокирует prompt, пока preflight ждёт SDK", async () => {
+      const stream = subscription([
+        event("server.connected"),
+        event("session.inbox.delivered", { sessionID: "ses-1", inboxID: "inbox-1" }),
+        event("session.execution.succeeded", { sessionID: "ses-1" }),
+      ]);
+      // Preflight идёт с внутренним signal, prompt — без options.
+      const get = vi.fn((_input: unknown, options?: { signal?: AbortSignal }) =>
+        options?.signal === undefined
+          ? Promise.resolve(ownedInfo())
+          : new Promise<unknown>(() => undefined),
+      );
+      const gateway = createOpenCodeGateway(
+        promptClient(stream, async () => canonicalTurn("inbox-1", completedAssistant()), {
+          get,
+          prompt: async () => ({ id: "inbox-1", sessionID: "ses-1", delivery: "queue" }),
+        }),
+      );
+
+      const preflight = gateway.ensureSessionTitle("ses-1", "Новая задача");
+      const received = await collect(
+        gateway.prompt("ses-1", "Новая задача", new AbortController().signal),
+      );
+      expect(streamEvent(last(received))).toEqual({ kind: "done" });
+      await expect(preflight).resolves.toBeNull();
+    });
+
+    it("сериализует preflight одной сессии: второй видит уже сохранённое название", async () => {
+      let title = "Kanbaner chat";
+      let messages: unknown[] = [];
+      let releaseList!: () => void;
+      const listGate = new Promise<void>((resolve) => {
+        releaseList = resolve;
+      });
+      let listCalls = 0;
+      const get = vi.fn(async () => ({ ...ownedInfo(), title }));
+      const list = vi.fn(async () => {
+        listCalls += 1;
+        if (listCalls === 1) await listGate;
+        return { data: messages, cursor: { next: null } };
+      });
+      const update = vi.fn(async ({ title: next }: { title: string }) => {
+        title = next;
+        messages = [{ id: "user-1", type: "user", text: "Новая задача" }];
+      });
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+      releaseList();
+
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+      await expect(second).resolves.toBeNull();
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("не сериализует preflight разных сессий", async () => {
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const get = vi.fn(async ({ sessionID }: { sessionID: string }) => ownedInfo(sessionID));
+      const list = vi.fn(async ({ sessionID }: { sessionID: string }) => {
+        if (sessionID === "ses-1") await firstGate;
+        return { data: [], cursor: { next: null } };
+      });
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      const second = gateway.ensureSessionTitle("ses-2", "Вторая задача");
+
+      await expect(second).resolves.toEqual({ id: "ses-2", title: "Вторая задача" });
+      expect(update).toHaveBeenCalledTimes(1);
+      releaseFirst();
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+    });
+
+    it("после timeout той же сессии следующий preflight выполняется, а не ждёт вечно", async () => {
+      vi.useFakeTimers();
+      try {
+        let getCalls = 0;
+        const get = vi.fn(() => {
+          getCalls += 1;
+          return getCalls === 1
+            ? new Promise<unknown>(() => undefined)
+            : Promise.resolve(ownedInfo());
+        });
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({
+            session: { get, update },
+            message: { list: async () => ({ data: [], cursor: { next: null } }) },
+          }),
+        );
+
+        const timedOut = gateway.ensureSessionTitle("ses-1", "Первая задача");
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(timedOut).resolves.toBeNull();
+        expect(update).not.toHaveBeenCalled();
+
+        const next = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(next).resolves.toEqual({ id: "ses-1", title: "Вторая задача" });
+        expect(update).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abort queued caller завершает ensure сразу, а поздний queued entry не вызывает SDK", async () => {
+      let releaseGet!: (value: unknown) => void;
+      const get = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            releaseGet = resolve;
+          }),
+      );
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const update = vi.fn(async () => undefined);
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+
+      const caller = new AbortController();
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача", caller.signal);
+      caller.abort();
+      // Без ожидания чужого preflight и без advance таймеров.
+      await expect(second).resolves.toBeNull();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(update).not.toHaveBeenCalled();
+
+      // После разблокировки первого отменённый queued entry — no-op.
+      releaseGet(ownedInfo());
+      await expect(first).resolves.toEqual({ id: "ses-1", title: "Первая задача" });
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(
+        { sessionID: "ses-1", title: "Первая задача" },
+        { signal: expect.any(AbortSignal) },
+      );
+    });
+
+    it("общий deadline queued вызова включает ожидание очереди", async () => {
+      vi.useFakeTimers();
+      try {
+        let getCalls = 0;
+        const get = vi.fn(() => {
+          getCalls += 1;
+          return new Promise<unknown>(() => undefined);
+        });
+        const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+        const update = vi.fn(async () => undefined);
+        const gateway = createOpenCodeGateway(
+          asClient({ session: { get, update }, message: { list } }),
+        );
+        const firstCaller = new AbortController();
+
+        const first = gateway.ensureSessionTitle("ses-1", "Первая задача", firstCaller.signal);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getCalls).toBe(1);
+
+        const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+        let secondSettled = false;
+        void second.then(() => {
+          secondSettled = true;
+        });
+
+        // Второй уже потратил 1.5 s из своего бюджета на очередь.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(secondSettled).toBe(false);
+        expect(getCalls).toBe(1);
+
+        // Освобождаем очередь; второй получает только остаток бюджета.
+        firstCaller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(first).resolves.toBeNull();
+        expect(getCalls).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(499);
+        expect(secondSettled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(second).resolves.toBeNull();
+        expect(update).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("не запускает новый auto update, пока предыдущая mutation не settled", async () => {
+      vi.useFakeTimers();
+      try {
+        for (const settle of ["resolve", "reject"] as const) {
+          const settlements: Array<(value: unknown) => void> = [];
+          const rejections: Array<(reason: unknown) => void> = [];
+          const update = vi.fn(
+            () =>
+              new Promise<unknown>((resolve, reject) => {
+                settlements.push(resolve);
+                rejections.push(reject);
+              }),
+          );
+          const get = vi.fn(async () => ownedInfo());
+          const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+          const gateway = createOpenCodeGateway(
+            asClient({ session: { get, update }, message: { list } }),
+          );
+
+          const first = gateway.ensureSessionTitle("ses-1", "Первая задача");
+          await vi.advanceTimersByTimeAsync(2_000);
+          await expect(first).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+
+          const getCalls = get.mock.calls.length;
+          const listCalls = list.mock.calls.length;
+          const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(second).resolves.toBeNull();
+          expect(update).toHaveBeenCalledTimes(1);
+          expect(get).toHaveBeenCalledTimes(getCalls);
+          expect(list).toHaveBeenCalledTimes(listCalls);
+
+          if (settle === "resolve") settlements[0]?.(undefined);
+          else rejections[0]?.({ status: 503, _tag: "Unavailable" });
+          await vi.advanceTimersByTimeAsync(0);
+
+          // После фактического settle eligibility проверяется заново.
+          const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+          await vi.advanceTimersByTimeAsync(0);
+          expect(update).toHaveBeenCalledTimes(2);
+          settlements[1]?.(undefined);
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("caller abort во время update оставляет mutation uncertain", async () => {
+      const settlements: Array<(value: unknown) => void> = [];
+      const update = vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            settlements.push(resolve);
+          }),
+      );
+      const get = vi.fn(async () => ownedInfo());
+      const list = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+      const gateway = createOpenCodeGateway(
+        asClient({ session: { get, update }, message: { list } }),
+      );
+      const caller = new AbortController();
+
+      const first = gateway.ensureSessionTitle("ses-1", "Первая задача", caller.signal);
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+      caller.abort();
+      await expect(first).resolves.toBeNull();
+
+      const getCalls = get.mock.calls.length;
+      const listCalls = list.mock.calls.length;
+      const second = gateway.ensureSessionTitle("ses-1", "Вторая задача");
+      await expect(second).resolves.toBeNull();
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(get).toHaveBeenCalledTimes(getCalls);
+      expect(list).toHaveBeenCalledTimes(listCalls);
+
+      settlements[0]?.(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const third = gateway.ensureSessionTitle("ses-1", "Третья задача");
+      await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+      settlements[1]?.(undefined);
+      await expect(third).resolves.toEqual({ id: "ses-1", title: "Третья задача" });
+    });
+  });
+});

@@ -1,0 +1,30 @@
+{
+  "name": "@kanbaner/kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ядро Kanbaner. Каркас без Storage Provider и доменной логики.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "semver": "7.8.6"
+  },
+  "devDependencies": {
+    "@types/semver": "7.8.0"
+  }
+}

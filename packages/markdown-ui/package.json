@@ -1,0 +1,36 @@
+{
+  "name": "@kanbaner/markdown-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Нейтральный безопасный React-рендер CommonMark/GFM для UI-плагинов Kanbaner.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

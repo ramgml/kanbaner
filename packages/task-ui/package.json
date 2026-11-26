@@ -1,0 +1,37 @@
+{
+  "name": "@kanbaner/task-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Общая React/Tailwind-библиотека представления задач Kanbaner. Не является плагином.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/plugin-tasks": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

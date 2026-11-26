@@ -1,0 +1,46 @@
+{
+  "name": "@kanbaner/plugin-projects",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UI-плагин рабочего пространства проектов Kanbaner: sidebar, доска, список и переключатель представлений. Работает только через публичные команды и запросы kanbaner.tasks.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "import": "./dist/ui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@kanbaner/markdown-ui": "workspace:*",
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@kanbaner/plugin-tasks": "workspace:*",
+    "@kanbaner/task-ui": "workspace:*",
+    "lucide-react": "1.70.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

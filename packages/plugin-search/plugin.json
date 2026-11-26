@@ -1,0 +1,13 @@
+{
+  "id": "kanbaner.search",
+  "name": "Kanbaner Search",
+  "version": "0.1.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./dist/index.js"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": ["kanbaner.search.queries.v1", "kanbaner.search.ui.v1"],
+  "permissions": ["search", "ui"]
+}

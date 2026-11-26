@@ -1,0 +1,17 @@
+{
+  "id": "kanbaner.tasks",
+  "name": "Kanbaner Tasks",
+  "version": "0.1.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./dist/index.js"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [
+    "kanbaner.tasks.commands.v1",
+    "kanbaner.tasks.queries.v1",
+    "kanbaner.tasks.events.v1"
+  ],
+  "permissions": ["commands", "events", "storage", "search"]
+}

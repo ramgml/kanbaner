@@ -1,0 +1,13 @@
+{
+  "id": "fixture.zeta",
+  "name": "fixture.zeta",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "./server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

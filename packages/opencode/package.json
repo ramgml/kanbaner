@@ -1,0 +1,50 @@
+{
+  "name": "@kanbaner/opencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Интеграция Kanbaner с OpenCode Service: чат, модели и ограниченные доменные tools.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "kanbaner-mcp": "./dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "import": "./dist/ui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kanbaner/markdown-ui": "workspace:*",
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@opencode/client": "2.2.5",
+    "lucide-react": "1.70.0",
+    "zod": "4.6.7"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

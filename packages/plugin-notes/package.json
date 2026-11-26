@@ -1,0 +1,55 @@
+{
+  "name": "@kanbaner/plugin-notes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Независимый плагин Notion-подобных заметок Kanbaner: иерархия страниц, визуальный Markdown, связи, поиск и локальные изображения.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./contract": {
+      "types": "./dist/contract.d.ts",
+      "import": "./dist/contract.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "import": "./dist/ui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@blocknote/core": "0.54.0",
+    "@blocknote/react": "0.54.0",
+    "@blocknote/shadcn": "0.54.0",
+    "@kanbaner/markdown-ui": "workspace:*",
+    "@kanbaner/plugin-sdk": "workspace:*",
+    "@sinclair/typebox": "0.34.52",
+    "lucide-react": "1.70.0",
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

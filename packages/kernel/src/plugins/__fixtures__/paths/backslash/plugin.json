@@ -1,0 +1,13 @@
+{
+  "id": "fixture.path-backslash",
+  "name": "fixture.path-backslash",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": ".\\\\server.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}

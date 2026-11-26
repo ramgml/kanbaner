@@ -1,0 +1,13 @@
+{
+  "id": "fixture.path-traversal",
+  "name": "fixture.path-traversal",
+  "version": "1.0.0",
+  "hostApi": "^1.0.0",
+  "entrypoints": {
+    "server": "../outside.mjs"
+  },
+  "requires": {},
+  "consumes": [],
+  "provides": [],
+  "permissions": []
+}
