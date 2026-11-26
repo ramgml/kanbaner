@@ -1,6 +1,6 @@
 {
   "name": "@kanbaner/kernel",
-  "version": "0.1.0-dev.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Ядро Kanbaner. Каркас без Storage Provider и доменной логики.",
