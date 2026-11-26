@@ -1,7 +1,7 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: in_progress
+status: review
 stage: 5
 priority: high
 owner: worker-kan-068
@@ -9,7 +9,7 @@ blocked_by: []
 branch: feat/kan-068-global-search-plugin
 worktree: .worktrees/kan-068-global-search-plugin
 created: 2026-11-25
-updated: 2026-11-25
+updated: 2026-11-26
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -151,6 +151,8 @@ Worker владеет всеми файлами, необходимыми для
   load-more offset считается по deduped hits вместо raw page size; low: на
   границе 1000 возможен заведомо невалидный Next. Задача оставлена
   `in_progress`; работа поставлена на паузу до следующего дня.
+- 2026-11-26 — Worker исправил raw cursor и границу 1000 коммитом `f2a68fe`.
+  Полный Playwright 177/177 и `pnpm check` зелёные. Статус `review`.
 
 ## Итог
 
