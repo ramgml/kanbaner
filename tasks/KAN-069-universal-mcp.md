@@ -1,7 +1,7 @@
 ---
 id: KAN-069
 title: Универсальный discovery-driven MCP
-status: in_progress
+status: review
 stage: 7
 priority: high
 owner: worker-kan-069
@@ -9,7 +9,7 @@ blocked_by: []
 branch: feat/kan-069-universal-mcp
 worktree: .worktrees/kan-069-universal-mcp
 created: 2026-11-25
-updated: 2026-11-25
+updated: 2026-11-26
 specs:
   - specs/product-mvp.md
   - specs/architecture.md
@@ -156,6 +156,10 @@ moveMany и остальные не перечисленные operations ост
 - 2026-11-25 — Worker закрыл замечания коммитом `6626d60`; 75/75 unit,
   typecheck/build/eslint/stdio smoke зелёные. Повторное ревью этапа A не нашло
   blocker/high/medium/low.
+- 2026-11-26 — После rebase этап B интегрирован коммитом `1a5bced`: discovery
+  exposure, source=mcp, tasks allowlist, real task/note/search integration.
+  Полный Playwright 177/177, `pnpm check` — 159 files / 2221 tests. Статус
+  `review`; реальный stdio smoke остаётся оркестратору.
 
 ## Итог
 
