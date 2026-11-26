@@ -1,7 +1,7 @@
 {
   "id": "kanbaner.tasks",
   "name": "Kanbaner Tasks",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.0",
   "hostApi": "^1.0.0",
   "entrypoints": {
     "server": "./dist/index.js"
