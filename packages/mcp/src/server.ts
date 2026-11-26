@@ -21,7 +21,7 @@ import { isPlainObject } from "./json.ts";
 import { buildToolCatalog, supportsStructuredOutput, type UniversalTool } from "./tools.ts";
 
 export const SERVER_NAME = "kanbaner-universal";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0-dev.0";
 
 type SchemaParameter = Parameters<typeof createSchemaValidator>[0];
 
