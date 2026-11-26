@@ -1,13 +1,13 @@
 ---
 id: KAN-068
 title: Отдельный глобальный search-плагин
-status: review
+status: done
 stage: 5
 priority: high
 owner: worker-kan-068
 blocked_by: []
-branch: feat/kan-068-global-search-plugin
-worktree: .worktrees/kan-068-global-search-plugin
+branch: dev
+worktree: .
 created: 2026-11-25
 updated: 2026-11-26
 specs:
@@ -54,20 +54,20 @@ specs:
 
 ## Объём работ
 
-- [ ] Добавить публичные SearchProvider/Registry contracts, lifecycle и
+- [x] Добавить публичные SearchProvider/Registry contracts, lifecycle и
   ownership тесты в SDK/kernel.
-- [ ] Расширить SearchQuery/SearchHit filters/metadata и синхронизировать SQLite
+- [x] Расширить SearchQuery/SearchHit filters/metadata и синхронизировать SQLite
   WAL, in-memory provider и Conformance Suite; SQL только в storage-sqlite.
-- [ ] Создать `packages/plugin-search` с manifest, `kanbaner.search.query`,
+- [x] Создать `packages/plugin-search` с manifest, `kanbaner.search.query`,
   facet/query schema, агрегацией, dedupe, score/ref ordering и bounded pagination.
-- [ ] Зарегистрировать providers в tasks, notes и fixture; unregister при
+- [x] Зарегистрировать providers в tasks, notes и fixture; unregister при
   deactivation, reindex при activation.
-- [ ] Добавить `/view/search` через app.main/app.sidebar, текстовый запрос,
+- [x] Добавить `/view/search` через app.main/app.sidebar, текстовый запрос,
   type/project/status/tags filters, loading/error/empty/warnings и keyboard
   resource opening.
-- [ ] Подключить HTTP exposure; `mcp:true` у read query декларируется для KAN-069,
+- [x] Подключить HTTP exposure; `mcp:true` у read query декларируется для KAN-069,
   но ручной OpenCode allowlist не расширяется.
-- [ ] Добавить unit/integration/contract/E2E и обновить документацию.
+- [x] Добавить unit/integration/contract/E2E и обновить документацию.
 
 ## Владение файлами
 
@@ -107,14 +107,14 @@ Worker владеет всеми файлами, необходимыми для
 
 ## Критерии приёмки
 
-- [ ] Integration создаёт/обновляет/находит задачу и заметку по тексту,
+- [x] Integration создаёт/обновляет/находит задачу и заметку по тексту,
   удаляет hit после удаления ресурса.
-- [ ] Type/project/status/tag filters работают на SQLite и in-memory parity.
-- [ ] Disabled provider не участвует; reindex восстанавливает пропущенный документ.
-- [ ] Fixture provider виден через тот же registry без специальных веток ядра.
-- [ ] UI позволяет найти и открыть ресурс клавиатурой, mobile 360 не ломается.
-- [ ] HTTP discovery/query требуют Bearer и не раскрывают секреты.
-- [ ] Полный `pnpm check`, полный Playwright Chromium, imports, composition и
+- [x] Type/project/status/tag filters работают на SQLite и in-memory parity.
+- [x] Disabled provider не участвует; reindex восстанавливает пропущенный документ.
+- [x] Fixture provider виден через тот же registry без специальных веток ядра.
+- [x] UI позволяет найти и открыть ресурс клавиатурой, mobile 360 не ломается.
+- [x] HTTP discovery/query требуют Bearer и не раскрывают секреты.
+- [x] Полный `pnpm check`, полный Playwright Chromium, imports, composition и
   SQLite smoke зелёные.
 
 ## Проверки
@@ -152,8 +152,18 @@ Worker владеет всеми файлами, необходимыми для
   границе 1000 возможен заведомо невалидный Next. Задача оставлена
   `in_progress`; работа поставлена на паузу до следующего дня.
 - 2026-11-26 — Worker исправил raw cursor и границу 1000 коммитом `f2a68fe`.
-  Полный Playwright 177/177 и `pnpm check` зелёные. Статус `review`.
+  Полный Playwright 177/177 и `pnpm check` зелёные.
+- 2026-11-26 — Финальное ревью не нашло blocker/high/medium/low. После rebase
+  коммиты `1cab8b9`, `94efc44`, `fc3c56d`, `20462f8` интегрированы
+  merge-коммитом `ebac8dd`. На `dev` search E2E 3/3, imports, composition и
+  SQLite smoke зелёные. Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Реализован отдельный `kanbaner.search` с публичным SearchProvider Registry,
+агрегацией задач, заметок и fixture, FTS5/unicode61, filters, pagination и
+полной переиндексацией через lifecycle доменов. Добавлены `/view/search`,
+клавиатурные переходы и HTTP exposure. Отключённые плагины исчезают из выдачи
+без потери данных.
+
+Merge: `ebac8dd`. Feature-ветка и worktree удалены. Push не выполнялся.
