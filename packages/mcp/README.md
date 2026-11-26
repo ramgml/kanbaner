@@ -165,9 +165,9 @@ pnpm check:imports
 Unit-тесты покрывают discovery, имена, JSON Schema, redaction, retry-политику и
 HTTP-клиент. MCP server проверяется низкоуровневым `Client` через
 `InMemoryTransport`; integration-тест поднимает реальную composition задач,
-заметок и поиска и HTTP transport без подмены доменной логики. Реальный stdio
-smoke процесса `kanbaner-mcp-universal` против локального HTTP server пока не
-выполнен и остаётся оркестратору.
+заметок и поиска и HTTP transport без подмены доменной логики. Дополнительно
+выполнен реальный stdio smoke отдельного процесса `kanbaner-mcp-universal`
+против production HTTP server на Node 24.22.2.
 
 ## Вне границ
 

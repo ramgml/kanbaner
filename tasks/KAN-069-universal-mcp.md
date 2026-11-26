@@ -1,13 +1,13 @@
 ---
 id: KAN-069
 title: Универсальный discovery-driven MCP
-status: review
+status: done
 stage: 7
 priority: high
 owner: worker-kan-069
 blocked_by: []
-branch: feat/kan-069-universal-mcp
-worktree: .worktrees/kan-069-universal-mcp
+branch: dev
+worktree: .
 created: 2026-11-25
 updated: 2026-11-26
 specs:
@@ -112,15 +112,15 @@ moveMany и остальные не перечисленные operations ост
 
 ## Критерии приёмки
 
-- [ ] Новый synthetic descriptor с mcp/http появляется в tools/list без правок
+- [x] Новый synthetic descriptor с mcp/http появляется в tools/list без правок
   пакета; mcp:false, http:false и collisions отсутствуют.
-- [ ] MCP list tasks, create task и create note работают через HTTP composition;
+- [x] MCP list tasks, create task и create note работают через HTTP composition;
   delete/bulk отсутствуют, search query KAN-068 доступен.
-- [ ] Invalid input не вызывает HTTP; expectedVersion/version conflict и
+- [x] Invalid input не вызывает HTTP; expectedVersion/version conflict и
   idempotency сохраняют контракт.
-- [ ] 401/503/timeout/abort/invalid JSON/redaction/disabled API покрыты.
-- [ ] `source.type=mcp` проверен, ручной OpenCode MCP остаётся 14 прежних tools.
-- [ ] Import boundaries, frozen strict install, полный `pnpm check` и полный
+- [x] 401/503/timeout/abort/invalid JSON/redaction/disabled API покрыты.
+- [x] `source.type=mcp` проверен, ручной OpenCode MCP остаётся 14 прежних tools.
+- [x] Import boundaries, frozen strict install, полный `pnpm check` и полный
   Playwright зелёные после integration.
 
 ## Проверки
@@ -158,9 +158,21 @@ moveMany и остальные не перечисленные operations ост
   blocker/high/medium/low.
 - 2026-11-26 — После rebase этап B интегрирован коммитом `1a5bced`: discovery
   exposure, source=mcp, tasks allowlist, real task/note/search integration.
-  Полный Playwright 177/177, `pnpm check` — 159 files / 2221 tests. Статус
-  `review`; реальный stdio smoke остаётся оркестратору.
+  Полный Playwright 177/177, `pnpm check` — 159 files / 2221 tests.
+- 2026-11-26 — Независимое ревью не нашло blocker/high/medium; два documentation
+  low исправлены `b1c26a2`. Реальный stdio smoke на Node 24.22.2 создал и нашёл
+  task/note, проверил VERSION_CONFLICT, redaction и запрещённые tools.
+- 2026-11-26 — После rebase коммиты `10d34f7`, `a51ddde`, `416d6b7`, `7240e17`
+  интегрированы merge-коммитом `5c93ab8`. `pnpm check` на ветке и `dev` выполнен
+  на Node 24.22.2; на `dev` полный Playwright — 178/178 с учётом сохранённых
+  локальных notes changes, imports/composition/SQLite зелёные. Статус `done`.
 
 ## Итог
 
-Заполняется оркестратором после интеграции.
+Добавлен `@kanbaner/mcp` с executable `kanbaner-mcp-universal`: актуальный
+discovery-driven tools/list, JSON Schema validation, HTTP command/query calls,
+idempotency, expectedVersion, destructive gate, redaction и source=mcp. Реальные
+MCP-клиенты могут читать и создавать задачи/заметки и использовать global search.
+Ручной OpenCode allowlist из 14 tools не изменён.
+
+Merge: `5c93ab8`. Feature-ветка и worktree удалены. Push не выполнялся.
