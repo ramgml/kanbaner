@@ -153,7 +153,7 @@ pnpm build:packages
 KANBANER_API_TOKEN="local-secret" node packages/mcp/dist/cli.js
 ```
 
-Переменные окружения: обязательный `KANBANER_API_TOKEN`, необязательные `KANBANER_API_URL` (по умолчанию `http://127.0.0.1:3000`), `KANBANER_MCP_TIMEOUT_MS` и `KANBANER_MCP_ALLOW_DESTRUCTIVE=true` для явного включения destructive-инструментов. Вызовы идут через `/api/v1` с `x-kanbaner-client: mcp`; аудит помечает их `source.type = mcp`. Вход и выход валидируются по JSON Schema, mutation с поддержкой идемпотентности получает `Idempotency-Key`, сообщения и `details` проходят redaction, а bearer token не попадает в ответы.
+Переменные окружения: обязательный `KANBANER_API_TOKEN`, необязательные `KANBANER_API_URL` (по умолчанию `http://127.0.0.1:3000`), `KANBANER_MCP_TIMEOUT_MS` и `KANBANER_MCP_ALLOW_DESTRUCTIVE=true` для явного включения destructive-инструментов. Вызовы идут через `/api/v1` с `x-kanbaner-client: mcp`; аудит помечает их `source.type = mcp`. Вход валидируется по JSON Schema; object output дополнительно валидируется по `outputSchema`, а массивы и примитивы возвращаются как text content без локальной output validation. Mutation с поддержкой идемпотентности получает `Idempotency-Key`, сообщения и `details` проходят redaction, а bearer token не попадает в ответы.
 
 Универсальный адаптер не меняет ручной allowlist из 14 инструментов в `@kanbaner/opencode`. Текущий доменный срез: list/get для проектов и задач, `column.list`, create/update проектов и задач, task complete/move; delete, bulk и summary закрыты. Заметки сохраняют свой существующий `exposure.mcp`, `kanbaner.search.query` опубликован, а `kanbaner.search.filters` — нет. Полная конфигурация, discovery-контракт и ограничения — в [`packages/mcp/README.md`](packages/mcp/README.md).
 
