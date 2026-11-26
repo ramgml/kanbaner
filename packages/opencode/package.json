@@ -1,6 +1,6 @@
 {
   "name": "@kanbaner/opencode",
-  "version": "0.2.0-dev.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Интеграция Kanbaner с OpenCode Service: чат, модели и ограниченные доменные tools.",
