@@ -328,7 +328,21 @@ async function waitFor<Value>(
 }
 
 describe("активация kanbaner.tasks", heavyPluginSuite, () => {
-  it("регистрирует все команды и запросы с UI/HTTP exposure и выключенным MCP", async () => {
+  const MCP_OPERATION_IDS = new Set<string>([
+    TASKS_QUERY_IDS.projectList,
+    TASKS_QUERY_IDS.projectGet,
+    TASKS_QUERY_IDS.columnList,
+    TASKS_QUERY_IDS.taskList,
+    TASKS_QUERY_IDS.taskGet,
+    TASKS_COMMAND_IDS.projectCreate,
+    TASKS_COMMAND_IDS.projectUpdate,
+    TASKS_COMMAND_IDS.taskCreate,
+    TASKS_COMMAND_IDS.taskUpdate,
+    TASKS_COMMAND_IDS.taskComplete,
+    TASKS_COMMAND_IDS.taskMove,
+  ]);
+
+  it("регистрирует все команды и запросы с UI/HTTP exposure и явным MCP allowlist", async () => {
     const harness = await startHarness();
 
     const commands = harness.composition.operations.registry.commands
@@ -344,7 +358,25 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     expect(queryIds).toEqual(Object.values(TASKS_QUERY_IDS).sort());
 
     for (const descriptor of [...commands, ...queries]) {
-      expect(descriptor.exposure).toEqual({ ui: true, http: true, mcp: false });
+      expect(descriptor.exposure).toEqual({
+        ui: true,
+        http: true,
+        mcp: MCP_OPERATION_IDS.has(descriptor.id),
+      });
+    }
+
+    for (const id of [
+      TASKS_COMMAND_IDS.projectDelete,
+      TASKS_COMMAND_IDS.columnCreate,
+      TASKS_COMMAND_IDS.columnUpdate,
+      TASKS_COMMAND_IDS.columnMove,
+      TASKS_COMMAND_IDS.columnDelete,
+      TASKS_COMMAND_IDS.taskDelete,
+      TASKS_COMMAND_IDS.taskDeleteMany,
+      TASKS_COMMAND_IDS.taskMoveMany,
+      TASKS_QUERY_IDS.projectSummary,
+    ]) {
+      expect(harness.composition.operations.registry.get(id)?.exposure.mcp).toBe(false);
     }
 
     expect(
@@ -1274,14 +1306,14 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     expect(second.task.id).not.toBe(first.task.id);
   });
 
-  it("не теряет задачу, созданную во время переиндексации второй активации", async () => {
+  it("не активирует tasks до завершения переиндексации второй активации", async () => {
     const gate = createReindexGate();
     const first = await startHarness();
     const dataDirectory = first.dataDirectory;
     const project = await createProject(first, "Reindex gate");
     await first.close(false);
 
-    const second = await startHarness({
+    const startPromise = startHarness({
       dataDirectory,
       removeOnClose: false,
       decorateProvider: gate.decorate,
@@ -1290,11 +1322,10 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
     try {
       await gate.entered;
 
-      const createPromise = createTask(second, project.project.id, {
-        title: "Во время reindex",
-      });
+      // Активация awaited reindex: runtime.start не завершается, пока индекс
+      // не заменён, поэтому команды tasks ещё не зарегистрированы.
       let settled = false;
-      void createPromise.then(
+      void startPromise.then(
         () => {
           settled = true;
         },
@@ -1309,7 +1340,10 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
       expect(settled).toBe(false);
 
       gate.release();
-      const created = await createPromise;
+      const second = await startPromise;
+      const created = await createTask(second, project.project.id, {
+        title: "После reindex",
+      });
 
       await waitFor(async () => {
         const documents = await second.composition.search.list(PLUGIN_ID);
@@ -1320,7 +1354,7 @@ describe("активация kanbaner.tasks", heavyPluginSuite, () => {
       const documents = await second.composition.search.list(PLUGIN_ID);
       expect(documents).toHaveLength(1);
       expect(documents[0]?.ref).toBe(formatTaskRef(created.task.id));
-      expect(documents[0]?.text).toContain("Во время reindex");
+      expect(documents[0]?.text).toContain("После reindex");
     } finally {
       gate.release();
     }

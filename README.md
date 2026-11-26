@@ -23,14 +23,19 @@ Kanbaner — локальная однопользовательская сис�
 - Notion-подобные заметки `kanbaner.notes`: визуальный Markdown, дерево страниц,
   автосохранение, избранное/недавние, полнотекстовый поиск, связи ResourceRef,
   локальные изображения и экспорт `.md`;
+- глобальный поиск `kanbaner.search` по задачам, заметкам и провайдерам
+  активных плагинов с фильтрами по типу, проекту, статусу и тегам, переходом по
+  ResourceRef, клавиатурным открытием результата и постраничной догрузкой
+  («Показать ещё»);
 - production Playwright-сценарии в Chromium;
 - HTTP API v1 с Bearer token, discovery, command/query transport и ResourceRef;
 - агентный CLI с универсальными операциями и доменными сокращениями;
 - необязательную правую панель OpenCode с выбором модели, streaming-ответами,
   вложениями prompt, полным built-in toolset и ограниченными MCP-операциями
-  над проектами, задачами и заметками.
-
-Отдельный поиск и универсальный discovery-driven MCP относятся к следующим этапам `specs/roadmap.md` и ещё не входят в текущий рабочий срез.
+  над проектами, задачами и заметками;
+- универсальный discovery-driven MCP `@kanbaner/mcp` (`kanbaner-mcp-universal`)
+  поверх `/api/v1` с генерацией инструментов из `exposure.mcp` и без доступа к
+  базе данных.
 
 ## Требования
 
@@ -139,6 +144,19 @@ Chat-агент `kanbaner` по явному решению пользовате
 
 Ручной MCP allowlist Kanbaner остаётся ограниченным: list/get/create/update/complete/move для проектов, задач и заметок. Delete MCP tools, сторонние MCP servers и Code Mode `execute` не включены. Раскрываемый список в панели показывает built-in tools и Kanbaner MCP отдельными группами с `risk` read/write и предупреждением «Полный доступ: интернет, файлы и shell»; для MCP также виден обязательный `expectedVersion`. Подробности transport, сессий и тестирования — в [`packages/opencode/README.md`](packages/opencode/README.md).
 
+## Универсальный MCP
+
+`@kanbaner/mcp` — отдельный stdio-процесс `kanbaner-mcp-universal`. Он не читает базу и не содержит доменной логики: при каждом `tools/list` и `tools/call` адаптер перечитывает `/api/v1/discovery` и публикует только операции с `exposure.http = true` и `exposure.mcp = true`.
+
+```bash
+pnpm build:packages
+KANBANER_API_TOKEN="local-secret" node packages/mcp/dist/cli.js
+```
+
+Переменные окружения: обязательный `KANBANER_API_TOKEN`, необязательные `KANBANER_API_URL` (по умолчанию `http://127.0.0.1:3000`), `KANBANER_MCP_TIMEOUT_MS` и `KANBANER_MCP_ALLOW_DESTRUCTIVE=true` для явного включения destructive-инструментов. Вызовы идут через `/api/v1` с `x-kanbaner-client: mcp`; аудит помечает их `source.type = mcp`. Вход и выход валидируются по JSON Schema, mutation с поддержкой идемпотентности получает `Idempotency-Key`, сообщения и `details` проходят redaction, а bearer token не попадает в ответы.
+
+Универсальный адаптер не меняет ручной allowlist из 14 инструментов в `@kanbaner/opencode`. Текущий доменный срез: list/get для проектов и задач, `column.list`, create/update проектов и задач, task complete/move; delete, bulk и summary закрыты. Заметки сохраняют свой существующий `exposure.mcp`, `kanbaner.search.query` опубликован, а `kanbaner.search.filters` — нет. Полная конфигурация, discovery-контракт и ограничения — в [`packages/mcp/README.md`](packages/mcp/README.md).
+
 К prompt можно прикрепить до 5 файлов общим размером до 8 MiB: UTF-8 текст или код до 1 MiB, PNG/JPEG/GIF/WebP/PDF до 5 MiB каждый. Браузер читает файл через `FileReader`, сервер проверяет Base64, UTF-8 и сигнатуру формата и передаёт выбранной модели только inline `data:` URL; `file:` URL, путь на сервере и чтение файлов с диска не используются. Если выбранная модель не поддерживает image/PDF-вход, панель предупреждает, но не блокирует отправку: OpenCode/provider может заменить вложение служебной заметкой или отклонить его. В истории остаются имя и MIME-тип без base64. Изображения показывают preview в composer и сообщениях; после перезагрузки canonical preview отдельно загружается через guarded same-origin binary endpoint, без Base64 в history JSON.
 
 ## Команды
@@ -147,7 +165,7 @@ Chat-агент `kanbaner` по явному решению пользовате
 | ----------------------------------------------------------- | ------------------------------------------------------------ |
 | `pnpm install --frozen-lockfile --strict-peer-dependencies` | Воспроизводимая установка зависимостей                       |
 | `pnpm dev`                                                  | Сборка пакетов и запуск Next.js в режиме разработки          |
-| `pnpm build:packages`                                       | Сборка SDK, ядра, Storage Provider и встроенных плагинов     |
+| `pnpm build:packages`                                       | Сборка SDK, ядра, Storage Provider, плагинов и MCP/CLI       |
 | `pnpm build`                                                | Сборка пакетов и production-сборка приложения                |
 | `pnpm start`                                                | Запуск production-сервера                                    |
 | `pnpm --silent cli --help`                                  | Справка агентного CLI HTTP API                               |
@@ -179,6 +197,7 @@ packages/plugin-projects/    Sidebar, список, канбан и настро
 packages/task-ui/            Общие клиентские UI-компоненты и форматирование
 packages/plugin-fixture/     Тестовый плагин plugin-механизма
 packages/opencode/           Панель OpenCode, Service gateway, built-in tools и ограниченный MCP
+packages/mcp/                Универсальный discovery-driven stdio MCP-адаптер
 packages/cli/                Универсальный и доменный CLI для HTTP API
 specs/                       Продуктовые, архитектурные и процессные решения
 tasks/                       Локальный трекер задач и отчёты
@@ -241,4 +260,5 @@ pnpm storage:restore --backup <backup-file> --data-dir <new-data-directory>
 - [План реализации](specs/roadmap.md)
 - [UI-плагин проектов](packages/plugin-projects/README.md)
 - [Домен задач](packages/plugin-tasks/README.md)
+- [Универсальный MCP](packages/mcp/README.md)
 - [Задачи разработки](tasks/README.md)

@@ -15,6 +15,8 @@ describe("SettingsPage", () => {
     );
 
     expect(screen.getByRole("heading", { level: 1, name: "Настройки" })).toBeInTheDocument();
+    expect(screen.getByText("Оформление")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Размер шрифта" })).toHaveValue("100");
     expect(screen.getByRole("link", { name: "Открыть обзор" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "Открыть plugin manager" })).toHaveAttribute(
       "href",

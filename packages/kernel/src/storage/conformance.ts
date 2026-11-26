@@ -970,6 +970,11 @@ export function createStorageProviderConformanceSuite(
             text: "Первый виджет для доски",
             kind: "widget",
             updatedAt: "2026-11-06T12:00:00.000Z",
+            metadata: {
+              projectId: "project-1",
+              status: "todo",
+              tags: ["ui", "search"],
+            },
           },
           {
             ref: TARGET,
@@ -978,6 +983,11 @@ export function createStorageProviderConformanceSuite(
             text: "Второй гаджет",
             kind: "gadget",
             updatedAt: "2026-11-06T12:00:00.000Z",
+            metadata: {
+              projectId: "project-2",
+              status: "done",
+              tags: ["backend"],
+            },
           },
         ]);
 
@@ -985,6 +995,42 @@ export function createStorageProviderConformanceSuite(
         assert.equal(hits.length, 1);
         assert.equal(hits[0]?.ref, SOURCE);
         assert.equal(hits[0]?.strategy, expectedStrategy);
+        assert.equal(hits[0]?.kind, "widget");
+        assert.deepEqual(hits[0]?.metadata, {
+          projectId: "project-1",
+          status: "todo",
+          tags: ["ui", "search"],
+        });
+
+        const byProject = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "projectId", operator: "eq", value: "project-1" }],
+        });
+        assert.deepEqual(
+          byProject.map((hit) => hit.ref),
+          [SOURCE],
+        );
+
+        const byTag = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "tags", operator: "contains", value: "search" }],
+        });
+        assert.deepEqual(
+          byTag.map((hit) => hit.ref),
+          [SOURCE],
+        );
+
+        const wrongProject = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "projectId", operator: "eq", value: "project-2" }],
+        });
+        assert.deepEqual(wrongProject, []);
+
+        const wrongTag = await provider.searchIndex.search({
+          text: "виджет",
+          filters: [{ field: "tags", operator: "contains", value: "back" }],
+        });
+        assert.deepEqual(wrongTag, []);
 
         const filtered = await provider.searchIndex.search({
           text: "гаджет",
@@ -1010,6 +1056,73 @@ export function createStorageProviderConformanceSuite(
         assert.equal((await provider.searchIndex.list()).length, 1);
         assert.equal(await provider.searchIndex.clear(PLUGIN), 1);
         assert.deepEqual(await provider.searchIndex.list(), []);
+      },
+    },
+    {
+      name: "поиск: metadata-фильтры имеют одинаковую семантику для SQLite и in-memory",
+      async run(provider) {
+        const FILTER_REF = "acme.widgets:widget:01JWIDGET0000000000000003";
+
+        await provider.searchIndex.upsert([
+          {
+            ref: FILTER_REF,
+            pluginId: PLUGIN,
+            title: "Метаданные фильтра",
+            text: "Проверка семантики metadata",
+            kind: "widget",
+            metadata: {
+              name: "alpha",
+              number: 7,
+              flag: true,
+              nil: null,
+              object: { nested: "alpha" },
+              tags: ["alpha", "beta"],
+              mixed: ["alpha", 5, true, null],
+            },
+          },
+        ]);
+
+        const search = (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ) => provider.searchIndex.search({ text: "семантики", filters });
+
+        const expectMatch = async (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ): Promise<void> => {
+          const hits = await search(filters);
+          assert.deepEqual(
+            hits.map((hit) => hit.ref),
+            [FILTER_REF],
+          );
+        };
+        const expectNoMatch = async (
+          filters: readonly { field: string; operator: "eq" | "contains"; value: string }[],
+        ): Promise<void> => {
+          assert.deepEqual(await search(filters), []);
+        };
+
+        // Строковый scalar: eq — точное совпадение, contains — подстрока.
+        await expectMatch([{ field: "name", operator: "eq", value: "alpha" }]);
+        await expectNoMatch([{ field: "name", operator: "eq", value: "alp" }]);
+        await expectMatch([{ field: "name", operator: "contains", value: "lph" }]);
+        await expectNoMatch([{ field: "name", operator: "contains", value: "zzz" }]);
+
+        // Массив: contains — точное совпадение строкового элемента, не подстрока.
+        await expectMatch([{ field: "tags", operator: "contains", value: "beta" }]);
+        await expectNoMatch([{ field: "tags", operator: "contains", value: "bet" }]);
+        await expectMatch([{ field: "mixed", operator: "contains", value: "alpha" }]);
+        await expectNoMatch([{ field: "mixed", operator: "contains", value: "5" }]);
+
+        // object, number, boolean и null не участвуют в фильтрах.
+        await expectNoMatch([{ field: "number", operator: "eq", value: "7" }]);
+        await expectNoMatch([{ field: "number", operator: "contains", value: "7" }]);
+        await expectNoMatch([{ field: "flag", operator: "eq", value: "true" }]);
+        await expectNoMatch([{ field: "flag", operator: "contains", value: "true" }]);
+        await expectNoMatch([{ field: "nil", operator: "eq", value: "null" }]);
+        await expectNoMatch([{ field: "nil", operator: "contains", value: "null" }]);
+        await expectNoMatch([{ field: "object", operator: "eq", value: "alpha" }]);
+        await expectNoMatch([{ field: "object", operator: "contains", value: "alpha" }]);
+        await expectNoMatch([{ field: "missing", operator: "eq", value: "alpha" }]);
       },
     },
     {

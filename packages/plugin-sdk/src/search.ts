@@ -1,7 +1,13 @@
 import type { JsonObject } from "./json.ts";
 import { parseResourceRef } from "./resources.ts";
 import type { PluginId } from "./plugin-id.ts";
-import type { SearchHit, SearchIndexDocument, SearchQuery } from "./storage/search.ts";
+import type {
+  SearchFilter,
+  SearchFilterOperator,
+  SearchHit,
+  SearchIndexDocument,
+  SearchQuery,
+} from "./storage/search.ts";
 import type { UtcTimestamp } from "./storage/time.ts";
 import type { ResourceRef } from "./resources.ts";
 import { StorageError } from "./storage/errors.ts";
@@ -29,6 +35,97 @@ export interface PluginSearchService {
   list(): Promise<readonly SearchIndexDocument[]>;
   search(query: Omit<SearchQuery, "pluginId">): Promise<readonly SearchHit[]>;
   reindex(documents: readonly SearchDocumentInput[]): Promise<number>;
+  /**
+   * Регистрирует SearchProvider текущего плагина.
+   *
+   * `provider.id` обязан совпадать с plugin ID: реестр агрегирует только
+   * активные доверенные провайдеры и не читает их namespace напрямую.
+   */
+  registerProvider(provider: SearchProvider): void;
+  /** Снимает провайдера текущего плагина; вызывается при деактивации. */
+  unregisterProviders(): void;
+  /** Агрегирует выдачу всех активных провайдеров с bounded pagination. */
+  aggregate(query: SearchProviderQuery): Promise<SearchAggregateResult>;
+  /** Объединяет типы и фильтры активных провайдеров для UI. */
+  listFacets(): Promise<SearchFacetSet>;
+}
+
+/** Публичный тип ресурса, который провайдер добавляет в глобальную выдачу. */
+export interface SearchProviderKind {
+  readonly id: string;
+  readonly title: string;
+}
+
+/** Значение facet-а с машинным значением и отображаемой подписью. */
+export interface SearchProviderFacetValue {
+  readonly value: string;
+  readonly label: string;
+}
+
+/**
+ * Фильтр, который провайдер умеет применять к своим метаданным.
+ *
+ * Facet описывает только публичные атрибуты документа; произвольные поля
+ * метаданных не становятся каналом доступа к чужим данным.
+ */
+export interface SearchProviderFacet {
+  readonly id: string;
+  readonly title: string;
+  readonly operators: readonly SearchFilterOperator[];
+  readonly values: readonly SearchProviderFacetValue[];
+}
+
+/** Запрос провайдера в рамках агрегированного глобального поиска. */
+export interface SearchProviderQuery {
+  readonly text: string;
+  readonly kinds?: readonly string[];
+  readonly filters?: readonly SearchFilter[];
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+/** Безопасное предупреждение об отказе одного провайдера или чужой ссылке. */
+export interface SearchAggregateWarning {
+  readonly providerId: string;
+  readonly code: "provider_failed" | "foreign_ref";
+}
+
+/** Результат агрегированного поиска: страница, признак продолжения и warning-и. */
+export interface SearchAggregateResult {
+  readonly hits: readonly SearchHit[];
+  readonly hasMore: boolean;
+  readonly warnings: readonly SearchAggregateWarning[];
+}
+
+/** Объединённые типы и фильтры активных провайдеров. */
+export interface SearchFacetSet {
+  readonly kinds: readonly SearchProviderKind[];
+  readonly facets: readonly SearchProviderFacet[];
+  readonly warnings: readonly SearchAggregateWarning[];
+}
+
+/**
+ * Поисковый провайдер доменного плагина.
+ *
+ * Провайдер не получает доступ к чужим данным: его `search` вызывается
+ * реестром, а реализация использует только bound `PluginSearchService` и
+ * собственный Store.
+ */
+export interface SearchProvider {
+  readonly id: string;
+  readonly kinds: readonly SearchProviderKind[];
+  /**
+   * Поля публичных метаданных, которые провайдер умеет фильтровать.
+   *
+   * Список статичен и используется для маршрутизации: провайдер без поля не
+   * вызывается, поэтому заметки не попадают в выдачу с фильтром проекта.
+   */
+  readonly filterFields: readonly string[];
+  /** Возвращает актуальные facet-ы по данным плагина. */
+  listFacets(): Promise<readonly SearchProviderFacet[]>;
+  search(query: SearchProviderQuery): Promise<readonly SearchHit[]>;
+  /** Идемпотентная полная переиндексация своего namespace. */
+  reindex(): Promise<number>;
 }
 
 /**
@@ -43,6 +140,10 @@ export interface SearchRegistrar {
   list(pluginId: PluginId): Promise<readonly SearchIndexDocument[]>;
   search(pluginId: PluginId, query: Omit<SearchQuery, "pluginId">): Promise<readonly SearchHit[]>;
   reindex(pluginId: PluginId, documents: readonly SearchDocumentInput[]): Promise<number>;
+  registerProvider(pluginId: PluginId, provider: SearchProvider): void;
+  unregisterProviders(pluginId: PluginId): void;
+  aggregate(query: SearchProviderQuery): Promise<SearchAggregateResult>;
+  listFacets(): Promise<SearchFacetSet>;
 }
 
 /**

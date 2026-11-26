@@ -11,6 +11,8 @@ import type {
   ResourceLink,
   ResourceService,
   OperationResult,
+  SearchAggregateResult,
+  SearchFacetSet,
   SearchHit,
   SearchIndexDocument,
   SearchRegistrar,
@@ -114,6 +116,21 @@ export function createUnavailableSearchRegistrar(): SearchRegistrar {
       return searchUnavailable();
     },
     reindex(): Promise<number> {
+      return searchUnavailable();
+    },
+    registerProvider(): void {
+      throw new OperationFailure(
+        "PLUGIN_UNAVAILABLE",
+        "Реестр поисковых провайдеров не подключён к шине",
+      );
+    },
+    unregisterProviders(): void {
+      // Нет зарегистрированных провайдеров.
+    },
+    aggregate(): Promise<SearchAggregateResult> {
+      return searchUnavailable();
+    },
+    listFacets(): Promise<SearchFacetSet> {
       return searchUnavailable();
     },
   };

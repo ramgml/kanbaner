@@ -18,6 +18,7 @@ import type {
   PluginStateRecord,
   PluginStateStore,
   SearchHit,
+  SearchFilter,
   SearchIndexDocument,
   SearchIndexStore,
   SearchIndexStrategy,
@@ -582,6 +583,77 @@ function compareSearchDocuments(left: SearchIndexDocument, right: SearchIndexDoc
   return compareStrings(left.ref, right.ref);
 }
 
+const SEARCH_FILTER_FIELD_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/u;
+const MAX_SEARCH_FILTERS = 10;
+const MAX_SEARCH_FILTER_VALUE_LENGTH = 200;
+
+function assertSearchFilters(filters: readonly SearchFilter[] | undefined): void {
+  if (filters === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(filters) || filters.length > MAX_SEARCH_FILTERS) {
+    throw storageError(
+      "INVALID_ARGUMENT",
+      `Количество фильтров поиска не может превышать ${String(MAX_SEARCH_FILTERS)}`,
+    );
+  }
+
+  for (const filter of filters) {
+    if (
+      typeof filter.field !== "string" ||
+      !SEARCH_FILTER_FIELD_PATTERN.test(filter.field) ||
+      filter.field.length > 64
+    ) {
+      throw storageError("INVALID_ARGUMENT", "Поле фильтра поиска имеет недопустимый формат");
+    }
+
+    if (filter.operator !== "eq" && filter.operator !== "contains") {
+      throw storageError("INVALID_ARGUMENT", "Оператор фильтра поиска должен быть eq или contains");
+    }
+
+    if (
+      typeof filter.value !== "string" ||
+      filter.value.length === 0 ||
+      filter.value.length > MAX_SEARCH_FILTER_VALUE_LENGTH
+    ) {
+      throw storageError(
+        "INVALID_ARGUMENT",
+        `Значение фильтра поиска должно быть строкой длиной до ${String(MAX_SEARCH_FILTER_VALUE_LENGTH)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Семантика metadata-фильтров SearchProvider.
+ *
+ * - `eq` сравнивает только строковый scalar: точное совпадение.
+ * - `contains` для строки — подстрока, для массива — точное совпадение
+ *   строкового элемента.
+ * - object, number, boolean и null не участвуют в фильтрах и не матчатся.
+ *
+ * Та же семантика реализована SQLite-провайдером; расхождение закрыто
+ * Conformance Suite.
+ */
+function metadataMatches(document: SearchIndexDocument, filter: SearchFilter): boolean {
+  const value = document.metadata?.[filter.field];
+
+  if (filter.operator === "eq") {
+    return typeof value === "string" && value === filter.value;
+  }
+
+  if (typeof value === "string") {
+    return value.includes(filter.value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => typeof item === "string" && item === filter.value);
+  }
+
+  return false;
+}
+
 function matchScore(
   document: SearchIndexDocument,
   query: string,
@@ -717,11 +789,13 @@ export function createSearchIndexStore(
         assertPluginIdValue(query.pluginId);
       }
 
+      assertSearchFilters(query.filters);
       assertPageSize(query.limit, "limit");
       assertPageNumber(query.offset ?? 0, "offset");
 
       return run((state) => {
         const hits: SearchHit[] = [];
+        const filters = query.filters ?? [];
 
         for (const document of state.search.values()) {
           if (query.pluginId !== undefined && document.pluginId !== query.pluginId) {
@@ -732,6 +806,10 @@ export function createSearchIndexStore(
             continue;
           }
 
+          if (!filters.every((filter) => metadataMatches(document, filter))) {
+            continue;
+          }
+
           const match = matchScore(document, query.text, strategy);
 
           if (match === null) {
@@ -739,13 +817,31 @@ export function createSearchIndexStore(
           }
 
           const text = `${document.title}\n${document.text}`;
-          hits.push({
+          const hit: {
+            ref: string;
+            title: string;
+            excerpt: string;
+            score: number;
+            strategy: SearchIndexStrategy;
+            kind?: string;
+            metadata?: JsonObject;
+          } = {
             ref: document.ref,
             title: document.title,
             excerpt: makeExcerpt(text, match.index, query.text.length),
             score: match.score,
             strategy,
-          });
+          };
+
+          if (document.kind !== undefined) {
+            hit.kind = document.kind;
+          }
+
+          if (document.metadata !== undefined) {
+            hit.metadata = cloneJson(document.metadata);
+          }
+
+          hits.push(hit);
         }
 
         const offset = query.offset ?? 0;

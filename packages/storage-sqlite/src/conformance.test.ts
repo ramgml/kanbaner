@@ -122,9 +122,9 @@ for (const variant of variants) {
       (conformanceCase) => conformanceCase.name !== NO_SAVEPOINTS_CASE,
     );
 
-    it("содержит 33 базовых case и опциональный no-savepoints case", () => {
-      expect(baseCases).toHaveLength(33);
-      expect(suite).toHaveLength(34);
+    it("содержит 34 базовых case и опциональный no-savepoints case", () => {
+      expect(baseCases).toHaveLength(34);
+      expect(suite).toHaveLength(35);
       expect(suite.some((conformanceCase) => conformanceCase.name === NO_SAVEPOINTS_CASE)).toBe(
         true,
       );

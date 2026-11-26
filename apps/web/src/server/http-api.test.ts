@@ -22,6 +22,8 @@ const TOKEN = "test-api-token";
 const PROJECT_CREATE = "kanbaner.tasks.project.create";
 const PROJECT_LIST = "kanbaner.tasks.project.list";
 const PROJECT_UPDATE = "kanbaner.tasks.project.update";
+const TASK_CREATE = "kanbaner.tasks.task.create";
+const SEARCH_QUERY = "kanbaner.search.query";
 
 interface Project {
   readonly id: string;
@@ -165,6 +167,11 @@ describe("HTTP API", () => {
         readonly apiVersion: number;
         readonly operations: readonly {
           readonly id: string;
+          readonly exposure: {
+            readonly ui: boolean;
+            readonly http: boolean;
+            readonly mcp: boolean;
+          };
           readonly inputSchema: Readonly<Record<string, unknown>>;
         }[];
       }>(response),
@@ -172,9 +179,67 @@ describe("HTTP API", () => {
 
     expect(discovery.apiVersion).toBe(1);
     expect(discovery.operations.some((operation) => operation.id === PROJECT_CREATE)).toBe(true);
+    expect(discovery.operations.some((operation) => operation.id === SEARCH_QUERY)).toBe(true);
     expect(
       discovery.operations.find((operation) => operation.id === PROJECT_CREATE)?.inputSchema,
     ).toMatchObject({ type: "object" });
+    expect(
+      discovery.operations.find((operation) => operation.id === PROJECT_CREATE)?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: true });
+    expect(
+      discovery.operations.find((operation) => operation.id === SEARCH_QUERY)?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: true });
+    expect(
+      discovery.operations.find((operation) => operation.id === "kanbaner.tasks.project.summary")
+        ?.exposure,
+    ).toEqual({ ui: true, http: true, mcp: false });
+    for (const operation of discovery.operations) {
+      expect(Object.keys(operation.exposure).sort()).toEqual(["http", "mcp", "ui"]);
+      expect(Object.values(operation.exposure).every((value) => typeof value === "boolean")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("помечает source mcp только по точному x-kanbaner-client", async () => {
+    const sources: unknown[] = [];
+    const api = createHttpApi(
+      {
+        getState: async () => {
+          throw new Error("not used");
+        },
+        listHttpOperations: async () => [],
+        executeHttpOperation: async (_operationId, _input, options) => {
+          sources.push(options.source);
+
+          return { ok: true, data: {} };
+        },
+        resolveHttpResource: async () => {
+          throw new Error("not used");
+        },
+      },
+      { getToken: () => TOKEN },
+    );
+
+    for (const header of ["mcp", "mcp-extra", undefined]) {
+      const response = await api.query(
+        operationRequest(
+          "queries",
+          PROJECT_LIST,
+          {},
+          header === undefined ? {} : { headers: { "x-kanbaner-client": header } },
+        ),
+        PROJECT_LIST,
+      );
+
+      expect(response.status).toBe(200);
+    }
+
+    expect(sources).toEqual([
+      { type: "mcp", id: "mcp" },
+      { type: "http", id: "api" },
+      { type: "http", id: "api" },
+    ]);
   });
 
   it(
@@ -239,6 +304,67 @@ describe("HTTP API", () => {
       expect(resource).toMatchObject({ ref: first.resource, title: "API project" });
     },
   );
+
+  it("выдаёт search query по HTTP только с Bearer token", { timeout: 20_000 }, async () => {
+    const harness = await startHarness();
+    const project = dataOf(
+      await resultOf<ProjectMutation>(
+        await harness.api.command(
+          operationRequest("commands", PROJECT_CREATE, { title: "Поисковый проект" }),
+          PROJECT_CREATE,
+        ),
+      ),
+    );
+    const marker = `http-search-${globalThis.crypto.randomUUID()}`;
+
+    const task = dataOf(
+      await resultOf<{ readonly task: { readonly id: string }; readonly resource: ResourceRef }>(
+        await harness.api.command(
+          operationRequest("commands", TASK_CREATE, {
+            projectId: project.project.id,
+            title: `${marker} задача`,
+          }),
+          TASK_CREATE,
+        ),
+      ),
+    );
+
+    const denied = await harness.api.query(
+      operationRequest("queries", SEARCH_QUERY, { text: marker }, { token: "wrong-token" }),
+      SEARCH_QUERY,
+    );
+
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get("www-authenticate")).toBe("Bearer");
+
+    const unauthorized = await harness.api.query(
+      new Request(`http://localhost/api/v1/queries/${SEARCH_QUERY}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: marker }),
+      }),
+      SEARCH_QUERY,
+    );
+
+    expect(unauthorized.status).toBe(401);
+
+    const response = await harness.api.query(
+      operationRequest("queries", SEARCH_QUERY, { text: marker }),
+      SEARCH_QUERY,
+    );
+    const result = dataOf(
+      await resultOf<{
+        readonly hits: readonly { readonly ref: string; readonly title: string }[];
+        readonly hasMore: boolean;
+        readonly warnings: readonly unknown[];
+      }>(response),
+    );
+
+    expect(response.status).toBe(200);
+    expect(result.hits.map((hit) => hit.ref)).toContain(task.resource);
+    expect(result.hits.some((hit) => hit.title === `${marker} задача`)).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
 
   it(
     "сохраняет доменные ошибки и не выполняет неэкспортированную операцию",

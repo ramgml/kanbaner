@@ -36,8 +36,8 @@ import {
   saveIdempotency,
 } from "./activation/idempotency.ts";
 import {
+  createNotesSearchProvider,
   deleteNoteSearchDocuments,
-  reindexAllNotes,
   upsertNoteSearchDocuments,
 } from "./activation/search-index.ts";
 import { createSerialQueue } from "./activation/serial-queue.ts";
@@ -871,6 +871,14 @@ export async function activate(context: NotesActivationContext): Promise<void> {
     idFactory,
     logger,
   };
+  const searchProvider = createNotesSearchProvider(store, context.search, logger);
+
+  // Полная переиндексация awaited до регистрации провайдера: первая global
+  // query после runtime.start видит все заметки, включая удаление stale-
+  // документов при пустом домене. Сбой отменяет активацию, чтобы не оставить
+  // зарегистрированного провайдера со stale-индексом.
+  await serialize(() => searchProvider.reindex());
+  context.search.registerProvider(searchProvider);
 
   for (const metadata of NOTES_COMMAND_LIST) {
     const handler = COMMAND_HANDLERS[metadata.id];
@@ -933,17 +941,6 @@ export async function activate(context: NotesActivationContext): Promise<void> {
   });
 
   context.ui.register(notesUiContributions);
-
-  // Полная переиндексация awaited до завершения активации: сразу после
-  // старта поиск не должен зависеть от гонки с фоновой задачей. Ошибка
-  // индекса логируется и не отменяет активацию.
-  try {
-    await serialize(() => reindexAllNotes(store, context.search, logger));
-  } catch (error) {
-    logger.warn("notes.search_reindex_failed", {
-      errorName: error instanceof Error ? error.name : "UnknownError",
-    });
-  }
 }
 
 export async function deactivate(): Promise<void> {

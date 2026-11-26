@@ -18,6 +18,7 @@
     "@kanbaner/plugin-notes": "workspace:*",
     "@kanbaner/opencode": "workspace:*",
     "@kanbaner/plugin-projects": "workspace:*",
+    "@kanbaner/plugin-search": "workspace:*",
     "@kanbaner/storage-sqlite": "workspace:*",
     "@kanbaner/task-ui": "workspace:*",
     "class-variance-authority": "0.7.1",

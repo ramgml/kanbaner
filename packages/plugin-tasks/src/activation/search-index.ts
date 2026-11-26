@@ -61,7 +61,8 @@ export async function deleteSearchDocuments(
  *
  * Читает все задачи домена в одной транзакции и заменяет документы поиска.
  * Проекты не индексируются: контракт предусматривает поисковые документы
- * только для задач.
+ * только для задач. Сбой пробрасывается: вызывающая активация обязана
+ * завершиться ошибкой, а не оставить провайдера со stale-индексом.
  */
 export async function reindexAllTasks(
   store: Pick<TasksStore, "withTransaction">,
@@ -73,11 +74,11 @@ export async function reindexAllTasks(
   try {
     return await search.reindex(tasks.map((task) => toTaskSearchDocument(task)));
   } catch (error) {
-    logger.warn("tasks.search_reindex_failed", {
+    logger.error("tasks.search_reindex_failed", {
       count: tasks.length,
       errorName: safeErrorName(error),
     });
 
-    return 0;
+    throw error;
   }
 }

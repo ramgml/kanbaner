@@ -31,6 +31,8 @@ const PROJECTS_PACKAGE = "@kanbaner/plugin-projects";
 const PROJECTS_UI_ENTRYPOINT = "@kanbaner/plugin-projects/ui";
 const NOTES_PACKAGE = "@kanbaner/plugin-notes";
 const NOTES_UI_ENTRYPOINT = "@kanbaner/plugin-notes/ui";
+const SEARCH_PACKAGE = "@kanbaner/plugin-search";
+const SEARCH_UI_ENTRYPOINT = "@kanbaner/plugin-search/ui";
 const BUILTIN_UI_COMPOSITION = "apps/web/src/ui/builtin-ui-plugins.ts";
 const ALLOWED_TASK_UI_DEPENDENCIES = new Set([
   "react",
@@ -78,6 +80,17 @@ const NOTES_SERVER_ENTRYPOINT = "index.ts";
 const NOTES_CONTRACT_ENTRYPOINT = "contract.ts";
 const NOTES_UI_ENTRYPOINT_FILE = "ui.tsx";
 const NOTES_UI_PACKAGE_PREFIXES = ["@blocknote/core", "@blocknote/react", "@blocknote/shadcn"];
+const ALLOWED_SEARCH_DEPENDENCIES = new Set([
+  "react",
+  "react-dom",
+  "react/jsx-runtime",
+  "@kanbaner/plugin-sdk",
+  "@sinclair/typebox",
+  "lucide-react",
+]);
+const SEARCH_SERVER_ENTRYPOINT = "index.ts";
+const SEARCH_CONTRACT_ENTRYPOINT = "contract.ts";
+const SEARCH_UI_ENTRYPOINT_FILE = "ui.tsx";
 const ALLOWED_CLI_DEPENDENCIES = new Set([
   "node:fs/promises",
   "node:util",
@@ -85,10 +98,27 @@ const ALLOWED_CLI_DEPENDENCIES = new Set([
   "@kanbaner/plugin-tasks/contract",
   "@kanbaner/plugin-notes/contract",
 ]);
+const MCP_PACKAGE = "@kanbaner/mcp";
+const ALLOWED_MCP_DEPENDENCIES = new Set([
+  "@kanbaner/plugin-sdk",
+  "@modelcontextprotocol/sdk",
+  "zod",
+]);
+const ALLOWED_MCP_TEST_DEPENDENCIES = new Set(["vitest"]);
+const ALLOWED_MCP_BUILTINS = new Set(["node:crypto"]);
 
 function isNotesUiSpecifier(specifier) {
   return NOTES_UI_PACKAGE_PREFIXES.some(
     (packageName) => specifier === packageName || specifier.startsWith(`${packageName}/`),
+  );
+}
+
+/** MCP-адаптеру разрешены только базовые пакеты и их публичные subpath. */
+function isAllowedMcpDependency(specifier) {
+  return (
+    ALLOWED_MCP_DEPENDENCIES.has(specifier) ||
+    specifier.startsWith("@modelcontextprotocol/sdk/") ||
+    specifier.startsWith("zod/")
   );
 }
 
@@ -722,6 +752,74 @@ function analyzeCliSources(root, violations) {
   }
 }
 
+function analyzeMcpSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "mcp");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(sourceRoot) || !statSync(sourceRoot).isDirectory()) {
+    return;
+  }
+
+  for (const file of sourceFiles(sourceRoot)) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const testFile = /\.test\.tsx?$/u.test(file);
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `mcp relative import escapes package (${kind}): ${specifier}`,
+          });
+        }
+
+        continue;
+      }
+
+      if (specifier.startsWith("node:")) {
+        if (!ALLOWED_MCP_BUILTINS.has(specifier)) {
+          violations.push({
+            file: fileLabel,
+            rule: `mcp node builtin вне whitelist (${kind}): ${specifier}`,
+          });
+        }
+
+        continue;
+      }
+
+      if (testFile && ALLOWED_MCP_TEST_DEPENDENCIES.has(specifier)) {
+        continue;
+      }
+
+      if (!isAllowedMcpDependency(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `mcp должен использовать только public SDK/MCP SDK/Zod/node (${kind}): ${specifier}`,
+        });
+      }
+    }
+
+    // Строковые ссылки ловят пути, которые не являются import-выражениями.
+    for (const forbidden of [
+      { label: "kernel internals", pattern: /packages\/kernel/u },
+      { label: "storage internals", pattern: /packages\/storage-sqlite/u },
+      { label: "apps", pattern: /(?:^|\/)apps\//u },
+    ]) {
+      if (forbidden.pattern.test(source)) {
+        violations.push({
+          file: fileLabel,
+          rule: `mcp не должен ссылаться на ${forbidden.label}`,
+        });
+      }
+    }
+  }
+}
+
 function analyzeNotesSources(root, violations) {
   const packageRoot = path.join(root, "packages", "plugin-notes");
   const sourceRoot = path.join(packageRoot, "src");
@@ -812,6 +910,110 @@ function analyzeNotesSources(root, violations) {
         violations.push({
           file: fileLabel,
           rule: `notes не должен импортировать (${kind}): ${specifier}`,
+        });
+      }
+    }
+
+    for (const rule of SYNC_PATTERNS) {
+      if (rule.pattern.test(source)) {
+        violations.push({ file: fileLabel, rule: `synchronous storage call: ${rule.label}` });
+      }
+    }
+  }
+}
+
+function analyzeSearchSources(root, violations) {
+  const packageRoot = path.join(root, "packages", "plugin-search");
+  const sourceRoot = path.join(packageRoot, "src");
+
+  if (!existsSync(packageRoot) || !statSync(packageRoot).isDirectory()) {
+    violations.push({
+      file: relative(root, packageRoot),
+      rule: "plugin-search package is missing",
+    });
+
+    return;
+  }
+
+  const serverGraph = entryGraph(sourceRoot, SEARCH_SERVER_ENTRYPOINT);
+  const contractGraph = entryGraph(sourceRoot, SEARCH_CONTRACT_ENTRYPOINT);
+  const uiGraph = entryGraph(sourceRoot, SEARCH_UI_ENTRYPOINT_FILE);
+  const serverOnly = new Set([SEARCH_SERVER_ENTRYPOINT, "activation.ts", "operations.ts"]);
+
+  for (const file of sourceFiles(sourceRoot).filter((file) => !/\.test\.tsx?$/u.test(file))) {
+    const source = readFileSync(file, "utf8");
+    const fileLabel = relative(root, file);
+    const relativeFile = path.relative(sourceRoot, file).replaceAll(path.sep, "/");
+    const inServer = serverGraph.has(file);
+    const inContract = contractGraph.has(file);
+    const inUi = uiGraph.has(file);
+
+    if (inContract && serverOnly.has(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: "search client-safe contract не должен достигать server modules",
+      });
+    }
+
+    if (inUi && serverOnly.has(relativeFile)) {
+      violations.push({
+        file: fileLabel,
+        rule: "search UI entrypoint не должен достигать server entrypoint",
+      });
+    }
+
+    for (const reference of moduleReferences(file, source)) {
+      const { specifier, kind } = reference;
+
+      if (specifier.startsWith(".")) {
+        const resolved = resolveRelativeModule(file, specifier);
+
+        if (!isInside(packageRoot, resolved)) {
+          violations.push({
+            file: fileLabel,
+            rule: `search relative import escapes package (${kind})`,
+          });
+        }
+
+        continue;
+      }
+
+      if (specifier.startsWith("node:")) {
+        violations.push({
+          file: fileLabel,
+          rule: `search builtin import запрещён (${kind}): ${specifier}`,
+        });
+        continue;
+      }
+
+      const forbidden = forbiddenPluginUiImport(specifier);
+
+      if (forbidden !== null) {
+        violations.push({
+          file: fileLabel,
+          rule: `search запрещённый импорт (${kind}): ${specifier} [${forbidden}]`,
+        });
+        continue;
+      }
+
+      if (
+        inServer &&
+        (specifier === "react" ||
+          specifier === "react-dom" ||
+          specifier.startsWith("react/") ||
+          specifier === "lucide-react")
+      ) {
+        violations.push({
+          file: fileLabel,
+          rule: `search server graph не должен импортировать UI (${kind}): ${specifier}`,
+        });
+        continue;
+      }
+
+      if (!ALLOWED_SEARCH_DEPENDENCIES.has(specifier)) {
+        violations.push({
+          file: fileLabel,
+          rule: `search не должен импортировать (${kind}): ${specifier}`,
         });
       }
     }
@@ -1034,6 +1236,34 @@ function analyzeProductionSources(root, fixtureRoot, violations) {
             rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
           });
         }
+
+        const isSearchUiEntrypoint =
+          specifier === SEARCH_UI_ENTRYPOINT ||
+          specifier === `${SEARCH_PACKAGE}/ui` ||
+          specifier.startsWith(`${SEARCH_PACKAGE}/ui/`) ||
+          (resolved !== null &&
+            isInside(path.join(root, "packages", "plugin-search", "src"), resolved) &&
+            /(?:^|\/)ui(?:\.tsx?|\/)/u.test(
+              relative(path.join(root, "packages", "plugin-search", "src"), resolved),
+            ));
+
+        if (isSearchUiEntrypoint && !isBuiltinComposition) {
+          violations.push({
+            file: fileLabel,
+            rule: `UI-entrypoint плагина разрешён только из ${BUILTIN_UI_COMPOSITION} (${kind}): ${specifier}`,
+          });
+        }
+
+        if (
+          (specifier === SEARCH_PACKAGE || specifier.startsWith(`${SEARCH_PACKAGE}/`)) &&
+          specifier !== SEARCH_UI_ENTRYPOINT &&
+          specifier !== `${SEARCH_PACKAGE}/ui`
+        ) {
+          violations.push({
+            file: fileLabel,
+            rule: `apps/shell не должен импортировать серверный entrypoint плагина (${kind}): ${specifier}`,
+          });
+        }
       }
 
       // Ссылка в строке ловит случаи, которые не являются import-выражением
@@ -1111,6 +1341,16 @@ function analyzeManifests(root, violations) {
         "@blocknote/shadcn",
         MARKDOWN_UI_PACKAGE,
       ]),
+    },
+    {
+      file: "packages/plugin-search/package.json",
+      name: SEARCH_PACKAGE,
+      allowed: new Set([ALLOWED_FIXTURE_DEPENDENCY, "@sinclair/typebox", "lucide-react"]),
+    },
+    {
+      file: "packages/mcp/package.json",
+      name: MCP_PACKAGE,
+      allowed: new Set([ALLOWED_FIXTURE_DEPENDENCY, "@modelcontextprotocol/sdk", "zod"]),
     },
     {
       file: "packages/task-ui/package.json",
@@ -1210,7 +1450,11 @@ export function analyzeImportBoundaries(root = ROOT) {
 
   analyzeNotesSources(root, violations);
 
+  analyzeSearchSources(root, violations);
+
   analyzeCliSources(root, violations);
+
+  analyzeMcpSources(root, violations);
 
   analyzeManifests(root, violations);
 
@@ -1251,6 +1495,7 @@ function runSelfTest() {
   const taskUiRoot = path.join(root, "packages", "task-ui");
   const projectsRoot = path.join(root, "packages", "plugin-projects");
   const cliRoot = path.join(root, "packages", "cli");
+  const mcpRoot = path.join(root, "packages", "mcp");
 
   try {
     writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: {} }));
@@ -1461,6 +1706,51 @@ function runSelfTest() {
       'import { parseArgs } from "node:util";\nimport { TASKS_QUERY_IDS } from "@kanbaner/plugin-tasks/contract";\nexport const value = [parseArgs, TASKS_QUERY_IDS];\n',
     );
 
+    // 12. mcp: только public SDK/MCP SDK/Zod/node, без доменов и apps.
+    writeFile(
+      path.join(mcpRoot, "package.json"),
+      JSON.stringify({
+        name: MCP_PACKAGE,
+        dependencies: {
+          "@kanbaner/plugin-sdk": "workspace:*",
+          "@modelcontextprotocol/sdk": "1.32.2",
+          zod: "4.6.7",
+        },
+      }),
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "bad-kernel.ts"),
+      'import { createOperationBus } from "@kanbaner/kernel";\nexport const bus = createOperationBus;\n',
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "bad-domain.ts"),
+      'import { TASKS_QUERY_IDS } from "@kanbaner/plugin-tasks/contract";\nexport const ids = TASKS_QUERY_IDS;\n',
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "bad-sqlite.ts"),
+      'import Database from "better-sqlite3";\nexport const database = Database;\n',
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "bad-node-sqlite.ts"),
+      'import { DatabaseSync } from "node:sqlite";\nexport const database = DatabaseSync;\n',
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "good.ts"),
+      [
+        'import { createSchemaValidator } from "@kanbaner/plugin-sdk";',
+        'import { Server } from "@modelcontextprotocol/sdk/server/index.js";',
+        'import type { z } from "zod";',
+        'import { createHash } from "node:crypto";',
+        "export const value = [createSchemaValidator, Server, createHash] as const;",
+        "export type Schema = z.ZodType;",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mcpRoot, "src", "good.test.ts"),
+      'import { describe } from "vitest";\nexport const value = describe;\n',
+    );
+
     const violations = analyzeImportBoundaries(root);
 
     assertViolation(
@@ -1557,6 +1847,28 @@ function runSelfTest() {
     assertNoViolation(violations, "packages/plugin-tasks/src/contract.ts");
     assertViolation(violations, "packages/cli/src/bad.ts", "cli должен использовать только HTTP");
     assertNoViolation(violations, "packages/cli/src/good.ts");
+    assertViolation(
+      violations,
+      "packages/mcp/src/bad-kernel.ts",
+      "mcp должен использовать только public SDK/MCP SDK/Zod/node",
+    );
+    assertViolation(
+      violations,
+      "packages/mcp/src/bad-domain.ts",
+      "mcp должен использовать только public SDK/MCP SDK/Zod/node",
+    );
+    assertViolation(
+      violations,
+      "packages/mcp/src/bad-sqlite.ts",
+      "mcp должен использовать только public SDK/MCP SDK/Zod/node",
+    );
+    assertViolation(
+      violations,
+      "packages/mcp/src/bad-node-sqlite.ts",
+      "mcp node builtin вне whitelist",
+    );
+    assertNoViolation(violations, "packages/mcp/src/good.ts");
+    assertNoViolation(violations, "packages/mcp/src/good.test.ts");
 
     console.log(
       `Import boundary self-test: ${String(violations.length)} violation(s) в ${String(
@@ -1589,5 +1901,8 @@ if (process.argv.includes("--self-test")) {
       "Import boundaries: task-ui и plugin-projects не смешивают server и React; UI-entrypoint импортируется только composition-модулем.",
     );
     console.log("Import boundaries: cli использует только HTTP client и public contracts.");
+    console.log(
+      "Import boundaries: mcp использует только public SDK/MCP SDK/Zod/node и не достигает kernel, storage, доменных плагинов или apps.",
+    );
   }
 }

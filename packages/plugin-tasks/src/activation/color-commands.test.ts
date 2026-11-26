@@ -120,6 +120,18 @@ function createSearchService(): PluginSearchService {
     async reindex(): Promise<number> {
       return 0;
     },
+    registerProvider(): void {
+      // Provider не требуется в unit-тесте команд.
+    },
+    unregisterProviders(): void {
+      // Provider не зарегистрирован.
+    },
+    async aggregate() {
+      return { hits: [], hasMore: false, warnings: [] };
+    },
+    async listFacets() {
+      return { kinds: [], facets: [], warnings: [] };
+    },
   };
 }
 
@@ -139,6 +151,18 @@ function createSearchRegistrar(): SearchRegistrar {
     },
     async reindex(_pluginId, documents): Promise<number> {
       return documents.length;
+    },
+    registerProvider(): void {
+      // Provider не требуется в unit-тесте шины.
+    },
+    unregisterProviders(): void {
+      // Provider не зарегистрирован.
+    },
+    async aggregate() {
+      return { hits: [], hasMore: false, warnings: [] };
+    },
+    async listFacets() {
+      return { kinds: [], facets: [], warnings: [] };
     },
   };
 }

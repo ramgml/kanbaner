@@ -1,0 +1,154 @@
+---
+id: KAN-066
+title: Автоматические названия OpenCode-сессий из первого запроса
+status: done
+stage: 8
+priority: medium
+owner: worker-kan-066
+blocked_by: []
+branch: dev
+worktree: .
+created: 2026-11-24
+updated: 2026-11-25
+specs:
+  - specs/product-mvp.md
+  - specs/architecture.md
+  - specs/roadmap.md
+---
+
+# KAN-066 — Автоматические названия OpenCode-сессий из первого запроса
+
+## Цель
+
+Автоматически давать новой OpenCode-сессии короткое понятное название из первого
+запроса пользователя, сохраняя возможность явного переименования.
+
+## Результат
+
+- Первый запрос заменяет стандартное `Kanbaner chat` коротким однострочным
+  названием, полученным детерминированно без дополнительного вызова модели.
+- Ручное название и название непустой сессии автоматически не перезаписываются.
+- Новое название сразу появляется в шапке и истории, переживает reload и не
+  откатывается старым canonical refresh.
+- Автоматическое название является best-effort и не мешает выполнению prompt.
+
+## Объём работ
+
+- [x] Добавить ограниченную нормализацию текста запроса в название длиной не
+  более 60 Unicode code points с понятным fallback.
+- [x] Добавить server-side eligibility: owned current-project session, default
+  title и пустая canonical history.
+- [x] Передать в internal prompt transport только display text запроса без
+  контекстной преамбулы, base64 и содержимого вложений.
+- [x] Вернуть подтверждённое автоматическое название в internal UI response и
+  интегрировать его с title overlay/history invalidation.
+- [x] Добавить unit/integration/E2E regressions и обновить спецификации.
+
+## Владение файлами
+
+Разрешено:
+
+- `packages/opencode/src/session-title.ts` и focused tests;
+- `packages/opencode/src/types.ts`, `gateway.ts`, `gateway.test.ts`;
+- `packages/opencode/src/ui.tsx`, `ui.test.tsx`;
+- `apps/web/src/server/opencode-http.ts`, `opencode-http.test.ts`;
+- `apps/web/e2e/opencode.spec.ts`;
+- `packages/opencode/README.md`;
+- `specs/product-mvp.md`, `specs/architecture.md`;
+- `tasks/reports/KAN-066.md`.
+
+Запрещено:
+
+- публичный `/api/v1`, MCP, SQLite, миграции, новые зависимости и AI-summary;
+- delete API и изменение ручного rename contract;
+- файлы задач, roadmap, package/lock, notes/sticky и чужие worktree;
+- ослабление ownership, turn/admission, canonical outcome, title/model overlay,
+  drafts, unread и scroll semantics.
+
+## Контракты и зависимости
+
+- Зависит от KAN-060–KAN-065 и сохраняет их поведение.
+- Источник названия — отображаемый текст первого запроса, а не прикреплённый
+  контекст или содержимое файлов.
+- Сервер повторно проверяет default title и пустую history; клиентскому
+  признаку новой сессии не доверяем.
+- Обновление выполняется до prompt как best-effort. Ошибка генерации/сохранения
+  названия не отменяет и не меняет исход prompt.
+- `session.update` получает только `title`; metadata и permissions не
+  передаются. Названия и текст запроса не логируются.
+- Для немедленного UI update допускается ASCII-encoded internal response header;
+  NDJSON contract и публичный HTTP API не расширяются.
+
+## Критерии приёмки
+
+- [x] Обычный первый запрос создаёт короткое название без Markdown-шума и
+  лишних пробелов; длинный/Unicode текст ограничен корректно.
+- [x] Пустой или бессмысленный текст оставляет default title и не вызывает
+  лишних upstream-мутаций.
+- [x] Manual/non-default title, чужая/child/wrong-project и непустая сессия не
+  переименовываются.
+- [x] Title при done/error/cancelled/unconfirmed/non-admission не нарушает prompt
+  outcome; retry не переименовывает повторно.
+- [x] Header обновляет текущую шапку и историю; stale refresh сохраняет
+  подтверждённое название, а последующий fresh canonical title принимается.
+- [x] Полные проверки и OpenCode E2E зелёные.
+
+## Проверки
+
+- Focused session-title/gateway/http/ui tests.
+- `pnpm --filter @kanbaner/opencode typecheck` и web typecheck.
+- `pnpm --filter @kanbaner/web test:e2e e2e/opencode.spec.ts`.
+- `pnpm check:imports`, `pnpm test:sqlite`, `pnpm check`.
+- Live smoke первого prompt и ручного rename выполняет оркестратор, если
+  доступна настроенная модель; ограничения явно фиксируются в отчёте.
+
+## Риски
+
+- SDK не предоставляет conditional rename; теоретическая гонка с ручным rename
+  из другой вкладки остаётся last-write-wins.
+- Ручной title, совпадающий с `Kanbaner chat`, неотличим от default.
+- Детерминированная очистка не является полноценным CommonMark parser.
+- Дополнительные preflight-запросы не должны бросать ошибку наружу или менять
+  admission/unconfirmed semantics.
+
+## Журнал
+
+- 2026-11-24 — Задача создана по запросу пользователя; назначен
+  `worker-kan-066`, статус `in_progress`.
+- 2026-11-24 — Worker реализовал auto title и немедленное обновление UI.
+  Коммит `d1ad061`; focused 217/217, OpenCode E2E 29/29, полный `pnpm check` —
+  145 files / 2085 tests.
+- 2026-11-24 — Ревью нашло high: зависший title preflight не реагировал на
+  abort и мог заблокировать prompt; medium: параллельные первые prompt не были
+  сериализованы. Также требуется реальный same-generation overlay regression.
+  Задача возвращена в `in_progress`.
+- 2026-11-25 — Worker добавил bounded abortable preflight, per-session queue и
+  UI grace regressions коммитом `bcdb252`. Focused 229/229, OpenCode E2E 29/29,
+  полный `pnpm check` — 145 files / 2097 tests.
+- 2026-11-25 — Повторное ревью нашло high: ожидание per-session queue не
+  входило в deadline и не реагировало на caller abort; medium: после timeout
+  незавершённого update допускался второй auto-update. Задача возвращена в
+  `in_progress`.
+- 2026-11-25 — Worker ограничил общий 2-секундный budget включая очередь и
+  добавил uncertain mutation guard коммитом `b53fbbe`. Focused 233/233,
+  OpenCode E2E 29/29, полный `pnpm check` — 145 files / 2101 tests.
+- 2026-11-25 — Финальное ревью не нашло blocker/high/medium/low. Live smoke
+  реального Service 2.2.5 подтвердил auto title, reload и сохранение ручного
+  названия после повторного prompt.
+- 2026-11-25 — После rebase коммиты `84e0b3c`, `194755b`, `af54420`
+  интегрированы merge-коммитом `3cc763f`. `pnpm check` на ветке и `dev`
+  зелёный; OpenCode E2E на `dev` — 29/29, imports и SQLite smoke зелёные.
+  Статус `done`.
+
+## Итог
+
+Новые OpenCode-сессии автоматически получают короткое однострочное название из
+отображаемого текста первого запроса. Сервер разрешает rename только для owned
+пустой сессии со стандартным названием, поэтому ручные имена и существующая
+история не перезаписываются. Название сразу появляется в шапке и истории.
+
+Preflight ограничен общими 2 секундами включая очередь, реагирует на abort,
+сериализуется по session ID и не запускает новый update при неопределённом
+результате предыдущего. Ошибка названия не меняет исход prompt.
+
+Merge: `3cc763f`. Feature-ветка и worktree удалены. Push не выполнялся.

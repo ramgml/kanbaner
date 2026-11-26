@@ -87,7 +87,8 @@ Kanbaner строится как **модульный монолит с plugin-�
 └────────┬─────────┘                   └───────────────┘
          │ stdio
 ┌────────▼─────────┐
-│ kanbaner-mcp     │
+│ kanbaner-mcp-    │
+│ universal        │
 │ внешний адаптер  │
 └──────────────────┘
 ```
@@ -129,7 +130,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 | `kanbaner.projects` | Рабочее пространство проектов: sidebar, доска, список, переключатель представлений | `kanbaner.tasks` | `kanbaner.projects.ui.v1` |
 | `kanbaner.notes` | Заметки и Markdown-редактор | Нет | `kanbaner.notes.commands.v1`, `kanbaner.notes.queries.v1`, `kanbaner.notes.events.v1` |
 | `kanbaner.search` | Полнотекстовый поиск и агрегация провайдеров | Нет | `kanbaner.search.queries.v1`, UI-вклад |
-| `kanbaner.mcp` | Необязательный stdio-адаптер MCP | HTTP API | Не загружается в ядро |
+| `kanbaner.mcp` | Необязательный универсальный discovery-driven stdio-адаптер MCP | HTTP API | Не загружается в ядро |
 | `kanbaner.opencode` | Глобальная панель чата, catalog/session gateway, полный built-in toolset внешнего агента и ограниченный MCP | Внешний OpenCode Service и HTTP API | `kanbaner.opencode.ui.v1`; не владеет доменными данными |
 
 `kanbaner.notes` не зависит от `kanbaner.tasks`. Связь заметки с задачей выражается через `ResourceRef`.
@@ -162,6 +163,7 @@ Kanbaner строится как **модульный монолит с plugin-�
 - `task-ui` — общая клиентская библиотека компонентов, а не плагин: она может зависеть от `plugin-sdk` и `@kanbaner/plugin-tasks/contract`, но не от корневого `@kanbaner/plugin-tasks`, `kernel`, storage, серверных модулей или `apps/web`;
 - UI-entrypoint плагина импортируется только composition-модулем `apps/web/src/ui/builtin-ui-plugins.ts`; shell и слоты работают с metadata из реестра;
 - `cli` является внешним HTTP-клиентом: он может использовать `@kanbaner/plugin-sdk` и client-safe `/contract` entrypoint-ы, но не ядро, Storage Provider или server-активацию плагинов;
+- `mcp` является внешним универсальным stdio-адаптером: он может использовать `@kanbaner/plugin-sdk`, MCP SDK, `zod` и `node:crypto`, но не ядро, Storage Provider, доменные плагины или `apps/web`; доменные вызовы идут только через `/api/v1`;
 - `opencode` зависит только от Plugin SDK и публичного OpenCode client, не импортирует kernel, Storage Provider или доменные плагины; доменные вызовы выполняет отдельный MCP-процесс через `/api/v1`;
 - нарушение правил импорта проверяется автоматическим тестом.
 
@@ -276,7 +278,7 @@ SQLite Storage Provider (MVP)
 ### 8.3. Владение
 
 - Каждый плагин владеет своим namespace данных.
-- В SQLite namespace выражается префиксом таблиц: `plugin_<normalized_id>_` для сторонних плагинов и короткими префиксами `tasks_`, `notes_`, `search_` для встроенных.
+- В SQLite namespace выражается префиксом таблиц: `plugin_<normalized_id>_` для сторонних плагинов и короткими префиксами `tasks_`, `notes_` для встроенных. Поисковый индекс использует инфраструктурные таблицы `core_search_*` Storage Provider, а не namespace плагина поиска.
 - Плагин создаёт и изменяет только свои таблицы.
 - Конкретные имена таблиц и схем являются деталью провайдера и не входят в публичный контракт.
 - Ядро отслеживает применённые миграции в `core_plugin_migrations`.
@@ -533,15 +535,32 @@ updatedAt
 `note` resource adapter, индексирует заголовок и Markdown после коммита и
 выполняет полную переиндексацию при активации.
 
-### 8.7. Плагин поиска
+### 8.7. Поисковый индекс и плагин поиска
 
 ```text
-search_documents
-search_index_state
+core_search_documents
+core_search_fts
 ```
 
-Поисковый плагин хранит собственный индекс через `SearchIndexStore`. Исходные данные остаются у доменных плагинов.
-SQLite-провайдер реализует индекс на FTS5; имена виртуальных таблиц не входят в публичный контракт.
+Индекс принадлежит инфраструктуре активного Storage Provider, а не отдельному
+namespace плагина. SQLite-провайдер реализует его на FTS5; имена виртуальных
+таблиц и SQL не входят в публичный контракт.
+
+- Доменные плагины пишут только scoped-документы своего `ResourceRef` через
+  `ctx.search`.
+- Storage Provider отвечает за нормализацию, FTS5, фильтры по `metadata` и
+  транзакционную замену индекса.
+- `kanbaner.search` не хранит индекс и не читает чужие namespace: он агрегирует
+  только активных провайдеров через публичный SearchProvider Registry.
+- Доменный плагин выполняет awaited `reindex()` при активации **до**
+  `registerProvider`. Поэтому первая глобальная выдача сразу после `runtime.start`
+  видит уже существующие ресурсы, даже если их документ отсутствовал в индексе.
+- Ошибка полной переиндексации прерывает активацию домена: runtime откатывает
+  регистрации и переходит в safe mode. Провайдер со stale-индексом не остаётся
+  зарегистрированным.
+- Отключение плагина снимает его провайдера из реестра, но не удаляет индекс;
+  повторная активация выполняет idempotent `reindex()` и восстанавливает
+  пропущенные документы.
 
 ### 8.8. Удаление
 
@@ -597,6 +616,76 @@ open(ref)
 - При пропущенном событии или включении плагина выполняется переиндексация.
 - Векторный поиск и AI-provider не используются.
 
+### 10.1. SearchProvider Registry
+
+Публичный `SearchProvider` объявляет:
+
+```text
+id            = plugin ID владельца
+kinds[]       = { id, title } доступных типов ресурсов
+filterFields[] = публичные metadata-поля, которые провайдер умеет фильтровать
+listFacets()  = актуальные facet-значения для UI
+search(query) = scoped-выдача своего namespace
+reindex()     = идемпотентная полная переиндексация своих документов
+```
+
+Реестр хранит только доверенные провайдеры активных плагинов. Регистрация под
+чужим `id`, пустой `kinds`, дубликаты типов и полей отклоняются до активации.
+`unregisterProviders()` вызывается lifecycle при деактивации; отключённый
+плагин исчезает из выдачи без удаления своих данных и индекса. Тот же
+`unregisterProviders()` выполняется при откате упавшей активации, поэтому
+провайдер, зарегистрированный до исключения, не остаётся в реестре.
+
+Полная переиндексация домена выполняется awaited до `registerProvider`.
+Ошибка `reindex()` не подавляется: runtime фиксирует `activation_failed`,
+откатывает регистрации и переходит в safe mode. Благодаря этому первая
+глобальная выдача после старта не зависит от гонки с фоновой задачей.
+
+Семантика JSON `metadata`-фильтров едина для SQLite и in-memory provider:
+
+- `eq` сравнивает только строковый scalar и требует точного совпадения;
+- `contains` для строки ищет подстроку, для массива — точное совпадение
+  строкового элемента;
+- object, number, boolean, null и отсутствующее поле не матчатся ни одним
+  оператором.
+
+Семантика закреплена общим case в Storage Provider Conformance Suite.
+
+Агрегация `kanbaner.search.query`:
+
+- маршрутизирует `kinds` и `filters` только по объявленным полям; провайдер без
+  нужного поля не вызывается;
+- отклоняет неизвестный тип, неизвестный фильтр и пустой текст как
+  `VALIDATION_ERROR`;
+- вызывает провайдеров с `offset: 0` и bounded `limit`, объединяет выдачу,
+  дедуплицирует по `ResourceRef` и сортирует по `score` desc, затем `ref` asc;
+- возвращает не больше запрошенной страницы и `hasMore`;
+- отбрасывает чужой `ResourceRef` и добавляет warning `foreign_ref`;
+- при ошибке одного провайдера добавляет warning `provider_failed` и сохраняет
+  остальную выдачу; если упали все — возвращает `DEPENDENCY_UNAVAILABLE`;
+- при отсутствии активных провайдеров возвращает пустую страницу без ошибки.
+
+`kanbaner.search.filters` объединяет `kinds` и facet-ы активных провайдеров,
+дедуплицирует значения и не раскрывает произвольные metadata. UI получает
+типы и фильтры динамически и не хардкодит домены. Переход к найденному ресурсу
+выполняется доменным `resource-opener` по `ResourceRef`; сам search-плагин
+opener не объявляет.
+
+Межплагинная reindex-команда с частичным успехом не вводится. Каждый домен
+переиндексирует свои документы при активации и после явной локальной команды,
+если она предусмотрена доменом; registry не выполняет чужие мутации.
+
+### 10.2. Экспорт поиска
+
+- `kanbaner.search.query` — `ui: true`, `http: true`, `mcp: true`; публикуется
+  универсальным discovery-driven MCP.
+- `kanbaner.search.filters` — `ui: true`, `http: true`, `mcp: false`.
+- Ручной OpenCode allowlist не расширяется: `exposure.mcp` не строит его и не
+  добавляет операций в `@kanbaner/opencode`.
+- Bearer token, лимиты и валидация выполняются общим HTTP transport; отдельного
+  поискового маршрута нет.
+
+
 ## 11. HTTP API
 
 API является транспортом над реестром команд и запросов.
@@ -614,8 +703,10 @@ GET  /api/v1/resources/{encodedResourceRef}
 ### Правила
 
 - Все ответы используют единый конверт из Plugin Contract.
+- `/api/v1/discovery` аддитивно отдаёт `exposure {ui,http,mcp}` для каждой операции; клиенты игнорируют неизвестные поля.
 - `Authorization: Bearer <token>` обязателен для всего, кроме `/health`.
 - `X-Request-Id` принимается от клиента или генерируется ядром.
+- `x-kanbaner-client: mcp` помечает вызов универсального MCP: audit source становится `{type: "mcp", id: "mcp"}`, остальные запросы получают `{type: "http", id: "api"}`. Заголовок не ослабляет Bearer-проверку.
 - `Idempotency-Key` передаётся для поддерживающих его команд.
 - Тело запроса валидируется по JSON Schema.
 - Ошибки валидации возвращаются до вызова плагина.
@@ -646,7 +737,9 @@ GET  /api/v1/resources/{encodedResourceRef}
 GET  /api/opencode/status
 GET  /api/opencode/catalog
 POST /api/opencode/session
-GET  /api/opencode/session/{sessionID}
+GET  /api/opencode/session
+GET  /api/opencode/session/{sessionID}[?turnID={turnID}]
+PATCH /api/opencode/session/{sessionID}
 GET  /api/opencode/session/{sessionID}/messages/{messageID}/attachments/{attachmentIndex}
 POST /api/opencode/session/{sessionID}/model
 POST /api/opencode/session/{sessionID}/prompt
@@ -654,11 +747,27 @@ POST /api/opencode/session/{sessionID}/prompt
 
 Это не машинный command/query API и не замена `/api/v1`. Bearer token не передаётся в браузер; запросы принимаются только с `x-kanbaner-client: ui` и same-origin Fetch Metadata/Origin проверками. Все ответы имеют `Cache-Control: no-store`; prompt использует NDJSON. Публичные ошибки не содержат сырые upstream messages, response body, headers и provider settings.
 
-Gateway вызывает `Service.ensure()` только при обращении к открытой панели. Catalog, session create и остальные операции используют один project location. Доступны только сессии с `metadata.source=kanbaner` и агентом `kanbaner`. Event subscription должна подтвердить `server.connected` до prompt; terminal execution закрывает поток, abort вызывает `session.interrupt` и закрывает subscriber-local iterator.
+`GET /api/opencode/session` не принимает query-параметры. Gateway читает не больше 4 страниц `session.list` по `limit: 50`, останавливается по `next` или повторному cursor, дедуплицирует ID, сортирует по `time.updated` desc с tie-break по ID и ограничивает ответ 30 записями. Наружу отдаётся только whitelist `{ id, title, updatedAt }`; `metadata`, `location`, `projectID`, стоимость, токены, permissions, model, agent, outcome, `archived` и `subpath` не сериализуются. В список попадают только root-сессии (`parentID: null`) с `metadata.source=kanbaner`, агентом `kanbaner`, валидным `time.updated` и тем же нормализованным project directory. `PATCH /api/opencode/session/{sessionID}` принимает строгий JSON `{title}` до 4 KiB, проверяет ownership и отправляет upstream только `{ sessionID, title }`; заголовок нормализуется до 1–100 code points, NUL/C0/C1 запрещены.
+
+Первый prompt новой сессии получает автоматический короткий title из отображаемого текста запроса. UI передаёт в `POST /api/opencode/session/{sessionID}/prompt` optional bounded `titleText` (display text без контекстной преамбулы и вложений, до 2000 code points); `session-title.ts` детерминированно очищает Markdown/HTML, схлопывает пробелы и ограничивает результат 60 code points без вызова модели. До `prompt` gateway best-effort вызывает `ensureSessionTitle`: проверяет ownership, root-сессию, агент/`metadata.source`, текущий project directory, точный default title и пустую canonical history через `message.list({sessionID, limit: 1})`, затем отправляет `session.update({sessionID, title})` только с `title`. Общий caller-visible deadline 2 s и caller abort стартуют до постановки в per-session очередь и покрывают queue wait + get/list/update; собственный `AbortController` связывает caller signal, timeout/abort возвращает `null`, не отменяет prompt и не меняет его outcome, а отменённый queued entry позже доходит до очереди как no-op без SDK-вызовов. После каждого `await` и перед update проверяется abort, поэтому истёкший preflight не начинает поздний update. Preflight одной сессии сериализуется в gateway, второй вызов перечитывает canonical title/history после первого, а разные session ID выполняются параллельно. После запуска `session.update` per-session uncertain/in-flight guard удерживается до фактического settle upstream Promise независимо от deadline/abort: новый auto update во время uncertainty не отправляется, состояние очищается при success/error, после чего eligibility проверяется заново. Уже отправленная mutation отменяется только если это поддерживает SDK/Service; поздняя запись остаётся документированным пределом. Подтверждённый title возвращается ASCII-header `x-kanbaner-session-title`; панель применяет его к текущей generation и инвалидирует историю. Первый canonical GET после header получает grace как potentially stale относительно server-side update: применяет canonical messages, сохраняет auto title и гасит overlay, следующий GET доверяет canonical. Conditional rename в SDK отсутствует: гонка с ручным переименованием из другой вкладки остаётся last-write-wins.
+
+Gateway вызывает `Service.ensure()` только при обращении к открытой панели. Catalog, session create и остальные операции используют один project location. Доступны только root-сессии с `metadata.source=kanbaner`, агентом `kanbaner` и тем же project directory. Event subscription должна подтвердить `server.connected` до prompt; после admission terminal execution подтверждается по canonical history точного turn, а не по типу upstream-события. Каждый prompt получает client-generated stable turn ID (`^msg_[A-Za-z0-9_-]{8,64}$`), передаваемый в `session.prompt({id})`; при подмене ID Service gateway выпускает служебное `kanbaner.turn.admitted` и хранит alias client→admitted. Перед canonical lookup gateway выпускает внутреннее событие `session.execution.finalizing`, которое NDJSON transport передаёт клиенту как `finalizing` без terminal-семантики. Abort вызывает `session.interrupt` и закрывает subscriber-local iterator.
+
+Если canonical outcome не подтверждён за ограниченное время, NDJSON завершается ошибкой с `reason: "unconfirmed"` без upstream-текста. Rejected `fetch`, null body, EOF без `finalizing` и неизвестный сбой после возможного admission также дают unconfirmed с `retryable:false`; terminal error после `finalizing` не дублируется. Rejected `client.session.prompt()` не считается доказательством non-admission: `promptAttempted` ставится непосредственно перед вызовом, после ошибки gateway выполняет bounded canonical lookup по stable turn ID и выдаёт terminal только при exact canonical outcome, иначе unconfirmed, без retry/interrupt. Панель в этом состоянии сохраняет streamed-сообщения, не запускает автоматический canonical refresh и не повторяет prompt; ручная кнопка «Проверить статус» выполняет `GET /api/opencode/session/{sessionID}?turnID={turnID}` и получает серверный `outcome` (`done`, `error`, `cancelled`, `pending`, `missing`), вычисленный по точному turn ID. Status query принимает исходный client ID через alias-map и прямой admitted `SessionMessageID` (bounded validator без `msg_`). UI применяет canonical history только при `done`. Автоматический повтор допускается только при сбое до вызова prompt (`OpenCodeGatewayError` до первого streamed-события, 408/429/5xx); ответ помечается `nonAdmission:true` и `retryable:true`; текст и файлы берутся из снимка исходного запроса. 4xx и post-admission ошибки не повторяются.
 
 Catalog также возвращает единый список инструментов с публичными `name`, `source` (`builtin` или `mcp`), `risk` (`read` или `write`) и `requiresExpectedVersion` для MCP. Панель показывает built-in tools OpenCode и ручной Kanbaner MCP отдельными группами и предупреждает о полном доступе к интернету, файлам и shell. Источник MCP-части — код интеграции, а не `exposure.mcp`, поэтому список не расширяется автоматически при появлении новых доменных операций.
 
+Tool call в истории и stream публикуется как `{ name, status, text, startedAt?, endedAt?, input?, output? }`, где `startedAt`/`endedAt` — epoch milliseconds. History использует canonical `time.ran`/`time.completed` (с fallback на `time.created` и v1 `state.time`), а stream — top-level `event.created` как приблизительное время до следующего canonical reload. Identity history: v2 использует `id`/`name`, а v1 `ToolPart` — `callID` для tool call identity (приоритетнее PartID `id`) и `tool` для имени; text parts сохраняют PartID. v1 string `state.error` и `state.output` нормализуются без раскрытия upstream-текста. `input` и `output` разделены и ограничены по размеру; `state.metadata`, `part.native` и upstream `error.message`/body не передаются. UI объединяет события по `assistantMessageID + tool call ID`, сохраняя ранний `startedAt`, первый `endedAt` и непустые input/output, и не понижает terminal status поздним running. Stream event без ID получает per-turn монотонный anonymous ID вместо `Date.now()`; события до terminal коррелируются в один вызов, а идентифицированный `event.id` не смешивается с anonymous. Summary tool call свёрнут по умолчанию и раскрывается pointer/touch, Enter или Space; running duration тикает раз в секунду, terminal фиксирует значение, а отсутствующие, невалидные и обратные timestamps не дают фиктивную длительность. Таймер помечен `role="timer" aria-live="off"`, чтобы ticking не анонсировался screen reader-ом. `cancelled` — UI-only terminal для Stop, подтверждённой отмены, canonical и streaming `error.type=aborted`; обычная tool error остаётся `error`. Confirmed `done`/`cancelled`/`error` завершает только running tools текущего prompt по набору identity из `appendTool` этого generation; explicit `nonAdmission` завершение не запускает, ручная проверка статуса использует тот же scope, а unconfirmed tool предыдущего хода остаётся running.
+
+Лента чата использует один реальный scroll container и внутренний content wrapper без виртуализации и IntersectionObserver. Follow включается только при расстоянии до нижней границы не больше 48 px, вычисленном по `scrollTop`/`scrollHeight`/`clientHeight`; при чтении выше streaming deltas, tool upsert и canonical refresh той же сессии не меняют `scrollTop`, а новые или изменённые по identity сообщения отражаются в badge (чистое удаление истории его не увеличивает). Собственный `role:"user"` — optimistic prompt и canonical `user:<turnID>` — badge не увеличивает: identity одного сообщения меняется при canonical refresh; assistant/tool/system считаются по общему правилу. Перед любой автоматической записью `scrollTop` текущий offset сверяется с сохранённой предыдущей нижней границей: молчаливый уход выше без доставленного scroll event выключает follow и показывает возврат вместо записи. Если после messages changes или resize геометрия сама привела контент к низу, follow и unread пересчитываются и восстанавливаются без scroll event. Возврат выполняет native button вне scroll content: pointer/touch, Enter/Space, `focus-visible` и перенос фокуса на контейнер с `preventScroll` при размонтировании кнопки. Prompt и retry явно включают follow; смена `session.id` сбрасывает unread и открывает конец, а canonical refresh той же сессии follow не сбрасывает. `ResizeObserver` на container/content, window resize fallback и capture `load`/`error` удерживают низ только в режиме follow; без `ResizeObserver` дополнительно работают capture `toggle` и window `pointerup`/`keyup`. Native scroll anchoring не отключается: при изменении высоты выше viewport контракт требует стабильности видимого фрагмента, а не неизменного числового `scrollTop`, поэтому браузер компенсирует reflow, а hook не делает собственный jump; для deltas без reflow выше viewport `scrollTop` остаётся прежним. Generation/abort не участвуют в scroll-логике, позиция между перезагрузками не сохраняется.
+
 По явному решению пользователя от 2026-11-20 агенту `kanbaner` разрешены стандартные built-in tools: `question`, `websearch`, `webfetch`, `read`, `glob`, `grep`, `edit`, `shell`, `subagent`, `skill` и `external_directory`. Это не песочница: `read`/`edit`/`shell` имеют доступ к локальным файлам и секретам, а `websearch`/`webfetch`/`shell` — к сети. Сторонние MCP servers, Code Mode `execute` и wildcard allow для чужих tools остаются запрещены.
+
+Копирование кода и черновики composer относятся к browser UI и не создают server storage. `@kanbaner/markdown-ui` принимает additive optional `codeBlockAction`; без prop разметка не меняется, с prop action получает точный plain text fenced/indented блока из HAST (без одного renderer-added trailing newline), а inline code и пустые блоки action не получают. Состояние кнопки (`Копировать код`, `Код скопирован`, `Не удалось скопировать код`) передаётся через native button `aria-label`/`title` с reset через 2 секунды и без второго live-region. Копирование сначала использует `navigator.clipboard.writeText`, затем legacy `execCommand` fallback с восстановлением `activeElement`/Selection; layout и scroll hook не затрагиваются.
+
+Черновики composer хранятся только в `localStorage["kanbaner.opencode.drafts.v1"]` как `{ v: 1, drafts: { [sessionID]: { text, updatedAt } } }` и не попадают на сервер, в SQLite или gateway. Лимиты: 16 384 символа на запись, 20 записей, 65 536 суммарно; переполнение удаляет самые старые по `updatedAt` записи (tie-break по session ID), сверхлимитный текст остаётся только в памяти. Невалидный JSON/version/shape и storage errors игнорируются; заблокированный `localStorage` не ломает initialize/composer и не превращается в Service error. Черновики изолированы по session ID, переживают reload, новая сессия не получает чужой текст; отправка очищает только черновик своей сессии после optimistic append, retry — только если composer не изменён. Вложения, base64, история, turn/model и ошибки в storage не сохраняются.
+
+История сессий в панели загружается лениво при раскрытии `<details>` и кэшируется на 30 секунд; создание сессии, завершённый prompt, rename и ручной terminal outcome (`done`/`error`/`cancelled`) из «Проверить статус», включая EOF-unconfirmed, инвалидируют кэш. Выбор записи идёт через guarded GET точной сессии: `404` удаляет только недоступную запись и не меняет текущую сессию/сохранённый ID, `503` показывает retry, а busy-операции блокируют записи. Reload-`404` сохранённого ID очищает только ID и показывает CTA «Новая сессия» без автоматического POST; временный `503` сохраняет ID и текущую сессию. Переименование выполняется в шапке через strict PATCH; Enter сохраняет, Escape закрывает форму и возвращает фокус, не всплывая до закрытия панели. Model switch и `newChat` используют отдельные request token и не делят generation с prompt: успешный и failed model switch сохраняют unconfirmed turn, ручную проверку и canonical refresh, failed switch оставляет прежнюю модель. Успешный switch фиксирует model overlay до маркера уже стартовавших canonical GET: pre-switch refresh применяет messages, но сохраняет новую модель и гасит overlay, а GET после switch принимает canonical model как более новую; overlay очищается при смене generation/сессии. `newChat` применяет созданную сессию и начинает новую generation только после успешного POST, а ошибка сохраняет черновик, вложения, attached context, rename и unconfirmed turn; успех очищает вложения и контекст. Stale ответы обеих операций отсекаются по token/generation, а create с отменённым token не применяется.
 
 ### Вложения OpenCode prompt
 
@@ -671,28 +780,67 @@ Catalog также возвращает единый список инструм
 
 ## 12. MCP
 
-`kanbaner-mcp` — необязательный внешний процесс.
+В репозитории два независимых MCP-адаптера:
+
+- `@kanbaner/mcp` — универсальный discovery-driven процесс с executable
+  `kanbaner-mcp-universal`;
+- ручной ограниченный `kanbaner-mcp` внутри `@kanbaner/opencode`.
+
+Оба работают как внешние stdio-процессы и не подключаются к базе.
 
 ```text
 MCP client
     │ stdio
-kanbaner-mcp
+kanbaner-mcp-universal
     │ HTTP + Bearer token
 Kanbaner API
 ```
+
+### Универсальный `@kanbaner/mcp`
 
 Правила:
 
 - адаптер не подключается к базе данных;
 - адаптер не содержит логики задач и заметок;
-- инструменты строятся по метаданным команд с `exposure.mcp = true`;
-- вход и выход валидируются по схемам;
+- discovery перечитывается на каждый `tools/list` и `tools/call`;
+- инструменты строятся из метаданных операций с `exposure.http = true` и
+  `exposure.mcp = true`;
+- вход и выход валидируются по схемам; object output дополнительно отдаётся как
+  `structuredContent`, non-object схемы не публикуются как MCP `outputSchema`;
 - названия инструментов детерминированно преобразуются из command ID с проверкой коллизий;
-- разрушительные команды экспортируются только при явном разрешении и помечаются как опасные;
+- разрушительные команды экспортируются только при явном
+  `KANBANER_MCP_ALLOW_DESTRUCTIVE=true` и помечаются как опасные;
+- mutation с `idempotency = "supported"` получает ключ из operation, input,
+  JSON-RPC request ID, session ID, instance ID и process ID; mutation без
+  поддержки не повторяется после неопределённого post-dispatch сбоя;
+- `expectedVersion` не подставляется: адаптер требует его только если поле
+  обязательно во входной схеме операции;
+- вызовы идут с `x-kanbaner-client: mcp`, поэтому audit source равен
+  `{type: "mcp", id: "mcp"}`;
+- токен вырезается из сообщений до ограничения длины, `details` санитизируются
+  рекурсивно; bearer token не попадает в stdout, stderr и JSON-RPC;
 - при недоступном API MCP возвращает структурированную ошибку;
 - MCP не влияет на запуск и работу веб-интерфейса.
 
-Текущий executable `kanbaner-mcp` входит в `@kanbaner/opencode` и предоставляет явно перечисленный ограниченный набор: `project_list/get/create/update`, `task_list/get/create/update/complete/move`, `note_list/get/create/update`. Он не является ещё универсальным discovery-driven адаптером `@kanbaner/mcp` из этапа 7. Delete MCP tools отсутствуют. Все операции идут через Bearer-защищённый `/api/v1`; update содержит `expectedVersion`, mutation — ключ идемпотентности из `operationId`, input, идентичности MCP request/session и UUID экземпляра MCP server. Ограниченность этого MCP не ограничивает отдельно разрешённые built-in tools OpenCode: `shell` и `edit` могут изменять локальные файлы, но не получают доступа к базе Kanbaner иначе как через HTTP API.
+Текущий доменный срез универсального адаптера: `project.list/get`,
+`column.list`, `task.list/get`, `project.create/update`,
+`task.create/update/complete/move`. Delete, bulk, summary и
+create/update/move/delete колонок закрыты. Заметки сохраняют существующий
+`exposure.mcp`, `kanbaner.search.query` опубликован, `kanbaner.search.filters` —
+нет.
+
+### Ручной `kanbaner-mcp` в `@kanbaner/opencode`
+
+Executable предоставляет явно перечисленный ограниченный набор:
+`project_list/get/create/update`, `task_list/get/create/update/complete/move`,
+`note_list/get/create/update`. Он не строится из `exposure.mcp`, не расширяется
+автоматически и не переиспользуется универсальным адаптером. Delete MCP tools
+отсутствуют. Все операции идут через Bearer-защищённый `/api/v1`; update
+содержит `expectedVersion`, mutation — ключ идемпотентности из `operationId`,
+input, идентичности MCP request/session и UUID экземпляра MCP server.
+Ограниченность этого MCP не ограничивает отдельно разрешённые built-in tools
+OpenCode: `shell` и `edit` могут изменять локальные файлы, но не получают
+доступа к базе Kanbaner иначе как через HTTP API.
 
 ## 13. Модель доверия и безопасность
 

@@ -33,11 +33,8 @@ import {
 } from "./activation/idempotency.ts";
 import { runMapped } from "./activation/errors.ts";
 import { createSerialQueue } from "./activation/serial-queue.ts";
-import {
-  deleteSearchDocuments,
-  reindexAllTasks,
-  upsertTaskSearchDocuments,
-} from "./activation/search-index.ts";
+import { deleteSearchDocuments, upsertTaskSearchDocuments } from "./activation/search-index.ts";
+import { createTasksSearchProvider } from "./activation/search-provider.ts";
 import {
   createdColumns,
   shiftedColumns,
@@ -1450,12 +1447,33 @@ const taskList: QueryFn = async (input, dependencies) => {
 /* Активация                                                                  */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * Явный MCP allowlist домена задач.
+ *
+ * Только перечисленные операции получают `exposure.mcp = true`. Остальные,
+ * включая delete/deleteMany/moveMany и project.summary, остаются закрытыми;
+ * автоматическое включение всех неразрушительных операций запрещено.
+ */
+const TASKS_MCP_OPERATION_IDS: ReadonlySet<string> = new Set([
+  TASKS_QUERY_IDS.projectList,
+  TASKS_QUERY_IDS.projectGet,
+  TASKS_QUERY_IDS.columnList,
+  TASKS_QUERY_IDS.taskList,
+  TASKS_QUERY_IDS.taskGet,
+  TASKS_COMMAND_IDS.projectCreate,
+  TASKS_COMMAND_IDS.projectUpdate,
+  TASKS_COMMAND_IDS.taskCreate,
+  TASKS_COMMAND_IDS.taskUpdate,
+  TASKS_COMMAND_IDS.taskComplete,
+  TASKS_COMMAND_IDS.taskMove,
+]);
+
 function withTaskExposure<Metadata extends CommandMetadata | QueryMetadata>(
   metadata: Metadata,
 ): Metadata {
   return {
     ...metadata,
-    exposure: { ui: true, http: true, mcp: false },
+    exposure: { ui: true, http: true, mcp: TASKS_MCP_OPERATION_IDS.has(metadata.id) },
   };
 }
 
@@ -1528,8 +1546,8 @@ const QUERY_HANDLERS: Readonly<Record<string, QueryFn>> = Object.freeze({
  *
  * Использует только публичный контекст активации: bound registrars, storage,
  * search и events. Регистрирует все команды и запросы KAN-010, типы ресурсов
- * `project`/`task` и запускает best-effort переиндексацию задач. Мутации и
- * переиндексация сериализуются очередью этой активации.
+ * `project`/`task` и awaited-переиндексацию задач до регистрации провайдера.
+ * Мутации и переиндексация сериализуются очередью этой активации.
  */
 export async function activate(context: TasksActivationContext): Promise<void> {
   if (context.pluginId !== PLUGIN_ID) {
@@ -1552,6 +1570,14 @@ export async function activate(context: TasksActivationContext): Promise<void> {
     idFactory,
     logger,
   };
+  const searchProvider = createTasksSearchProvider(store, context.search, logger);
+
+  // Полная переиндексация awaited до регистрации провайдера: первая global
+  // query сразу после runtime.start должна видеть уже существующие задачи,
+  // даже если их документ отсутствует в индексе. Сбой отменяет активацию,
+  // чтобы runtime не оставил зарегистрированного провайдера со stale-индексом.
+  await serialize(() => searchProvider.reindex());
+  context.search.registerProvider(searchProvider);
 
   for (const metadata of TASKS_COMMAND_LIST) {
     const handler = COMMAND_HANDLERS[metadata.id];
@@ -1647,13 +1673,5 @@ export async function activate(context: TasksActivationContext): Promise<void> {
 
       offset = page.nextOffset;
     }
-  });
-
-  // Переиндексация остаётся независимой best-effort: её ошибка не влияет ни
-  // на активацию, ни на уже выполненный backfill.
-  void serialize(() => reindexAllTasks(store, context.search, logger)).catch((error: unknown) => {
-    logger.warn("tasks.search_reindex_failed", {
-      errorName: error instanceof Error ? error.name : "UnknownError",
-    });
   });
 }

@@ -7,6 +7,8 @@ import {
 import {
   ATTACHMENT_LIMITS,
   ensureOpenCodeGateway,
+  isOpenCodeAdmittedTurnID,
+  isOpenCodeTurnID,
   isRecord,
   OpenCodeGatewayError,
   OPENCODE_AGENT_ID,
@@ -14,6 +16,7 @@ import {
   type OpenCodeGateway,
   type OpenCodeModelRefView,
   type OpenCodePromptAttachment,
+  type OpenCodeSessionRename,
 } from "@kanbaner/opencode";
 
 import { parsePromptAttachments } from "./opencode-attachments.ts";
@@ -209,8 +212,51 @@ export async function handleOpenCodeSessionGet(
   const denied = uiGuard(request);
   if (denied !== null) return denied;
   try {
+    const turnID = new URL(request.url).searchParams.get("turnID");
     const gateway = await getOpenCodeGateway();
+    if (turnID !== null) {
+      if (!isOpenCodeAdmittedTurnID(turnID)) {
+        return failure("VALIDATION_ERROR", "Некорректный идентификатор хода");
+      }
+      return success(await gateway.getTurnStatus(sessionID, turnID));
+    }
     return success(await gateway.getSession(sessionID));
+  } catch (error) {
+    return internalError(error);
+  }
+}
+
+/** Cursor, directory, project и limit не принимаются от браузера. */
+export async function handleOpenCodeSessionList(request: Request): Promise<Response> {
+  const denied = uiGuard(request);
+  if (denied !== null) return denied;
+  if (new URL(request.url).search.length > 0) {
+    return failure("VALIDATION_ERROR", "Параметры списка сессий не поддерживаются");
+  }
+  try {
+    const gateway = await getOpenCodeGateway();
+    return success(await gateway.listSessions());
+  } catch (error) {
+    return internalError(error);
+  }
+}
+
+/** Rename — только текущая сессия и только поле title в строгом JSON body. */
+export async function handleOpenCodeSessionRename(
+  sessionID: string,
+  request: Request,
+): Promise<Response> {
+  const denied = uiGuard(request);
+  if (denied !== null) return denied;
+  try {
+    const body = await jsonBody(request, 4 * 1024);
+    const keys = Object.keys(body);
+    if (keys.length !== 1 || keys[0] !== "title" || typeof body.title !== "string") {
+      throw new PublicHttpError("VALIDATION_ERROR", "Тело запроса должно содержать только title");
+    }
+    const gateway = await getOpenCodeGateway();
+    const renamed: OpenCodeSessionRename = await gateway.renameSession(sessionID, body.title);
+    return success(renamed);
   } catch (error) {
     return internalError(error);
   }
@@ -275,11 +321,31 @@ function ndjson(value: unknown): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
 }
 
+const TITLE_TEXT_MAX_POINTS = 2_000;
+const TITLE_TEXT_MAX_UNITS = 8_192;
+
+/**
+ * Необязательный источник автоназвания: только bounded display text запроса.
+ * Невалидное/пустое/слишком длинное поле не ломает prompt; длинное значение
+ * безопасно обрезается по code points.
+ */
+function titleTextInput(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const points = Array.from(
+    value.length > TITLE_TEXT_MAX_UNITS ? value.slice(0, TITLE_TEXT_MAX_UNITS) : value,
+  );
+  if (points.length === 0) return undefined;
+  return points.slice(0, TITLE_TEXT_MAX_POINTS).join("");
+}
+
 export async function handleOpenCodePrompt(sessionID: string, request: Request): Promise<Response> {
   const denied = uiGuard(request);
   if (denied !== null) return denied;
   let gateway: OpenCodeGateway;
   let text: string;
+  let turnID: string | undefined;
+  let titleText: string | undefined;
+  let sessionTitle: string | null = null;
   let attachments: readonly OpenCodePromptAttachment[] = [];
   const abortController = new AbortController();
   const signal = abortController.signal;
@@ -290,6 +356,7 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   try {
     const body = await jsonBody(request, ATTACHMENT_LIMITS.maxRequestBytes);
     text = typeof body.text === "string" ? body.text.trim() : "";
+    titleText = titleTextInput(body.titleText);
     attachments = parsePromptAttachments(body.files);
     if (text.length === 0) {
       throw new PublicHttpError("VALIDATION_ERROR", "Текст запроса не должен быть пустым");
@@ -297,8 +364,26 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
     if (text.length > 100_000) {
       throw new PublicHttpError("VALIDATION_ERROR", "Текст запроса слишком большой");
     }
+    if (body.turnID !== undefined) {
+      const candidate = body.turnID;
+      if (!isOpenCodeTurnID(candidate)) {
+        throw new PublicHttpError("VALIDATION_ERROR", "Некорректный идентификатор хода");
+      }
+      turnID = candidate;
+    }
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
     gateway = await getOpenCodeGateway();
+    if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
+    // Название — best-effort до prompt: контракт метода не бросает, но даже
+    // нарушение контракта не должно отменить сам prompt.
+    if (titleText !== undefined && titleText.trim().length > 0) {
+      try {
+        const ensured = await gateway.ensureSessionTitle(sessionID, titleText, signal);
+        if (ensured !== null && !signal.aborted) sessionTitle = ensured.title;
+      } catch {
+        sessionTitle = null;
+      }
+    }
     if (signal.aborted) throw new PublicHttpError("CANCELLED", "Запрос OpenCode отменён");
   } catch (error) {
     request.signal.removeEventListener("abort", onAbort);
@@ -312,6 +397,8 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   }
   let closed = false;
   let terminal = false;
+  let finalizing = false;
+  let emittedAny = false;
   const close = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
     if (closed) return;
     closed = true;
@@ -339,22 +426,52 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const event of gateway.prompt(sessionID, text, signal, attachments)) {
+        for await (const event of gateway.prompt(sessionID, text, signal, attachments, turnID)) {
           if (closed) return;
           const mapped = streamEvent(event);
           if (mapped === null) continue;
+          emittedAny = true;
+          if (mapped.kind === "finalizing") {
+            // Этап перед canonical lookup: не terminal и не подтверждает результат.
+            finalizing = true;
+          }
           if (mapped.kind === "done" || mapped.kind === "cancelled" || mapped.kind === "error") {
             terminal = true;
           }
           if (!emit(controller, mapped)) return;
         }
-        if (!terminal && !signal.aborted) {
-          emit(controller, { kind: "error", text: "OpenCode завершил поток без результата" });
+        if (!terminal && !signal.aborted && !finalizing) {
+          emit(controller, {
+            kind: "error",
+            text: "Не удалось подтвердить результат OpenCode",
+            reason: "unconfirmed",
+          });
         }
         close(controller);
-      } catch {
-        if (!closed && !signal.aborted) {
-          emit(controller, { kind: "error", text: "Запрос OpenCode завершился с ошибкой" });
+      } catch (error) {
+        if (!closed && !signal.aborted && !terminal) {
+          if (!finalizing && !emittedAny && error instanceof OpenCodeGatewayError) {
+            // Gateway гарантирует: его OpenCodeGatewayError наружу означает
+            // сбой строго до вызова prompt (owned session/subscription), т.е.
+            // server-confirmed non-admission. После начала вызова gateway сам
+            // делает canonical lookup и не выбрасывает pre-admission ошибку.
+            emit(controller, {
+              kind: "error",
+              text: error.message,
+              nonAdmission: true,
+              retryable: error.code === "DEPENDENCY_UNAVAILABLE",
+            });
+          } else if (!finalizing) {
+            // Любая неопределённость после возможного admission безопаснее
+            // как unconfirmed: повтор prompt запрещён. После «Завершаем»
+            // terminal не дублируется: клиент сам трактует оборванный поток
+            // как unconfirmed.
+            emit(controller, {
+              kind: "error",
+              text: "Не удалось подтвердить результат OpenCode",
+              reason: "unconfirmed",
+            });
+          }
         }
         close(controller);
       } finally {
@@ -373,6 +490,9 @@ export async function handleOpenCodePrompt(sessionID: string, request: Request):
       "content-type": "application/x-ndjson; charset=utf-8",
       "x-accel-buffering": "no",
       "x-content-type-options": "nosniff",
+      ...(sessionTitle === null
+        ? {}
+        : { "x-kanbaner-session-title": encodeURIComponent(sessionTitle) }),
     },
   });
 }
