@@ -1,7 +1,7 @@
 # Release v0.1.0
 
-Статус: **проверки завершены, готов к публикации**. Merge в `main`, тег и
-GitHub Release ещё не выполнены.
+Статус: **опубликован**. `main`, annotated tag, stable GitHub Release и assets
+проверены; `dev` переведён на следующую development-версию.
 
 Дата подготовки: 2026-11-26. Ветка: `release/0.1.0`. Рабочее дерево:
 `.worktrees/release-0.1.0`.
@@ -100,8 +100,8 @@ changelog, release-документация и связанные с верси�
       не изменялся.
 - [x] Source archive precheck от `7fc9543`: содержит lockfile, README и
       changelog; чистая frozen install, native `better-sqlite3` + FTS5/unicode61
-      smoke и production build успешны. Финальный архив пересоздаётся и
-      перепроверяется от итогового HEAD перед публикацией.
+      smoke и production build успешны. Финальный архив пересоздан от annotated
+      tag и повторно прошёл те же проверки.
 - [x] Проверка отсутствия секретов: tracked data/private-key paths и
       high-confidence private-key/GitHub/OpenAI token markers во всей истории не
       найдены. Dedicated `gitleaks` недоступен; это явно ограничение сканирования.
@@ -111,21 +111,36 @@ changelog, release-документация и связанные с верси�
 
 ## Публикация
 
-Раздел заполняется оркестратором после мержа и тега; значения ниже намеренно
-не заполнены.
-
-- Merge `release/0.1.0` в `main`: не выполнялся.
-- Annotated tag `v0.1.0`: не создавался.
-- GitHub Release и assets: не публиковались.
-- SHA-256 архива: не вычислялся.
-- Merge обратно в `dev` и следующий development bump: не выполнялись.
+- Merge `release/0.1.0` в `main`: **`54204db`** (`merge: release v0.1.0`). После
+  merge полный `pnpm check` на `main` прошёл на Node `24.22.2`; tree совпадает с
+  проверенным release HEAD `a351122`.
+- Annotated tag: **`v0.1.0`**, tag object `f0ea649`, dereferenced commit
+  **`54204db801abd17b37b4689e86e5c235c70dcbfa`**. `origin/main` и tag
+  опубликованы без force-push.
+- GitHub Release:
+  https://github.com/ramgml/kanbaner/releases/tag/v0.1.0 — stable
+  (`isPrerelease=false`, не draft) и latest.
+- Assets: `kanbaner-0.1.0.tar.gz` и `kanbaner-0.1.0.tar.gz.sha256`. Архив создан
+  от annotated tag; чистая frozen install, native SQLite/FTS5 и production build
+  из него успешны.
+- SHA-256:
+  **`a9f001f28dbec05a8b9465124bdbd7ca0496b22c30dfdcdfaa5dda5b2e9d249f`**.
+  Оба assets скачаны после публикации; checksum скачанного архива совпал.
+- Обратный merge в `dev`: **`438ba16`**, полный `pnpm check` после merge зелёный.
+- Следующая development-версия `0.2.0-dev.0`: коммит `767c04e`, merge
+  **`7a7a973`**, полные проверки на ветке и `dev` зелёные. Первая попытка merge
+  выявила известный flaky `project-settings` тест и была откачена; изолированный
+  прогон **34/34** и повторная очередь с новым чистым коммитом успешны.
+- Release-ветка удаляется после успешной интеграции; её RC history остаётся в
+  `main`, `dev` и неизменном теге `v0.1.0-rc.0`.
 
 ## Известные риски
 
 - Windows install/build/native SQLite/migrations/E2E не проверялись; это
   осознанный waiver, а не подтверждённая совместимость.
-- Release-проверки backup/restore, обновления RC и архива завершены; публикация
-  и проверка скачанных assets выполняются оркестратором после тега.
+- Release-проверки backup/restore, обновления RC, архива и скачанных assets
+  завершены. Dedicated `gitleaks` оставался недоступен; использованы явно
+  описанные history/marker scans.
 - Новый универсальный MCP по умолчанию не экспортирует destructive-операции и
   не подключается к базе данных; ручной OpenCode allowlist из 14 инструментов
   остаётся неизменным.
