@@ -1,14 +1,14 @@
 {
   "id": "kanbaner.projects",
   "name": "Kanbaner Projects",
-  "version": "0.1.0-rc.0",
+  "version": "0.1.0",
   "hostApi": "^1.0.0",
   "entrypoints": {
     "server": "./dist/index.js",
     "client": "./dist/ui.js"
   },
   "requires": {
-    "kanbaner.tasks": "^0.1.0-rc.0"
+    "kanbaner.tasks": "^0.1.0"
   },
   "consumes": ["kanbaner.tasks.commands.v1", "kanbaner.tasks.queries.v1"],
   "provides": ["kanbaner.projects.ui.v1"],

@@ -1,6 +1,6 @@
 {
   "name": "@kanbaner/web",
-  "version": "0.1.0-rc.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Веб-приложение Kanbaner: UI shell и composition root.",
