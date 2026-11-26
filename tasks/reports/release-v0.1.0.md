@@ -1,7 +1,7 @@
 # Release v0.1.0
 
-Статус: **draft подготовки release-ветки**. Публикация, тег и проверки
-оркестратора ещё не выполнены.
+Статус: **проверки завершены, готов к публикации**. Merge в `main`, тег и
+GitHub Release ещё не выполнены.
 
 Дата подготовки: 2026-11-26. Ветка: `release/0.1.0`. Рабочее дерево:
 `.worktrees/release-0.1.0`.
@@ -83,16 +83,31 @@ changelog, release-документация и связанные с верси�
 
 ## Проверки оркестратора перед публикацией
 
-Раздел заполняется по факту; в draft-отчёте результаты не предполагаются.
+Все проверки ниже выполнены на Linux с Node.js `24.22.2` и pnpm `12.18.0`.
 
-- [ ] Полный production Playwright Chromium
-- [ ] Production smoke на чистой базе и повторный запуск
-- [ ] Online backup активного Storage Provider (`.backup()`)
-- [ ] Offline restore в новый каталог и запуск восстановленной базы
-- [ ] Source archive: чистая frozen install, native `better-sqlite3` smoke,
-      production build
-- [ ] Проверка отсутствия секретов
-- [ ] Release review
+- [x] Полный production Playwright Chromium на release-ветке: **177/177**.
+- [x] Production smoke на восстановленной чистой базе: созданы проект, задача и
+      заметка, global search нашёл обе сущности; повторный запуск сохранил данные
+      и два search hits, safe mode выключен.
+- [x] Online backup активного Storage Provider через `.backup()`:
+      `integrity: ok`, **102400 bytes / 25 pages**; независимый integrity check
+      подтверждён.
+- [x] Offline restore через `scripts/restore.mjs` в новый каталог: маркерный
+      документ прочитан, production server запущен на восстановленной базе.
+- [x] Обновление копии данных с `v0.1.0-rc.0`: RC source был установлен и собран,
+      созданы проект/задача/заметка; после остановки копия запущена на `0.1.0`,
+      данные сохранены и найдены через новый global search. Исходный RC каталог
+      не изменялся.
+- [x] Source archive precheck от `7fc9543`: содержит lockfile, README и
+      changelog; чистая frozen install, native `better-sqlite3` + FTS5/unicode61
+      smoke и production build успешны. Финальный архив пересоздаётся и
+      перепроверяется от итогового HEAD перед публикацией.
+- [x] Проверка отсутствия секретов: tracked data/private-key paths и
+      high-confidence private-key/GitHub/OpenAI token markers во всей истории не
+      найдены. Dedicated `gitleaks` недоступен; это явно ограничение сканирования.
+- [x] Release review: blocker/high/medium не найдено. Documentation low о
+      безусловной MCP output validation исправлено в `README.md` коммитом
+      `7fc9543`.
 
 ## Публикация
 
@@ -109,8 +124,8 @@ changelog, release-документация и связанные с верси�
 
 - Windows install/build/native SQLite/migrations/E2E не проверялись; это
   осознанный waiver, а не подтверждённая совместимость.
-- Release-проверки backup/restore, архива и публикации выполняет оркестратор
-  после этого коммита.
+- Release-проверки backup/restore, обновления RC и архива завершены; публикация
+  и проверка скачанных assets выполняются оркестратором после тега.
 - Новый универсальный MCP по умолчанию не экспортирует destructive-операции и
   не подключается к базе данных; ручной OpenCode allowlist из 14 инструментов
   остаётся неизменным.
