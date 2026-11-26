@@ -8,8 +8,8 @@
 ## Манифест
 
 - Plugin ID: `kanbaner.projects`
-- Версия: `0.1.0`
-- Зависит от: `kanbaner.tasks` `^0.1.0`
+- Версия: `0.2.0-dev.0`
+- Зависит от: `kanbaner.tasks` `^0.2.0-dev.0`
 - Потребляет: `kanbaner.tasks.commands.v1`, `kanbaner.tasks.queries.v1`
 - Предоставляет: `kanbaner.projects.ui.v1`
 - Разрешения: `commands`, `events`, `ui`

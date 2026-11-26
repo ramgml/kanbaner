@@ -1,6 +1,6 @@
 {
   "name": "@kanbaner/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.0",
   "private": true,
   "type": "module",
   "description": "Универсальный discovery-driven MCP-адаптер Kanbaner поверх HTTP API.",
