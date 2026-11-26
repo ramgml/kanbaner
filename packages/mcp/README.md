@@ -143,10 +143,10 @@ Discovery-конверт:
   `project.summary`, `column.create/update/move/delete`, `project.delete`,
   `task.delete/deleteMany/moveMany` остаются `mcp = false`.
 - `kanbaner.notes`: существующий явный `exposure.mcp` не сужается. Через metadata
-  могут публиковаться `note.create/update/move/favorite.set/link/unlink`,
-  `note.attachment.create`, `note.get/list/search/subtree/links/export` и
-  `note.attachment.get`. `note.delete` и `note.attachment.delete` остаются
-  закрытыми, `note.visit` — без MCP.
+  публикуются `note.create/update/move/favorite.set/link/unlink`,
+  `note.attachment.create`, `note.get/list/search/subtree/links`.
+  `note.delete`, `note.attachment.delete`, `note.export`,
+  `note.attachment.get` и `note.visit` остаются закрытыми.
 - `kanbaner.search`: `kanbaner.search.query` публикуется, `kanbaner.search.filters`
   остаётся `mcp = false`.
 
@@ -162,10 +162,12 @@ pnpm vitest run tests/integration/mcp-universal.test.ts
 pnpm check:imports
 ```
 
-Unit-тесты покрывают discovery, имена, схемы, redaction, retry-политику, CLI и
-stdio. Integration-тест поднимает реальную composition задач, заметок и поиска,
-MCP `Client` поверх `InMemoryTransport` и HTTP transport без подмены доменной
-логики.
+Unit-тесты покрывают discovery, имена, JSON Schema, redaction, retry-политику и
+HTTP-клиент. MCP server проверяется низкоуровневым `Client` через
+`InMemoryTransport`; integration-тест поднимает реальную composition задач,
+заметок и поиска и HTTP transport без подмены доменной логики. Реальный stdio
+smoke процесса `kanbaner-mcp-universal` против локального HTTP server пока не
+выполнен и остаётся оркестратору.
 
 ## Вне границ
 
